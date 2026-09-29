@@ -264,13 +264,18 @@ fn transcript(messages: &[crate::history::Message]) -> Vec<LoadedMessage> {
 
 /// Immutable-by-loop shared state for the command loop's handlers: the
 /// session, its connections, and the pieces every arm reaches for. Loop
-/// locals that mutate per command (`current_turn`, `shell_seq`,
-/// `selection`) stay in the loop and are passed as `&mut`.
+/// locals that mutate per command (`current_turn`, `selection`) stay in
+/// the loop and are passed as `&mut`.
 struct LoopCtx {
     state: Arc<Mutex<SessionState>>,
     files: Files,
     cancel_flag: run::CancelFlag,
-    pending_shell: Arc<std::sync::Mutex<Vec<crate::history::Message>>>,
+    /// Per-tool-call subagent cancellation (task 96): shared with every
+    /// turn's task-tool launcher; `Command::CancelSubagent` fires here.
+    subagent_cancels: Arc<run::cancel::CancelMap<String>>,
+    /// Bang-mode bookkeeping (task 96): run ids, in-flight cancel
+    /// triggers, and visible-run results waiting for the next turn.
+    shell: Arc<std::sync::Mutex<crate::tui::shell::ShellState>>,
     permissions: Arc<PermissionManager>,
     config: Arc<Config>,
     workspace: Workspace,
@@ -589,14 +594,13 @@ impl CraftProvider {
         )));
         let files: Files = Files::default();
         let (cancel_flag, _) = run::cancel_channel();
+        let subagent_cancels = Arc::new(run::cancel::CancelMap::new());
         let mut current_turn: Option<AbortHandle> = None;
-        // Bang-mode shell bookkeeping: id sequence and visible-run results
-        // waiting for the next turn (see `Command::SendMessage`).
-        let mut shell_seq: u64 = 0;
+        // Bang-mode bookkeeping lives in `ctx.shell` (ShellState).
         // Quota-fetch generation: shared with the spawned fetches so a slow
         // stale answer never overwrites a newer one (rapid Ctrl+R).
         let usage_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let pending_shell: Arc<std::sync::Mutex<Vec<crate::history::Message>>> = Arc::default();
+        let shell: Arc<std::sync::Mutex<crate::tui::shell::ShellState>> = Arc::default();
         // Signals the loop when a running turn finishes (see LoopCtx).
         let wake = Arc::new(Notify::new());
         let permissions = self.permissions;
@@ -609,7 +613,8 @@ impl CraftProvider {
             state,
             files,
             cancel_flag,
-            pending_shell,
+            subagent_cancels,
+            shell,
             permissions,
             config,
             workspace,
@@ -692,9 +697,7 @@ impl CraftProvider {
                     )
                     .await
                 }
-                Command::Shell { command, visible } => {
-                    handle_shell(&ctx, &mut shell_seq, command, visible)
-                }
+                Command::Shell { command, visible } => handle_shell(&ctx, command, visible),
                 Command::Approve { id, always } => {
                     let answer = if always {
                         PermissionAnswer::AllowAlwaysLocal
@@ -740,6 +743,11 @@ impl CraftProvider {
                 Command::Interrupt => {
                     handle_interrupt(&ctx, &mut current_turn);
                     pending_messages.clear();
+                }
+                Command::CancelSubagent { tool_use_id } => {
+                    // Marks the id so children spawned later under it die
+                    // too; the parent turn keeps running.
+                    ctx.subagent_cancels.cancel_or_precancel(tool_use_id);
                 }
                 Command::Clear => {
                     handle_clear(&ctx, &selection, &mut current_turn).await;
@@ -799,7 +807,7 @@ async fn handle_send_message(
     *current_turn = None;
     // Bang-mode results queue until the next turn: pushing them into the
     // history directly would race the running turn's whole-history commit.
-    drain_shell_results(&ctx.pending_shell, &ctx.state).await;
+    drain_shell_results(&ctx.shell, &ctx.state).await;
     *current_turn = Some(start_turn(ctx, selection, text, mode, images));
 }
 
@@ -816,7 +824,7 @@ async fn maybe_send_next(
     }
     *current_turn = None;
     if let Some((text, mode, images)) = pending.pop_front() {
-        drain_shell_results(&ctx.pending_shell, &ctx.state).await;
+        drain_shell_results(&ctx.shell, &ctx.state).await;
         *current_turn = Some(start_turn(ctx, selection, text, mode, images));
     }
 }
@@ -838,6 +846,7 @@ fn start_turn(
             state: ctx.state.clone(),
             files: ctx.files.clone(),
             cancel: ctx.cancel_flag.token(),
+            subagent_cancels: ctx.subagent_cancels.clone(),
             tx: ctx.evt_tx.clone(),
             permissions: ctx.permissions.clone(),
             mode,
@@ -854,16 +863,25 @@ fn start_turn(
     abort
 }
 
-/// `Command::Shell`: spawn a bang-mode shell run under the cancel token;
-/// visible-run results queue in `pending_shell` for the next turn.
-fn handle_shell(ctx: &LoopCtx, shell_seq: &mut u64, command: String, visible: bool) {
-    *shell_seq += 1;
-    let id = format!("shell-{shell_seq}");
+/// `Command::Shell`: spawn a bang-mode shell run under a per-run child
+/// token (a parent interrupt cancels it); its trigger is registered in
+/// the session's `ShellState` and visible-run results queue there for
+/// the next turn.
+fn handle_shell(ctx: &LoopCtx, command: String, visible: bool) {
+    let (id, cancel) = {
+        let mut shell = ctx.shell.lock().unwrap_or_else(|e| e.into_inner());
+        let id = shell.reserve_id();
+        // Child of the interrupt flag: Esc stops this run without
+        // touching anything else, and the registered trigger lets
+        // `cancel_all` sweep every in-flight run at teardown.
+        let (trigger, cancel) = ctx.cancel_flag.token().child();
+        shell.add_trigger(&id, trigger);
+        (id, cancel)
+    };
     let tx = ctx.evt_tx.clone();
-    let cancel = ctx.cancel_flag.token();
-    let results = Arc::clone(&ctx.pending_shell);
+    let shell = Arc::clone(&ctx.shell);
     tokio::spawn(crate::tui::shell::run_shell(
-        id, command, visible, tx, cancel, results,
+        id, command, visible, tx, cancel, shell,
     ));
 }
 
@@ -1021,10 +1039,11 @@ async fn handle_clear(
     current_turn: &mut Option<AbortHandle>,
 ) {
     interrupt(ctx, current_turn);
-    ctx.pending_shell
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    {
+        let mut shell = ctx.shell.lock().unwrap_or_else(|e| e.into_inner());
+        shell.clear_results();
+        shell.cancel_all();
+    }
     // Reset through `linked` so the fresh session's compaction state keeps
     // working dedup/guardrails handles; a bare default would strand the
     // caches the dispatcher still points at.
@@ -1044,10 +1063,11 @@ async fn handle_reset(
     current_turn: &mut Option<AbortHandle>,
 ) {
     interrupt(ctx, current_turn);
-    ctx.pending_shell
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    {
+        let mut shell = ctx.shell.lock().unwrap_or_else(|e| e.into_inner());
+        shell.clear_results();
+        shell.cancel_all();
+    }
     *ctx.state.lock().await = SessionState::linked().with_store(
         ctx.state_dir.as_ref(),
         &ctx.cwd,
@@ -1110,14 +1130,13 @@ fn handle_select_model(ctx: &LoopCtx, selection: &mut Selection, provider: Strin
 /// race the running turn's whole-history commit (turn.rs replaces
 /// `session.history` only on success). Returns how many landed.
 async fn drain_shell_results(
-    pending: &Arc<std::sync::Mutex<Vec<crate::history::Message>>>,
+    shell: &Arc<std::sync::Mutex<crate::tui::shell::ShellState>>,
     state: &Arc<Mutex<SessionState>>,
 ) -> usize {
-    let queued = pending
+    let queued = shell
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .drain(..)
-        .collect::<Vec<_>>();
+        .drain_results();
     let drained = queued.len();
     if drained > 0 {
         state.lock().await.history.extend(queued);
@@ -1129,7 +1148,13 @@ async fn drain_shell_results(
 /// persist them (no next turn exists to carry them), then flush any soft
 /// checkpointed draft.
 async fn persist_on_exit(ctx: &LoopCtx, selection: &Selection) {
-    let drained = drain_shell_results(&ctx.pending_shell, &ctx.state).await;
+    // No next turn exists: stop any in-flight bang runs, fold their
+    // queued results into the history, and persist them.
+    ctx.shell
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cancel_all();
+    let drained = drain_shell_results(&ctx.shell, &ctx.state).await;
     let mut guard = ctx.state.lock().await;
     let history = guard.history.clone();
     if drained > 0
@@ -1172,11 +1197,11 @@ mod tests {
     #[tokio::test]
     async fn shell_results_drain_into_history_once() {
         let state = Arc::new(Mutex::new(SessionState::linked()));
-        let pending: Arc<std::sync::Mutex<Vec<crate::history::Message>>> = Arc::default();
+        let pending: Arc<std::sync::Mutex<crate::tui::shell::ShellState>> = Arc::default();
         pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(Message::user("I ran: $ ls\n\nOutput:\nsrc"));
+            .push_result(Message::user("I ran: $ ls\n\nOutput:\nsrc"));
 
         drain_shell_results(&pending, &state).await;
         assert_eq!(state.lock().await.history.len(), 1);
@@ -1184,7 +1209,11 @@ mod tests {
             state.lock().await.history[0].text(),
             "I ran: $ ls\n\nOutput:\nsrc"
         );
-        assert!(pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        assert!(pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain_results()
+            .is_empty());
 
         // A second drain with nothing queued is a no-op.
         drain_shell_results(&pending, &state).await;
@@ -1203,10 +1232,10 @@ mod tests {
             "mock/model",
         )));
         let ctx = test_ctx(state.clone());
-        ctx.pending_shell
+        ctx.shell
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(Message::user("I ran: $ ls\n\nOutput:\nsrc"));
+            .push_result(Message::user("I ran: $ ls\n\nOutput:\nsrc"));
 
         persist_on_exit(
             &ctx,
@@ -1239,7 +1268,7 @@ mod tests {
     async fn submit_mid_turn_queues_without_aborting() {
         let state = Arc::new(Mutex::new(SessionState::linked()));
         let ctx = LoopCtx {
-            pending_shell: Arc::default(),
+            shell: Arc::default(),
             ..test_ctx(state)
         };
         let selection = Selection {
@@ -1292,13 +1321,14 @@ mod tests {
     }
 
     /// A minimal LoopCtx for the queue/persist tests: only `state`,
-    /// `pending_shell`, and `wake` are exercised.
+    /// ``shell`, and `wake` are exercised.
     fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
         LoopCtx {
             state,
             files: Files::default(),
             cancel_flag: run::cancel_channel().0,
-            pending_shell: Arc::default(),
+            subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
+            shell: Arc::default(),
             permissions: Arc::new(PermissionManager::new(
                 PermissionsConfig::default(),
                 std::path::PathBuf::new(),

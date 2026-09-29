@@ -418,6 +418,10 @@ impl Provider for MockProvider {
                     Command::SetDraft(_) => {
                         // No persistence behind the scripted demo.
                     }
+                    Command::CancelSubagent { .. } => {
+                        // The mock spawns no subagents; the parent turn
+                        // just carries on (mirrors the live provider).
+                    }
                 }
             }
         });

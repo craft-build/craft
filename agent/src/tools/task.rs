@@ -94,6 +94,7 @@ impl Task {
         let spawn = Arc::clone(&self.0);
         Box::pin(async move {
             let req = SubagentRequest {
+                tool_use_id: crate::run::dispatch::current_call_id().unwrap_or_default(),
                 description: args.description,
                 prompt: args.prompt,
                 subagent_type: args.subagent_type.unwrap_or_else(|| "research".into()),

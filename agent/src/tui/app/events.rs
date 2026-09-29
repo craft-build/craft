@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use super::{App, Message, Modal, PendingClick};
 use crate::tui::app::EFFORTS;
 use crate::tui::keybindings::ActionId;
-use crate::tui::provider::Command;
+use crate::tui::provider::{AgentEvent, Command};
 use crate::tui::selection::{clamp_to, copy_to_clipboard, extract_selection_text, rect_contains};
 
 /// Who owns the keyboard right now, in dispatch priority order.
@@ -59,6 +59,11 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
         // Any keypress dismisses a live flash toast.
         self.flash = None;
+        // A pending task-chat Esc-Esc is armed by Esc alone; any other
+        // key disarms it (Esc itself is handled in the navigation path).
+        if key.code != KeyCode::Esc {
+            self.esc_pending = None;
+        }
         // A modal owns the keyboard while open; its keys never fall
         // through to base chords (so ctrl+q does not quit under an open
         // palette). Permission/question may decline a chord; declined
@@ -235,6 +240,17 @@ impl App {
             self.overlays.modal = Modal::Help;
             return true;
         }
+        // Task-chat cycling (task 96): claimed only while task chats
+        // exist, so Ctrl-P keeps opening the palette on the bare main
+        // chat (the reference also binds Ctrl-P here for PrevChat).
+        if !self.task_chats.is_empty() && (m(ActionId::TaskChatNext) || m(ActionId::TaskChatPrev)) {
+            if m(ActionId::TaskChatNext) {
+                self.cycle_task_chats(true);
+            } else {
+                self.cycle_task_chats(false);
+            }
+            return true;
+        }
         if m(ActionId::Palette) {
             self.overlays.modal = Modal::Palette {
                 query: String::new(),
@@ -372,6 +388,34 @@ impl App {
     ) -> bool {
         match key.code {
             KeyCode::Esc => {
+                // Inside a task chat, Esc stays local (the reference
+                // swallows it there too): Esc-Esc cancels the subagent
+                // while it works, and does nothing once finished — never
+                // the main chat's interrupt chain.
+                if let Some(idx) = self.active_task {
+                    if self.task_chats[idx].outcome.is_none() {
+                        let armed = self
+                            .esc_pending
+                            .is_some_and(|at| at.elapsed() <= super::FLASH_TTL);
+                        self.esc_pending = None;
+                        if armed {
+                            let id = self.task_chats[idx].tool_use_id.clone();
+                            let _ = tx.send(Command::CancelSubagent { tool_use_id: id });
+                            // The cancelled chat closes as an error and
+                            // says so in its own transcript.
+                            self.conversation.apply(AgentEvent::Notice {
+                                tone: crate::tui::provider::Tone::Warning,
+                                text: "cancelled".into(),
+                            });
+                            self.task_chats[idx].finish(super::TaskOutcome::Error);
+                            self.flash("task cancelled");
+                        } else {
+                            self.esc_pending = Some(std::time::Instant::now());
+                            self.flash("press Esc again to cancel this task");
+                        }
+                    }
+                    return true;
+                }
                 // Close slash menu → clear focus → interrupt a running turn.
                 if self.composer.text.starts_with('/') {
                     self.composer.clear();
@@ -1602,5 +1646,232 @@ mod tests {
         // Plain text pastes are unaffected.
         app.insert_paste("just words");
         assert_eq!(app.composer.text, "just words");
+    }
+
+    // ------------------------------------------------------------------
+    // Subagent task chats (task 96)
+    // ------------------------------------------------------------------
+
+    fn sub_event(id: &str, text: &str) -> AgentEvent {
+        AgentEvent::Subagent {
+            tool_use_id: id.into(),
+            description: "refactor tests".into(),
+            event: Box::new(AgentEvent::AssistantDelta(text.into())),
+        }
+    }
+
+    #[test]
+    fn subagent_events_create_and_fill_chat() {
+        let mut app = App::new();
+        app.handle_event(sub_event("t1", "hello "));
+        // A second event with the same id reuses the chat; deltas merge
+        // into one assistant paragraph.
+        app.handle_event(sub_event("t1", "world"));
+        assert_eq!(app.task_chats.len(), 1);
+        assert_eq!(app.task_chats[0].tool_use_id, "t1");
+        assert_eq!(app.task_chats[0].name, "refactor tests");
+        match &app.task_chats[0].conversation.messages[..] {
+            [crate::tui::app::Message::Assistant(text)] => assert_eq!(text, "hello world"),
+            _ => panic!("expected one merged assistant message"),
+        }
+        // A different id opens a second chat.
+        app.handle_event(sub_event("t2", "other"));
+        assert_eq!(app.task_chats.len(), 2);
+        assert_eq!(app.task_chats[1].conversation.messages.len(), 1);
+    }
+
+    #[test]
+    fn subagent_finished_sets_outcome_by_is_error() {
+        let mut app = App::new();
+        app.handle_event(sub_event("t1", "working"));
+        app.handle_event(AgentEvent::SubagentFinished {
+            tool_use_id: "t1".into(),
+            is_error: false,
+        });
+        assert_eq!(
+            app.task_chats[0].outcome,
+            Some(crate::tui::app::TaskOutcome::Done)
+        );
+        // A late error verdict does not walk back the decided outcome.
+        app.handle_event(AgentEvent::SubagentFinished {
+            tool_use_id: "t1".into(),
+            is_error: true,
+        });
+        assert_eq!(
+            app.task_chats[0].outcome,
+            Some(crate::tui::app::TaskOutcome::Done)
+        );
+
+        app.handle_event(sub_event("t2", "failing"));
+        app.handle_event(AgentEvent::SubagentFinished {
+            tool_use_id: "t2".into(),
+            is_error: true,
+        });
+        assert_eq!(
+            app.task_chats[1].outcome,
+            Some(crate::tui::app::TaskOutcome::Error)
+        );
+    }
+
+    #[test]
+    fn turn_end_terminalizes_working_task_chats() {
+        let mut app = App::new();
+        app.handle_event(sub_event("t1", "half done"));
+        assert_eq!(
+            app.task_chats[0].status(),
+            crate::tui::app::TaskStatus::Working
+        );
+        // A return to idle (either settled status) closes the chat with
+        // the placeholder outcome, which reads as Done.
+        app.handle_event(AgentEvent::StatusChanged(Status::Done));
+        assert_eq!(
+            app.task_chats[0].outcome,
+            Some(crate::tui::app::TaskOutcome::Unknown)
+        );
+        assert_eq!(
+            app.task_chats[0].status(),
+            crate::tui::app::TaskStatus::Done
+        );
+        // The late verdict can still refine the placeholder.
+        app.handle_event(AgentEvent::SubagentFinished {
+            tool_use_id: "t1".into(),
+            is_error: true,
+        });
+        assert_eq!(
+            app.task_chats[0].status(),
+            crate::tui::app::TaskStatus::Error
+        );
+
+        // Same terminalization via Failed, and a pending Esc disarms.
+        app.handle_event(sub_event("t2", "x"));
+        app.esc_pending = Some(std::time::Instant::now());
+        app.handle_event(AgentEvent::StatusChanged(Status::Failed));
+        assert!(app.esc_pending.is_none());
+        assert_eq!(
+            app.task_chats[1].outcome,
+            Some(crate::tui::app::TaskOutcome::Unknown)
+        );
+    }
+
+    #[test]
+    fn ctrl_n_p_cycle_clamped_between_main_and_task_chats() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.handle_event(sub_event("t1", "one"));
+        app.handle_event(sub_event("t2", "two"));
+        // No wrap: clamped at both ends.
+        app.handle_key(ctrl('p'), &tx);
+        assert_eq!(app.active_task, None, "prev from main stays on main");
+        app.handle_key(ctrl('n'), &tx);
+        assert_eq!(app.active_task, Some(0));
+        app.handle_key(ctrl('n'), &tx);
+        assert_eq!(app.active_task, Some(1));
+        app.handle_key(ctrl('n'), &tx);
+        assert_eq!(app.active_task, Some(1), "next clamps at the last task");
+        app.handle_key(ctrl('p'), &tx);
+        app.handle_key(ctrl('p'), &tx);
+        assert_eq!(app.active_task, None, "prev walks back to the main chat");
+
+        // Focusing a task chat mounts its transcript in the render
+        // slots; the main transcript stays reachable and intact.
+        app.handle_key(ctrl('n'), &tx);
+        let visible = super::super::testutil::screen_text(&mut app, 80, 24);
+        assert!(
+            visible.contains("one"),
+            "task transcript mounted:\n{visible}"
+        );
+        assert!(
+            visible.contains("refactor tests"),
+            "task header missing:\n{visible}"
+        );
+
+        // Without task chats the chords are no-ops (Ctrl-P stays palette).
+        let mut bare = App::new();
+        bare.handle_key(ctrl('n'), &tx);
+        assert_eq!(bare.active_task, None);
+        bare.handle_key(ctrl('p'), &tx);
+        assert!(matches!(bare.overlays.modal, Modal::Palette { .. }));
+    }
+
+    #[test]
+    fn esc_esc_cancels_the_focused_task_chat() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.handle_event(sub_event("t1", "churning"));
+        app.handle_key(ctrl('n'), &tx);
+
+        // First Esc only arms: a flash, no command yet.
+        app.handle_key(key(KeyCode::Esc), &tx);
+        assert!(app.esc_pending.is_some());
+        assert!(rx.try_recv().is_err(), "single Esc must not cancel");
+
+        // Second Esc within the window cancels the subagent by id.
+        app.handle_key(key(KeyCode::Esc), &tx);
+        assert!(app.esc_pending.is_none());
+        match rx.try_recv() {
+            Ok(Command::CancelSubagent { tool_use_id }) => assert_eq!(tool_use_id, "t1"),
+            other => panic!("expected CancelSubagent, got {other:?}"),
+        }
+        assert_eq!(
+            app.task_chats[0].outcome,
+            Some(crate::tui::app::TaskOutcome::Error)
+        );
+        // The chat's transcript records the cancellation.
+        assert!(app.conversation.messages.iter().any(|m| matches!(
+            m,
+            crate::tui::app::Message::Notice { text, .. } if text == "cancelled"
+        )));
+
+        // Any other key disarms a pending Esc-Esc.
+        app.handle_event(sub_event("t2", "x"));
+        app.handle_key(ctrl('n'), &tx);
+        app.handle_key(key(KeyCode::Esc), &tx);
+        app.handle_key(key(KeyCode::Char('a')), &tx);
+        assert!(app.esc_pending.is_none());
+        app.handle_key(key(KeyCode::Esc), &tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "disarmed Esc-Esc must start over with one Esc"
+        );
+    }
+
+    #[test]
+    fn main_chat_esc_still_interrupts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        // With a working task chat existing but not focused, Esc is the
+        // plain interrupt chain.
+        app.handle_event(sub_event("t1", "x"));
+        app.handle_event(AgentEvent::StatusChanged(Status::Running));
+        app.handle_key(key(KeyCode::Esc), &tx);
+        match rx.try_recv() {
+            Ok(Command::Interrupt) => {}
+            other => panic!("main-chat Esc must interrupt, got {other:?}"),
+        }
+        // Same inside a task chat that already finished: no cancel path.
+        app.handle_event(AgentEvent::SubagentFinished {
+            tool_use_id: "t1".into(),
+            is_error: false,
+        });
+        app.handle_key(ctrl('n'), &tx);
+        app.handle_key(key(KeyCode::Esc), &tx);
+        assert!(app.esc_pending.is_none(), "finished task chats don't arm");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reset_clears_task_chat_state() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.handle_event(sub_event("t1", "x"));
+        app.handle_event(AgentEvent::StatusChanged(Status::Done));
+        app.handle_key(ctrl('n'), &tx);
+        assert_eq!(app.active_task, Some(0));
+
+        // Cancel then reset: chats gone, back on the main transcript.
+        app.run_command("new", &tx);
+        assert!(app.task_chats.is_empty());
+        assert_eq!(app.active_task, None);
+        assert!(app.conversation.messages.is_empty());
     }
 }

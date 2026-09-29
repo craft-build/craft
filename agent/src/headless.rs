@@ -282,6 +282,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             workspace: params.workspace.clone(),
             history: Vec::new(),
             cancel: cancel.clone(),
+            cancels: Arc::new(crate::run::cancel::CancelMap::new()),
             emit: Arc::new(move |event| subagent_event_tx.send(event)),
             before: params.before.clone(),
         });
@@ -460,6 +461,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 workspace: params.workspace.clone(),
                 history: history.clone(),
                 cancel: cancel.clone(),
+            cancels: Arc::new(crate::run::cancel::CancelMap::new()),
                 emit: Arc::new(move |event| turn_event_tx.send(event)),
                 before: params.before.clone(),
             });

@@ -7,6 +7,7 @@ mod mode;
 mod models;
 mod scroll;
 mod sidebar;
+mod task_chats;
 
 // Re-exported so `crate::tui::app::*` keeps working for every item that
 // lived in the old flat `app.rs`.
@@ -16,6 +17,8 @@ pub use self::commands::{COMMANDS, CommandSpec};
 pub use self::models::{
     AutoReviewLine, Conversation, DiffState, Message, PendingClick, Session, ViewModel,
 };
+#[allow(unused_imports)]
+pub use self::task_chats::{TaskChat, TaskOutcome, TaskStatus};
 
 use tokio::sync::mpsc;
 
@@ -156,6 +159,16 @@ pub struct App {
     pub view: ViewModel,
     pub session: Session,
 
+    // --- subagent task chats (task 96) ---
+    /// One chat per `task` tool call, in spawn order. The focused chat's
+    /// transcript/view are swapped into `conversation`/`view`.
+    pub task_chats: Vec<TaskChat>,
+    /// Focused task chat index; `None` = the main chat.
+    pub active_task: Option<usize>,
+    /// Set by the first Esc inside a working task chat; a second Esc
+    /// within `FLASH_TTL` cancels that subagent.
+    pub esc_pending: Option<std::time::Instant>,
+
     pub composer: Composer,
     /// Rolling user-input history (↑/↓ recall; persisted per state dir).
     pub input_history: crate::storage::input_history::InputHistory,
@@ -204,6 +217,9 @@ impl App {
             conversation: Conversation::new(),
             view: ViewModel::new(),
             session: Session::new(),
+            task_chats: Vec::new(),
+            active_task: None,
+            esc_pending: None,
             composer: Composer::new(),
             input_history: crate::storage::input_history::InputHistory::default(),
             history_recall: HistoryRecall {
@@ -449,6 +465,13 @@ impl App {
                 }
                 self.status = s;
                 self.interrupt_requested = false;
+                // Returning to idle ends the turn: close every still-
+                // working task chat (a late tool verdict can still refine
+                // the placeholder outcome) and drop a pending Esc-Esc.
+                if matches!(s, Status::Done | Status::Failed) {
+                    self.terminalize_task_chats();
+                    self.esc_pending = None;
+                }
                 self.update_plan_lifecycle(was_busy);
             }
             AgentEvent::PlanSet(plan) => self.plan = plan,
@@ -488,6 +511,19 @@ impl App {
                     self.sent_draft = self.composer.text.clone();
                 }
             }
+            // Subagent events (task 96): inner events fill the task
+            // chat's own transcript; the tool verdict sets its outcome.
+            AgentEvent::Subagent {
+                tool_use_id,
+                description,
+                event,
+            } => self.apply_subagent_event(&tool_use_id, &description, *event),
+            AgentEvent::SubagentFinished {
+                tool_use_id,
+                is_error,
+            } => {
+                self.finish_task_chat(&tool_use_id, is_error);
+            }
             AgentEvent::PermissionRequest {
                 id,
                 tool,
@@ -504,8 +540,13 @@ impl App {
                 }
                 // Deny and cancel paths never produce a completed card, so
                 // the decision itself must retire the "needs approval" badge.
-                if let Some(Message::Tool { diff, .. }) =
-                    self.conversation.messages.iter_mut().find(|m| {
+                // Tool cards live in the main transcript, wherever it is
+                // currently parked (a task chat may be focused).
+                if let Some(Message::Tool { diff, .. }) = self
+                    .main_conversation_mut()
+                    .messages
+                    .iter_mut()
+                    .find(|m| {
                         matches!(
                             m,
                             Message::Tool {
@@ -515,6 +556,7 @@ impl App {
                             } if *mid == id
                         )
                     })
+                    .map(|m| &mut *m)
                 {
                     *diff = None;
                 }
@@ -527,8 +569,10 @@ impl App {
                     self.overlays.question_form.close();
                 }
             }
-            // Message-bearing events merge into the conversation.
-            ev => self.conversation.apply(ev),
+            // Message-bearing events merge into the conversation. Main-
+            // chat events must land in the main transcript even while a
+            // task chat is mounted in the render slots.
+            ev => self.main_conversation_mut().apply(ev),
         }
         if was_following {
             self.view.follow = true;
@@ -812,6 +856,9 @@ impl App {
     }
 
     pub(crate) fn reset_conversation(&mut self) {
+        // A session reset drops every task chat and returns to the main
+        // transcript (which is cleared right after).
+        self.clear_task_chats();
         self.conversation.messages.clear();
         self.conversation.collapsed.clear();
         self.conversation.expanded_bodies.clear();

@@ -128,6 +128,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let status_area = sub[2];
     let footer_area = sub[3];
 
+    // Task-chat header (task 96): one line above the transcript with
+    // the task name, status, and the Esc-Esc hint while it works.
+    if let Some(idx) = app.active_task {
+        render_task_header(f, app, idx, msg_area);
+    }
     messages::render(f, app, msg_area);
     if form_h > 0 {
         app.plan_mode.plan_form.view(f, form_area);
@@ -144,6 +149,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // ready plan's form is dismissed (reference `PlanForm::hint_line`).
     if let Some(hint) = app.plan_mode.plan_form.hint_line() {
         f.render_widget(ratatui::widgets::Paragraph::new(hint), footer_area);
+    } else if app.active_task.is_none() && app.any_task_working() {
+        // Main-chat hint while subagents run: how many, and the chord
+        // that opens their chats (task 96).
+        let n = app
+            .task_chats
+            .iter()
+            .filter(|c| c.outcome.is_none())
+            .count();
+        let hint = format!(
+            "{n} task{} running — Ctrl-N to view",
+            if n == 1 { "" } else { "s" }
+        );
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(hint).style(Style::default().fg(theme::current().text_tertiary)),
+            footer_area,
+        );
     }
 
     if let Some(side) = side {
@@ -169,6 +190,44 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.view.composer_area = composer_area;
     snapshot_frame(f, app);
     render_selection(f, app);
+}
+
+/// One-line header above a focused task chat's transcript (task 96):
+/// task name, status, and the dim Esc-Esc hint while it works.
+fn render_task_header(f: &mut Frame, app: &App, idx: usize, area: Rect) {
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+
+    let t = theme::current();
+    let Some(chat) = app.task_chats.get(idx) else {
+        return;
+    };
+    let status = chat.status();
+    let status_color = match status {
+        crate::tui::app::TaskStatus::Working => t.warning,
+        crate::tui::app::TaskStatus::Done => t.success,
+        crate::tui::app::TaskStatus::Error => t.danger,
+    };
+    let mut spans = vec![
+        Span::styled(chat.name.clone(), Style::default().fg(t.accent)),
+        Span::raw(" · "),
+        Span::styled(status.label(), Style::default().fg(status_color)),
+    ];
+    if status == crate::tui::app::TaskStatus::Working {
+        spans.push(Span::styled(
+            "  Esc-Esc cancels",
+            Style::default().fg(t.text_tertiary),
+        ));
+    }
+    // The transcript's top margin row hosts the header, so the messages
+    // below keep their layout unchanged.
+    let header = Rect {
+        x: area.x + 2,
+        y: area.y,
+        width: area.width.saturating_sub(4),
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(Line::from(spans)), header);
 }
 
 fn snapshot_frame(f: &mut Frame, app: &mut App) {

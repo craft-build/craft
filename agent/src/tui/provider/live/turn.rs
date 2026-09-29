@@ -36,6 +36,9 @@ pub(super) struct TurnCtx {
     pub(super) state: Arc<Mutex<SessionState>>,
     pub(super) files: Files,
     pub(super) cancel: CancelToken,
+    /// Per-tool-call subagent cancellation: shared with the task-tool
+    /// launcher so `Command::CancelSubagent` can stop one child.
+    pub(super) subagent_cancels: Arc<run::cancel::CancelMap<String>>,
     pub(super) tx: mpsc::UnboundedSender<AgentEvent>,
     pub(super) permissions: Arc<PermissionManager>,
     pub(super) mode: AgentMode,
@@ -100,6 +103,15 @@ impl TurnRenderer {
                 arguments,
                 result,
             } => {
+                // A finished task tool call settles its subagent's chat
+                // (task 96): the is_error verdict is the most specific
+                // ending the chat will see.
+                if name == "task" {
+                    let _ = self.tx.send(AgentEvent::SubagentFinished {
+                        tool_use_id: id.clone(),
+                        is_error: result.is_error,
+                    });
+                }
                 let done = cards::tool_done(id, &name, &arguments, &result);
                 if let Some((path, status)) = done.touched {
                     self.files.lock().expect("files lock").insert(path, status);
@@ -177,11 +189,20 @@ impl TurnRenderer {
             | run::Event::AutoReviewStart { .. }
             | run::Event::AutoReviewDecision { .. }
             | run::Event::StreamClosed => {}
-            // Subagent events (A.5) surface as a tagged notice for now;
-            // the task-chats panel (task 96) will render them properly.
-            run::Event::Subagent { description, event } => {
-                if let run::Event::ToolStart { name, .. } = &*event {
-                    self.notice(Tone::Neutral, format!("[{description}] running {name}"));
+            // Subagent events normally go straight from the launcher's
+            // emit closure to the tx; this arm only catches any that ride
+            // the parent stream, and routes them the same way (task 96).
+            run::Event::Subagent {
+                tool_use_id,
+                description,
+                event,
+            } => {
+                if let Some(inner) = subagent_event(*event) {
+                    let _ = self.tx.send(AgentEvent::Subagent {
+                        tool_use_id,
+                        description,
+                        event: Box::new(inner),
+                    });
                 }
             }
         }
@@ -196,6 +217,48 @@ impl TurnRenderer {
     fn streamed(&self) -> bool {
         self.streamed_text.load(Ordering::Relaxed)
             || self.streamed_reasoning.load(Ordering::Relaxed)
+    }
+}
+
+/// Convert one forwarded child run event into the `AgentEvent` its task
+/// chat renders (task 96). Tool cards complete from `ToolDone` (the
+/// child's streaming output is filtered upstream); anything the chat has
+/// no surface for is dropped.
+fn subagent_event(event: run::Event) -> Option<AgentEvent> {
+    match event {
+        run::Event::TextDelta(text) => Some(AgentEvent::AssistantDelta(text)),
+        run::Event::ThinkingDelta(text) => Some(AgentEvent::ReasoningDelta(text)),
+        run::Event::ToolStart {
+            id,
+            name,
+            arguments,
+        } => Some(AgentEvent::ToolCall(ToolCallData {
+            id,
+            kind: cards::tool_head(&name, &arguments),
+            lines: Vec::new(),
+            awaiting_approval: false,
+            image: None,
+        })),
+        run::Event::ToolDone {
+            id,
+            name,
+            arguments,
+            result,
+            ..
+        } => Some(AgentEvent::ToolCall(
+            cards::tool_done(id, &name, &arguments, &result).card,
+        )),
+        run::Event::Info(text) => Some(AgentEvent::Notice {
+            tone: Tone::Neutral,
+            text,
+        }),
+        run::Event::Retry {
+            attempt, message, ..
+        } => Some(AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: format!("retrying (attempt {attempt}): {message}"),
+        }),
+        _ => None,
     }
 }
 
@@ -473,6 +536,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         state,
         files,
         cancel,
+        subagent_cancels,
         tx,
         permissions,
         mode,
@@ -540,16 +604,22 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         workspace: workspace.clone(),
         history: history.clone(),
         cancel: cancel.clone(),
+        cancels: subagent_cancels,
         emit: Arc::new(move |event| {
             // Filtered child events arrive wrapped in `Event::Subagent`;
-            // surface tool activity as a tagged notice (the task-chats
-            // panel, task 96, will render the full stream).
-            if let run::Event::Subagent { description, event } = event
-                && let run::Event::ToolStart { name, .. } = &*event
+            // route the renderable ones into the subagent's task chat
+            // (task 96), tagged with the spawning call's id.
+            if let run::Event::Subagent {
+                tool_use_id,
+                description,
+                event,
+            } = event
+                && let Some(inner) = subagent_event(*event)
             {
-                let _ = subagent_emit_tx.send(AgentEvent::Notice {
-                    tone: Tone::Neutral,
-                    text: format!("[{description}] running {name}"),
+                let _ = subagent_emit_tx.send(AgentEvent::Subagent {
+                    tool_use_id,
+                    description,
+                    event: Box::new(inner),
                 });
             }
         }),

@@ -156,10 +156,11 @@ pub enum Event {
     /// swallowed by [`SessionEvents::next`].
     StreamClosed,
     /// An event from a `task`-spawned subagent (A.5), tagged with the
-    /// spawning call's description. Forward substrate for the subagent
-    /// task-chats panel (task 96); the child's own `Done`, `Error`,
+    /// spawning call's id and description. `tool_use_id` is the key the
+    /// task-chats view routes by; the child's own `Done`, `Error`,
     /// `ToolOutput`, and `ToolPending` events are filtered before this.
     Subagent {
+        tool_use_id: String,
         description: String,
         event: Box<Event>,
     },

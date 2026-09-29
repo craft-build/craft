@@ -88,6 +88,10 @@ const SCHEMA_INSTRUCTION_TAIL: &str = "\nReturn ONLY that JSON object as your fi
 /// inputs that programmatic callers need.
 #[derive(Debug, Clone)]
 pub struct SubagentRequest {
+    /// The spawning tool call's id: the key the task-chats view routes
+    /// subagent events by. Empty when the caller has no call identity
+    /// (tests, programmatic launches).
+    pub tool_use_id: String,
     /// Human label, used for event tags and the worktree slug.
     pub description: String,
     /// The prompt body (schema instructions are appended when
@@ -109,6 +113,7 @@ pub struct SubagentRequest {
 impl SubagentRequest {
     pub fn research(description: impl Into<String>, prompt: impl Into<String>) -> Self {
         Self {
+            tool_use_id: String::new(),
             description: description.into(),
             prompt: prompt.into(),
             subagent_type: "research".into(),
@@ -153,6 +158,10 @@ pub struct SubagentLauncher {
     pub history: Vec<Message>,
     /// Parent cancel token; the child is linked under it.
     pub cancel: CancelToken,
+    /// Per-tool-call child cancellation (task 96): every spawn registers
+    /// its child trigger here under the spawning call's id, so a surface
+    /// can cancel one subagent without stopping the parent turn.
+    pub cancels: Arc<run::cancel::CancelMap<String>>,
     /// Where filtered child events are forwarded.
     pub emit: Arc<dyn Fn(Event) + Send + Sync>,
     /// The parent's approval gate (B.1): subagent tool calls flow through
@@ -296,12 +305,36 @@ impl SubagentLauncher {
             tools = tools.with_before(Arc::clone(hook));
         }
         let (child_trigger, child_cancel) = self.cancel.child();
+        // Register the child for per-subagent cancellation (task 96):
+        // retiring the slot drops the trigger, which cancels the child —
+        // the same effect the local `cancel()` calls had before.
+        let mut child_trigger = Some(child_trigger);
+        let mut cancel_slot = None;
+        if !req.tool_use_id.is_empty()
+            && let Some(trigger) = child_trigger.take()
+        {
+            cancel_slot = Some(self.cancels.insert(req.tool_use_id.clone(), trigger));
+        }
+        // Stop the child at every exit path, whether it is owned by the
+        // cancel map (retire drops the trigger) or held locally.
+        macro_rules! stop_child {
+            () => {
+                if let Some(slot) = cancel_slot {
+                    self.cancels.retire(&req.tool_use_id, slot);
+                } else if let Some(trigger) = child_trigger.take() {
+                    trigger.cancel();
+                }
+            };
+        }
+        let tool_use_id = req.tool_use_id.clone();
         let description = req.description.clone();
         let forward = {
             let emit = Arc::clone(&self.emit);
             move |event: Event| {
-                // Reference filter: the parent derives its own Done/Error and
-                // live tool output; forwarding the child's would duplicate.
+                // Reference filter: the parent derives its own Done/Error
+                // and live tool output; forwarding the child's would
+                // duplicate. ToolDone passes so the task chat (task 96)
+                // can complete its tool cards.
                 if matches!(
                     event,
                     Event::Done { .. }
@@ -313,6 +346,7 @@ impl SubagentLauncher {
                     return;
                 }
                 emit(Event::Subagent {
+                    tool_use_id: tool_use_id.clone(),
                     description: description.clone(),
                     event: Box::new(event),
                 });
@@ -367,7 +401,7 @@ impl SubagentLauncher {
                 // A run cut short after streaming some text still has the
                 // transcript: half of it beats a bare error.
                 let partial = partial_text(&history);
-                child_trigger.cancel();
+                stop_child!();
                 if partial.is_empty() {
                     return Err(format!("sub-agent error: {message}"));
                 }
@@ -400,11 +434,11 @@ impl SubagentLauncher {
                     }
                 }
             } else {
-                child_trigger.cancel();
+                stop_child!();
                 return Ok(SubagentResult::Text(last_text));
             }
         }
-        child_trigger.cancel();
+        stop_child!();
         drop(worktree);
 
         match validated {
@@ -665,6 +699,7 @@ mod tests {
             workspace,
             history: Vec::new(),
             cancel: cancel.clone(),
+            cancels: Arc::new(run::cancel::CancelMap::new()),
             emit: Arc::new(move |event| emit_capture.0.lock().unwrap().push(event)),
             before: None,
         }
@@ -724,6 +759,29 @@ mod tests {
             1,
             "gate must see child tool calls"
         );
+    }
+
+    /// Task 96: forwarded events are keyed by the spawning call's id, so
+    /// the task-chats view can route them without guessing.
+    #[tokio::test]
+    async fn forwarded_events_carry_the_call_id() {
+        let (flag, cancel) = run::cancel_channel();
+        drop(flag);
+        let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
+        let l = launcher(
+            mock(vec![text_turn("working on it")]),
+            captured.clone(),
+            &cancel,
+        );
+        let mut req = SubagentRequest::research("find", "search");
+        req.tool_use_id = "toolu_01".into();
+        let result = l.spawn(&req).await;
+        assert!(result.is_ok(), "{result:?}");
+        let forwarded = events(&captured);
+        assert!(!forwarded.is_empty());
+        assert!(forwarded.iter().all(
+            |e| matches!(e, Event::Subagent { tool_use_id, .. } if tool_use_id == "toolu_01")
+        ));
     }
 
     #[tokio::test]

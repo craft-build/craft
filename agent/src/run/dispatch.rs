@@ -25,6 +25,20 @@ use crate::snapshot::SnapshotManager;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
+tokio::task_local! {
+    /// The internal call id of the tool currently executing on this task.
+    /// Tools that need their own call identity (the `task` tool tags its
+    /// subagent events by it) read it via [`current_call_id`]; it is
+    /// unavailable outside a dispatch.
+    static CURRENT_CALL_ID: String;
+}
+
+/// The call id of the tool executing on this task, if this code runs
+/// inside a dispatch.
+pub fn current_call_id() -> Option<String> {
+    CURRENT_CALL_ID.try_with(|id| id.clone()).ok()
+}
+
 /// What to do with a tool call before it executes.
 #[derive(Debug, Clone)]
 pub enum Decision {
@@ -258,7 +272,12 @@ impl ToolDispatch {
             );
             return Ok(DispatchOutcome::Ran(replayed));
         }
-        let output = tool.execute(call.function.arguments.clone()).await;
+        let output = CURRENT_CALL_ID
+            .scope(
+                call.id.clone(),
+                tool.execute(call.function.arguments.clone()),
+            )
+            .await;
         let mut result = match output {
             Ok(output) => history::ToolResult {
                 call: call.id.clone(),

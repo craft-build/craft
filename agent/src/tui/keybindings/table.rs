@@ -74,6 +74,10 @@ pub mod key {
     /// image support deliver screenshots via the OSC 52-style clipboard,
     /// so the chord reads the clipboard directly.
     pub const PASTE_IMAGE: Bind = ctrl('v', "Ctrl+V");
+    /// Task-chat cycling (task 96). Ctrl-P shares its chord with the
+    /// palette; dispatch only claims it while task chats exist.
+    pub const TASK_CHAT_NEXT: Bind = ctrl('n', "Ctrl+N");
+    pub const TASK_CHAT_PREV: Bind = ctrl('p', "Ctrl+P");
 }
 
 /// A help-sheet section. Children render nested under their parent, sharing
@@ -206,6 +210,20 @@ pub const KEYBINDS: &[Keybind] = &[
         action_id: Some(super::ActionId::Search),
         label: KeyLabel::Single(key::SEARCH.label),
         description: "Search the transcript",
+        context: KeybindContext::General,
+        platform: Platform::All,
+    },
+    Keybind {
+        action_id: Some(super::ActionId::TaskChatPrev),
+        label: KeyLabel::Single(key::TASK_CHAT_PREV.label),
+        description: "Previous task chat",
+        context: KeybindContext::General,
+        platform: Platform::All,
+    },
+    Keybind {
+        action_id: Some(super::ActionId::TaskChatNext),
+        label: KeyLabel::Single(key::TASK_CHAT_NEXT.label),
+        description: "Next task chat",
         context: KeybindContext::General,
         platform: Platform::All,
     },
@@ -363,6 +381,13 @@ pub const KEYBINDS: &[Keybind] = &[
         action_id: None,
         label: KeyLabel::Single("Esc Esc"),
         description: "Interrupt a running turn",
+        context: KeybindContext::Streaming,
+        platform: Platform::All,
+    },
+    Keybind {
+        action_id: None,
+        label: KeyLabel::Single("Esc Esc"),
+        description: "Cancel the focused task chat",
         context: KeybindContext::Streaming,
         platform: Platform::All,
     },

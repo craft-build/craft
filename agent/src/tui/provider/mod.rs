@@ -44,6 +44,9 @@ pub enum Command {
     },
     /// Esc: interrupt the running turn.
     Interrupt,
+    /// Cancel one subagent (by the task tool-call's id) without stopping
+    /// the parent turn (task 96, Esc-Esc in a task chat).
+    CancelSubagent { tool_use_id: String },
     /// Start over (new session): abort any turn and reset to the initial state.
     Reset,
     /// Conversation context was cleared by the user.
@@ -323,6 +326,20 @@ pub enum AgentEvent {
     /// timed out); closes the form if the id matches.
     QuestionResolved {
         id: String,
+    },
+    /// An event from a `task`-spawned subagent (task 96), tagged with the
+    /// spawning call's id. Routed into that subagent's task chat, never
+    /// the main transcript.
+    Subagent {
+        tool_use_id: String,
+        description: String,
+        event: Box<AgentEvent>,
+    },
+    /// The task tool call backing `tool_use_id` finished; `is_error`
+    /// decides the task chat's outcome (Done vs Error).
+    SubagentFinished {
+        tool_use_id: String,
+        is_error: bool,
     },
 }
 

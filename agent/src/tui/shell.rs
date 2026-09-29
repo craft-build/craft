@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use crate::child_guard::ChildGuard;
 use crate::history;
 use crate::run::CancelToken;
+use crate::run::cancel::CancelTrigger;
 
 use super::provider::{AgentEvent, LineKind, ToolCallData, ToolKind, ToolLine};
 
@@ -61,6 +62,74 @@ pub(crate) fn parse_shell_prefix(text: &str) -> Option<ShellPrefix> {
     })
 }
 
+/// Per-session bookkeeping for bang-mode runs, ported from the reference
+/// `ShellState` (`craft-ui/src/app/shell.rs`): monotonically numbered
+/// `shell-N` ids, the set of in-flight runs, one cancel trigger per
+/// in-flight run, and the visible-run results queued for the next turn.
+#[derive(Default)]
+pub(crate) struct ShellState {
+    id_counter: u64,
+    active_ids: std::collections::HashSet<String>,
+    /// One trigger per in-flight run, keyed by its id. A trigger cancels
+    /// on drop, so removing a finished run's entry doubles as the cleanup
+    /// that ends its parent-link task.
+    triggers: std::collections::HashMap<String, CancelTrigger>,
+    pending_results: Vec<history::Message>,
+}
+
+impl ShellState {
+    /// Reserve the next run id; active until [`Self::finish_run`].
+    pub(crate) fn reserve_id(&mut self) -> String {
+        self.id_counter += 1;
+        let id = format!("shell-{}", self.id_counter);
+        self.active_ids.insert(id.clone());
+        id
+    }
+
+    /// Ids of runs still in flight.
+    #[allow(dead_code)] // parity with the reference API; exercised by tests
+    pub(crate) fn active_ids(&self) -> &std::collections::HashSet<String> {
+        &self.active_ids
+    }
+
+    /// Register a run's cancel trigger (its per-run child token's setting
+    /// half, linked under the parent interrupt flag).
+    pub(crate) fn add_trigger(&mut self, id: &str, trigger: CancelTrigger) {
+        self.triggers.insert(id.to_owned(), trigger);
+    }
+
+    /// Retire one finished run: free its id and drop its trigger. The run
+    /// is over, so the token cancel the drop performs is harmless — it
+    /// only ends the parent-link task.
+    pub(crate) fn finish_run(&mut self, id: &str) {
+        self.active_ids.remove(id);
+        self.triggers.remove(id);
+    }
+
+    /// Cancel every in-flight run (loop teardown, session reset).
+    pub(crate) fn cancel_all(&mut self) {
+        for (_, trigger) in self.triggers.drain() {
+            trigger.cancel();
+        }
+        self.active_ids.clear();
+    }
+
+    /// Queue a visible run's `I ran: …` message for the next turn.
+    pub(crate) fn push_result(&mut self, msg: history::Message) {
+        self.pending_results.push(msg);
+    }
+
+    /// Take every queued visible-run result.
+    pub(crate) fn drain_results(&mut self) -> Vec<history::Message> {
+        std::mem::take(&mut self.pending_results)
+    }
+
+    /// Drop queued results without delivering them (`/clear`, `/reset`).
+    pub(crate) fn clear_results(&mut self) {
+        self.pending_results.clear();
+    }
+}
+
 fn card(id: &str, command: &str, lines: Vec<ToolLine>) -> AgentEvent {
     AgentEvent::ToolCall(ToolCallData {
         id: id.to_owned(),
@@ -84,14 +153,15 @@ fn body_lines(output: &str, is_error: bool) -> Vec<ToolLine> {
 
 /// Execute one bang-mode command: emit the start card, stream the output,
 /// finalize the card, and — for visible runs — queue the `I ran: …` user
-/// message the next turn will see.
+/// message the next turn will see. The run is retired in `shell` on every
+/// exit path (id released, trigger dropped).
 pub(crate) async fn run_shell(
     id: String,
     command: String,
     visible: bool,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancelToken,
-    results: Arc<Mutex<Vec<history::Message>>>,
+    shell: Arc<Mutex<ShellState>>,
 ) {
     let _ = tx.send(card(&id, &command, Vec::new()));
     let result = run_command(&command, &id, &tx, &cancel).await;
@@ -100,11 +170,13 @@ pub(crate) async fn run_shell(
         Err(err) => (err, true),
     };
     let _ = tx.send(card(&id, &command, body_lines(&output, is_error)));
+    let mut shell_guard = shell.lock().unwrap_or_else(|e| e.into_inner());
     if visible {
         let label = if is_error { "Error" } else { "Output" };
         let msg = history::Message::user(format!("I ran: $ {command}\n\n{label}:\n{output}"));
-        results.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+        shell_guard.push_result(msg);
     }
+    shell_guard.finish_run(&id);
 }
 
 async fn run_command(
@@ -280,7 +352,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (_flag, cancel) = cancel_channel();
-        let results = Arc::new(Mutex::new(Vec::new()));
+        let shell = Arc::new(Mutex::new(ShellState::default()));
 
         run_shell(
             "shell-1".into(),
@@ -288,7 +360,7 @@ mod tests {
             true,
             tx,
             cancel,
-            Arc::clone(&results),
+            Arc::clone(&shell),
         )
         .await;
 
@@ -311,12 +383,16 @@ mod tests {
             }
             other => panic!("unexpected final event: {other:?}"),
         }
-        let queued = results.lock().unwrap().clone();
+        let queued = shell.lock().unwrap().drain_results();
         assert_eq!(queued.len(), 1);
         assert!(
             queued[0]
                 .text()
                 .starts_with("I ran: $ echo hi\n\nOutput:\nhi")
+        );
+        assert!(
+            shell.lock().unwrap().active_ids().is_empty(),
+            "the finished run is retired"
         );
     }
 
@@ -326,7 +402,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let (_flag, cancel) = cancel_channel();
-        let results = Arc::new(Mutex::new(Vec::new()));
+        let shell = Arc::new(Mutex::new(ShellState::default()));
 
         run_shell(
             "shell-1".into(),
@@ -334,11 +410,11 @@ mod tests {
             false,
             tx,
             cancel,
-            Arc::clone(&results),
+            Arc::clone(&shell),
         )
         .await;
 
-        assert!(results.lock().unwrap().is_empty());
+        assert!(shell.lock().unwrap().drain_results().is_empty());
     }
 
     /// A cancelled token kills a long-running command: `run_shell` returns
@@ -353,7 +429,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (flag, cancel) = cancel_channel();
         flag.set(true); // cancelled before it starts, as after an Esc press
-        let results = Arc::new(Mutex::new(Vec::new()));
+        let shell = Arc::new(Mutex::new(ShellState::default()));
 
         let started = Instant::now();
         run_shell(
@@ -362,7 +438,7 @@ mod tests {
             true,
             tx,
             cancel,
-            Arc::clone(&results),
+            Arc::clone(&shell),
         )
         .await;
         assert!(
@@ -384,6 +460,51 @@ mod tests {
             }
             other => panic!("unexpected final event: {other:?}"),
         }
-        assert_eq!(results.lock().unwrap().len(), 1);
+        assert_eq!(shell.lock().unwrap().drain_results().len(), 1);
+    }
+
+    #[test]
+    fn shell_state_ids_lifecycle_and_results() {
+        let mut state = ShellState::default();
+        let a = state.reserve_id();
+        let b = state.reserve_id();
+        assert_ne!(a, b, "concurrent runs must get distinct ids");
+        assert_eq!(state.active_ids().len(), 2);
+
+        state.finish_run(&a);
+        assert!(!state.active_ids().contains(&a));
+        assert!(state.active_ids().contains(&b));
+
+        state.push_result(history::Message::user("I ran: x"));
+        assert_eq!(state.drain_results().len(), 1);
+        assert!(state.drain_results().is_empty(), "drain takes everything");
+        state.push_result(history::Message::user("dropped"));
+        state.clear_results();
+        assert!(state.drain_results().is_empty());
+    }
+
+    /// `cancel_all` stops every in-flight run's token; a finished run's
+    /// trigger is already gone and cannot be re-cancelled.
+    #[tokio::test]
+    async fn shell_state_cancel_all_cancels_in_flight_runs() {
+        use crate::run::cancel::cancel_pair;
+
+        let mut state = ShellState::default();
+        let id_a = state.reserve_id();
+        let id_b = state.reserve_id();
+        let (trig_a, tok_a) = cancel_pair();
+        let (trig_b, tok_b) = cancel_pair();
+        state.add_trigger(&id_a, trig_a);
+        state.add_trigger(&id_b, trig_b);
+
+        state.finish_run(&id_a); // retired: dropping its trigger ends the
+        // link task (the token cancel it performs is post-run cleanup)
+        tok_a.wait().await;
+        assert!(tok_a.cancelled());
+
+        state.cancel_all();
+        tok_b.wait().await;
+        assert!(tok_b.cancelled(), "the in-flight run is stopped");
+        assert!(state.active_ids().is_empty());
     }
 }

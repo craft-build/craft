@@ -7,8 +7,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use super::theme;
+use crate::markdown::highlight::{Highlighter, SegmentColor};
 use crate::tui::app::App;
 use crate::tui::provider::Status;
+use crate::tui::shell::parse_shell_prefix;
 
 /// Max text rows the composer grows to before it scrolls instead of expanding.
 pub const MAX_TEXT_ROWS: usize = 12;
@@ -86,7 +88,14 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         let y = inset.y + 1 + (i - offset) as u16;
         let line: String = chars[s..e].iter().collect();
         let w = line.chars().count();
-        let mut spans = vec![Span::styled(line, text_style)];
+        // Bang-prefix highlighting (task 96): only the first wrapped row
+        // of a `!` / `!!` line gets the styled sigil and bash colors.
+        let mut spans = if s == 0 {
+            shell_spans(&line, text_style)
+                .unwrap_or_else(|| vec![Span::styled(line.clone(), text_style)])
+        } else {
+            vec![Span::styled(line.clone(), text_style)]
+        };
         if w < text_w {
             spans.push(Span::styled(
                 " ".repeat(text_w - w),
@@ -187,6 +196,47 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::styled(" ".repeat(gap), surf));
     spans.push(Span::styled(right, tertiary));
     f.render_widget(Paragraph::new(Line::from(spans)), info);
+}
+
+/// Bang-prefix highlighting (task 96, ported from the reference's
+/// `shell_highlight_spans`): a first line starting `!` / `!!` renders its
+/// sigil in the theme's warning color and the command syntax-highlighted
+/// as bash. `None` keeps plain rendering — no bang prefix, or the syntect
+/// engine not warmed up yet.
+fn shell_spans(line: &str, base: Style) -> Option<Vec<Span<'static>>> {
+    if !crate::markdown::highlight::is_ready() {
+        return None;
+    }
+    let parsed = parse_shell_prefix(line)?;
+    let t = theme::current();
+    let prefix_style = Style::default().fg(t.warning).bg(t.bg_surface);
+    let mut spans = vec![Span::styled(
+        line[..parsed.prefix_len].to_owned(),
+        prefix_style,
+    )];
+    let mut hl = Highlighter::for_token("bash");
+    for seg in hl.highlight_line(&line[parsed.prefix_len..]) {
+        let mut style = base;
+        if let Some(color) = seg_color(seg.fg) {
+            style = style.fg(color);
+        }
+        if seg.bold {
+            style = style.add_modifier(ratatui::style::Modifier::BOLD);
+        }
+        if seg.italic {
+            style = style.add_modifier(ratatui::style::Modifier::ITALIC);
+        }
+        spans.push(Span::styled(seg.text, style));
+    }
+    Some(spans)
+}
+
+fn seg_color(c: SegmentColor) -> Option<ratatui::style::Color> {
+    match c {
+        SegmentColor::Rgb(r, g, b) => Some(ratatui::style::Color::Rgb(r, g, b)),
+        SegmentColor::Ansi(i) => Some(ratatui::style::Color::Indexed(i)),
+        SegmentColor::Default => None,
+    }
 }
 
 /// Spinner / status word with the running timer and interrupt hint.
@@ -290,4 +340,44 @@ fn truncate_spans<'a>(spans: Vec<Span<'a>>, max: usize) -> (Vec<Span<'a>>, usize
         }
     }
     (out, used)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base() -> Style {
+        let t = theme::current();
+        Style::default().fg(t.text_primary).bg(t.bg_surface)
+    }
+
+    /// The prefix span carries the sigil in the warning color; the command
+    /// follows as syntect-highlighted spans covering the rest of the line.
+    #[test]
+    fn bang_prefix_gets_sigil_style_and_bash_highlighting() {
+        crate::markdown::highlight::syntax_set(); // arm is_ready()
+        let spans = shell_spans("! cargo test", base()).expect("styled");
+        let t = theme::current();
+        assert_eq!(spans[0].content, "! ");
+        assert_eq!(spans[0].style.fg, Some(t.warning));
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "! cargo test");
+        assert!(spans.len() > 1, "the command is highlighted, not plain");
+    }
+
+    #[test]
+    fn double_bang_prefix_is_styled_too() {
+        crate::markdown::highlight::syntax_set();
+        let spans = shell_spans("!! ls -la", base()).expect("styled");
+        assert_eq!(spans[0].content, "!! ");
+    }
+
+    /// No sigil (or a bang mid-line) keeps the plain single-span path.
+    #[test]
+    fn plain_lines_and_mid_string_bangs_stay_unstyled() {
+        crate::markdown::highlight::syntax_set();
+        assert!(shell_spans("hello ! world", base()).is_none());
+        assert!(shell_spans("just a message", base()).is_none());
+        assert!(shell_spans("! ", base()).is_none(), "empty command");
+    }
 }
