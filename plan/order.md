@@ -136,7 +136,7 @@ Fixes:
 97. C.12 Advisor (post-turn review)
 
 Fixes:
-- [ ] /recipe is not wired up, i have not tested creating custom commands but i suspect its not wired to tui
+- [x] /recipe is not wired up, i have not tested creating custom commands but i suspect its not wired to tui (custom commands were already wired; `/recipe` now opens a picker, `/recipe <name> key=value ...` runs it in the TUI)
 - [ ] When an interrupt occurs from user via esc then they post something the message history is not sent to the agent leading to the agent not seeing all of the previous context.
 - [ ] MCP Client is not propagating the prompts into /commands in the tui
 - [ ] Make sure our MCP Client supports the reading of resources provided by the MCP

@@ -1109,6 +1109,86 @@ pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// `/recipe`: recipe picker (J.5); Enter runs the selection or prefills
+/// `key=` parameter stubs, Esc closes.
+pub fn render_recipes(f: &mut Frame, app: &App, area: Rect) {
+    use crate::tui::modals::Modal;
+    let t = theme::current();
+
+    let Modal::Recipes { entries, selected } = &app.overlays.modal else {
+        return;
+    };
+    dim(f, area);
+    let n = entries.len().clamp(1, 8) as u16;
+    let width = 60.min(area.width.saturating_sub(4));
+    let rect = centered(width, n + 4, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Recipes — enter to run, esc to close",
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    let content_w = inner.width.saturating_sub(2) as usize;
+    let spans: Vec<Vec<Span<'static>>> = if entries.is_empty() {
+        vec![vec![Span::styled(
+            " no recipes found (.craft/recipes/*.yaml)".to_string(),
+            Style::default().fg(t.text_tertiary),
+        )]]
+    } else {
+        entries
+            .iter()
+            .map(|entry| {
+                let params = if entry.params.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", entry.params.join(", "))
+                };
+                let hint = format!("{params} ");
+                let name_w = content_w.saturating_sub(hint.chars().count() + 1);
+                let mut name: String = entry.name.chars().take(name_w).collect();
+                if entry.name.chars().count() > name_w && name_w > 1 {
+                    name.truncate(name_w - 1);
+                    name.push('…');
+                }
+                let name = format!(" {name}");
+                let gap = content_w.saturating_sub(name.chars().count() + hint.chars().count());
+                vec![
+                    Span::styled(name, Style::default().fg(t.text_primary)),
+                    Span::raw(" ".repeat(gap)),
+                    Span::styled(hint, Style::default().fg(t.text_tertiary)),
+                ]
+            })
+            .collect()
+    };
+    render_rows(
+        f,
+        &spans,
+        if entries.is_empty() {
+            usize::MAX
+        } else {
+            *selected
+        },
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2,
+            width: inner.width.saturating_sub(2),
+            height: n,
+        },
+    );
+}
+
 /// `/theme`: bundled-theme picker. Arrows preview live, Enter applies +
 /// persists, Esc restores the pre-open theme.
 pub fn render_theme_picker(f: &mut Frame, app: &App, area: Rect) {

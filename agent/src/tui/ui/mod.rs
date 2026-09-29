@@ -162,7 +162,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             if n == 1 { "" } else { "s" }
         );
         f.render_widget(
-            ratatui::widgets::Paragraph::new(hint).style(Style::default().fg(theme::current().text_tertiary)),
+            ratatui::widgets::Paragraph::new(hint)
+                .style(Style::default().fg(theme::current().text_tertiary)),
             footer_area,
         );
     }
@@ -183,6 +184,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     overlays::render_sessions(f, app, area);
     overlays::render_theme_picker(f, app, area);
     overlays::render_mcp(f, app, area);
+    overlays::render_recipes(f, app, area);
 
     // Snapshot the frame as plain text (selection copy extracts from this),
     // then draw the current text selection as reversed cells.

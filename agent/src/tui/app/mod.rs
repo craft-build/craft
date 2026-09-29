@@ -760,6 +760,29 @@ impl App {
             self.submit_custom_command(&custom, &args, tx);
             return;
         }
+        // Exact `/recipe <name> [key=value ...]` (J.5): builtin slash, so
+        // the custom-command path does not claim it.
+        if text.starts_with("/recipe")
+            && let Some((token, rest)) = text.split_once(' ')
+            && token == "/recipe"
+        {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                self.composer.clear();
+                self.open_recipes();
+            } else {
+                let (name, args) = rest
+                    .split_once(' ')
+                    .map(|(n, a)| (n.trim().to_string(), a.trim().to_string()))
+                    .unwrap_or_else(|| (rest.to_string(), String::new()));
+                self.composer.clear();
+                self.input_history.push(text);
+                self.history_recall.history_index = None;
+                self.history_recall.history_draft.clear();
+                self.submit_recipe(&name, &args, tx);
+            }
+            return;
+        }
         // Bang-mode: run the line as a shell command, bypassing the model.
         if let Some(prefix) = shell::parse_shell_prefix(&text) {
             let cmd = prefix.command.trim();

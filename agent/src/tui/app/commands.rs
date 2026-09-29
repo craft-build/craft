@@ -142,6 +142,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "Switch color theme",
     },
     CommandSpec {
+        id: "recipe",
+        slash: Some("/recipe"),
+        alias: None,
+        label: "Run recipe",
+        hint: "/recipe",
+        desc: "Browse and run recipes",
+    },
+    CommandSpec {
         id: "help",
         slash: Some("/help"),
         alias: None,
@@ -244,6 +252,7 @@ impl App {
                 let _ = tx.send(Command::Undo);
             }
             "mcp" => self.open_mcp(),
+            "recipe" => self.open_recipes(),
             "compact" => {
                 let _ = tx.send(Command::Compact);
             }
@@ -288,6 +297,155 @@ impl App {
     /// no state beyond the selection.
     pub(crate) fn open_mcp(&mut self) {
         self.overlays.modal = Modal::Mcp { selected: 0 };
+    }
+
+    /// Discover recipes for the `/recipe` surfaces (J.5): the picker and
+    /// `/recipe <name> key=value ...`. Unreadable files are skipped.
+    pub(crate) fn discover_recipes(&self) -> Vec<crate::tui::modals::RecipeEntry> {
+        let files = crate::skills::Discovery::from_env()
+            .discover_files("recipes", &["yaml", "yml", "json"]);
+        let mut entries = Vec::new();
+        for f in files {
+            let Ok(r) = crate::recipe::load(&f.path) else {
+                continue;
+            };
+            let name = r.name.clone().unwrap_or_else(|| f.name.clone());
+            // Same resolution order as `craft recipe run`: the file stem
+            // wins, so a later recipe named only via its `name` field
+            // cannot shadow it.
+            if entries
+                .iter()
+                .any(|e: &crate::tui::modals::RecipeEntry| e.name == name)
+            {
+                continue;
+            }
+            entries.push(crate::tui::modals::RecipeEntry {
+                name,
+                description: r.description.clone().unwrap_or_default(),
+                params: r
+                    .parameters
+                    .iter()
+                    .filter(|p| p.default.is_none())
+                    .map(|p| p.name.clone())
+                    .collect(),
+            });
+        }
+        entries
+    }
+
+    /// `/recipe`: open the picker over discovered recipes.
+    pub(crate) fn open_recipes(&mut self) {
+        let entries = self.discover_recipes();
+        self.overlays.modal = Modal::Recipes {
+            entries,
+            selected: 0,
+        };
+    }
+
+    /// Run a recipe (J.5): parse `key=value` args, resolve parameters,
+    /// render the minijinja template, echo the invocation, and send the
+    /// prompt as a normal user message. Recipes are matched by file stem
+    /// or `name` field, like `craft recipe run`.
+    pub(crate) fn submit_recipe(
+        &mut self,
+        name: &str,
+        args: &str,
+        tx: &mpsc::UnboundedSender<Command>,
+    ) {
+        let files = crate::skills::Discovery::from_env()
+            .discover_files("recipes", &["yaml", "yml", "json"]);
+        let path = files
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.path.clone())
+            .or_else(|| {
+                files
+                    .iter()
+                    .filter(|f| {
+                        crate::recipe::load(&f.path)
+                            .ok()
+                            .and_then(|r| r.name)
+                            .as_deref()
+                            == Some(name)
+                    })
+                    .map(|f| f.path.clone())
+                    .next()
+            });
+        let Some(path) = path else {
+            self.push_notice(
+                Tone::Warning,
+                format!("recipe '{name}' not found (try /recipe to browse)"),
+            );
+            return;
+        };
+        let recipe = match crate::recipe::load(&path) {
+            Ok(r) => r,
+            Err(e) => {
+                self.push_notice(Tone::Danger, format!("load recipe: {e}"));
+                return;
+            }
+        };
+
+        let mut overrides = std::collections::HashMap::new();
+        for raw in args.split_whitespace() {
+            match raw.split_once('=') {
+                Some((k, v)) => {
+                    overrides.insert(k.trim().to_string(), v.trim().to_string());
+                }
+                None => {
+                    self.push_notice(
+                        Tone::Warning,
+                        format!("skipped argument {raw:?}, expected key=value"),
+                    );
+                }
+            }
+        }
+
+        let missing: Vec<String> = recipe
+            .missing_required(&overrides)
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        if !missing.is_empty() {
+            self.push_notice(
+                Tone::Warning,
+                format!(
+                    "recipe '{name}' needs: {} (e.g. /recipe {name} {})",
+                    missing.join(", "),
+                    missing
+                        .iter()
+                        .map(|p| format!("{p}="))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            );
+            return;
+        }
+
+        let prompt = match recipe
+            .resolve_parameters(&overrides)
+            .and_then(|params| recipe.render(&params, &path))
+        {
+            Ok(p) => crate::template::env_vars().apply(&p).into_owned(),
+            Err(e) => {
+                self.push_notice(Tone::Danger, format!("recipe '{name}': {e}"));
+                return;
+            }
+        };
+
+        let echo = if args.is_empty() {
+            format!("/recipe {name}")
+        } else {
+            format!("/recipe {name} {args}")
+        };
+        self.conversation.assistant_open = false;
+        self.conversation.messages.push(Message::User(echo));
+        let _ = tx.send(Command::SendMessage(
+            prompt,
+            self.agent_mode(),
+            std::mem::take(&mut self.images.attached),
+        ));
+        self.view.follow = true;
     }
 
     pub(crate) fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
@@ -454,6 +612,25 @@ mod tests {
 
     /// `/auto-review` routes a toggle command to the provider.
     #[test]
+    /// J.5: `/recipe` opens the picker; running an unknown recipe warns
+    /// through a notice instead of sending anything.
+    #[test]
+    fn recipe_slash_opens_picker_and_unknown_warns() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.run_command("recipe", &tx);
+        assert!(matches!(app.overlays.modal, Modal::Recipes { .. }));
+        app.submit_recipe("definitely-missing", "", &tx);
+        assert!(matches!(
+            app.conversation.messages.last(),
+            Some(Message::Notice {
+                tone: Tone::Warning,
+                ..
+            })
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
     fn auto_review_slash_sends_toggle_command() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();

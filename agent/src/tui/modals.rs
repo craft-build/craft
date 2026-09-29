@@ -49,6 +49,22 @@ pub enum Modal {
     Mcp {
         selected: usize,
     },
+    /// `/recipe`: recipe picker (J.5). Enter runs the selection; recipes
+    /// with parameters prefill the composer with `/recipe <name> key=`.
+    Recipes {
+        entries: Vec<RecipeEntry>,
+        selected: usize,
+    },
+}
+
+/// One row of the `/recipe` picker: a discovered, parseable recipe.
+#[derive(Clone, Debug)]
+pub struct RecipeEntry {
+    /// Recipe `name` field or the file stem.
+    pub name: String,
+    pub description: String,
+    /// Parameters that need a `key=value` argument (no default).
+    pub params: Vec<String>,
 }
 
 /// One row of the `/sessions` picker, pre-rendered for display.
@@ -117,6 +133,12 @@ impl App {
         // 7. MCP server screen.
         if matches!(self.overlays.modal, Modal::Mcp { .. }) {
             self.handle_mcp_key(key);
+            return;
+        }
+
+        // 8. Recipe picker.
+        if matches!(self.overlays.modal, Modal::Recipes { .. }) {
+            self.handle_recipes_key(key, tx);
         }
     }
 
@@ -224,6 +246,53 @@ impl App {
                     let _ = tx.send(Command::LoadSession {
                         id: entry.id.clone(),
                     });
+                }
+            }
+            // Esc or any other key closes the picker (already None).
+            _ => {}
+        }
+    }
+
+    /// `/recipe` picker keys: arrows move, Enter runs (or prefills
+    /// parameters for), Esc closes. All keys are consumed.
+    fn handle_recipes_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
+        let Modal::Recipes { entries, selected } =
+            std::mem::replace(&mut self.overlays.modal, Modal::None)
+        else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => {
+                self.overlays.modal = Modal::Recipes {
+                    entries,
+                    selected: selected.saturating_sub(1),
+                }
+            }
+            KeyCode::Down => {
+                let max = entries.len().saturating_sub(1);
+                self.overlays.modal = Modal::Recipes {
+                    entries,
+                    selected: (selected + 1).min(max),
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(entry) = entries.get(selected).cloned() {
+                    if entry.params.is_empty() {
+                        self.submit_recipe(&entry.name, "", tx);
+                    } else {
+                        // Prefill `key=` stubs for parameters without a
+                        // default so Enter submits once they are filled.
+                        self.composer.text = format!(
+                            "/recipe {} {}",
+                            entry.name,
+                            entry
+                                .params
+                                .iter()
+                                .map(|p| format!("{p}="))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
                 }
             }
             // Esc or any other key closes the picker (already None).
