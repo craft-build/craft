@@ -177,6 +177,13 @@ impl TurnRenderer {
             | run::Event::AutoReviewStart { .. }
             | run::Event::AutoReviewDecision { .. }
             | run::Event::StreamClosed => {}
+            // Subagent events (A.5) surface as a tagged notice for now;
+            // the task-chats panel (task 96) will render them properly.
+            run::Event::Subagent { description, event } => {
+                if let run::Event::ToolStart { name, .. } = &*event {
+                    self.notice(Tone::Neutral, format!("[{description}] running {name}"));
+                }
+            }
         }
     }
 
@@ -508,16 +515,54 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         context_length: selection.context_length,
     };
 
+    // The approval gate is shared by the parent's dispatch table and every
+    // subagent the task tool spawns, so children cannot bypass approvals.
+    let approval = Arc::new(ApprovalGate::new(
+        state.clone(),
+        tx.clone(),
+        cancel.clone(),
+        permissions.clone(),
+        Some(model_reviewer(model.clone())),
+    ));
     // The question seam (A.5) is per-turn like the approval gate: it parks
-    // on this turn's cancel token and event channel.
-    let workspace =
-        workspace
-            .clone()
-            .with_questions(Arc::new(super::question::QuestionAsker::new(
-                state.clone(),
-                tx.clone(),
-                cancel.clone(),
-            )));
+    // on this turn's cancel token and event channel. The subagent seam
+    // (task tool) is installed on the same clone, carrying the turn's
+    // model, history snapshot, cancel token, and event channel.
+    let subagent_emit_tx = tx.clone();
+    let subagents = Arc::new(crate::subagent::SubagentLauncher {
+        parent_model: model.clone(),
+        parent_spec: format!("{}/{}", selection.provider, selection.model),
+        provider: selection.provider.clone(),
+        providers: config.providers.clone(),
+        agent: config.agent.clone(),
+        compression: config.compression.clone(),
+        base_prompt: format!("{}{}", config.agent.preamble, instructions_text),
+        workspace: workspace.clone(),
+        history: history.clone(),
+        cancel: cancel.clone(),
+        emit: Arc::new(move |event| {
+            // Filtered child events arrive wrapped in `Event::Subagent`;
+            // surface tool activity as a tagged notice (the task-chats
+            // panel, task 96, will render the full stream).
+            if let run::Event::Subagent { description, event } = event
+                && let run::Event::ToolStart { name, .. } = &*event
+            {
+                let _ = subagent_emit_tx.send(AgentEvent::Notice {
+                    tone: Tone::Neutral,
+                    text: format!("[{description}] running {name}"),
+                });
+            }
+        }),
+        before: Some(approval.clone()),
+    });
+    let workspace = workspace
+        .clone()
+        .with_questions(Arc::new(super::question::QuestionAsker::new(
+            state.clone(),
+            tx.clone(),
+            cancel.clone(),
+        )))
+        .with_subagents(subagents);
     // B.11: the first prompt must not ship without the MCP tools, but a
     // hung server can't block the turn forever — the gate times out and
     // the turn proceeds with whatever has landed.
@@ -539,13 +584,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         .register_with_mode(mode.clone())
         .with_dedup(dedup)
         .with_guardrails(guardrails)
-        .with_before(Arc::new(ApprovalGate::new(
-            state.clone(),
-            tx.clone(),
-            cancel.clone(),
-            permissions.clone(),
-            Some(model_reviewer(model.clone())),
-        )));
+        .with_before(approval);
     let params = run::RunParams {
         preamble: Some(crate::prompt::build_system_prompt(
             &crate::prompt::Vars::new()

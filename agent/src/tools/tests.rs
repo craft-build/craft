@@ -694,6 +694,7 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
             "retrieve",
             "sessions",
             "skill",
+            "task",
             "todo_write",
             "view_image",
             "webfetch",
@@ -1764,9 +1765,7 @@ async fn mcp_tools_register_dispatch_and_clear() {
                 .content
                 .iter()
                 .filter_map(|c| match c {
-                    crate::history::ToolResultContent::Text(t) => {
-                        Some(t.text.clone().to_string())
-                    }
+                    crate::history::ToolResultContent::Text(t) => Some(t.text.clone().to_string()),
                     _ => None,
                 })
                 .collect();

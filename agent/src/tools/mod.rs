@@ -25,10 +25,12 @@ mod retrieve;
 mod sessions;
 pub(crate) mod skill;
 pub(crate) mod ssrf;
+mod task;
 mod todo_write;
 mod view_image;
 mod webfetch;
 mod websearch;
+pub(crate) mod worktree;
 mod write;
 
 #[cfg(test)]
@@ -60,6 +62,7 @@ pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
 pub use sessions::{Sessions, SessionsArgs, SessionsOutput};
 pub use skill::{Skill, SkillArgs, SkillOutput};
+pub use task::{NoSubagents, SpawnSubagent, Task, TaskArgs, TaskOutput};
 pub(crate) use todo_write::flatten_todos;
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
 pub use view_image::{ViewImage, ViewImageArgs, ViewImageOutput};
@@ -113,6 +116,7 @@ const BUILTIN_TOOL_NAMES: &[&str] = &[
     "question",
     "batch",
     "list_tools",
+    "task",
 ];
 
 pub fn is_builtin_tool(name: &str) -> bool {
@@ -144,6 +148,10 @@ pub struct Workspace {
     /// portable tool per published MCP tool under its `server__tool` wire name.
     /// Shared like every other cell so the per-turn set is visible through clones.
     mcp: std::sync::Arc<std::sync::RwLock<Option<crate::mcp::McpHandle>>>,
+    /// Host seam for the `task` tool (A.5): the TUI and headless surfaces
+    /// install a subagent launcher per turn; the default reports that
+    /// subagents are unavailable.
+    subagents: Arc<dyn task::SpawnSubagent>,
 }
 
 impl Workspace {
@@ -167,7 +175,16 @@ impl Workspace {
             questions: Arc::new(question::DismissAsk),
             plan_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
             mcp: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            subagents: Arc::new(task::NoSubagents),
         })
+    }
+
+    /// Install the subagent seam (A.5). Taken on a workspace clone per turn
+    /// (like the question asker) so the launcher can carry the turn's cancel
+    /// token, history snapshot, and event channel.
+    pub fn with_subagents(mut self, spawn: Arc<dyn task::SpawnSubagent>) -> Self {
+        self.subagents = spawn;
+        self
     }
 
     /// Install the session's MCP client (B.11). Call before the first turn
@@ -278,6 +295,7 @@ impl Workspace {
             dynamic(Websearch),
             dynamic(ViewImage(self.clone())),
             dynamic(Question(self.questions.clone())),
+            dynamic(Task(self.subagents.clone())),
             dynamic(batch.clone()),
         ];
         // MCP tools (B.11): one portable tool per published MCP server tool,
@@ -293,6 +311,91 @@ impl Workspace {
             .with_compression_store(self.compression_store.clone())
             .with_snapshots(self.snapshots.clone())
             .with_mode(mode);
+        let _ = batch.0.set(dispatch.clone());
+        dispatch
+    }
+
+    /// The restricted tool table for a `task`-spawned subagent (A.5):
+    /// `general` adds the write family to the read-only research set;
+    /// neither includes `task`, `question`, or `sessions`. MCP tools are
+    /// inherited. The batch child table is built from the same restricted
+    /// set, so batch fan-outs cannot escape the subagent's tool budget.
+    pub fn register_subagent(&self, general: bool) -> crate::run::ToolDispatch {
+        let allowed: &[&str] = if general {
+            crate::subagent::GENERAL_TOOLS
+        } else {
+            crate::subagent::RESEARCH_TOOLS
+        };
+        let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
+        let mut tools: Vec<PortableDynamicTool> = Vec::new();
+        for candidate in [
+            "read",
+            "grep",
+            "glob",
+            "list",
+            "edit",
+            "edit_lines",
+            "insert_lines",
+            "multiedit",
+            "apply_patch",
+            "write",
+            "delete",
+            "move_file",
+            "bash",
+            "bash_status",
+            "bash_watch",
+            "bash_kill",
+            "inspect",
+            "todo_write",
+            "retrieve",
+            "skill",
+            "webfetch",
+            "websearch",
+            "view_image",
+        ] {
+            if !allowed.contains(&candidate) {
+                continue;
+            }
+            let tool = match candidate {
+                "read" => dynamic(Read(self.clone())),
+                "grep" => dynamic(Grep(self.clone())),
+                "glob" => dynamic(Glob(self.clone())),
+                "list" => dynamic(List(self.clone())),
+                "edit" => dynamic(Edit(self.clone())),
+                "edit_lines" => dynamic(EditLines(self.clone())),
+                "insert_lines" => dynamic(InsertLines(self.clone())),
+                "multiedit" => dynamic(MultiEdit(self.clone())),
+                "apply_patch" => dynamic(ApplyPatch(self.clone())),
+                "write" => dynamic(Write(self.clone())),
+                "delete" => dynamic(Delete(self.clone())),
+                "move_file" => dynamic(MoveFile(self.clone())),
+                "bash" => dynamic(Bash(self.clone())),
+                "bash_status" => dynamic(BashStatus(self.clone())),
+                "bash_watch" => dynamic(BashWatch(self.clone())),
+                "bash_kill" => dynamic(BashKill(self.clone())),
+                "inspect" => dynamic(Inspect(self.clone())),
+                "todo_write" => dynamic(TodoWrite(self.clone())),
+                "retrieve" => dynamic(Retrieve(self.compression_store.clone())),
+                "skill" => dynamic(Skill::new(self.root().to_path_buf())),
+                "webfetch" => dynamic(Webfetch),
+                "websearch" => dynamic(Websearch),
+                _ => dynamic(ViewImage(self.clone())),
+            };
+            tools.push(tool);
+        }
+        if allowed.contains(&"batch") {
+            tools.push(dynamic(batch.clone()));
+        }
+        if let Some(handle) = self.mcp() {
+            tools.extend(mcp_tools(&handle));
+        }
+        let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
+        tools.push(dynamic(ListTools(Arc::new(definitions))));
+        let dispatch = crate::run::ToolDispatch::new(tools)
+            .with_write_root((*self.root).clone())
+            .with_compression_store(self.compression_store.clone())
+            .with_snapshots(self.snapshots.clone())
+            .with_mode(crate::run::AgentMode::Build);
         let _ = batch.0.set(dispatch.clone());
         dispatch
     }

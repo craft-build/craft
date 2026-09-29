@@ -254,17 +254,47 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     let store = opened.ok().flatten();
 
     let task = tokio::spawn(async move {
-        let mut tools = params.workspace.register();
+        let mut history = Vec::new();
+        let (_flag, cancel) = cancel_channel();
+        let mut run_params = params.run;
+        run_params.model_spec = params.model_spec.clone();
+        let event_tx = guard.sender(0);
+        let subagent_event_tx = event_tx.clone();
+        // The subagent seam (A.5): headless sessions carry no provider
+        // configs, so tier selection degrades to the parent model.
+        let provider = params
+            .model_spec
+            .as_ref()
+            .and_then(|s| s.split('/').next().map(str::to_owned))
+            .unwrap_or_default();
+        let subagents = Arc::new(crate::subagent::SubagentLauncher {
+            parent_model: params.model.clone(),
+            parent_spec: params.model_spec.as_deref().unwrap_or("").to_owned(),
+            provider,
+            providers: Default::default(),
+            agent: crate::config::AgentConfig {
+                temperature: run_params.temperature,
+                max_tokens: run_params.max_tokens,
+                ..Default::default()
+            },
+            compression: run_params.compression.clone(),
+            base_prompt: String::new(),
+            workspace: params.workspace.clone(),
+            history: Vec::new(),
+            cancel: cancel.clone(),
+            emit: Arc::new(move |event| subagent_event_tx.send(event)),
+            before: params.before.clone(),
+        });
+        let mut tools = params
+            .workspace
+            .clone()
+            .with_subagents(subagents)
+            .register();
         if let Some(hook) = params.before {
             tools = attach_before(tools, hook);
         }
 
         let mut store = store;
-        let mut history = Vec::new();
-        let (_flag, cancel) = cancel_channel();
-        let mut run_params = params.run;
-        run_params.model_spec = params.model_spec;
-        let event_tx = guard.sender(0);
         // The terminal Done's per-model ledger, captured from the event
         // seam so the store can persist it after the run ends.
         let done_by_model = Arc::new(std::sync::Mutex::new(None));
@@ -402,15 +432,46 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
             }
             run_params.model_spec = model_spec.clone().map(Arc::from);
 
-            let mut tools = params.workspace.register();
-            if let Some(hook) = &params.before {
-                tools = attach_before(tools, Arc::clone(hook));
-            }
-
             // A cancel left over from a previous turn must not kill this
             // one, so drain before arming the watcher.
             drain_cancel(&cancel_rx).await;
             let (flag, cancel) = cancel_channel();
+
+            // The subagent seam (A.5), armed with this turn's cancel token
+            // and event channel; headless carries no provider configs, so
+            // tier selection degrades to the parent model.
+            let turn_event_tx = event_tx.clone();
+            let provider = model_spec
+                .as_ref()
+                .and_then(|s| s.split('/').next().map(str::to_owned))
+                .unwrap_or_default();
+            let subagents = Arc::new(crate::subagent::SubagentLauncher {
+                parent_model: model.clone(),
+                parent_spec: model_spec.as_deref().unwrap_or("").to_owned(),
+                provider,
+                providers: Default::default(),
+                agent: crate::config::AgentConfig {
+                    temperature: run_params.temperature,
+                    max_tokens: run_params.max_tokens,
+                    ..Default::default()
+                },
+                compression: run_params.compression.clone(),
+                base_prompt: String::new(),
+                workspace: params.workspace.clone(),
+                history: history.clone(),
+                cancel: cancel.clone(),
+                emit: Arc::new(move |event| turn_event_tx.send(event)),
+                before: params.before.clone(),
+            });
+            let mut tools = params
+                .workspace
+                .clone()
+                .with_subagents(subagents)
+                .register();
+            if let Some(hook) = &params.before {
+                tools = attach_before(tools, Arc::clone(hook));
+            }
+
             let watcher = {
                 let cancel_rx = Arc::clone(&cancel_rx);
                 tokio::spawn(async move {

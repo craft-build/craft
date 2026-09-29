@@ -1176,6 +1176,7 @@ async fn run_turn(
                 | run::Event::Retry { .. }
                 | run::Event::AuthRequired { .. }
                 | run::Event::AutoCompacting { .. }
+                | run::Event::Subagent { .. }
                 | run::Event::CompactionDone { .. }
                 | run::Event::StagnationDetected { .. }
                 | run::Event::AutoReviewStart { .. }

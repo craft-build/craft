@@ -155,6 +155,14 @@ pub enum Event {
     /// End-of-stream marker; emitted only by [`EventStreamGuard::drop`] and
     /// swallowed by [`SessionEvents::next`].
     StreamClosed,
+    /// An event from a `task`-spawned subagent (A.5), tagged with the
+    /// spawning call's description. Forward substrate for the subagent
+    /// task-chats panel (task 96); the child's own `Done`, `Error`,
+    /// `ToolOutput`, and `ToolPending` events are filtered before this.
+    Subagent {
+        description: String,
+        event: Box<Event>,
+    },
 }
 
 /// Why a run ended, riding the terminal [`Event::Done`].
