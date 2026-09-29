@@ -741,7 +741,7 @@ impl CraftProvider {
                 }
                 Command::SetDraft(draft) => handle_set_draft(&ctx, draft).await,
                 Command::Interrupt => {
-                    handle_interrupt(&ctx, &mut current_turn);
+                    handle_interrupt(&ctx, &current_turn);
                     pending_messages.clear();
                 }
                 Command::CancelSubagent { tool_use_id } => {
@@ -1024,9 +1024,32 @@ fn interrupt(ctx: &LoopCtx, current_turn: &mut Option<AbortHandle>) {
     }
 }
 
-/// `Command::Interrupt`: cancel and end the assistant bubble.
-fn handle_interrupt(ctx: &LoopCtx, current_turn: &mut Option<AbortHandle>) {
-    interrupt(ctx, current_turn);
+/// `Command::Interrupt`: signal cancellation and end the assistant bubble.
+/// The turn is left to settle on its own rather than hard-aborted: the run
+/// layer already keeps the partial history on cancel (`commit_cancelled`),
+/// and aborting the task would drop the user message and streamed reply
+/// from the session the next turn reads.
+/// Grace period after an Esc before a still-running turn is force-aborted
+/// (an await that never checks the cancel flag).
+const INTERRUPT_ABORT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `Command::Interrupt`: signal cancellation and end the assistant bubble.
+/// The turn is left to settle on its own rather than hard-aborted: the run
+/// layer already keeps the partial history on cancel (`commit_cancelled`),
+/// and aborting the task would drop the user message and streamed reply
+/// from the session the next turn reads.
+fn handle_interrupt(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
+    ctx.cancel_flag.set(true);
+    // Abort fallback: if the in-flight turn doesn't settle within the
+    // grace window, some await isn't cancellation-aware — force it.
+    if let Some(handle) = current_turn.as_ref().map(AbortHandle::clone) {
+        tokio::spawn(async move {
+            tokio::time::sleep(INTERRUPT_ABORT_GRACE).await;
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        });
+    }
     let _ = ctx.evt_tx.send(AgentEvent::AssistantEnd);
     let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
 }
@@ -1209,11 +1232,13 @@ mod tests {
             state.lock().await.history[0].text(),
             "I ran: $ ls\n\nOutput:\nsrc"
         );
-        assert!(pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain_results()
-            .is_empty());
+        assert!(
+            pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain_results()
+                .is_empty()
+        );
 
         // A second drain with nothing queued is a no-op.
         drain_shell_results(&pending, &state).await;

@@ -477,9 +477,13 @@ async fn handle_outcome(
 ) -> TurnFlow {
     match outcome {
         RunOutcome::Cancelled => {
+            // Commit the partial run (user message, streamed reply, tool
+            // turns) like MaxTurns does: dropping it would erase the
+            // interrupted turn from the next prompt's context.
+            state.lock().await.history = history.to_vec();
             let _ = tx.send(AgentEvent::AssistantEnd);
             let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-            TurnFlow::Abort
+            TurnFlow::Commit
         }
         RunOutcome::Failed(message) => {
             if renderer.streamed() {
@@ -885,5 +889,31 @@ mod tests {
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Neutral);
         assert!(text.contains("guardrail blocked read"), "{text}");
+    }
+
+    /// An interrupted turn must commit its partial history so the next
+    /// message still carries the interrupted turn's context.
+    #[tokio::test]
+    async fn cancelled_commits_partial_history() {
+        let (renderer, _rx) = renderer();
+        let (tx, _tx_out) = mpsc::unbounded_channel();
+        let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
+        let history = vec![history::Message::User {
+            content: vec![history::UserContent::text("stop here")],
+        }];
+        let mut prompt = String::new();
+        let mut continuations = MAX_EMPTY_CONTINUATIONS;
+        let flow = handle_outcome(
+            RunOutcome::Cancelled,
+            &renderer,
+            &history,
+            &mut prompt,
+            &mut continuations,
+            &state,
+            &tx,
+        )
+        .await;
+        assert!(matches!(flow, TurnFlow::Commit));
+        assert_eq!(state.lock().await.history, history);
     }
 }
