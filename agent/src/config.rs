@@ -1,17 +1,15 @@
-//! Configuration for `~/.config/craft/agent.toml` (legacy `~/.craft/` is
-//! searched first when it exists).
+//! Configuration for `~/.config/craft.bml` or the split files under
+//! `~/.config/craft/*.bml` (legacy `~/.craft/` is searched first when it
+//! exists). Format is BarkML.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, path::Path};
 
 use serde::Deserialize;
 use snafu::ResultExt;
 
 use crate::error::{
-    ConfigDirSnafu, InvalidBaseUrlSnafu, InvalidProviderSnafu, InvalidSnafu, InvalidTomlSnafu,
-    LoadConfigSnafu, ReadConfigSnafu, Result,
+    InvalidBaseUrlSnafu, InvalidBmlSnafu, InvalidProviderSnafu, InvalidSnafu, LoadConfigSnafu,
+    ReadConfigSnafu, Result,
 };
 use crate::providers::ProviderKind;
 
@@ -72,7 +70,7 @@ fn de_ratio<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D:
 }
 
 /// Context reserved for compaction: an absolute token count or a percent of
-/// the context window (TOML: `20000` or `"20%"`). Subtracted from the window
+/// the context window (BML: `20000` or `"20%"`). Subtracted from the window
 /// when the engine decides whether the context is full, so compaction fires
 /// before the provider would start rejecting requests (ported from Craft's
 /// `craft_config::CompactionBuffer`).
@@ -278,7 +276,7 @@ impl AgentConfig {
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub kind: ProviderKind,
-    /// Environment variable containing the credential; never store keys in TOML.
+    /// Environment variable containing the credential; never store keys in config.
     pub api_key_env: Option<String>,
     /// Full API base, including any protocol prefix such as `/v1`.
     pub base_url: Option<String>,
@@ -309,18 +307,20 @@ pub struct ModelConfig {
 }
 
 impl Config {
-    pub fn path() -> Result<PathBuf> {
-        // Search legacy `~/.craft/` first when it exists, then the XDG config
-        // dir; a fresh install with no file anywhere defaults to the XDG path.
-        if let Some(found) = crate::paths::find_config_path("agent.toml") {
-            return Ok(found);
-        }
-        let dir = crate::paths::xdg_config_dir().context(ConfigDirSnafu)?;
-        Ok(dir.join("agent.toml"))
-    }
-
     pub async fn load() -> Result<Self> {
-        Self::load_from(&Self::path()?).await
+        let loaded = crate::bml::load_global();
+        if let Some((path, error)) = loaded.errors.first() {
+            return Err(error.clone())
+                .context(InvalidBmlSnafu)
+                .context(LoadConfigSnafu { path: path.clone() });
+        }
+        match loaded.doc {
+            Some(doc) => Self::from_statement(&doc),
+            None => {
+                crate::bml::warn_legacy_toml(false);
+                Ok(Self::default())
+            }
+        }
     }
 
     /// A missing file means no configured providers. Other I/O errors are fatal.
@@ -342,7 +342,122 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Self = toml::from_str(text).context(InvalidTomlSnafu)?;
+        // An empty document keeps every default; barkml itself rejects it.
+        if text.trim().is_empty() {
+            let doc = barkml::Statement::new_module(
+                "main",
+                indexmap::IndexMap::new(),
+                barkml::Metadata::default(),
+            );
+            return Self::from_statement(&doc);
+        }
+        let doc = crate::bml::parse(text).context(InvalidBmlSnafu)?;
+        let config = Self::from_statement(&doc)?;
+        Self::validate(config)
+    }
+
+    /// Extract a [`Config`] from a merged BarkML document, taking only the
+    /// sections that belong to the main config (`agent`, `provider`,
+    /// `compaction`, `compression`, `keybind`/`keybindings`); unrelated
+    /// blocks (`mcp`, `permissions`) are left for their own loaders.
+    pub fn from_statement(doc: &barkml::Statement) -> Result<Self> {
+        use serde_json::Value as Json;
+        let mut map = serde_json::Map::new();
+
+        for section in ["agent", "compression"] {
+            if let Some(child) = doc.get_child(section, &[]) {
+                map.insert(section.to_string(), crate::bml::container_json(child));
+            }
+        }
+
+        // `provider "name" { ... }` labeled blocks → providers map.
+        let mut providers = serde_json::Map::new();
+        for (id, labels, block) in doc.blocks() {
+            if id != "provider" {
+                continue;
+            }
+            let Some(name) = labels.first().and_then(|l| l.as_string().cloned()) else {
+                continue;
+            };
+            let mut json = crate::bml::container_json(block);
+            // Labeled `model "id" { ... }` children collect under `model`;
+            // the struct field is `models`.
+            if let Some(models) = json.as_object_mut().unwrap().remove("model") {
+                json.as_object_mut()
+                    .unwrap()
+                    .insert("models".to_string(), models);
+            }
+            providers.insert(name, json);
+        }
+        if !providers.is_empty() {
+            map.insert("providers".to_string(), Json::Object(providers));
+        }
+
+        // `compaction "kind" { ... }` labeled blocks → ordered stages.
+        let mut stages = Vec::new();
+        for (id, labels, block) in doc.blocks() {
+            if id != "compaction" {
+                continue;
+            }
+            let mut json = crate::bml::container_json(block);
+            if let Some(label) = labels.first().and_then(|l| l.as_string().cloned())
+                && !json.as_object().is_some_and(|o| o.contains_key("kind"))
+            {
+                json.as_object_mut()
+                    .unwrap()
+                    .insert("kind".to_string(), Json::String(label));
+            }
+            stages.push(json);
+        }
+        if !stages.is_empty() {
+            map.insert("compaction".to_string(), Json::Array(stages));
+        }
+
+        if let Some(value) = doc
+            .get_child("compaction_buffer", &[])
+            .and_then(|child| child.get_value())
+        {
+            map.insert(
+                "compaction_buffer".to_string(),
+                crate::bml::value_json(value),
+            );
+        }
+
+        // `keybind "action" { keys = [...] }` or `keybindings = { ... }`.
+        let mut keybindings = serde_json::Map::new();
+        for (id, labels, block) in doc.blocks() {
+            if id != "keybind" {
+                continue;
+            }
+            let Some(action) = labels.first().and_then(|l| l.as_string().cloned()) else {
+                continue;
+            };
+            let keys = block
+                .get_child("keys", &[])
+                .and_then(|k| k.get_value())
+                .map(crate::bml::value_json)
+                .unwrap_or(Json::Array(Vec::new()));
+            keybindings.insert(action, keys);
+        }
+        if !keybindings.is_empty() {
+            map.insert("keybindings".to_string(), Json::Object(keybindings));
+        } else if let Some(value) = doc
+            .get_child("keybindings", &[])
+            .and_then(|child| child.get_value())
+        {
+            map.insert("keybindings".to_string(), crate::bml::value_json(value));
+        }
+
+        let config: Self = serde_json::from_value(Json::Object(map)).map_err(|e| {
+            InvalidSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
+        Self::validate(config)
+    }
+
+    fn validate(config: Self) -> Result<Self> {
         config.agent.validate()?;
         if let Err(reason) = config.compression.validate() {
             return InvalidSnafu { reason }.fail();
@@ -462,7 +577,7 @@ mod tests {
 
     #[test]
     fn parses_example() {
-        let config = Config::parse(include_str!("../agent.example.toml")).unwrap();
+        let config = Config::parse(include_str!("../agent.example.bml")).unwrap();
         assert_eq!(config.providers.len(), 4);
         assert_eq!(config.agent.preamble, "");
         assert_eq!(
@@ -497,17 +612,12 @@ mod tests {
 
     #[test]
     fn compaction_buffer_parses_tokens_and_percent() {
-        #[derive(Deserialize)]
-        struct Wrap {
-            #[serde(default = "default_compaction_buffer")]
-            compaction_buffer: CompactionBuffer,
-        }
-        let tokens: Wrap = toml::from_str("compaction_buffer = 20000").unwrap();
+        let tokens = Config::parse("compaction_buffer = 20000").unwrap();
         assert_eq!(tokens.compaction_buffer, CompactionBuffer::Tokens(20000));
-        let percent: Wrap = toml::from_str(r#"compaction_buffer = "20%""#).unwrap();
+        let percent = Config::parse("compaction_buffer = \"20%\"").unwrap();
         assert_eq!(percent.compaction_buffer, CompactionBuffer::Percent(20));
-        assert!(toml::from_str::<Wrap>("compaction_buffer = 100").is_err());
-        assert!(toml::from_str::<Wrap>(r#"compaction_buffer = "20""#).is_err());
+        assert!(Config::parse("compaction_buffer = 100").is_err());
+        assert!(Config::parse("compaction_buffer = \"20\"").is_err());
     }
 
     #[test]
@@ -530,7 +640,7 @@ mod tests {
     #[test]
     fn compression_accepts_overrides() {
         let config = Config::parse(
-            "[compression]\nenabled = false\ncode_compression_rate = 0.5\nmax_log_lines = 25",
+            "compression {\n  enabled = false\n  code_compression_rate = 0.5\n  max_log_lines = 25\n}",
         )
         .unwrap();
         assert!(!config.compression.enabled);
@@ -541,16 +651,15 @@ mod tests {
 
     #[test]
     fn rejects_invalid_compression_rate() {
-        assert!(Config::parse("[compression]\ncode_compression_rate = 0.0").is_err());
-        assert!(Config::parse("[compression]\ncode_compression_rate = 1.5").is_err());
-        assert!(Config::parse("[compression]\nno_such_knob = 1").is_err());
+        assert!(Config::parse("compression { code_compression_rate = 0.0 }").is_err());
+        assert!(Config::parse("compression { code_compression_rate = 1.5 }").is_err());
+        assert!(Config::parse("compression { no_such_knob = 1 }").is_err());
     }
 
     #[test]
     fn compaction_accepts_string_or_number_ratios() {
         let config = Config::parse(
-            "[[compaction]]\nkind = \"llm\"\ncontext = \"0.75\"\n\
-             [[compaction]]\nkind = \"vcc\"\ncontext = 0.5",
+            "compaction \"llm\" { context = \"0.75\" }\ncompaction \"vcc\" { context = 0.5 }",
         )
         .unwrap();
         assert_eq!(config.compaction.len(), 2);
@@ -561,14 +670,13 @@ mod tests {
     #[test]
     fn rejects_invalid_compaction_settings() {
         for text in [
-            "[[compaction]]\nkind = \"unknown\"\ncontext = 0.5",
-            "[[compaction]]\nkind = \"llm\"\ncontext = 0",
-            "[[compaction]]\nkind = \"llm\"\ncontext = 1.0",
-            "[[compaction]]\nkind = \"llm\"\ncontext = \"not a number\"",
-            "[[compaction]]\nkind = \"llm\"",
-            "[[compaction]]\nkind = \"llm\"\ncontext = 0.5\nextra = true",
-            "[[compaction]]\nkind = \"vcc\"\ncontext = 0.5\n\
-             [[compaction]]\nkind = \"vcc\"\ncontext = 0.7",
+            "compaction \"unknown\" { context = 0.5 }",
+            "compaction \"llm\" { context = 0 }",
+            "compaction \"llm\" { context = 1.0 }",
+            "compaction \"llm\" { context = \"not a number\" }",
+            "compaction \"llm\" { }",
+            "compaction \"llm\" { context = 0.5\n  extra = true }",
+            "compaction \"vcc\" { context = 0.5 }\ncompaction \"vcc\" { context = 0.7 }",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
@@ -579,9 +687,9 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config.agent.temperature, None);
         assert_eq!(config.agent.max_tokens, None);
-        let config = Config::parse("[agent]\nmax_tokens = 1024").unwrap();
+        let config = Config::parse("agent { max_tokens = 1024 }").unwrap();
         assert_eq!(config.agent.max_tokens, Some(1024));
-        let config = Config::parse("[agent]\nmax_turns = 4").unwrap();
+        let config = Config::parse("agent { max_turns = 4 }").unwrap();
         assert_eq!(config.agent.max_turns, Some(4));
         assert_eq!(config.agent.preamble, AgentConfig::default().preamble);
     }
@@ -597,7 +705,7 @@ mod tests {
             "unknown_setting = true",
         ] {
             assert!(
-                Config::parse(&format!("[agent]\n{field}")).is_err(),
+                Config::parse(&format!("agent {{ {field} }}")).is_err(),
                 "{field}"
             );
         }
@@ -606,22 +714,73 @@ mod tests {
     #[test]
     fn rejects_invalid_configuration() {
         for text in [
-            "[providers.x]\nkind = 'unknown'",
-            "[providers.x]\nkind = 'openai'\napi_key = 'do-not-store-keys'",
-            "[providers.x]\nkind = 'openai'\nbase_url = 'file:///tmp/api'",
-            "[providers.x]\nkind = 'openai'\nbase_url = 'https://user:secret@example.com'",
-            "[providers.x]\nkind = 'openai'\napi_version = 'v1'",
-            "[providers.x]\nkind = 'openai'\napi_key_env = ''",
-            "[providers.x]\nkind = 'openai'\n[providers.x.models.test]\ncontext_length = 0",
+            "provider \"x\" { kind = \"unknown\" }",
+            "provider \"x\" { kind = \"openai\"\n  api_key = \"do-not-store-keys\" }",
+            "provider \"x\" { kind = \"openai\"\n  base_url = \"file:///tmp/api\" }",
+            "provider \"x\" { kind = \"openai\"\n  base_url = \"https://user:secret@example.com\" }",
+            "provider \"x\" { kind = \"openai\"\n  api_version = \"v1\" }",
+            "provider \"x\" { kind = \"openai\"\n  api_key_env = \"\" }",
+            "provider \"x\" { kind = \"openai\"\n  model \"test\" { context_length = 0 } }",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
     }
 
+    #[test]
+    fn split_layout_merges_deep_and_labeled() {
+        let dir = tempfile::tempdir().unwrap();
+        let xdg = dir.path().join("craft");
+        std::fs::create_dir_all(&xdg).unwrap();
+        std::fs::write(
+            dir.path().join("craft.bml"),
+            "agent { temperature = 0.2 }\nprovider \"x\" { kind = \"openai\" }\ncompaction \"vcc\" { context = 0.5 }",
+        )
+        .unwrap();
+        std::fs::write(
+            xdg.join("extra.bml"),
+            "agent { max_tokens = 512 }\nprovider \"x\" { base_url = \"https://llm.example.com\" }\ncompaction \"llm\" { context = 0.9 }",
+        )
+        .unwrap();
+
+        let loaded = crate::bml::load_global_from(std::slice::from_ref(&xdg), Some(xdg.as_path()));
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let doc = loaded.doc.expect("bml sources exist");
+        let config = Config::from_statement(&doc).unwrap();
+        // Deep merge: both agent fields apply.
+        assert_eq!(config.agent.temperature, Some(0.2));
+        assert_eq!(config.agent.max_tokens, Some(512));
+        // Repeated blocks accumulate.
+        assert_eq!(config.compaction.len(), 2);
+        // Labeled block override merges per-field.
+        let provider = &config.providers["x"];
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://llm.example.com")
+        );
+    }
+
+    #[test]
+    fn legacy_toml_without_bml_is_detected_and_bml_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        // No bml anywhere: a legacy agent.toml must be flagged.
+        std::fs::write(dir.path().join("agent.toml"), "[agent]\n").unwrap();
+        let loaded = crate::bml::load_global_from(&[dir.path().to_path_buf()], None);
+        assert!(loaded.doc.is_none());
+        assert!(!crate::bml::legacy_toml_files_in(&[dir.path().to_path_buf()]).is_empty());
+
+        // With bml present, the legacy file is not flagged as blocking.
+        std::fs::write(dir.path().join("craft.bml"), "agent { max_tokens = 1 }").unwrap();
+        let loaded = crate::bml::load_global_from(&[dir.path().to_path_buf()], None);
+        let doc = loaded.doc.expect("bml source found");
+        let config = Config::from_statement(&doc).unwrap();
+        assert_eq!(config.agent.max_tokens, Some(1));
+        assert_eq!(config.providers.len(), 0);
+    }
+
     #[tokio::test]
     async fn missing_config_is_empty() {
         let path = std::env::temp_dir().join(format!(
-            "craft-agent-missing-{}-{}.toml",
+            "craft-agent-missing-{}-{}.bml",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

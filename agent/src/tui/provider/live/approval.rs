@@ -73,7 +73,7 @@ fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
     PermissionError::new(&tool.to_string(), scopes).to_string()
 }
 
-/// Record a user answer, persisting "always" answers to permissions.toml
+/// Record a user answer, persisting "always" answers to permissions.bml
 /// (project-local for `*AlwaysLocal`). Write failures degrade to the session
 /// grant — the answer still applies now, it just may be asked again later.
 fn record_answer(

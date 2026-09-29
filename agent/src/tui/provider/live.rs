@@ -343,7 +343,7 @@ pub struct CraftProvider {
     /// Instruction files (AGENTS.md and friends) discovered at startup;
     /// appended to the system prompt and shared with tool injection.
     instructions: crate::instructions::Instructions,
-    /// Permission rule engine: persistent `permissions.toml` rules, session
+    /// Permission rule engine: persistent `permissions.bml` rules, session
     /// grants, and per-tool defaults; consulted by the approval gate.
     permissions: Arc<PermissionManager>,
     /// Per-provider discovered models, config key order.

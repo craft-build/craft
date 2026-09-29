@@ -1,11 +1,11 @@
 //! Permission rule engine.
 //!
 //! Every tool call is checked against, in order: session rules (grants and
-//! denies made this session), persistent rules from `permissions.toml`
+//! denies made this session), persistent rules from `permissions.bml`
 //! (global config dir and project `.craft/`), then per-tool/global defaults.
 //! Any matching deny wins; unclaimed scopes fall through to the default
 //! effect (`prompt` unless configured otherwise). "Always allow" answers are
-//! written back comment-preservingly via `toml_edit`.
+//! written back to `permissions.bml` (regenerated; comments not kept).
 //!
 //! Ported from the reference `craft-agent/src/permissions.rs` +
 //! `craft-config` permission layer. Deviations: no plugin rule store (no
@@ -51,7 +51,7 @@ pub const PERMISSION_DENIED_PREFIX: &str = "Permission denied for";
 
 pub const BOUNDARY_UNVERIFIABLE_PREFIX: &str = "Cannot verify project boundary for";
 
-pub const PERMISSIONS_FILE: &str = "permissions.toml";
+pub const PERMISSIONS_FILE: &str = "permissions.bml";
 
 pub(super) const PROJECT_DIR: &str = ".craft";
 
@@ -370,7 +370,7 @@ impl PermissionManager {
     }
 
     /// G.1 `--yolo`: skip every permission prompt and allow every check.
-    /// Explicit deny rules in `permissions.toml` are also bypassed, matching
+    /// Explicit deny rules in `permissions.bml` are also bypassed, matching
     /// the reference's "allow everything" semantics.
     pub fn set_yolo(&self, yes: bool) {
         self.yolo.store(yes, std::sync::atomic::Ordering::Relaxed);

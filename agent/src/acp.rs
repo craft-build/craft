@@ -184,7 +184,7 @@ impl AppState {
             .next()
             .cloned()
             .ok_or_else(|| {
-                "no providers are configured in ~/.config/craft/agent.toml".to_string()
+                "no providers are configured in ~/.config/craft.bml".to_string()
             })?;
         let (_provider, models) = self.provider_catalog(&provider_name).await?;
         let model = models
@@ -259,7 +259,7 @@ impl AppState {
             .keys()
             .next()
             .cloned()
-            .ok_or_else(|| "no providers are configured in ~/.config/craft/agent.toml".to_string())
+            .ok_or_else(|| "no providers are configured in ~/.config/craft.bml".to_string())
     }
 
     /// Instructions discovery, workspace, and the permission engine —
@@ -670,7 +670,7 @@ fn permission_request(
     )
 }
 
-/// Record a client answer, persisting "always" answers to permissions.toml
+/// Record a client answer, persisting "always" answers to permissions.bml
 /// (project-local). Write failures degrade to the session grant — the answer
 /// still applies now, it just may be asked again later. Mirrors the TUI
 /// gate's `record_answer`.

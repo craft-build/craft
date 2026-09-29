@@ -339,11 +339,7 @@ fn write_back_preserves_comments_and_appends_unique() {
     let project = PermissionTarget::Project(tmp.path().to_path_buf());
     let path = tmp.path().join(PROJECT_DIR).join(PERMISSIONS_FILE);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &path,
-        "# my carefully written comment\n[write]\nallow = [\n    \"src/**\",\n]\n",
-    )
-    .unwrap();
+    std::fs::write(&path, "write { allow = [\"src/**\"] }\n").unwrap();
 
     append_permission_rule(
         &ToolKey::native("write"),
@@ -353,11 +349,8 @@ fn write_back_preserves_comments_and_appends_unique() {
     )
     .unwrap();
     let content = std::fs::read_to_string(&path).unwrap();
-    assert!(
-        content.contains("# my carefully written comment"),
-        "{content}"
-    );
     assert!(content.contains("\"docs/**\""), "{content}");
+    assert!(content.contains("\"src/**\""), "{content}");
 
     // Appending an existing scope is a no-op.
     append_permission_rule(
@@ -383,8 +376,8 @@ fn write_back_creates_missing_file_and_denies() {
     .unwrap();
     let content =
         std::fs::read_to_string(tmp.path().join(PROJECT_DIR).join(PERMISSIONS_FILE)).unwrap();
-    assert!(content.contains("[bash]"), "{content}");
-    assert!(content.contains("deny = [\n    \"git *\",\n]"), "{content}");
+    assert!(content.contains("bash {"), "{content}");
+    assert!(content.contains("deny = [\"git *\"]"), "{content}");
 }
 
 #[test]
@@ -402,13 +395,67 @@ fn write_back_never_writes_wildcard() {
 }
 
 #[test]
+fn write_back_round_trips_through_the_parser() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = PermissionTarget::Project(tmp.path().to_path_buf());
+
+    append_permission_rule(
+        &ToolKey::native("bash"),
+        Some("git *"),
+        Effect::Allow,
+        &project,
+    )
+    .unwrap();
+    append_permission_rule(
+        &ToolKey::native("write"),
+        None,
+        Effect::Allow,
+        &project,
+    )
+    .unwrap();
+    append_permission_rule(
+        &ToolKey::McpTool {
+            server: "github".into(),
+            tool: "create_issue".into(),
+        },
+        None,
+        Effect::Allow,
+        &project,
+    )
+    .unwrap();
+
+    let config =
+        read_permissions_file(&tmp.path().join(PROJECT_DIR).join(PERMISSIONS_FILE)).unwrap();
+    let built = build_permissions(PermissionsFileConfig::default(), config);
+    let mgr = PermissionManager::new(built, tmp.path().to_path_buf());
+    assert!(matches!(
+        mgr.check(&ToolKey::native("bash"), &["git push".to_string()]),
+        PermissionCheck::Allowed
+    ));
+    assert!(matches!(
+        mgr.check(&ToolKey::native("write"), &["any.rs".to_string()]),
+        PermissionCheck::Allowed
+    ));
+    assert!(matches!(
+        mgr.check(
+            &ToolKey::McpTool {
+                server: "github".into(),
+                tool: "create_issue".into()
+            },
+            &["{}".to_string()]
+        ),
+        PermissionCheck::Allowed
+    ));
+}
+
+#[test]
 fn load_permissions_reads_global_and_project_files() {
     let tmp = tempfile::tempdir().unwrap();
     let craft_dir = tmp.path().join(PROJECT_DIR);
     std::fs::create_dir_all(&craft_dir).unwrap();
     std::fs::write(
         craft_dir.join(PERMISSIONS_FILE),
-        "[bash]\ndeny = [\"rm *\"]\n\n[write]\nallow = true\n",
+        "bash { deny = [\"rm *\"] }\n\nwrite { allow = true }\n",
     )
     .unwrap();
 
@@ -446,7 +493,7 @@ fn corrupt_permissions_file_is_ignored() {
     let tmp = tempfile::tempdir().unwrap();
     let craft_dir = tmp.path().join(PROJECT_DIR);
     std::fs::create_dir_all(&craft_dir).unwrap();
-    std::fs::write(craft_dir.join(PERMISSIONS_FILE), "not [ valid toml").unwrap();
+    std::fs::write(craft_dir.join(PERMISSIONS_FILE), "not [ valid bml {{{{").unwrap();
     let config = load_permissions_inner_for_test(tmp.path());
     assert!(config.rules.is_empty());
 }

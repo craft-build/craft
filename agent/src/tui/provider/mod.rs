@@ -25,10 +25,10 @@ pub enum Command {
     /// message; hidden runs never reach the model.
     Shell { command: String, visible: bool },
     /// User approved a pending diff (by tool-call id). `always` persists an
-    /// allow rule to the project's `permissions.toml` instead of the session.
+    /// allow rule to the project's `permissions.bml` instead of the session.
     Approve { id: String, always: bool },
     /// User rejected a pending diff (by tool-call id). `always` persists a
-    /// deny rule to the project's `permissions.toml` instead of the session.
+    /// deny rule to the project's `permissions.bml` instead of the session.
     Reject { id: String, always: bool },
     /// Answered the permission-prompt overlay (by tool-call id) with the
     /// full scope-negotiated decision (F.5).

@@ -1,10 +1,8 @@
 //! Rule-engine internals: scope matching, scope generalization, the
-//! `permissions.toml` file format, and comment-preserving write-back.
+//! `permissions.bml` file format, and write-back.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
 
 use super::FILE_WRITE_TOOLS;
 use super::PERMISSIONS_FILE;
@@ -160,17 +158,17 @@ fn generalize_scope(tool: &ToolKey, scope: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// permissions.toml file format
+// permissions.bml file format
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct ToolPermissions {
     allow: Option<ScopeSet>,
     deny: Option<ScopeSet>,
     default: Option<DefaultEffect>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum ScopeSet {
     All(bool),
@@ -186,78 +184,73 @@ pub(super) struct PermissionsFileConfig {
 }
 
 impl PermissionsFileConfig {
-    fn merge(&mut self, overlay: PermissionsFileConfig) {
-        if overlay.default.is_some() {
-            self.default = overlay.default;
-        }
-        self.tools.extend(overlay.tools);
-        self.mcp_rules.extend(overlay.mcp_rules);
-        self.mcp_defaults.extend(overlay.mcp_defaults);
-    }
-}
-
-impl<'de> Deserialize<'de> for PermissionsFileConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let table = toml::Table::deserialize(deserializer)?;
-        let default = table
-            .get("default")
-            .and_then(|v| DefaultEffect::deserialize(v.clone()).ok())
-            .or_else(|| {
-                table
-                    .get("allow_all")?
-                    .as_bool()?
-                    .then_some(DefaultEffect::Allow)
-            });
-
-        let mut tools = HashMap::new();
-        let mut mcp_rules = Vec::new();
-        let mut mcp_defaults = HashMap::new();
-
-        for (k, v) in table.iter() {
-            if k.is_empty() || k == "allow_all" || k == "default" {
-                continue;
-            }
-            if k == "mcp" {
-                if let Some(mcp_table) = v.as_table() {
-                    for (server_name, server_value) in mcp_table {
-                        if let Some(server_table) = server_value.as_table() {
-                            parse_mcp_server_table(
-                                server_name,
-                                server_table,
-                                &mut mcp_rules,
-                                &mut mcp_defaults,
-                            );
-                        } else {
-                            eprintln!("permissions: [mcp.{server_name}] is not a table — skipping");
-                        }
+    /// Parse the BarkML permissions shape: `default = "..."`, tool blocks
+    /// (`bash { allow = [...] }`), and `mcp "server" { ... }` blocks.
+    pub(super) fn from_statement(doc: &barkml::Statement) -> Self {
+        let mut out = Self::default();
+        for child in doc.children() {
+            match child.id.as_str() {
+                "default" => {
+                    if let Some(value) = child.get_value()
+                        && let Ok(d) = serde_json::from_value(crate::bml::value_json(value))
+                    {
+                        out.default = Some(d);
                     }
-                } else {
-                    eprintln!("permissions: [mcp] is not a table — skipping");
                 }
-            } else if let Ok(tp) = v.clone().try_into::<ToolPermissions>() {
-                if k.contains('.') {
-                    eprintln!(
-                        "permissions: tool section [{k}] contains a dot — did you mean [mcp.{}]? Skipping.",
-                        k.split('.').next().unwrap_or(k)
+                "allow_all" => {
+                    if child
+                        .get_value()
+                        .and_then(|v| v.as_bool())
+                        .is_some_and(|b| *b)
+                    {
+                        out.default = Some(DefaultEffect::Allow);
+                    }
+                }
+                "mcp" => {
+                    let Some((labels, _)) = child.get_labeled() else {
+                        eprintln!("permissions: mcp block requires a server label — skipping");
+                        continue;
+                    };
+                    let Some(server_name) = labels.first().and_then(|l| l.as_string().cloned())
+                    else {
+                        continue;
+                    };
+                    parse_mcp_server_block(
+                        &server_name,
+                        child,
+                        &mut out.mcp_rules,
+                        &mut out.mcp_defaults,
                     );
-                } else {
-                    tools.insert(k.clone(), tp);
+                }
+                _ => {
+                    let json = if child.is_container() {
+                        crate::bml::container_json(child)
+                    } else if let Some(value) = child.get_value() {
+                        crate::bml::value_json(value)
+                    } else {
+                        continue;
+                    };
+                    let Ok(tp) = serde_json::from_value::<ToolPermissions>(json) else {
+                        continue;
+                    };
+                    if child.id.contains('.') {
+                        eprintln!(
+                            "permissions: tool section [{}] contains a dot — did you mean an mcp block? Skipping.",
+                            child.id
+                        );
+                    } else {
+                        out.tools.insert(child.id.clone(), tp);
+                    }
                 }
             }
         }
-
-        Ok(Self {
-            default,
-            tools,
-            mcp_rules,
-            mcp_defaults,
-        })
+        out
     }
 }
 
-fn parse_mcp_server_table(
+fn parse_mcp_server_block(
     server_name: &str,
-    table: &toml::Table,
+    block: &barkml::Statement,
     rules: &mut Vec<PermissionRule>,
     mcp_defaults: &mut HashMap<ToolKey, DefaultEffect>,
 ) {
@@ -268,53 +261,59 @@ fn parse_mcp_server_table(
         return;
     }
 
-    for (key, value) in table {
-        match key.as_str() {
+    for child in block.children() {
+        match child.id.as_str() {
             "allow" | "deny" => {
-                let effect = if key == "allow" {
+                let effect = if child.id == "allow" {
                     Effect::Allow
                 } else {
                     Effect::Deny
                 };
-                match value {
-                    toml::Value::Array(arr) => {
-                        for item in arr {
-                            if let Some(tool_name) = item.as_str() {
-                                if tool_name == "*" {
-                                    rules.push(PermissionRule {
-                                        tool: ToolKey::McpServer {
-                                            server: server_name.into(),
-                                        },
-                                        scope: None,
-                                        effect,
-                                    });
-                                } else if is_valid_wire_name(tool_name) {
-                                    rules.push(PermissionRule {
-                                        tool: ToolKey::McpTool {
-                                            server: server_name.into(),
-                                            tool: tool_name.into(),
-                                        },
-                                        scope: None,
-                                        effect,
-                                    });
-                                } else {
-                                    eprintln!(
-                                        "permissions: skipping invalid MCP tool name {server_name}/{tool_name}"
-                                    );
+                if let Some(value) = child.get_value() {
+                    match value.as_array() {
+                        Some(arr) => {
+                            for item in arr {
+                                if let Some(tool_name) = item.as_string() {
+                                    if tool_name == "*" {
+                                        rules.push(PermissionRule {
+                                            tool: ToolKey::McpServer {
+                                                server: server_name.into(),
+                                            },
+                                            scope: None,
+                                            effect,
+                                        });
+                                    } else if is_valid_wire_name(tool_name) {
+                                        rules.push(PermissionRule {
+                                            tool: ToolKey::McpTool {
+                                                server: server_name.into(),
+                                                tool: tool_name.as_str().into(),
+                                            },
+                                            scope: None,
+                                            effect,
+                                        });
+                                    } else {
+                                        eprintln!(
+                                            "permissions: skipping invalid MCP tool name {server_name}/{tool_name}"
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
-                    toml::Value::Boolean(false) => {}
-                    _ => {
-                        eprintln!(
-                            "permissions: [mcp.{server_name}] {key} must be an array of tool names or false — ignoring"
-                        );
+                        None if value.as_bool() == Some(&false) => {}
+                        None => {
+                            eprintln!(
+                                "permissions: [mcp.{server_name}] {} must be an array of tool names or false — ignoring",
+                                child.id
+                            );
+                        }
                     }
                 }
             }
             "default" => {
-                if let Ok(d) = DefaultEffect::deserialize(value.clone()) {
+                if let Some(value) = child.get_value()
+                    && let Ok(d) =
+                        serde_json::from_value::<DefaultEffect>(crate::bml::value_json(value))
+                {
                     mcp_defaults.insert(
                         ToolKey::McpServer {
                             server: server_name.into(),
@@ -323,7 +322,10 @@ fn parse_mcp_server_table(
                     );
                 }
             }
-            _ => eprintln!("permissions: unknown key {key} in [mcp.{server_name}] — ignoring"),
+            _ => eprintln!(
+                "permissions: unknown key {} in [mcp.{server_name}] — ignoring",
+                child.id
+            ),
         }
     }
 }
@@ -441,25 +443,31 @@ pub(super) fn build_permissions(
 }
 
 pub(super) fn read_permissions_file(path: &Path) -> Option<PermissionsFileConfig> {
-    let content = std::fs::read_to_string(path).ok()?;
-    match toml::from_str(&content) {
-        Ok(p) => Some(p),
+    match crate::bml::parse_file_or_empty(path) {
+        Ok(doc) => Some(PermissionsFileConfig::from_statement(&doc)),
         Err(e) => {
-            eprintln!("permissions: failed to parse {}: {e}", path.display());
+            eprintln!("permissions: {e}");
             None
         }
     }
 }
 
-/// Load permission rules from the global config search dirs plus the
-/// project's `.craft/permissions.toml`. A missing file anywhere behaves as
-/// no rules from that source.
+/// Load permission rules from the merged global craft document's
+/// `permissions` block plus the project's `.craft/permissions.bml`. A
+/// missing source anywhere behaves as no rules from that source.
 pub fn load_permissions(cwd: &Path) -> PermissionsConfig {
+    let loaded = crate::bml::load_global();
+    for (path, error) in &loaded.errors {
+        eprintln!("permissions: failed to parse {}: {error}", path.display());
+    }
     let mut global_perms = PermissionsFileConfig::default();
-    for dir in paths::config_search_dirs() {
-        if let Some(p) = read_permissions_file(&dir.join(PERMISSIONS_FILE)) {
-            global_perms.merge(p);
+    match loaded.doc {
+        Some(doc) => {
+            if let Some(block) = doc.get_child("permissions", &[]) {
+                global_perms = PermissionsFileConfig::from_statement(block);
+            }
         }
+        None => crate::bml::warn_legacy_toml(false),
     }
 
     let project_perms =
@@ -472,45 +480,8 @@ pub fn load_permissions(cwd: &Path) -> PermissionsConfig {
 // Write-back
 // ---------------------------------------------------------------------------
 
-fn child_table<'a>(
-    table: &'a mut toml_edit::Table,
-    key: &str,
-) -> Result<&'a mut toml_edit::Table, PermissionWriteError> {
-    table
-        .entry(key)
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .ok_or(PermissionWriteError::NotATable {
-            tool: key.to_string(),
-        })
-}
-
-fn push_unique(
-    table: &mut toml_edit::Table,
-    key: &str,
-    value: &str,
-) -> Result<(), PermissionWriteError> {
-    let arr = table
-        .entry(key)
-        .or_insert_with(|| toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())))
-        .as_array_mut()
-        .ok_or(PermissionWriteError::NotAnArray {
-            tool: String::new(),
-            key: key.to_string(),
-        })?;
-    if !arr.iter().any(|v| v.as_str() == Some(value)) {
-        arr.push(value);
-        arr.set_trailing("\n");
-        arr.set_trailing_comma(true);
-        for item in arr.iter_mut() {
-            item.decor_mut().set_prefix("\n    ");
-        }
-    }
-    Ok(())
-}
-
 fn insert_permission_entry(
-    doc: &mut toml_edit::DocumentMut,
+    doc: &mut barkml::Statement,
     tool_key: &ToolKey,
     scope: Option<&str>,
     effect: Effect,
@@ -523,12 +494,12 @@ fn insert_permission_entry(
     match tool_key {
         // MCP scopes are always wildcarded, so `scope` is ignored for MCP keys.
         ToolKey::McpTool { server, tool } => {
-            let server_table = child_table(child_table(doc.as_table_mut(), "mcp")?, server)?;
-            push_unique(server_table, key, tool)?;
+            let server_block = crate::bml::ensure_labeled_block(doc, "mcp", server);
+            crate::bml::push_unique_string(server_block, key, tool);
         }
         ToolKey::McpServer { server } => {
-            let server_table = child_table(child_table(doc.as_table_mut(), "mcp")?, server)?;
-            server_table.insert("default", toml_edit::value(key));
+            let server_block = crate::bml::ensure_labeled_block(doc, "mcp", server);
+            crate::bml::upsert_assign(server_block, "default", crate::bml::string_value(key));
         }
         ToolKey::Wildcard => {
             // Wildcard rules are config-only; runtime never writes them.
@@ -537,11 +508,14 @@ fn insert_permission_entry(
             });
         }
         ToolKey::Native(name) => {
-            let tool_table = child_table(doc.as_table_mut(), name)?;
+            let tool_block =
+                crate::bml::ensure_block(doc, name).ok_or(PermissionWriteError::NotATable {
+                    tool: name.to_string(),
+                })?;
             match scope {
-                Some(s) => push_unique(tool_table, key, s)?,
+                Some(s) => crate::bml::push_unique_string(tool_block, key, s),
                 None => {
-                    tool_table.insert(key, toml_edit::value(true));
+                    crate::bml::upsert_assign(tool_block, key, crate::bml::bool_value(true));
                 }
             }
         }
@@ -549,8 +523,8 @@ fn insert_permission_entry(
     Ok(())
 }
 
-/// Append a rule to `permissions.toml`, preserving the existing file's
-/// comments and formatting (`toml_edit`).
+/// Append a rule to `permissions.bml`. The file is regenerated from the
+/// parsed AST; comments are not preserved.
 pub fn append_permission_rule(
     tool: &ToolKey,
     scope: Option<&str>,
@@ -567,16 +541,13 @@ pub fn append_permission_rule(
             )))?,
         PermissionTarget::Project(cwd) => cwd.join(PROJECT_DIR).join(PERMISSIONS_FILE),
     };
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|e: toml_edit::TomlError| PermissionWriteError::Parse(e.to_string()))?;
+    let mut doc = crate::bml::parse_file_or_empty(&path).map_err(PermissionWriteError::Parse)?;
 
     insert_permission_entry(&mut doc, tool, scope, effect)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    atomic_write(&path, doc.to_string().as_bytes())?;
+    atomic_write(&path, crate::bml::to_text(&doc).as_bytes())?;
     Ok(())
 }

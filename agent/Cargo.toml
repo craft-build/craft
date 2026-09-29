@@ -28,6 +28,8 @@ arboard.workspace = true
 regex.workspace = true
 rmcp.workspace = true
 arc-swap.workspace = true
+barkml.workspace = true
+indexmap.workspace = true
 reqwest.workspace = true
 rig-core.workspace = true
 schemars.workspace = true
@@ -44,7 +46,6 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "net", "process", "rt"] }
 toml.workspace = true
-toml_edit.workspace = true
 tree-sitter = "0.26"
 tree-sitter-bash = "0.25"
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-fancy"] }

@@ -225,16 +225,15 @@ mod tests {
         let auth = if kind == ProviderKind::Llamafile {
             ""
         } else {
-            "api_key_env = 'CRAFT_TEST_KEY'\n"
+            "api_key_env = \"CRAFT_TEST_KEY\"\n"
         };
         let azure = if kind == ProviderKind::Azure {
-            "api_version = '2024-10-21'\n"
+            "api_version = \"2024-10-21\"\n"
         } else {
             ""
         };
         Config::parse(&format!(
-            "[providers.test]\nkind = '{}'\nbase_url = '{base_url}'\n{auth}{azure}\
-             [providers.test.models.manual]\nname = 'Manual model'\n",
+            "provider \"test\" {{\n  kind = \"{}\"\n  base_url = \"{base_url}\"\n{auth}{azure}  model \"manual\" {{ name = \"Manual model\" }}\n}}",
             kind.as_str(),
         ))
         .unwrap()
@@ -336,7 +335,7 @@ mod tests {
         });
         // No api_key_env/base_url in config: the key and base URL both come
         // from the environment, and the timeout policy must still apply.
-        let config = Config::parse("[providers.test]\nkind = 'openai'\n")
+        let config = Config::parse("provider \"test\" { kind = \"openai\" }")
             .unwrap()
             .providers
             .remove("test")
@@ -380,9 +379,7 @@ mod tests {
     #[test]
     fn merges_partial_overrides_and_manual_models() {
         let config = Config::parse(
-            "[providers.x]\nkind = 'openai'\n\
-             [providers.x.models.existing]\nmax_output_tokens = 2048\n\
-             [providers.x.models.new]\nname = 'Manual model'",
+            "provider \"x\" {\n  kind = \"openai\"\n  model \"existing\" { max_output_tokens = 2048 }\n  model \"new\" { name = \"Manual model\" }\n}",
         )
         .unwrap();
         let mut existing = Model::new("existing", "Discovered name");
@@ -435,9 +432,10 @@ mod tests {
 
     #[test]
     fn missing_credentials_are_reported_only_when_building() {
-        let config =
-            Config::parse("[providers.test]\nkind = 'openai'\napi_key_env = 'CRAFT_TEST_KEY'")
-                .unwrap();
+        let config = Config::parse(
+            "provider \"test\" { kind = \"openai\"\n  api_key_env = \"CRAFT_TEST_KEY\" }",
+        )
+        .unwrap();
         let result =
             Provider::from_config_with(&config.providers["test"], Timeouts::default(), &|name| {
                 crate::error::InvalidSnafu {

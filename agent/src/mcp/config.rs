@@ -1,7 +1,8 @@
-//! `mcp.toml` loading and validation (B.11).
+//! `mcp.bml` loading and validation (B.11).
 //!
-//! Global config (`mcp.toml` in the config search dirs) is merged first, then
-//! the project's `.craft/mcp.toml` overrides by server name. Expansion errors
+//! Global config (`mcp "name" { ... }` blocks in the merged craft document)
+//! is merged first, then the project's `.craft/mcp.bml` overrides by server
+//! name. Expansion errors
 //! (unset `${VAR}`) fail the individual server, not the whole file.
 
 use std::collections::HashMap;
@@ -10,13 +11,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
-use toml_edit::DocumentMut;
 
 use super::error::McpError;
 use crate::permissions::is_valid_server_name;
 use crate::tools::is_builtin_tool;
 
-const MCP_CONFIG_FILE: &str = "mcp.toml";
+const MCP_CONFIG_FILE: &str = "mcp.bml";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 
@@ -321,22 +321,35 @@ pub fn load_config(cwd: &Path) -> (McpConfig, McpConfigErrors) {
     let mut merged = McpConfig::default();
     let mut errors = McpConfigErrors::new(cwd.to_path_buf());
 
-    if let Some(global_path) = crate::paths::find_config_path(MCP_CONFIG_FILE) {
-        match read_config(&global_path) {
-            Ok(None) => {}
-            Ok(Some(cfg)) => {
-                tracing::info!(
-                    path = %global_path.display(),
-                    servers = cfg.mcp.len(),
-                    "loaded mcp config"
-                );
-                for name in cfg.mcp.keys() {
+    // Global servers come from the merged craft document's `mcp` blocks.
+    let loaded = crate::bml::load_global();
+    for (path, error) in loaded.errors {
+        errors.add_error(McpConfigError::Parse {
+            path,
+            error: error.to_string(),
+        });
+    }
+    let global_path = crate::paths::config_search_dirs()
+        .into_iter()
+        .next_back()
+        .map(|dir| dir.join(MCP_CONFIG_FILE))
+        .unwrap_or_default();
+    if let Some(doc) = loaded.doc.as_ref() {
+        match servers_from_doc(doc) {
+            Ok(servers) => {
+                tracing::info!(servers = servers.len(), "loaded mcp config");
+                for name in servers.keys() {
                     merged.origins.insert(name.clone(), global_path.clone());
                 }
-                merged.mcp.extend(cfg.mcp);
+                merged.mcp.extend(servers);
             }
-            Err(e) => errors.add_error(e),
+            Err(error) => errors.add_error(McpConfigError::Parse {
+                path: global_path,
+                error,
+            }),
         }
+    } else {
+        crate::bml::warn_legacy_toml(false);
     }
 
     let project_path = cwd.join(".craft").join(MCP_CONFIG_FILE);
@@ -363,35 +376,38 @@ pub fn persist_enabled(
     server_name: &str,
     enabled: bool,
 ) -> Result<(), McpError> {
-    let content = fs::read_to_string(config_path).unwrap_or_default();
-    let mut doc: DocumentMut = content.parse().map_err(|e| McpError::Config {
-        message: format!("failed to parse {}: {e}", config_path.display()),
-    })?;
-
-    let mcp = doc
-        .entry("mcp")
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-    let server = mcp
-        .as_table_like_mut()
-        .ok_or(McpError::Config {
-            message: "[mcp] is not a table".into(),
-        })?
-        .entry(server_name)
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-    server.as_table_like_mut().ok_or(McpError::Config {
-        message: format!("[mcp.{server_name}] is not a table"),
-    })?;
-    server["enabled"] = toml_edit::value(enabled);
+    let mut doc = crate::bml::parse_file_or_empty(config_path)
+        .map_err(|e| McpError::Config { message: e })?;
+    let server = crate::bml::ensure_labeled_block(&mut doc, "mcp", server_name);
+    crate::bml::upsert_assign(server, "enabled", crate::bml::bool_value(enabled));
 
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).map_err(|e| McpError::Config {
             message: format!("cannot create dir: {e}"),
         })?;
     }
-    fs::write(config_path, doc.to_string()).map_err(|e| McpError::Config {
+    fs::write(config_path, crate::bml::to_text(&doc)).map_err(|e| McpError::Config {
         message: format!("cannot write {}: {e}", config_path.display()),
     })?;
     Ok(())
+}
+
+/// Extract `mcp "name" { ... }` blocks from a document.
+fn servers_from_doc(doc: &barkml::Statement) -> Result<HashMap<String, RawServerConfig>, String> {
+    let mut servers = HashMap::new();
+    for (id, labels, block) in doc.blocks() {
+        if id != "mcp" {
+            continue;
+        }
+        let Some(name) = labels.first().and_then(|l| l.as_string().cloned()) else {
+            continue;
+        };
+        let json = crate::bml::container_json(block);
+        let raw: RawServerConfig =
+            serde_json::from_value(json).map_err(|e| format!("mcp server {name:?}: {e}"))?;
+        servers.insert(name, raw);
+    }
+    Ok(servers)
 }
 
 fn read_config(path: &Path) -> Result<Option<McpConfig>, McpConfigError> {
@@ -409,21 +425,49 @@ fn read_config(path: &Path) -> Result<Option<McpConfig>, McpConfigError> {
             });
         }
     };
-    toml::from_str(&content)
-        .inspect_err(|e| {
-            tracing::warn!(path = %path.display(), error = %e, "failed to parse mcp config");
-        })
-        .map(Some)
-        .map_err(|e| McpConfigError::Parse {
-            path: path.into(),
-            error: e.to_string(),
-        })
+    let doc = if content.trim().is_empty() {
+        None
+    } else {
+        match crate::bml::parse(&content) {
+            Ok(doc) => Some(doc),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "failed to parse mcp config");
+                return Err(McpConfigError::Parse {
+                    path: path.into(),
+                    error: e.to_string(),
+                });
+            }
+        }
+    };
+    let mcp = match doc.as_ref().map(servers_from_doc) {
+        None => HashMap::new(),
+        Some(Ok(servers)) => servers,
+        Some(Err(error)) => {
+            tracing::warn!(path = %path.display(), error = %error, "invalid mcp config");
+            return Err(McpConfigError::Parse {
+                path: path.into(),
+                error,
+            });
+        }
+    };
+    Ok(Some(McpConfig {
+        mcp,
+        origins: HashMap::new(),
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use test_case::test_case;
+
+    fn parse_mcp(text: &str) -> McpConfig {
+        let doc = crate::bml::parse(text).unwrap();
+        McpConfig {
+            mcp: servers_from_doc(&doc).unwrap(),
+            origins: HashMap::new(),
+        }
+    }
 
     fn stdio_raw(cmd: &[&str]) -> RawServerConfig {
         RawServerConfig {
@@ -459,14 +503,9 @@ mod tests {
 
     #[test]
     fn header_with_unset_var_fails_the_server_with_the_var_name() {
-        let config: McpConfig = toml::from_str(
-            r#"
-            [mcp.remote]
-            url = "https://mcp.example.com/mcp"
-            headers = { Authorization = "Bearer ${CRAFT_TEST_MCP_UNSET_84421}" }
-            "#,
-        )
-        .unwrap();
+        let config = parse_mcp(
+            "mcp \"remote\" { url = \"https://mcp.example.com/mcp\"\n  headers = { Authorization = \"Bearer ${CRAFT_TEST_MCP_UNSET_84421}\" } }",
+        );
         let err = parse_server("remote".into(), config.mcp["remote"].clone()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("CRAFT_TEST_MCP_UNSET_84421"), "got: {msg}");
@@ -476,14 +515,9 @@ mod tests {
     #[test]
     fn header_with_empty_var_fails_like_unset() {
         unsafe { std::env::set_var("CRAFT_TEST_MCP_EMPTY_84421", "") };
-        let config: McpConfig = toml::from_str(
-            r#"
-            [mcp.remote]
-            url = "https://mcp.example.com/mcp"
-            headers = { Authorization = "Bearer ${CRAFT_TEST_MCP_EMPTY_84421}" }
-            "#,
-        )
-        .unwrap();
+        let config = parse_mcp(
+            "mcp \"remote\" { url = \"https://mcp.example.com/mcp\"\n  headers = { Authorization = \"Bearer ${CRAFT_TEST_MCP_EMPTY_84421}\" } }",
+        );
         let err = parse_server("remote".into(), config.mcp["remote"].clone()).unwrap_err();
         assert!(err.to_string().contains("CRAFT_TEST_MCP_EMPTY_84421"));
     }
@@ -491,14 +525,9 @@ mod tests {
     #[test]
     fn stdio_environment_expands_from_the_process_env() {
         unsafe { std::env::set_var("CRAFT_TEST_MCP_ENV_84421", "tok") };
-        let config: McpConfig = toml::from_str(
-            r#"
-            [mcp.local]
-            command = ["server"]
-            environment = { GITHUB_TOKEN = "${CRAFT_TEST_MCP_ENV_84421}" }
-            "#,
-        )
-        .unwrap();
+        let config = parse_mcp(
+            "mcp \"local\" { command = [\"server\"]\n  environment = { GITHUB_TOKEN = \"${CRAFT_TEST_MCP_ENV_84421}\" } }",
+        );
         let parsed = parse_server("local".into(), config.mcp["local"].clone()).unwrap();
         match parsed.transport {
             Transport::Stdio { environment, .. } => {
@@ -530,22 +559,25 @@ mod tests {
     }
 
     #[test]
-    fn toml_deserialization() {
-        let toml_str = r#"
-            [mcp.filesystem]
-            command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    fn bml_deserialization() {
+        let bml_str = r#"
+            mcp "filesystem" {
+              command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+            }
 
-            [mcp.github]
-            command = ["gh", "mcp-server"]
-            environment = { GITHUB_TOKEN = "tok" }
-            timeout = 10000
-            enabled = false
+            mcp "github" {
+              command = ["gh", "mcp-server"]
+              environment = { GITHUB_TOKEN = "tok" }
+              timeout = 10000
+              enabled = false
+            }
 
-            [mcp.remote]
-            url = "https://mcp.example.com/mcp"
-            headers = { Authorization = "Bearer tok123" }
+            mcp "remote" {
+              url = "https://mcp.example.com/mcp"
+              headers = { Authorization = "Bearer tok123" }
+            }
         "#;
-        let config: McpConfig = toml::from_str(toml_str).unwrap();
+        let config = parse_mcp(bml_str);
         assert_eq!(config.mcp.len(), 3);
 
         assert!(matches!(
@@ -572,14 +604,9 @@ mod tests {
 
     #[test]
     fn oauth_client_config_deserializes() {
-        let config: McpConfig = toml::from_str(
-            r#"
-            [mcp.acme]
-            url = "https://mcp.acme.example.com/mcp"
-            oauth = { client_id = "acme-client", client_secret = "s3cret", callback_port = 3118, callback_path = "/callback" }
-            "#,
-        )
-        .unwrap();
+        let config = parse_mcp(
+            "mcp \"acme\" { url = \"https://mcp.acme.example.com/mcp\"\n  oauth { client_id = \"acme-client\"\n    client_secret = \"s3cret\"\n    callback_port = 3118\n    callback_path = \"/callback\" } }",
+        );
         let parsed = parse_server("acme".into(), config.mcp["acme"].clone()).unwrap();
         match parsed.transport {
             Transport::Http { url, oauth, .. } => {
@@ -596,10 +623,9 @@ mod tests {
 
     #[test]
     fn oauth_client_secret_and_port_optional() {
-        let config: McpConfig = toml::from_str(
-            "[mcp.acme]\nurl = \"https://mcp.acme.example.com/mcp\"\noauth = { client_id = \"acme-client\" }\n",
-        )
-        .unwrap();
+        let config = parse_mcp(
+            "mcp \"acme\" { url = \"https://mcp.acme.example.com/mcp\"\n  oauth { client_id = \"acme-client\" } }",
+        );
         let parsed = parse_server("acme".into(), config.mcp["acme"].clone()).unwrap();
         match parsed.transport {
             Transport::Http { oauth, .. } => {
@@ -614,10 +640,9 @@ mod tests {
 
     #[test]
     fn oauth_callback_path_must_start_with_slash() {
-        let config: McpConfig = toml::from_str(
-            "[mcp.acme]\nurl = \"https://mcp.acme.example.com/mcp\"\noauth = { client_id = \"acme-client\", callback_path = \"callback\" }\n",
-        )
-        .unwrap();
+        let config = parse_mcp(
+            "mcp \"acme\" { url = \"https://mcp.acme.example.com/mcp\"\n  oauth { client_id = \"acme-client\"\n    callback_path = \"callback\" } }",
+        );
         let err = parse_server("acme".into(), config.mcp["acme"].clone()).unwrap_err();
         assert!(err.to_string().contains("callback_path"));
     }
@@ -628,11 +653,8 @@ mod tests {
         let global_dir = dir.path().join("global");
         fs::create_dir_all(&global_dir).unwrap();
         fs::write(
-            global_dir.join("mcp.toml"),
-            r#"[mcp.srv]
-command = ["global"]
-timeout = 5000
-"#,
+            global_dir.join("mcp.bml"),
+            "mcp \"srv\" { command = [\"global\"]\n  timeout = 5000 }",
         )
         .unwrap();
 
@@ -640,17 +662,15 @@ timeout = 5000
         let project_craft_dir = project_dir.join(".craft");
         fs::create_dir_all(&project_craft_dir).unwrap();
         fs::write(
-            project_craft_dir.join("mcp.toml"),
-            r#"[mcp.srv]
-command = ["project"]
-"#,
+            project_craft_dir.join("mcp.bml"),
+            "mcp \"srv\" { command = [\"project\"] }",
         )
         .unwrap();
 
-        let project_cfg = read_config(&project_craft_dir.join("mcp.toml"))
+        let project_cfg = read_config(&project_craft_dir.join("mcp.bml"))
             .unwrap()
             .unwrap();
-        let global_cfg = read_config(&global_dir.join("mcp.toml")).unwrap().unwrap();
+        let global_cfg = read_config(&global_dir.join("mcp.bml")).unwrap().unwrap();
 
         let mut merged = McpConfig::default();
         merged.mcp.extend(global_cfg.mcp);
@@ -673,32 +693,34 @@ command = ["project"]
     #[test]
     fn persist_enabled_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp.toml");
+        let path = dir.path().join("mcp.bml");
 
+        // Creates the file from scratch.
         persist_enabled(&path, "srv", false).unwrap();
-        let doc: toml_edit::DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
-        assert_eq!(doc["mcp"]["srv"]["enabled"].as_bool(), Some(false));
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("enabled = false"), "{text}");
+        assert!(text.contains("mcp \"srv\""), "{text}");
 
+        // Preserves other fields and flips the flag.
         fs::write(
             &path,
-            r#"[mcp.srv]
-command = ["echo"]
-timeout = 5000
-enabled = true
-"#,
+            "mcp \"srv\" { command = [\"echo\"]\n  timeout = 5000\n  enabled = true }",
         )
         .unwrap();
         persist_enabled(&path, "srv", false).unwrap();
-        let doc: toml_edit::DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
-        assert_eq!(doc["mcp"]["srv"]["enabled"].as_bool(), Some(false));
-        assert!(doc["mcp"]["srv"]["command"].is_array());
-        assert_eq!(doc["mcp"]["srv"]["timeout"].as_integer(), Some(5000));
+        let cfg = read_config(&path).unwrap().unwrap();
+        assert!(!cfg.mcp["srv"].enabled);
+        match &cfg.mcp["srv"].transport {
+            RawTransport::Stdio(s) => assert_eq!(s.command, vec!["echo"]),
+            _ => panic!("expected Stdio"),
+        }
+        assert_eq!(cfg.mcp["srv"].timeout, 5000);
     }
 
     #[test]
     fn read_config_directory_path_returns_read_error() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp.toml");
+        let path = dir.path().join("mcp.bml");
         fs::create_dir(&path).unwrap();
         assert!(matches!(
             read_config(&path),
@@ -709,8 +731,8 @@ enabled = true
     #[test]
     fn read_config_invalid_toml_returns_parse_error() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp.toml");
-        fs::write(&path, "this is not valid toml {{").unwrap();
+        let path = dir.path().join("mcp.bml");
+        fs::write(&path, "this is not valid bml {{").unwrap();
         assert!(matches!(
             read_config(&path),
             Err(McpConfigError::Parse { .. })
@@ -718,16 +740,10 @@ enabled = true
     }
 
     #[test]
-    fn read_config_valid_toml_returns_ok() {
+    fn read_config_valid_bml_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp.toml");
-        fs::write(
-            &path,
-            r#"[mcp.valid]
-command = ["echo", "hello"]
-"#,
-        )
-        .unwrap();
+        let path = dir.path().join("mcp.bml");
+        fs::write(&path, "mcp \"valid\" { command = [\"echo\", \"hello\"] }").unwrap();
         let cfg = read_config(&path).unwrap().unwrap();
         assert!(cfg.mcp.contains_key("valid"));
     }

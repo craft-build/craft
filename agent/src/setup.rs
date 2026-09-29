@@ -7,7 +7,7 @@
 //! "interactive" wording, the reference has no wizard — trust the code.
 //!
 //! Adapted to this repo's config-driven Rig architecture: when
-//! `agent.toml` configures no providers, auto-detect providers from
+//! `craft.bml` configures no providers, auto-detect providers from
 //! credential environment variables and inject them as in-memory config
 //! entries (priority order preserved as the config key order, which the
 //! default model selection then walks). Explicit configuration always
@@ -97,7 +97,7 @@ pub fn first_run(config: &mut Config) -> Vec<String> {
 /// reference `resolve_model` error: name the fix, not just the failure.
 pub fn setup_hint() -> String {
     "no provider available - set an API key (e.g. ANTHROPIC_API_KEY), \
-     configure ~/.config/craft/agent.toml, or run `craft doctor`"
+     configure ~/.config/craft.bml, or run `craft doctor`"
         .to_owned()
 }
 
@@ -175,7 +175,7 @@ mod tests {
     fn setup_hint_names_the_fixes() {
         let hint = setup_hint();
         assert!(hint.contains("ANTHROPIC_API_KEY"), "{hint}");
-        assert!(hint.contains("agent.toml"), "{hint}");
+        assert!(hint.contains("craft.bml"), "{hint}");
         assert!(hint.contains("craft doctor"), "{hint}");
     }
 }

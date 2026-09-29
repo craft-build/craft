@@ -32,8 +32,8 @@ pub enum Error {
         source: Box<Error>,
     },
 
-    #[snafu(display("invalid agent TOML"))]
-    InvalidToml { source: toml::de::Error },
+    #[snafu(display("invalid agent BML"))]
+    InvalidBml { source: barkml::Error },
 
     #[snafu(display("provider {name:?}"))]
     InvalidProvider {

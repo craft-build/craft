@@ -47,7 +47,7 @@ pub enum CliMode {
     version,
     about = "Craft coding agent: launches the interactive TUI by default",
     long_about = "Craft coding agent. With no subcommand, launches the interactive terminal UI \
-                  backed by the configured providers in ~/.config/craft/agent.toml. With \
+                  backed by the configured providers in ~/.config/craft.bml. With \
                   --print, runs one prompt headlessly and exits."
 )]
 pub struct Cli {

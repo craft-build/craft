@@ -61,7 +61,7 @@ async fn main() -> Result<(), Error> {
             // G.1 run overrides land in the config the TUI builds its run
             // parameters from.
             // G.6 first run: auto-detect providers from credential env
-            // vars when agent.toml configures none.
+            // vars when craft.bml configures none.
             let setup_notes = craft::setup::first_run(&mut config);
             config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
             if let Some(max_turns) = cli.max_turns {
