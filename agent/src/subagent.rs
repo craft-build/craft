@@ -296,6 +296,7 @@ impl SubagentLauncher {
             reauth: None,
             model_spec: Some(child_spec),
             fast: false,
+            advisor: self.agent.advisor.clone(),
         };
 
         let mut tools = self.workspace.register_subagent(general);

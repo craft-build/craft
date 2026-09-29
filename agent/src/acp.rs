@@ -1098,6 +1098,7 @@ async fn run_turn(
     };
     let params = run::RunParams {
         fast: false,
+        advisor: state.config.agent.advisor.clone(),
         preamble: Some(crate::prompt::build_system_prompt(
             &crate::prompt::Vars::new()
                 .set("{cwd}", cwd)
@@ -1172,6 +1173,7 @@ async fn run_turn(
                 | run::Event::ToolResultsSubmitted { .. }
                 | run::Event::Done { .. }
                 | run::Event::Info(_)
+                | run::Event::AdvisorNote { .. }
                 | run::Event::Error(_)
                 | run::Event::Retry { .. }
                 | run::Event::AuthRequired { .. }

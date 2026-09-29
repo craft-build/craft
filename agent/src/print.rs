@@ -166,6 +166,17 @@ struct RetryEvent<'a> {
     session_id: &'a SessionRef,
 }
 
+/// Stream-json line for a non-fatal system notice (C.12 advisor notes).
+#[derive(Serialize)]
+struct SystemEvent<'a> {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    subtype: &'static str,
+    severity: &'a str,
+    message: &'a str,
+    session_id: &'a SessionRef,
+}
+
 /// Where the verbose/stream events go: JSONL lines, a collected array, or
 /// nowhere (plain text without `--verbose`).
 enum WireOut {
@@ -324,6 +335,15 @@ impl PrintState {
                 self.error = Some(message.clone());
                 self.result_text = message;
                 return Ok(true);
+            }
+            Event::AdvisorNote { severity, message } => {
+                self.out.emit(&SystemEvent {
+                    event_type: "system",
+                    subtype: "advisor_note",
+                    severity: &severity,
+                    message: &message,
+                    session_id: &self.session_id,
+                })?;
             }
             _ => {}
         }

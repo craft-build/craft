@@ -976,6 +976,7 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
 
     let params = crate::run::RunParams {
         fast: false,
+        advisor: config.agent.advisor.clone(),
         preamble: Some(crate::prompt::build_system_prompt(
             &crate::prompt::Vars::new()
                 .set("{cwd}", &cwd_str)

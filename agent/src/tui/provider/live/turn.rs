@@ -175,6 +175,10 @@ impl TurnRenderer {
                 "agent looks stuck in a loop; asking it to summarize and stop.".into(),
             ),
             run::Event::Info(text) => self.notice(Tone::Neutral, text),
+            run::Event::AdvisorNote { severity, message } => self.notice(
+                advisor_tone(&severity),
+                format!("advisor [{severity}]: {message}"),
+            ),
             // The nudge is visible in the next model call; nothing to show.
             // Live-call rendering of ToolPending/ToolOutput/
             // ToolResultsSubmitted is Phase 8 tool work; Done is consumed
@@ -220,6 +224,16 @@ impl TurnRenderer {
     }
 }
 
+/// Tone for an advisor note by severity (C.12): blockers shout, concerns
+/// warn, nits stay neutral.
+fn advisor_tone(severity: &str) -> Tone {
+    match severity {
+        "blocker" => Tone::Danger,
+        "concern" => Tone::Warning,
+        _ => Tone::Neutral,
+    }
+}
+
 /// Convert one forwarded child run event into the `AgentEvent` its task
 /// chat renders (task 96). Tool cards complete from `ToolDone` (the
 /// child's streaming output is filtered upstream); anything the chat has
@@ -251,6 +265,10 @@ fn subagent_event(event: run::Event) -> Option<AgentEvent> {
         run::Event::Info(text) => Some(AgentEvent::Notice {
             tone: Tone::Neutral,
             text,
+        }),
+        run::Event::AdvisorNote { severity, message } => Some(AgentEvent::Notice {
+            tone: advisor_tone(&severity),
+            text: format!("advisor [{severity}]: {message}"),
         }),
         run::Event::Retry {
             attempt, message, ..
@@ -685,6 +703,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         model_spec: Some(format!("{}/{}", selection.provider, selection.model).into()),
         retry: run::RetryCtx::default(),
         fast: false,
+        advisor: config.agent.advisor.clone(),
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));

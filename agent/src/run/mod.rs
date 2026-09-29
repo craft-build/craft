@@ -10,6 +10,7 @@
 //! commits its sanitized partial history with an end marker so the next
 //! prompt continues from where the budget ran out.
 
+pub mod advisor;
 pub mod cancel;
 pub mod dedup;
 pub mod dispatch;
@@ -110,6 +111,9 @@ pub enum Event {
     },
     /// Human-readable, non-fatal status text.
     Info(String),
+    /// The post-turn advisor (C.12) reviewed the run's delta and produced
+    /// this note. Emitted whether or not the run continues on it.
+    AdvisorNote { severity: String, message: String },
     /// The run failed; paired with a terminal `Done` carrying the reason.
     Error(String),
     /// A recoverable stream failure is being retried (attempt is 1-based).
@@ -342,6 +346,10 @@ pub struct RunParams {
     /// tier the provider actually billed, so surfaces must set it whenever
     /// they select fast mode.
     pub fast: bool,
+    /// Post-turn advisor (C.12). Disabled by default; when enabled, a
+    /// terminal reply triggers one no-tools delta review whose note may
+    /// continue the run (see [`advisor::should_act`]).
+    pub advisor: crate::config::AdvisorConfig,
 }
 
 /// What a surface calls when the model stream reports an auth error: block
@@ -370,6 +378,7 @@ impl std::fmt::Debug for RunParams {
             .field("retry", &self.retry)
             .field("reauth", &self.reauth.is_some())
             .field("model_spec", &self.model_spec)
+            .field("advisor", &self.advisor)
             .finish()
     }
 }
@@ -383,7 +392,6 @@ impl RunParams {
     pub fn new(preamble: Option<String>) -> Self {
         Self {
             preamble,
-            fast: false,
             temperature: None,
             max_tokens: None,
             max_turns: Self::UNBOUNDED,
@@ -394,6 +402,8 @@ impl RunParams {
             retry: RetryCtx::default(),
             reauth: None,
             model_spec: None,
+            fast: false,
+            advisor: crate::config::AdvisorConfig::default(),
         }
     }
 
@@ -419,6 +429,7 @@ impl Default for RunParams {
             reauth: None,
             model_spec: None,
             fast: false,
+            advisor: crate::config::AdvisorConfig::default(),
         }
     }
 }
@@ -642,6 +653,16 @@ async fn run_loop<M: CompletionModel + Clone>(
     // Doom-loop tracker for this run.
     let mut doom = doom::DoomTracker::new();
     let mut recent = doom::RecentCalls::default();
+    // Advisor state (C.12): reviews only this run's messages, so the cursor
+    // starts after the pre-existing history.
+    let mut advisor_state = params
+        .advisor
+        .enabled
+        .then(|| advisor::AdvisorState::with_dedup(params.advisor.dedup_size));
+    if let Some(state) = advisor_state.as_mut() {
+        state.last_reviewed = history.len();
+    }
+    let mut advisor_continuations: u32 = 0;
     loop {
         if cancel.cancelled() {
             return (commit_cancelled(history, &mut turn), stats);
@@ -725,7 +746,52 @@ async fn run_loop<M: CompletionModel + Clone>(
                 .await
                 {
                     turns::TurnEnd::Continue => continue,
-                    turns::TurnEnd::Stop(outcome) => return (outcome, stats),
+                    turns::TurnEnd::Stop(outcome) => {
+                        // Advisor gate (C.12): one delta review after a
+                        // terminal reply, before the run result escapes.
+                        if let (true, Some(state)) =
+                            (params.advisor.enabled, advisor_state.as_mut())
+                            && matches!(outcome, RunOutcome::Done { .. })
+                            && !cancel.cancelled()
+                        {
+                            emit(Event::Info(advisor::ADVISOR_REVIEWING_INFO.into()));
+                            // No cancel race: the token's `wait`/`race` also
+                            // resolve when the flag half is dropped, which
+                            // would silently skip every review; the deadline
+                            // bounds the call and the token is checked after
+                            // (same deviation as the auto-reviewer).
+                            let note = match refreshed_model.as_ref() {
+                                Some(m) => advisor::review(m, state, history).await,
+                                None => advisor::review(model, state, history).await,
+                            };
+                            if cancel.cancelled() {
+                                return (commit_cancelled(history, &mut turn), stats);
+                            }
+                            if let Some(note) = note {
+                                emit(Event::AdvisorNote {
+                                    severity: note.severity.as_str().to_string(),
+                                    message: note.message.clone(),
+                                });
+                                if let advisor::AdvisorTurnAction::Continue(note) =
+                                    advisor::advisor_turn_action(
+                                        Some(note),
+                                        &params.advisor,
+                                        advisor_continuations,
+                                    )
+                                {
+                                    advisor_continuations += 1;
+                                    emit(Event::Info(advisor::advisor_continuation_info(
+                                        &note,
+                                        advisor_continuations,
+                                        params.advisor.max_act_turns,
+                                    )));
+                                    turn.push(advisor::advisor_followup_message(&note));
+                                    continue;
+                                }
+                            }
+                        }
+                        return (outcome, stats);
+                    }
                 }
             }
         }

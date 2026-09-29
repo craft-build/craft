@@ -55,16 +55,23 @@ impl CancelToken {
     }
 
     /// Runs `future` to completion unless cancellation wins the race first.
+    /// A dropped setting half is not a cancellation: the future runs to
+    /// completion (nothing can ever cancel it anymore).
     pub async fn race<T>(&self, future: impl Future<Output = T>) -> Result<T, String> {
         if self.cancelled() {
             return Err(CANCELLED.into());
         }
         let mut rx = self.subscribe();
+        tokio::pin!(future);
         tokio::select! {
-            result = future => Ok(result),
+            result = &mut future => Ok(result),
             changed = rx.changed() => {
                 let _ = changed;
-                Err(CANCELLED.into())
+                if self.cancelled() {
+                    Err(CANCELLED.into())
+                } else {
+                    Ok(future.await)
+                }
             }
         }
     }
@@ -239,6 +246,14 @@ mod tests {
         trigger.cancel();
         let result = token.race(std::future::pending::<()>()).await;
         assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn race_finishes_when_the_flag_half_drops() {
+        let (flag, token) = cancel_channel();
+        drop(flag);
+        let result = token.race(async { 7 }).await;
+        assert_eq!(result.unwrap(), 7);
     }
 
     #[tokio::test]

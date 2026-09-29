@@ -160,10 +160,75 @@ fn default_compaction() -> Vec<CompactionConfig> {
     ]
 }
 
+/// Advisor auto-act severity threshold (C.12). Declaration order doubles as
+/// the severity ranking: `Off < Nit < Concern < Blocker`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AdvisorAutoAct {
+    #[default]
+    Off,
+    Nit,
+    Concern,
+    Blocker,
+}
+
+/// Always-on lightweight reviewer that reads the transcript delta after a
+/// terminal reply and emits at most one deduped note (C.12). Off by default.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvisorConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum advisor notes kept in the dedup FIFO.
+    #[serde(default = "default_advisor_dedup_size")]
+    pub dedup_size: usize,
+    /// Minimum severity that triggers an automatic follow-up turn instead of
+    /// stopping for the user. Notes at or above this severity are pushed into
+    /// the agent's own context and the run continues.
+    #[serde(default = "default_advisor_auto_act")]
+    pub auto_act: AdvisorAutoAct,
+    /// Maximum advisor-driven follow-up turns a single run may take.
+    #[serde(default = "default_advisor_max_act_turns")]
+    pub max_act_turns: u32,
+}
+
+fn default_advisor_dedup_size() -> usize {
+    8
+}
+
+fn default_advisor_auto_act() -> AdvisorAutoAct {
+    AdvisorAutoAct::Concern
+}
+
+fn default_advisor_max_act_turns() -> u32 {
+    2
+}
+
+impl Default for AdvisorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dedup_size: default_advisor_dedup_size(),
+            auto_act: default_advisor_auto_act(),
+            max_act_turns: default_advisor_max_act_turns(),
+        }
+    }
+}
+
 /// Defaults for each agent run, independent of provider/model selection.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[derive(Default)]
 pub struct AgentConfig {
     /// System instructions. An empty string keeps the built-in defaults; any
     /// text is appended to the assembled system prompt's instructions slot.
@@ -176,6 +241,8 @@ pub struct AgentConfig {
     /// (unbounded in the TUI, [`crate::run::RunParams`] defaults headless);
     /// set by `--max-turns` (G.1).
     pub max_turns: Option<u32>,
+    /// Post-turn advisor (C.12).
+    pub advisor: AdvisorConfig,
 }
 
 impl AgentConfig {
