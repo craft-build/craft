@@ -105,7 +105,45 @@ async fn fetch_pinned_script(tag: &str) -> Result<String> {
         )));
     }
     check_build_pin(&script, BUILD_PIN)?;
+    verify_persistent_pin(tag, &script)?;
     Ok(script)
+}
+
+/// Trust-on-first-use per release tag: the first verified digest seen for
+/// a tag is recorded locally, and the same tag later serving a different
+/// script refuses to run — so a moved or compromised tag cannot swap the
+/// script on an established install. A new tag is first use.
+fn verify_persistent_pin(tag: &str, script: &str) -> Result<()> {
+    let dir =
+        crate::paths::state_dir().map_err(|e| invalid(format!("cannot resolve state dir: {e}")))?;
+    verify_persistent_pin_in(&dir, tag, script)
+}
+
+/// Testable core of [`verify_persistent_pin`].
+fn verify_persistent_pin_in(dir: &Path, tag: &str, script: &str) -> Result<()> {
+    let path = dir.join("install_script_pins");
+    let computed = sha256_hex(script.as_bytes());
+    let pins = std::fs::read_to_string(&path).unwrap_or_default();
+    let previous = pins
+        .lines()
+        .find_map(|line| line.split_once(' ').filter(|(t, _)| *t == tag))
+        .map(|(_, d)| d.trim().to_string());
+    match previous {
+        Some(digest) if digest.eq_ignore_ascii_case(&computed) => Ok(()),
+        Some(digest) => Err(invalid(format!(
+            "sha256 of {SCRIPT_NAME} at tag v{tag} changed since the last update \
+             ({digest}); refusing to run the script"
+        ))),
+        None => {
+            let mut out = pins;
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("{tag} {computed}\n"));
+            std::fs::write(&path, out)
+                .map_err(|e| invalid(format!("write {}: {e}", path.display())))
+        }
+    }
 }
 
 /// Where the install script installs to: `$CRAFT_INSTALL_DIR` when set,
@@ -315,6 +353,28 @@ mod tests {
             "https://raw.githubusercontent.com/craft-build/craft/v0.14.1/install.sh"
         );
         assert!(digest_url("0.14.1").ends_with("/v0.14.1/install.sh.sha256"));
+    }
+
+    #[test]
+    fn persistent_pin_is_trust_on_first_use_per_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "echo hi\n";
+        let other = "echo bye\n";
+
+        // First use records the digest and passes.
+        assert!(verify_persistent_pin_in(dir.path(), "0.14.1", script).is_ok());
+        // Same tag, same script: pass.
+        assert!(verify_persistent_pin_in(dir.path(), "0.14.1", script).is_ok());
+        // Same tag, different script: refuse.
+        let err = verify_persistent_pin_in(dir.path(), "0.14.1", other).unwrap_err();
+        assert!(err.to_string().contains("changed since the last update"));
+        // A new tag is first use and is recorded independently.
+        assert!(verify_persistent_pin_in(dir.path(), "0.14.2", other).is_ok());
+        assert!(verify_persistent_pin_in(dir.path(), "0.14.2", other).is_ok());
+        assert!(
+            verify_persistent_pin_in(dir.path(), "0.14.2", script).is_err(),
+            "each tag is pinned to its own first-seen script"
+        );
     }
 
     #[test]

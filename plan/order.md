@@ -60,7 +60,7 @@ Optimal port order from `comparison.md`: dependencies first, highest leverage-pe
 45. E.5 JSON repair pipeline (S)
 46. E.10 Auth-error reauth wait (S)
 
-## Phase 5 — Providers, usage & sessions
+## [x] Phase 5 — Providers, usage & sessions
 
 47. H.6 Usage & cost accounting — prerequisite for /usage, /stats, subagent cost chaining
 48. H.3 Model registry & tiers (weak/medium/strong/compaction)
@@ -71,14 +71,14 @@ Optimal port order from `comparison.md`: dependencies first, highest leverage-pe
 53. C.14 Headless session API
 54. C.20 Cost ledger wiring to /usage, /stats
 
-## Phase 6 — Web & media
+## [x] Phase 6 — Web & media
 
 55. E.8 SSRF protection on webfetch
 56. A.4 webfetch
 57. A.4 websearch
 58. A.4 view_image (needs F.13 image pipeline — schedule with Phase 8 if not ready)
 
-## Phase 7 — TUI core
+## [x] Phase 7 — TUI core
 
 59. F.1 Dirty-flag repaint / render worker
 60. F.6 Markdown rendering engine (stateful streaming re-wrap)
@@ -132,7 +132,12 @@ Fixes:
 93. A.5 sessions (model-side)
 94. B.11 MCP client
 95. A.5 task (subagents) — single-tier first, then tiers/isolation/output_schema
-96. F.3 Subagent task chats + per-session shell state (ShellState id bookkeeping for bang-mode) + bang-prefix composer highlighting (syntax-highlight the `!`/`!!` prefix while typing; engine from task 61)
-97. [x] C.12 Advisor (post-turn review)
-98. D.5 auto-retrieve (semantic, needs embeddings)
-99. C.17 Flow mode + J.6 Flow workstreams (XL — last)
+96. F.3 Subagent task chats
+97. C.12 Advisor (post-turn review)
+
+Fixes:
+- [ ] /recipe is not wired up, i have not tested creating custom commands but i suspect its not wired to tui
+- [ ] When an interrupt occurs from user via esc then they post something the message history is not sent to the agent leading to the agent not seeing all of the previous context.
+- [ ] MCP Client is not propagating the prompts into /commands in the tui
+- [ ] Make sure our MCP Client supports the reading of resources provided by the MCP
+- [ ] The task switcher clashes with the command prompt you use ctrl-n + ctrl-p for navigating instead i want to have a modal selector like reference craft has.
