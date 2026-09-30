@@ -1131,6 +1131,104 @@ pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Ctrl-N task-chat picker (task 96): row 0 is the main chat, then one row
+/// per task chat — name on the left, status color-coded on the right — with
+/// the active chat marked. Enter mounts the selection, Esc closes.
+pub fn render_task_picker(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
+    let Modal::TaskPicker { selected } = &app.overlays.modal else {
+        return;
+    };
+    let active = app.active_task.map_or(0, |i| i + 1);
+    dim(f, area);
+    let n = app.task_chats.len().clamp(1, 10) as u16 + 1;
+    let width = 60.min(area.width.saturating_sub(4));
+    let rect = centered(width, n + 4, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Task chats — enter to open, esc to close",
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    let content_w = inner.width.saturating_sub(2) as usize;
+    let mut rows: Vec<Vec<Span<'static>>> = vec![picker_row(
+        "Main chat",
+        "",
+        active == 0,
+        content_w,
+        t.text_tertiary,
+    )];
+    rows.extend(app.task_chats.iter().enumerate().map(|(i, chat)| {
+        let (status, color) = match chat.status() {
+            crate::tui::app::TaskStatus::Working => ("working", t.warning),
+            crate::tui::app::TaskStatus::Done => ("done", t.success),
+            crate::tui::app::TaskStatus::Error => ("error", t.danger),
+        };
+        picker_row(&chat.name, status, active == i + 1, content_w, color)
+    }));
+    render_rows(
+        f,
+        &rows,
+        *selected,
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2,
+            width: inner.width.saturating_sub(2),
+            height: n,
+        },
+    );
+}
+
+/// One picker row: an active-chat marker, the name truncated with an
+/// ellipsis, and a right-aligned status in `status_color`.
+fn picker_row(
+    name: &str,
+    status: &str,
+    is_active: bool,
+    content_w: usize,
+    status_color: ratatui::style::Color,
+) -> Vec<Span<'static>> {
+    let t = theme::current();
+    let marker = if is_active { "●" } else { " " };
+    let status_text = if status.is_empty() {
+        String::new()
+    } else {
+        format!("{status} ")
+    };
+    // Two columns for the marker and its trailing space.
+    let name_w = content_w.saturating_sub(status_text.chars().count() + 2);
+    let mut label: String = name.chars().take(name_w).collect();
+    if name.chars().count() > name_w && name_w > 1 {
+        // Byte-truncate at the last full char so the ellipsis fits.
+        let bytes: usize = label.chars().map(char::len_utf8).take(name_w - 1).sum();
+        label.truncate(bytes);
+        label.push('…');
+    }
+    let gap = content_w.saturating_sub(2 + label.chars().count() + status_text.chars().count());
+    vec![
+        Span::styled(
+            format!("{marker} "),
+            Style::default().fg(if is_active { t.accent } else { t.bg_raised }),
+        ),
+        Span::styled(label, Style::default().fg(t.text_primary)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(status_text, Style::default().fg(status_color)),
+    ]
+}
+
 /// `/recipe`: recipe picker (J.5); Enter runs the selection or prefills
 /// `key=` parameter stubs, Esc closes.
 pub fn render_recipes(f: &mut Frame, app: &App, area: Rect) {

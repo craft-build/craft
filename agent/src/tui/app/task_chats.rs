@@ -1,5 +1,5 @@
 //! Subagent task chats (task 96): one transcript per `task` tool call,
-//! navigable with Ctrl-N / Ctrl-P, cancellable with Esc-Esc.
+//! selectable from the Ctrl-N modal picker, cancellable with Esc-Esc.
 //!
 //! The visible transcript always lives in `App::conversation` /
 //! `App::view` — entering a task chat swaps its saved state into those
@@ -137,25 +137,20 @@ impl App {
         }
     }
 
-    /// Cycle between the main chat (position 0) and the task chats,
-    /// clamped at both ends (no wrap). Swaps the conversation/view slots
-    /// so the mounted pair always matches the focused chat.
-    pub fn cycle_task_chats(&mut self, forward: bool) {
-        let len = self.task_chats.len();
-        if len == 0 {
+    /// Open the task-chat picker modal (task 96, reference list-picker
+    /// style) with the cursor on the currently focused chat. A no-op
+    /// without task chats.
+    pub fn open_task_picker(&mut self) {
+        if self.task_chats.is_empty() {
             return;
         }
-        let current = self.active_task.map_or(0, |i| i + 1);
-        let target = if forward {
-            (current + 1).min(len)
-        } else {
-            current.saturating_sub(1)
+        self.overlays.modal = super::Modal::TaskPicker {
+            selected: self.active_task.map_or(0, |i| i + 1),
         };
-        self.focus_chat_position(target);
     }
 
     /// Mount the chat at view position `pos` (0 = main chat).
-    fn focus_chat_position(&mut self, pos: usize) {
+    pub(crate) fn focus_chat_position(&mut self, pos: usize) {
         let target = if pos == 0 { None } else { Some(pos - 1) };
         if target == self.active_task {
             return;

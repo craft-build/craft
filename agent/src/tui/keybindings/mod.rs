@@ -53,8 +53,7 @@ pub enum ActionId {
     EditInput,
     CycleEffort,
     PasteImage,
-    TaskChatNext,
-    TaskChatPrev,
+    TaskChatPicker,
 }
 
 const ALL_ACTION_IDS: &[ActionId] = &[
@@ -76,8 +75,7 @@ const ALL_ACTION_IDS: &[ActionId] = &[
     ActionId::EditInput,
     ActionId::CycleEffort,
     ActionId::PasteImage,
-    ActionId::TaskChatNext,
-    ActionId::TaskChatPrev,
+    ActionId::TaskChatPicker,
 ];
 
 pub fn all_action_ids() -> impl Iterator<Item = ActionId> {
@@ -105,8 +103,7 @@ impl ActionId {
             Self::EditInput => "edit_input",
             Self::CycleEffort => "cycle_effort",
             Self::PasteImage => "paste_image",
-            Self::TaskChatNext => "task_chat_next",
-            Self::TaskChatPrev => "task_chat_prev",
+            Self::TaskChatPicker => "task_chat_picker",
         }
     }
 
@@ -134,8 +131,7 @@ impl ActionId {
             Self::EditInput => &[key::EDIT_INPUT],
             Self::CycleEffort => &[key::EFFORT_CYCLE],
             Self::PasteImage => &[key::PASTE_IMAGE],
-            Self::TaskChatNext => &[key::TASK_CHAT_NEXT],
-            Self::TaskChatPrev => &[key::TASK_CHAT_PREV],
+            Self::TaskChatPicker => &[key::TASK_CHAT_PICKER],
         }
     }
 }

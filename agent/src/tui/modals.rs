@@ -49,6 +49,13 @@ pub enum Modal {
     Mcp {
         selected: usize,
     },
+    /// Ctrl-N task-chat picker (task 96, reference list-picker style):
+    /// row 0 is the main chat, rows 1.. the task chats; rows read the
+    /// live `task_chats` at render/handle time, only the selection lives
+    /// here. Enter mounts the selected chat.
+    TaskPicker {
+        selected: usize,
+    },
     /// `/recipe`: recipe picker (J.5). Enter runs the selection; recipes
     /// with parameters prefill the composer with `/recipe <name> key=`.
     Recipes {
@@ -136,7 +143,13 @@ impl App {
             return;
         }
 
-        // 8. Recipe picker.
+        // 8. Task-chat picker.
+        if matches!(self.overlays.modal, Modal::TaskPicker { .. }) {
+            self.handle_task_picker_key(key);
+            return;
+        }
+
+        // 9. Recipe picker.
         if matches!(self.overlays.modal, Modal::Recipes { .. }) {
             self.handle_recipes_key(key, tx);
         }
@@ -248,6 +261,30 @@ impl App {
                     });
                 }
             }
+            // Esc or any other key closes the picker (already None).
+            _ => {}
+        }
+    }
+
+    /// Task-chat picker keys (task 96): arrows / j-k move, Enter mounts
+    /// the selected chat, Esc or any other key closes. All keys are
+    /// consumed. Selection is clamped to main + task chats.
+    fn handle_task_picker_key(&mut self, key: KeyEvent) {
+        let Modal::TaskPicker { selected } =
+            std::mem::replace(&mut self.overlays.modal, Modal::None)
+        else {
+            return;
+        };
+        let max = self.task_chats.len(); // row 0 is the main chat
+        let moved = |app: &mut Self, sel: usize| {
+            app.overlays.modal = Modal::TaskPicker {
+                selected: sel.min(max),
+            };
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => moved(self, selected.saturating_sub(1)),
+            KeyCode::Down | KeyCode::Char('j') => moved(self, selected + 1),
+            KeyCode::Enter => self.focus_chat_position(selected.min(max)),
             // Esc or any other key closes the picker (already None).
             _ => {}
         }

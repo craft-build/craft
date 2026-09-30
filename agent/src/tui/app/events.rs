@@ -240,15 +240,11 @@ impl App {
             self.overlays.modal = Modal::Help;
             return true;
         }
-        // Task-chat cycling (task 96): claimed only while task chats
-        // exist, so Ctrl-P keeps opening the palette on the bare main
-        // chat (the reference also binds Ctrl-P here for PrevChat).
-        if !self.task_chats.is_empty() && (m(ActionId::TaskChatNext) || m(ActionId::TaskChatPrev)) {
-            if m(ActionId::TaskChatNext) {
-                self.cycle_task_chats(true);
-            } else {
-                self.cycle_task_chats(false);
-            }
+        // Task-chat picker (task 96): Ctrl-N opens the modal selector,
+        // claimed only while task chats exist; Ctrl-P keeps opening the
+        // palette unconditionally (no more chord clash).
+        if !self.task_chats.is_empty() && m(ActionId::TaskChatPicker) {
+            self.open_task_picker();
             return true;
         }
         if m(ActionId::Palette) {
@@ -769,6 +765,15 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    /// Open the task picker (Ctrl-N), move to row `idx + 1`, Enter.
+    fn focus_task_chat(app: &mut App, tx: &mpsc::UnboundedSender<Command>, idx: usize) {
+        app.handle_key(ctrl('n'), tx);
+        for _ in 0..=idx {
+            app.handle_key(key(KeyCode::Down), tx);
+        }
+        app.handle_key(key(KeyCode::Enter), tx);
     }
 
     fn type_query(app: &mut App, tx: &mpsc::UnboundedSender<Command>, q: &str) {
@@ -1754,27 +1759,54 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_n_p_cycle_clamped_between_main_and_task_chats() {
+    fn ctrl_n_opens_the_task_chat_picker_modal() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.handle_event(sub_event("t1", "one"));
         app.handle_event(sub_event("t2", "two"));
-        // No wrap: clamped at both ends.
+
+        // Ctrl-N opens the picker on the current (main) chat; Ctrl-P is
+        // never claimed by task chats and always opens the palette.
         app.handle_key(ctrl('p'), &tx);
-        assert_eq!(app.active_task, None, "prev from main stays on main");
+        assert!(matches!(app.overlays.modal, Modal::Palette { .. }));
+        app.overlays.modal = Modal::None;
         app.handle_key(ctrl('n'), &tx);
-        assert_eq!(app.active_task, Some(0));
-        app.handle_key(ctrl('n'), &tx);
+        let Modal::TaskPicker { selected } = app.overlays.modal else {
+            panic!("Ctrl-N did not open the task picker");
+        };
+        assert_eq!(selected, 0);
+
+        // Arrows move (clamped), Enter mounts the highlighted chat.
+        for _ in 0..4 {
+            app.handle_key(key(KeyCode::Down), &tx);
+        }
+        let Modal::TaskPicker { selected } = app.overlays.modal else {
+            panic!("arrows must keep the picker open");
+        };
+        assert_eq!(selected, 2, "selection clamps at the last task");
+        app.handle_key(key(KeyCode::Enter), &tx);
+        assert!(matches!(app.overlays.modal, Modal::None));
         assert_eq!(app.active_task, Some(1));
+
+        // Reopening from a task chat starts the cursor on it; Enter on
+        // row 0 returns to the main chat.
         app.handle_key(ctrl('n'), &tx);
-        assert_eq!(app.active_task, Some(1), "next clamps at the last task");
-        app.handle_key(ctrl('p'), &tx);
-        app.handle_key(ctrl('p'), &tx);
-        assert_eq!(app.active_task, None, "prev walks back to the main chat");
+        let Modal::TaskPicker { selected } = app.overlays.modal else {
+            panic!("reopen failed");
+        };
+        assert_eq!(selected, 2);
+        app.handle_key(key(KeyCode::Up), &tx);
+        app.handle_key(key(KeyCode::Up), &tx);
+        app.handle_key(key(KeyCode::Up), &tx);
+        app.handle_key(key(KeyCode::Enter), &tx);
+        assert_eq!(app.active_task, None, "row 0 is the main chat");
+        assert!(matches!(app.overlays.modal, Modal::None));
 
         // Focusing a task chat mounts its transcript in the render
         // slots; the main transcript stays reachable and intact.
         app.handle_key(ctrl('n'), &tx);
+        app.handle_key(key(KeyCode::Down), &tx);
+        app.handle_key(key(KeyCode::Enter), &tx);
         let visible = super::super::testutil::screen_text(&mut app, 80, 24);
         assert!(
             visible.contains("one"),
@@ -1785,10 +1817,11 @@ mod tests {
             "task header missing:\n{visible}"
         );
 
-        // Without task chats the chords are no-ops (Ctrl-P stays palette).
+        // Without task chats the chord is a no-op (Ctrl-P stays palette).
         let mut bare = App::new();
         bare.handle_key(ctrl('n'), &tx);
         assert_eq!(bare.active_task, None);
+        assert!(matches!(bare.overlays.modal, Modal::None));
         bare.handle_key(ctrl('p'), &tx);
         assert!(matches!(bare.overlays.modal, Modal::Palette { .. }));
     }
@@ -1798,7 +1831,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.handle_event(sub_event("t1", "churning"));
-        app.handle_key(ctrl('n'), &tx);
+        focus_task_chat(&mut app, &tx, 0);
 
         // First Esc only arms: a flash, no command yet.
         app.handle_key(key(KeyCode::Esc), &tx);
@@ -1824,7 +1857,7 @@ mod tests {
 
         // Any other key disarms a pending Esc-Esc.
         app.handle_event(sub_event("t2", "x"));
-        app.handle_key(ctrl('n'), &tx);
+        focus_task_chat(&mut app, &tx, 1);
         app.handle_key(key(KeyCode::Esc), &tx);
         app.handle_key(key(KeyCode::Char('a')), &tx);
         assert!(app.esc_pending.is_none());
@@ -1853,7 +1886,7 @@ mod tests {
             tool_use_id: "t1".into(),
             is_error: false,
         });
-        app.handle_key(ctrl('n'), &tx);
+        focus_task_chat(&mut app, &tx, 0);
         app.handle_key(key(KeyCode::Esc), &tx);
         assert!(app.esc_pending.is_none(), "finished task chats don't arm");
         assert!(rx.try_recv().is_err());
@@ -1865,7 +1898,7 @@ mod tests {
         let mut app = App::new();
         app.handle_event(sub_event("t1", "x"));
         app.handle_event(AgentEvent::StatusChanged(Status::Done));
-        app.handle_key(ctrl('n'), &tx);
+        focus_task_chat(&mut app, &tx, 0);
         assert_eq!(app.active_task, Some(0));
 
         // Cancel then reset: chats gone, back on the main transcript.
