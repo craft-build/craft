@@ -84,6 +84,9 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "view_image",
     "websearch",
     "webfetch",
+    // Phase 5: MCP resource reads — read-only against the remote server,
+    // deny rules can still block them.
+    "mcp_read",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +150,30 @@ impl ToolKey {
         }
     }
 
+    /// Tool key for a call-site (wire) name: MCP tools arrive from the model
+    /// as `server__tool` wire names, everything else is native. Keying the
+    /// call correctly is what lets `mcp "server"` rules and defaults apply
+    /// instead of falling through to the wildcard/default path.
+    pub fn parse(name: &str) -> Self {
+        match name {
+            "*" => Self::Wildcard,
+            _ if let Some((server, tool)) = name.split_once(crate::mcp::WIRE_SEPARATOR) => {
+                if crate::permissions::is_valid_server_name(server)
+                    && !tool.is_empty()
+                    && is_valid_wire_name(tool)
+                {
+                    Self::McpTool {
+                        server: server.into(),
+                        tool: tool.into(),
+                    }
+                } else {
+                    Self::native(name)
+                }
+            }
+            _ => Self::native(name),
+        }
+    }
+
     pub fn is_mcp(&self) -> bool {
         matches!(self, Self::McpServer { .. } | Self::McpTool { .. })
     }
@@ -188,6 +215,10 @@ pub enum PermissionCheck {
         /// scopes are (e.g. an unsplittable bash compound command): the
         /// prompt must be shown even though an allow rule matches.
         force_prompt: bool,
+        /// The tool carries `readOnlyHint: true` and no destructive hint:
+        /// still a prompt (hints never auto-allow), but the UI can phrase it
+        /// in a neutral, low-risk tone.
+        low_risk: bool,
     },
 }
 
@@ -293,6 +324,21 @@ impl PermissionAnswer {
     }
 }
 
+/// Server-declared MCP tool annotations (Phase 3). Hints, never grants.
+#[derive(Debug, Clone, Copy, Default)]
+struct McpHints {
+    read_only: Option<bool>,
+    destructive: Option<bool>,
+}
+
+/// Per-manager annotation table, rebuilt whenever the MCP tool snapshot's
+/// generation changes so stale tools do not linger.
+#[derive(Debug, Default, Clone)]
+struct McpAnnotationTable {
+    generation: Option<u64>,
+    hints: HashMap<(Arc<str>, Arc<str>), McpHints>,
+}
+
 pub struct PermissionManager {
     session_rules: Mutex<Vec<PermissionRule>>,
     config_rules: Vec<PermissionRule>,
@@ -300,6 +346,8 @@ pub struct PermissionManager {
     tool_defaults: HashMap<ToolKey, DefaultEffect>,
     cwd: PathBuf,
     auto_review: AtomicBool,
+    /// MCP tool annotations (Phase 3): `server__tool` → declared hints.
+    mcp_annotations: Mutex<McpAnnotationTable>,
     /// G.1 `--yolo` (`--dangerously-skip-permissions`): when set, every
     /// check short-circuits to allowed before rules are consulted.
     yolo: AtomicBool,
@@ -344,6 +392,7 @@ impl PermissionManager {
             tool_defaults,
             cwd,
             auto_review: AtomicBool::new(false),
+            mcp_annotations: Mutex::new(McpAnnotationTable::default()),
             yolo: AtomicBool::new(false),
         }
     }
@@ -365,6 +414,12 @@ impl PermissionManager {
             tool_defaults: self.tool_defaults.clone(),
             cwd: self.cwd.clone(),
             auto_review: AtomicBool::new(self.is_auto_review()),
+            mcp_annotations: Mutex::new(
+                self.mcp_annotations
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
             yolo: AtomicBool::new(self.is_yolo()),
         }
     }
@@ -400,6 +455,25 @@ impl PermissionManager {
         if self.is_yolo() {
             return PermissionCheck::Allowed;
         }
+        // MCP annotations (Phase 3): consulted after the rule loop below —
+        // deny rules and explicit user rules always win, hints never grant.
+        // A destructive hint mirrors the unsplittable-bash precedent: the
+        // user must see the call even if an allow rule covers it.
+        let (read_only_hint, destructive_hint) = match tool {
+            ToolKey::McpTool { server, tool } => {
+                let table = self
+                    .mcp_annotations
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                table
+                    .hints
+                    .get(&(Arc::clone(server), Arc::clone(tool)))
+                    .map(|h| (h.read_only, h.destructive))
+                    .unwrap_or((None, None))
+            }
+            _ => (None, None),
+        };
+        let force_prompt = force_prompt || matches!(destructive_hint, Some(true));
         let session = self.session_rules();
 
         // Any matching deny wins, however broadly it was aimed. Only allows
@@ -436,31 +510,86 @@ impl PermissionManager {
             return PermissionCheck::Allowed;
         }
 
-        let eff = self
-            .tool_defaults
-            .get(tool)
-            .copied()
-            .or_else(|| {
-                let server = match tool {
-                    ToolKey::McpTool { server, .. } => server,
-                    _ => return None,
-                };
-                self.tool_defaults
-                    .get(&ToolKey::McpServer {
-                        server: server.clone(),
-                    })
-                    .copied()
-            })
-            .unwrap_or(self.default);
+        let tool_eff = self.tool_defaults.get(tool).copied().or_else(|| {
+            let server = match tool {
+                ToolKey::McpTool { server, .. } => server,
+                _ => return None,
+            };
+            self.tool_defaults
+                .get(&ToolKey::McpServer {
+                    server: server.clone(),
+                })
+                .copied()
+        });
+        let eff = tool_eff.unwrap_or(self.default);
+        // `readOnlyHint: true` (without a destructive hint) keeps the prompt
+        // but flags it low-risk for the UI; it never upgrades Allow to silent.
+        // A user-written tool default is an explicit mcp rule, so it stands.
+        let low_risk = tool_eff.is_none()
+            && matches!(read_only_hint, Some(true))
+            && !matches!(destructive_hint, Some(true));
         match eff {
             DefaultEffect::Deny => PermissionCheck::Denied,
-            DefaultEffect::Allow if !force_prompt => PermissionCheck::Allowed,
+            DefaultEffect::Allow if !force_prompt && !low_risk => PermissionCheck::Allowed,
             DefaultEffect::Allow | DefaultEffect::Prompt => PermissionCheck::NeedsPrompt {
                 tool: tool.clone(),
                 scopes: pending.into_iter().map(|s| s.to_string()).collect(),
                 force_prompt,
+                low_risk,
             },
         }
+    }
+
+    /// Record one MCP tool's declared annotations (Phase 3). Called when the
+    /// tool snapshot is (re)published; `sync_mcp_annotations` is the bulk form.
+    pub fn register_mcp_annotations(
+        &self,
+        server: &str,
+        tool: &str,
+        read_only: Option<bool>,
+        destructive: Option<bool>,
+    ) {
+        let mut table = self
+            .mcp_annotations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        table.hints.insert(
+            (server.into(), tool.into()),
+            McpHints {
+                read_only,
+                destructive,
+            },
+        );
+    }
+
+    /// Rebuild the annotation table from the published MCP descriptors when
+    /// the snapshot generation moved, so per-turn callers can call this
+    /// cheaply without re-registering every tool every turn.
+    pub fn sync_mcp_annotations(&self, handle: &crate::mcp::McpHandle) {
+        let generation = handle.generation();
+        let mut table = self
+            .mcp_annotations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if table.generation == Some(generation) {
+            return;
+        }
+        table.hints.clear();
+        for d in handle.tool_descriptors() {
+            let Some((server, tool)) = d.qualified_name.split_once(crate::mcp::SEPARATOR) else {
+                continue;
+            };
+            if d.read_only_hint.is_some() || d.destructive_hint.is_some() {
+                table.hints.insert(
+                    (server.into(), tool.into()),
+                    McpHints {
+                        read_only: d.read_only_hint,
+                        destructive: d.destructive_hint,
+                    },
+                );
+            }
+        }
+        table.generation = Some(generation);
     }
 
     pub fn check(&self, tool: &ToolKey, scopes: &[String]) -> PermissionCheck {
@@ -604,6 +733,14 @@ impl PermissionManager {
 /// `force_prompt`: the scopes could not be derived confidently, so allow
 /// rules must not silence the prompt.
 pub fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec<String>, bool) {
+    if name == "mcp_read"
+        && let (Some(server), Some(uri)) = (
+            args.get("server").and_then(|v| v.as_str()),
+            args.get("uri").and_then(|v| v.as_str()),
+        )
+    {
+        return (vec![format!("mcp:{server}:{uri}")], false);
+    }
     if name == "bash"
         && let Some(command) = args.get("command").and_then(|v| v.as_str())
         && let Some(scopes) = bash::permission_scopes(command)

@@ -99,6 +99,9 @@ pub struct Overlays {
     pub help_scroll: usize,
     /// Max scroll of the help sheet, written back by its renderer.
     pub help_scroll_max: usize,
+    /// `/mcp` sheet (Phase 5): index of the server whose resource list is
+    /// expanded under its row; `None` when every row is collapsed.
+    pub mcp_expanded: Option<usize>,
     /// Data-driven keybinding resolution (F.1): compile-time defaults plus
     /// the user's config overlay. All chord dispatch goes through this.
     pub keybinds: crate::tui::keybindings::KeybindingResolver,
@@ -238,6 +241,7 @@ impl App {
                 usage_scroll_max: usize::MAX,
                 help_scroll: 0,
                 help_scroll_max: usize::MAX,
+                mcp_expanded: None,
                 keybinds: crate::tui::keybindings::KeybindingResolver::new(),
                 search: crate::tui::search_modal::SearchModal::new(),
                 file_picker: crate::tui::file_picker::FilePicker::new(),
@@ -620,7 +624,24 @@ impl App {
                 items.push((slash, custom.description.clone()));
             }
         }
+        // MCP prompts (B.11): `/server:name`, after custom commands so
+        // neither shadows the builtins.
+        for prompt in self.mcp_prompts() {
+            let slash = format!("/{}", prompt.display_name);
+            let claimed = items.iter().any(|(cmd, _)| *cmd == slash);
+            if !claimed && (q == "/" || slash.starts_with(q)) {
+                items.push((slash, prompt.description));
+            }
+        }
         items
+    }
+
+    /// Prompts published by the live MCP servers, from the latest snapshot.
+    pub(crate) fn mcp_prompts(&self) -> Vec<crate::mcp::McpPromptInfo> {
+        self.mcp
+            .as_ref()
+            .map(|handle| handle.reader().load_full().prompts.clone())
+            .unwrap_or_default()
     }
 
     /// Plain text of every rendered segment, one entry per segment index
@@ -739,6 +760,14 @@ impl App {
                 self.submit_custom_command(&custom, &args, tx);
                 return;
             }
+            if let Some(prompt) = self.mcp_prompt(&cmd) {
+                self.composer.clear();
+                self.input_history.push(text);
+                self.history_recall.history_index = None;
+                self.history_recall.history_draft.clear();
+                self.submit_mcp_prompt(&prompt, &args, tx);
+                return;
+            }
             self.composer.clear();
             self.input_history.push(text);
             self.history_recall.history_index = None;
@@ -758,6 +787,21 @@ impl App {
             self.history_recall.history_index = None;
             self.history_recall.history_draft.clear();
             self.submit_custom_command(&custom, &args, tx);
+            return;
+        }
+        // Exact `/server:name key=value ...` MCP prompt (B.11); like custom
+        // commands, only reachable with trailing arguments once the popup
+        // has closed.
+        if text.starts_with('/')
+            && let Some((token, args)) = text.split_once(' ')
+            && let Some(prompt) = self.mcp_prompt(token)
+        {
+            let args = args.trim().to_string();
+            self.composer.clear();
+            self.input_history.push(text);
+            self.history_recall.history_index = None;
+            self.history_recall.history_draft.clear();
+            self.submit_mcp_prompt(&prompt, &args, tx);
             return;
         }
         // Exact `/recipe <name> [key=value ...]` (J.5): builtin slash, so

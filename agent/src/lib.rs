@@ -1,7 +1,7 @@
 pub mod acp;
 pub mod auto_review;
-pub mod child_guard;
 pub mod bml;
+pub mod child_guard;
 pub mod cli;
 pub mod command;
 pub mod compaction;

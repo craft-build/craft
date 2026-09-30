@@ -120,6 +120,7 @@ pub struct McpServerInfo {
     pub transport_kind: &'static str,
     pub tool_count: usize,
     pub prompt_count: usize,
+    pub resource_count: usize,
     pub status: McpServerStatus,
     pub config_path: PathBuf,
     pub url: Option<String>,

@@ -406,13 +406,7 @@ fn write_back_round_trips_through_the_parser() {
         &project,
     )
     .unwrap();
-    append_permission_rule(
-        &ToolKey::native("write"),
-        None,
-        Effect::Allow,
-        &project,
-    )
-    .unwrap();
+    append_permission_rule(&ToolKey::native("write"), None, Effect::Allow, &project).unwrap();
     append_permission_rule(
         &ToolKey::McpTool {
             server: "github".into(),
@@ -445,6 +439,65 @@ fn write_back_round_trips_through_the_parser() {
             &["{}".to_string()]
         ),
         PermissionCheck::Allowed
+    ));
+}
+
+#[test]
+fn parse_keys_wire_names_as_mcp_tools() {
+    assert_eq!(
+        ToolKey::parse("github__create_issue"),
+        ToolKey::McpTool {
+            server: "github".into(),
+            tool: "create_issue".into(),
+        }
+    );
+    assert_eq!(ToolKey::parse("*"), ToolKey::Wildcard);
+    assert_eq!(ToolKey::parse("todo_write"), ToolKey::native("todo_write"));
+    // Underscore-heavy native names without the `__` separator stay native.
+    assert_eq!(ToolKey::parse("bash_watch"), ToolKey::native("bash_watch"));
+    // Only the FIRST `__` separates server from tool; the rest belong to
+    // the tool name (`wire_tool_name` replaces only the first separator).
+    assert_eq!(
+        ToolKey::parse("github__do__thing"),
+        ToolKey::McpTool {
+            server: "github".into(),
+            tool: "do__thing".into(),
+        }
+    );
+}
+
+/// An MCP tool call keyed from its wire name must be promptable under the
+/// default config, not hard-denied: the mcp defaults/rules only apply when
+/// the gate keys the call as `McpTool`.
+/// Phase 5: the internal `mcp_read` tool scopes its call to
+/// `mcp:<server>:<uri>`, classifies read-only (allowed by default), and a
+/// deny rule on that scope still blocks it.
+#[test]
+fn mcp_read_is_read_only_and_scoped_to_server_and_uri() {
+    let args = serde_json::json!({"server": "srv", "uri": "file:///notes.txt"});
+    let (scopes, force_prompt) = scope_for_call(Path::new("/w"), "mcp_read", &args);
+    assert!(!force_prompt);
+    assert_eq!(scopes, vec!["mcp:srv:file:///notes.txt".to_string()]);
+
+    let mgr = mgr_with(std::env::temp_dir().as_ref(), Vec::new());
+    let tool = ToolKey::native("mcp_read");
+    assert_eq!(mgr.check(&tool, &scopes), PermissionCheck::Allowed);
+
+    let blocked = mgr_with(
+        std::env::temp_dir().as_ref(),
+        vec![deny_rule("mcp_read", Some("mcp:srv:*"))],
+    );
+    assert_eq!(blocked.check(&tool, &scopes), PermissionCheck::Denied);
+}
+
+#[test]
+fn mcp_wire_tool_defaults_to_prompt_not_deny() {
+    let mgr = PermissionManager::new(PermissionsConfig::default(), std::env::temp_dir());
+    let tool = ToolKey::parse("github__create_issue");
+    assert!(tool.is_mcp());
+    assert!(matches!(
+        mgr.check(&tool, &["*".to_string()]),
+        PermissionCheck::NeedsPrompt { .. }
     ));
 }
 
@@ -555,4 +608,159 @@ fn permission_error_display_has_prefix_and_guidance() {
     let e =
         PermissionError::with_guidance("bash", &["rm -rf /".to_string()], "use git clean".into());
     assert!(e.to_string().contains("User guidance: use git clean"));
+}
+
+// --- MCP tool annotations (Phase 3) ---
+
+fn mcp_tool(server: &str, tool: &str) -> ToolKey {
+    ToolKey::McpTool {
+        server: server.into(),
+        tool: tool.into(),
+    }
+}
+
+#[test]
+fn read_only_hint_prompts_but_never_auto_allows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(tmp.path(), Vec::new());
+    let tool = mcp_tool("srv", "get");
+    mgr.register_mcp_annotations("srv", "get", Some(true), Some(false));
+    // Default Prompt: still a prompt, but flagged low-risk for the UI.
+    match mgr.check(&tool, &["{}".to_string()]) {
+        PermissionCheck::NeedsPrompt {
+            low_risk,
+            force_prompt,
+            ..
+        } => {
+            assert!(low_risk);
+            assert!(!force_prompt);
+        }
+        other => panic!("expected NeedsPrompt, got {other:?}"),
+    }
+    // Hints never grant: even a default Allow stays a prompt.
+    let allow_default = PermissionManager::new(
+        PermissionsConfig {
+            default: DefaultEffect::Allow,
+            ..Default::default()
+        },
+        tmp.path().to_path_buf(),
+    );
+    allow_default.register_mcp_annotations("srv", "get", Some(true), Some(false));
+    assert!(needs_prompt(
+        &allow_default.check(&tool, &["{}".to_string()])
+    ));
+    // An explicit user allow rule outranks the hint.
+    let allowed = mgr_with(
+        tmp.path(),
+        vec![PermissionRule {
+            tool: tool.clone(),
+            scope: None,
+            effect: Effect::Allow,
+        }],
+    );
+    allowed.register_mcp_annotations("srv", "get", Some(true), Some(false));
+    assert_eq!(
+        allowed.check(&tool, &["{}".to_string()]),
+        PermissionCheck::Allowed
+    );
+}
+
+#[test]
+fn destructive_hint_forces_prompt_despite_allow_rule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(
+        tmp.path(),
+        vec![PermissionRule {
+            tool: mcp_tool("srv", "nuke"),
+            scope: None,
+            effect: Effect::Allow,
+        }],
+    );
+    mgr.register_mcp_annotations("srv", "nuke", Some(false), Some(true));
+    match mgr.check(&mcp_tool("srv", "nuke"), &["{}".to_string()]) {
+        PermissionCheck::NeedsPrompt {
+            force_prompt,
+            low_risk,
+            ..
+        } => {
+            assert!(force_prompt);
+            assert!(!low_risk);
+        }
+        other => panic!("expected NeedsPrompt, got {other:?}"),
+    }
+    // Deny rules still win over the annotation.
+    let denied = mgr_with(
+        tmp.path(),
+        vec![PermissionRule {
+            tool: mcp_tool("srv", "nuke"),
+            scope: None,
+            effect: Effect::Deny,
+        }],
+    );
+    denied.register_mcp_annotations("srv", "nuke", Some(false), Some(true));
+    assert_eq!(
+        denied.check(&mcp_tool("srv", "nuke"), &["{}".to_string()]),
+        PermissionCheck::Denied
+    );
+}
+
+#[test]
+fn conflicting_hints_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(
+        tmp.path(),
+        vec![PermissionRule {
+            tool: mcp_tool("srv", "odd"),
+            scope: None,
+            effect: Effect::Allow,
+        }],
+    );
+    // Both hints true: destructive wins — forced prompt, not low-risk tone.
+    mgr.register_mcp_annotations("srv", "odd", Some(true), Some(true));
+    match mgr.check(&mcp_tool("srv", "odd"), &["{}".to_string()]) {
+        PermissionCheck::NeedsPrompt {
+            force_prompt,
+            low_risk,
+            ..
+        } => {
+            assert!(force_prompt);
+            assert!(!low_risk);
+        }
+        other => panic!("expected NeedsPrompt, got {other:?}"),
+    }
+}
+
+#[test]
+fn unannotated_mcp_tools_keep_today_semantics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(tmp.path(), Vec::new());
+    let tool = mcp_tool("srv", "plain");
+    mgr.add_session_rule(PermissionRule {
+        tool: tool.clone(),
+        scope: None,
+        effect: Effect::Allow,
+    });
+    // A session allow rule suffices; no force_prompt enters the outcome.
+    match mgr.check(&tool, &["{}".to_string()]) {
+        PermissionCheck::Allowed => {}
+        other => panic!("expected Allowed, got {other:?}"),
+    }
+}
+
+#[test]
+fn explicit_tool_default_allow_outranks_read_only_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tool = mcp_tool("srv", "get");
+    let mgr = PermissionManager::new(
+        PermissionsConfig {
+            tool_defaults: std::iter::once((tool.clone(), DefaultEffect::Allow)).collect(),
+            ..Default::default()
+        },
+        tmp.path().to_path_buf(),
+    );
+    mgr.register_mcp_annotations("srv", "get", Some(true), Some(false));
+    assert_eq!(
+        mgr.check(&tool, &["{}".to_string()]),
+        PermissionCheck::Allowed
+    );
 }

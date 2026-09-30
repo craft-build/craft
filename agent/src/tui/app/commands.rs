@@ -297,6 +297,7 @@ impl App {
     /// no state beyond the selection.
     pub(crate) fn open_mcp(&mut self) {
         self.overlays.modal = Modal::Mcp { selected: 0 };
+        self.overlays.mcp_expanded = None;
     }
 
     /// Discover recipes for the `/recipe` surfaces (J.5): the picker and
@@ -445,6 +446,89 @@ impl App {
             self.agent_mode(),
             std::mem::take(&mut self.images.attached),
         ));
+        self.view.follow = true;
+    }
+
+    /// Resolve a `/server:name` slash string to a published MCP prompt
+    /// (B.11). Returns `None` when the name is unknown or claimed by a
+    /// builtin/custom command.
+    pub(crate) fn mcp_prompt(&self, slash: &str) -> Option<crate::mcp::McpPromptInfo> {
+        if COMMANDS
+            .iter()
+            .flat_map(|spec| [spec.slash, spec.alias])
+            .flatten()
+            .any(|builtin| builtin == slash)
+            || self
+                .custom_commands
+                .iter()
+                .any(|custom| format!("/{}", custom.name) == slash)
+        {
+            return None;
+        }
+        let name = slash.strip_prefix('/')?;
+        self.mcp_prompts()
+            .into_iter()
+            .find(|prompt| prompt.display_name == name)
+    }
+
+    /// Run an MCP prompt: parse `key=value` arguments, require the prompt's
+    /// required arguments, echo the invocation, and hand the qualified name
+    /// to the provider, which renders it server-side (`/server:name`).
+    pub(crate) fn submit_mcp_prompt(
+        &mut self,
+        prompt: &crate::mcp::McpPromptInfo,
+        args: &str,
+        tx: &mpsc::UnboundedSender<Command>,
+    ) {
+        let mut arguments = std::collections::HashMap::new();
+        for raw in args.split_whitespace() {
+            match raw.split_once('=') {
+                Some((k, v)) => {
+                    arguments.insert(k.trim().to_string(), v.trim().to_string());
+                }
+                None => {
+                    self.push_notice(
+                        Tone::Warning,
+                        format!("skipped argument {raw:?}, expected key=value"),
+                    );
+                }
+            }
+        }
+
+        let missing: Vec<&str> = prompt
+            .arguments
+            .iter()
+            .filter(|a| a.required && !arguments.contains_key(&a.name))
+            .map(|a| a.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            self.push_notice(
+                Tone::Warning,
+                format!(
+                    "prompt '{}' needs: {}",
+                    prompt.display_name,
+                    missing
+                        .iter()
+                        .map(|n| format!("{n}="))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            );
+            return;
+        }
+
+        let echo = if args.is_empty() {
+            format!("/{}", prompt.display_name)
+        } else {
+            format!("/{} {}", prompt.display_name, args)
+        };
+        self.conversation.assistant_open = false;
+        self.conversation.messages.push(Message::User(echo));
+        let _ = tx.send(Command::RunMcpPrompt {
+            qualified: prompt.qualified_name.clone(),
+            arguments,
+            mode: self.agent_mode(),
+        });
         self.view.follow = true;
     }
 
@@ -777,6 +861,64 @@ mod tests {
             app.conversation.messages.last(),
             Some(Message::User(echo)) if echo.contains("/review src/lib.rs")
         ));
+    }
+
+    /// B.11: a published MCP prompt appears in slash completion as
+    /// `/server:name` and submitting it sends `RunMcpPrompt` with the
+    /// qualified name and parsed arguments; missing required arguments are
+    /// rejected with a notice instead.
+    #[test]
+    fn mcp_prompt_appears_in_slash_completion_and_submits() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.mcp = Some(crate::mcp::test_support::stub_handle_with_prompts(vec![
+            crate::mcp::McpPromptInfo {
+                display_name: "github:review-pr".into(),
+                qualified_name: "github.review-pr".into(),
+                description: "Review a pull request".into(),
+                arguments: vec![crate::mcp::McpPromptArg {
+                    name: "pr".into(),
+                    description: String::new(),
+                    required: true,
+                }],
+            },
+        ]));
+        app.composer.text = "/github:rev".into();
+        assert!(
+            app.slash_matches()
+                .iter()
+                .any(|(cmd, desc)| cmd == "/github:review-pr" && desc == "Review a pull request"),
+            "mcp prompt missing from completion"
+        );
+
+        // Missing required argument: refused with a notice, nothing sent.
+        app.composer.set_text("/github:review-pr".into());
+        app.submit(&tx);
+        assert!(
+            matches!(
+                app.conversation.messages.last(),
+                Some(Message::Notice { .. })
+            ),
+            "missing required argument should notice"
+        );
+
+        app.composer.set_text("/github:review-pr pr=42".into());
+        app.submit(&tx);
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(Command::RunMcpPrompt { qualified, arguments, .. })
+                    if qualified == "github.review-pr" && arguments.get("pr").map(String::as_str) == Some("42")
+            ),
+            "RunMcpPrompt not sent"
+        );
+        assert!(
+            matches!(
+                app.conversation.messages.last(),
+                Some(Message::User(echo)) if echo == "/github:review-pr pr=42"
+            ),
+            "invocation not echoed"
+        );
     }
 
     /// B.11: `/mcp` appears in slash completion and opens the server

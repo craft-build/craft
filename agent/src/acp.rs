@@ -183,9 +183,7 @@ impl AppState {
             .keys()
             .next()
             .cloned()
-            .ok_or_else(|| {
-                "no providers are configured in ~/.config/craft.bml".to_string()
-            })?;
+            .ok_or_else(|| "no providers are configured in ~/.config/craft.bml".to_string())?;
         let (_provider, models) = self.provider_catalog(&provider_name).await?;
         let model = models
             .first()
@@ -727,7 +725,7 @@ async fn gate_decide(gate: AcpPermissionGate, call: history::ToolCall) -> run::D
         return run::Decision::Stop("cancelled by client".into());
     }
     let name = call.function.name.as_str();
-    let tool = ToolKey::native(name);
+    let tool = ToolKey::parse(name);
     let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &call.function.arguments);
     match permissions.check_multi(&tool, &scopes, force_prompt) {
         PermissionCheck::Allowed => return run::Decision::Run,
@@ -1069,6 +1067,11 @@ async fn run_turn(
         }
     }
 
+    // Phase 3: register MCP tool annotations once the tool set is settled so
+    // the ACP permission gate consults the same hints as the TUI.
+    if let Some(mcp) = workspace.mcp() {
+        permissions.sync_mcp_annotations(&mcp);
+    }
     let tools = workspace
         .with_questions(Arc::new(ElicitationAsker {
             connection: connection.clone(),

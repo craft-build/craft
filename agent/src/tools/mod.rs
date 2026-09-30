@@ -77,6 +77,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use rig_core::completion::message::{ImageMediaType, ToolResultContent as RigToolResultContent};
 use rig_core::tool::{
     PortableDynamicTool, PortableTool, ToolErrorKind, ToolExecutionError, ToolOutput,
 };
@@ -152,6 +153,11 @@ pub struct Workspace {
     /// install a subagent launcher per turn; the default reports that
     /// subagents are unavailable.
     subagents: Arc<dyn task::SpawnSubagent>,
+    /// Phase 6: the turn's cancellation token, installed per turn like the
+    /// question seam. MCP tool calls race it so a cancelled turn tells the
+    /// server to stop. Shared cell so every clone (batch, subagents) sees
+    /// the per-turn set; `None` before a turn installs one.
+    mcp_cancel: std::sync::Arc<std::sync::RwLock<Option<crate::run::CancelToken>>>,
 }
 
 impl Workspace {
@@ -176,6 +182,7 @@ impl Workspace {
             plan_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
             mcp: std::sync::Arc::new(std::sync::RwLock::new(None)),
             subagents: Arc::new(task::NoSubagents),
+            mcp_cancel: Default::default(),
         })
     }
 
@@ -233,6 +240,14 @@ impl Workspace {
     /// cancel token and event channel.
     pub fn with_questions(mut self, asker: Arc<dyn question::AskQuestions>) -> Self {
         self.questions = asker;
+        self
+    }
+
+    /// Install the turn's cancellation token (Phase 6): taken on the same
+    /// per-turn clone as the question/subagent seams, so MCP tool calls
+    /// registered from it race the turn's cancel.
+    pub fn with_cancel(self, cancel: crate::run::CancelToken) -> Self {
+        *self.mcp_cancel.write().expect("mcp cancel cell poisoned") = Some(cancel);
         self
     }
 
@@ -301,7 +316,13 @@ impl Workspace {
         // MCP tools (B.11): one portable tool per published MCP server tool,
         // registered under the `server__tool` wire name.
         if let Some(handle) = self.mcp() {
-            tools.extend(mcp_tools(&handle));
+            let cancel = self
+                .mcp_cancel
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            tools.extend(mcp_tools(&handle, cancel));
+            tools.push(mcp_read_tool(&handle));
         }
         // Introspection snapshot of every other registered tool.
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
@@ -387,7 +408,13 @@ impl Workspace {
             tools.push(dynamic(batch.clone()));
         }
         if let Some(handle) = self.mcp() {
-            tools.extend(mcp_tools(&handle));
+            let cancel = self
+                .mcp_cancel
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            tools.extend(mcp_tools(&handle, cancel));
+            tools.push(mcp_read_tool(&handle));
         }
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
@@ -634,13 +661,17 @@ pub(crate) use impl_tool;
 /// One portable tool per published MCP tool (B.11). The model sees the
 /// `server__tool` wire name; the closure resolves it back to the qualified
 /// name the manager's tool index is keyed by.
-fn mcp_tools(handle: &crate::mcp::McpHandle) -> Vec<PortableDynamicTool> {
+fn mcp_tools(
+    handle: &crate::mcp::McpHandle,
+    cancel: Option<crate::run::CancelToken>,
+) -> Vec<PortableDynamicTool> {
     handle
         .tool_descriptors()
         .into_iter()
         .map(|descriptor| {
             let handle = handle.clone();
             let qualified = descriptor.qualified_name.clone();
+            let cancel = cancel.clone();
             PortableDynamicTool::new(
                 descriptor.wire_name,
                 descriptor.description,
@@ -648,9 +679,21 @@ fn mcp_tools(handle: &crate::mcp::McpHandle) -> Vec<PortableDynamicTool> {
                 move |arguments| {
                     let handle = handle.clone();
                     let qualified = qualified.clone();
+                    let cancel = cancel.clone();
                     Box::pin(async move {
-                        match handle.call_tool(&qualified, &arguments).await {
-                            Ok(text) => Ok(ToolOutput::text(text)),
+                        // Phase 6: race the turn's cancel so a cancelled turn
+                        // stops the in-flight server call instead of parking
+                        // until it finishes or times out.
+                        let outcome = match &cancel {
+                            Some(token) => {
+                                handle
+                                    .call_tool_cancellable(&qualified, &arguments, token)
+                                    .await
+                            }
+                            None => handle.call_tool(&qualified, &arguments).await,
+                        };
+                        match outcome {
+                            Ok(output) => Ok(mcp_tool_output(output)),
                             Err(e) => Err(failure(e.to_string())),
                         }
                     })
@@ -658,6 +701,98 @@ fn mcp_tools(handle: &crate::mcp::McpHandle) -> Vec<PortableDynamicTool> {
             )
         })
         .collect()
+}
+
+/// The internal `mcp_read` tool (Phase 5): lets the agent read one MCP
+/// resource by server + uri. Registered whenever an MCP handle is
+/// installed (the resource set can change at any moment via
+/// `resources/list_changed`); unknown pairs fail with `UnknownResource`.
+fn mcp_read_tool(handle: &crate::mcp::McpHandle) -> PortableDynamicTool {
+    let handle = handle.clone();
+    PortableDynamicTool::new(
+        "mcp_read",
+        "Read one MCP resource. `server` is the MCP server name and `uri` the          resource URI from the server's resource listing.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "server": {"type": "string", "description": "MCP server name"},
+                "uri": {"type": "string", "description": "Resource URI"}
+            },
+            "required": ["server", "uri"],
+            "additionalProperties": false
+        }),
+        move |arguments| {
+            let handle = handle.clone();
+            Box::pin(async move {
+                let server = arguments
+                    .get("server")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let uri = arguments
+                    .get("uri")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                match handle.read_resource(&server, &uri).await {
+                    Ok(text) => Ok(ToolOutput::text(text)),
+                    Err(e) => Err(failure(e.to_string())),
+                }
+            })
+        },
+    )
+}
+
+/// Map an MCP tool's output into a tool result, preserving the server's
+/// block order: text parts as text, images as vision content parts (same
+/// shape `view_image` emits) interleaved where they appeared.
+fn mcp_tool_output(output: crate::mcp::McpToolOutput) -> ToolOutput {
+    use crate::mcp::session::McpPart;
+
+    if !output.has_images() {
+        return ToolOutput::text(output.joined_text());
+    }
+    let mut content = Vec::new();
+    for part in output.parts {
+        match part {
+            McpPart::Text(text) => content.push(RigToolResultContent::text(text)),
+            McpPart::Image(image) => match image_media_type(&image.mime) {
+                Some(media) => content.push(RigToolResultContent::image_base64(
+                    image.data,
+                    Some(media),
+                    None,
+                )),
+                // Rig only carries known media types; note the drop instead of
+                // losing the image silently.
+                None => content.push(RigToolResultContent::text(format!(
+                    "[unsupported image mime: {}]",
+                    image.mime
+                ))),
+            },
+        }
+    }
+    let text = content
+        .iter()
+        .filter_map(|c| match c {
+            RigToolResultContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ToolOutput::content(content).unwrap_or_else(|_| ToolOutput::text(text))
+}
+
+fn image_media_type(mime: &str) -> Option<ImageMediaType> {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some(ImageMediaType::JPEG),
+        "image/png" => Some(ImageMediaType::PNG),
+        "image/gif" => Some(ImageMediaType::GIF),
+        "image/webp" => Some(ImageMediaType::WEBP),
+        "image/heic" => Some(ImageMediaType::HEIC),
+        "image/heif" => Some(ImageMediaType::HEIF),
+        "image/svg+xml" => Some(ImageMediaType::SVG),
+        _ => None,
+    }
 }
 
 /// Adapt a typed portable tool into the erased tool the dispatcher executes.

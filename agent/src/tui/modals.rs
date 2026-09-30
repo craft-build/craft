@@ -419,8 +419,9 @@ impl App {
     }
 
     /// `/mcp` screen keys (B.11): arrows move the selection, `t` toggles the
-    /// highlighted server, `r` reconnects it, Esc or `q` closes. Rows read
-    /// the live snapshot, so a command's effect shows up on the next paint.
+    /// highlighted server, `r` reconnects it, Enter (or `e`) expands the
+    /// row's resource list, Esc or `q` closes. Rows read the live snapshot,
+    /// so a command's effect shows up on the next paint.
     fn handle_mcp_key(&mut self, key: KeyEvent) {
         let Modal::Mcp { selected } = std::mem::replace(&mut self.overlays.modal, Modal::None)
         else {
@@ -430,6 +431,19 @@ impl App {
             Some(handle) => handle.reader().load().infos.clone(),
             None => Vec::new(),
         };
+        if matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('E')
+        ) {
+            // Phase 5: expand/collapse the selected server's resources.
+            self.overlays.mcp_expanded = if self.overlays.mcp_expanded == Some(selected) {
+                None
+            } else {
+                (selected < infos.len()).then_some(selected)
+            };
+            self.overlays.modal = Modal::Mcp { selected };
+            return;
+        }
         match key.code {
             KeyCode::Up => {
                 self.overlays.modal = Modal::Mcp {
@@ -591,6 +605,7 @@ mod tests {
             transport_kind: "stdio",
             tool_count: 2,
             prompt_count: 1,
+            resource_count: 0,
             status,
             config_path: std::path::PathBuf::from("/test/mcp.toml"),
             url: None,
@@ -672,6 +687,40 @@ mod tests {
         app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
         assert!(matches!(app.overlays.modal, Modal::None));
     }
+    /// Phase 5: Enter expands the selected server's resource list, a
+    /// second Enter collapses it, and other keys leave the state alone.
+    #[test]
+    fn mcp_screen_enter_toggles_resource_expansion() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.overlays.modal = Modal::Mcp { selected: 0 };
+        assert!(app.overlays.mcp_expanded.is_none());
+
+        app.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        // No handle: infos is empty, so the out-of-range selection does not
+        // expand.
+        assert!(app.overlays.mcp_expanded.is_none());
+        assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
+
+        app.mcp = Some(crate::mcp::test_support::stub_handle_with_resources(vec![
+            crate::mcp::McpResourceInfo {
+                server: "srv".into(),
+                uri: "file:///notes.txt".into(),
+                name: "notes".into(),
+                description: String::new(),
+                mime: None,
+                size: None,
+            },
+        ]));
+        app.handle_modal_key(key('e'), &tx);
+        assert_eq!(app.overlays.mcp_expanded, Some(0));
+        assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
+
+        app.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert_eq!(app.overlays.mcp_expanded, None);
+        assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
+    }
+
     /// The send path against a real manager: a Failed server flips to
     /// Disabled through the command loop, proving the key round-trips to the
     /// manager and the snapshot republishes.

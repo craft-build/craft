@@ -21,6 +21,9 @@ pub enum McpError {
         message: String,
     },
 
+    #[snafu(display("tool call on server {server} was cancelled"))]
+    Cancelled { server: String },
+
     #[snafu(display("invalid response from server {server}: {reason}"))]
     InvalidResponse { server: String, reason: String },
 
@@ -29,6 +32,9 @@ pub enum McpError {
 
     #[snafu(display("unknown MCP prompt: {name}"))]
     UnknownPrompt { name: String },
+
+    #[snafu(display("unknown MCP resource: {uri}"))]
+    UnknownResource { uri: String },
 
     #[snafu(display("config error: {message}"))]
     Config { message: String },

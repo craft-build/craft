@@ -42,6 +42,14 @@ pub enum Command {
         id: String,
         answer: crate::tools::QuestionAnswer,
     },
+    /// Run an MCP prompt (`/server:name`): render it server-side and send
+    /// the result as a user message (B.11 prompt surfacing).
+    RunMcpPrompt {
+        /// Qualified prompt name (`server.prompt`).
+        qualified: String,
+        arguments: std::collections::HashMap<String, String>,
+        mode: AgentMode,
+    },
     /// Esc: interrupt the running turn.
     Interrupt,
     /// Cancel one subagent (by the task tool-call's id) without stopping

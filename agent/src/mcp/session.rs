@@ -4,15 +4,30 @@
 //! fakes without touching rmcp.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::sync::{mpsc, oneshot};
 
 use super::config::{ServerConfig, Transport};
 use super::error::McpError;
+use super::request::{ElicitOutcome, McpServerRequest};
 
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// A live re-list result: refreshed tools, prompts, and resources.
+pub struct Listings {
+    pub tools: Vec<ToolInfo>,
+    pub prompts: Vec<PromptInfo>,
+    pub resources: Vec<ResourceInfo>,
+}
+
+type ListChangedCb = Arc<dyn Fn(&str) + Send + Sync>;
+type LogCb = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+type DeadCb = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Tool metadata in the manager's own vocabulary.
 #[derive(Debug, Clone)]
@@ -20,6 +35,10 @@ pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Server-declared `readOnlyHint`, if the tool carried annotations.
+    pub read_only_hint: Option<bool>,
+    /// Server-declared `destructiveHint`, if the tool carried annotations.
+    pub destructive_hint: Option<bool>,
 }
 
 /// Prompt metadata in the manager's own vocabulary.
@@ -37,6 +56,16 @@ pub struct PromptArgument {
     pub required: bool,
 }
 
+/// Resource metadata in the manager's own vocabulary.
+#[derive(Debug, Clone)]
+pub struct ResourceInfo {
+    pub uri: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub mime: Option<String>,
+    pub size: Option<u64>,
+}
+
 /// One message of a rendered prompt.
 #[derive(Debug, Clone)]
 pub struct PromptMessage {
@@ -44,11 +73,71 @@ pub struct PromptMessage {
     pub text: Option<String>,
 }
 
+/// An image returned by an MCP tool, kept structured so it reaches the model
+/// as vision input instead of being flattened into text.
+#[derive(Debug, Clone)]
+pub struct McpToolImage {
+    /// Base64-encoded image bytes.
+    pub data: String,
+    pub mime: String,
+}
+
+/// A tool call's full output, in the server's original block order so text
+/// and images stay interleaved as sent.
+#[derive(Debug, Clone, Default)]
+pub struct McpToolOutput {
+    pub parts: Vec<McpPart>,
+}
+
+/// One ordered slice of a tool result: text (or inlined resource text) or a
+/// retained image.
+#[derive(Debug, Clone)]
+pub enum McpPart {
+    Text(String),
+    Image(McpToolImage),
+}
+
+impl McpToolOutput {
+    /// All text parts joined with newlines — what an error message or a
+    /// text-only consumer sees.
+    pub fn joined_text(&self) -> String {
+        self.parts
+            .iter()
+            .filter_map(|p| match p {
+                McpPart::Text(t) => Some(t.as_str()),
+                McpPart::Image(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn has_images(&self) -> bool {
+        self.parts.iter().any(|p| matches!(p, McpPart::Image(_)))
+    }
+}
+
 /// Seam between the manager and a live MCP server session.
 pub trait McpSession: Send + Sync {
     fn server_name(&self) -> &str;
     fn list_tools(&self) -> BoxFuture<'_, Result<Vec<ToolInfo>, McpError>>;
-    fn call_tool(&self, name: &str, args: &Value) -> BoxFuture<'_, Result<String, McpError>>;
+    fn call_tool(&self, name: &str, args: &Value)
+    -> BoxFuture<'_, Result<McpToolOutput, McpError>>;
+
+    /// Phase 6: `call_tool` under the turn's cancellation token. When the
+    /// token fires the future resolves with [`McpError::Cancelled`] instead
+    /// of parking until the server answers (or the request timeout lapses).
+    /// rmcp does not cancel on future drop — the `notifications/cancelled`
+    /// must be sent while the request id is still known — so live transport
+    /// sessions override this to notify the server; the default only stops
+    /// waiting (kept provided so external implementors stay source-compatible).
+    fn call_tool_cancellable<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a Value,
+        cancel: &'a crate::run::CancelToken,
+    ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
+        race_call_cancel(self, name, args, cancel)
+    }
     fn list_prompts(&self) -> BoxFuture<'_, Result<Vec<PromptInfo>, McpError>>;
     fn get_prompt(
         &self,
@@ -56,18 +145,117 @@ pub trait McpSession: Send + Sync {
         arguments: &HashMap<String, String>,
     ) -> BoxFuture<'_, Result<Vec<PromptMessage>, McpError>>;
     fn shutdown(&self) -> BoxFuture<'_, ()>;
+
+    /// Cached `resources/list` results. Default: none (fakes and servers
+    /// without the resources capability report an empty set).
+    fn list_resources(&self) -> BoxFuture<'_, Result<Vec<ResourceInfo>, McpError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// `resources/read`: text inline, blobs as base64 with a mime header
+    /// line. Default: unknown-resource error so fakes never fake a read.
+    fn read_resource<'a>(&'a self, uri: &'a str) -> BoxFuture<'a, Result<String, McpError>> {
+        Box::pin(async {
+            Err(McpError::UnknownResource {
+                uri: uri.to_string(),
+            })
+        })
+    }
+
+    /// Re-fetch tool/prompt/resource listings from the live server and update the
+    /// session's cache. Servers notify `list_changed` after connect, so the
+    /// connect-time snapshot goes stale; the manager refreshes instead of
+    /// paying a full reconnect. Default: report the cached values (fakes and
+    /// read-mostly servers are unaffected).
+    fn refresh_listings(&self) -> BoxFuture<'_, Result<Listings, McpError>> {
+        Box::pin(async {
+            let tools = self.list_tools().await?;
+            let prompts = self.list_prompts().await?;
+            let resources = self.list_resources().await?;
+            Ok(Listings {
+                tools,
+                prompts,
+                resources,
+            })
+        })
+    }
+}
+
+/// Race a plain [`McpSession::call_tool`] against a cancel token: the body
+/// the manager's test fakes share, since only real transports can notify
+/// the server.
+pub(crate) fn race_call_cancel<'a, S: McpSession + ?Sized>(
+    session: &'a S,
+    name: &'a str,
+    args: &'a Value,
+    cancel: &'a crate::run::CancelToken,
+) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
+    Box::pin(async move {
+        let call = session.call_tool(name, args);
+        tokio::select! {
+            result = call => result,
+            _ = cancel.wait() => Err(McpError::Cancelled {
+                server: session.server_name().to_string(),
+            }),
+        }
+    })
+}
+
+/// Server → client notification callbacks, injected by the manager (or the
+/// TUI for notices). Callbacks must be cheap and non-blocking: they run on
+/// rmcp's transport task.
+#[derive(Clone, Default)]
+pub struct McpEvents {
+    /// `tools/list_changed` / `prompts/list_changed` /
+    /// `resources/list_changed`: the manager re-lists that server without
+    /// reconnecting.
+    pub on_list_changed: Option<ListChangedCb>,
+    /// `notifications/message` at warning-or-worse: (server, level, message).
+    pub on_log: Option<LogCb>,
+    /// Keepalive ping failed: the session is unusable, the manager marks the
+    /// entry Failed so the user is offered Reconnect.
+    pub on_dead: Option<DeadCb>,
+    /// Where server-initiated requests (sampling, elicitation) are relayed.
+    /// `None` (or a dropped receiver) makes the handler deny them cleanly.
+    pub server_requests: Option<mpsc::UnboundedSender<McpServerRequest>>,
+    /// Workspace root advertised via `roots/list` and the `roots` capability.
+    /// `None` in callers that have no cwd to speak of.
+    pub root: Option<PathBuf>,
+}
+
+impl McpEvents {
+    fn list_changed(&self, server: &str) {
+        if let Some(cb) = &self.on_list_changed {
+            cb(server);
+        }
+    }
+
+    fn log(&self, server: &str, level: &str, message: &str) {
+        if let Some(cb) = &self.on_log {
+            cb(server, level, message);
+        }
+    }
+
+    fn dead(&self, server: &str) {
+        if let Some(cb) = &self.on_dead {
+            cb(server);
+        }
+    }
 }
 
 /// Start one server from its config: build the transport, run the `initialize`
 /// handshake, and return the live session.
-pub async fn start_session(config: &ServerConfig) -> Result<Arc<dyn McpSession>, McpError> {
-    match connect(config).await {
+pub async fn start_session(
+    config: &ServerConfig,
+    events: McpEvents,
+) -> Result<Arc<dyn McpSession>, McpError> {
+    match connect(config, events.clone()).await {
         Ok(session) => Ok(session),
         // Transient-failure retry: one more attempt for errors that look like
         // transport blips rather than config or auth problems.
         Err(e) if is_transient(&e) => {
             tracing::warn!(server = %config.name, error = %e, "MCP connect failed; retrying once");
-            connect(config).await
+            connect(config, events).await
         }
         Err(e) => Err(e),
     }
@@ -85,8 +273,15 @@ fn is_transient(e: &McpError) -> bool {
     )
 }
 
-async fn connect(config: &ServerConfig) -> Result<Arc<dyn McpSession>, McpError> {
+async fn connect(
+    config: &ServerConfig,
+    events: McpEvents,
+) -> Result<Arc<dyn McpSession>, McpError> {
     let name: Arc<str> = Arc::from(config.name.as_str());
+    let handler = McpClientHandler {
+        server: Arc::clone(&name),
+        events: events.clone(),
+    };
     let (service, capabilities, child_pid) = match &config.transport {
         Transport::Stdio {
             program,
@@ -110,7 +305,7 @@ async fn connect(config: &ServerConfig) -> Result<Arc<dyn McpSession>, McpError>
             // fork grandchildren that must die with the session. The child is
             // its own process-group leader, so a group kill reaps them all.
             let child_pid = transport.id();
-            let service = run_initialize(config, transport).await?;
+            let service = run_initialize(config, transport, handler).await?;
             let capabilities = capabilities_of(&service);
             (service, capabilities, child_pid)
         }
@@ -147,14 +342,16 @@ async fn connect(config: &ServerConfig) -> Result<Arc<dyn McpSession>, McpError>
                         rmcp::transport::auth::AuthClient::new(reqwest::Client::new(), manager);
                     run_initialize(
                         config,
-                        rmcp::transport::streamable_http_client::StreamableHttpClientTransport::with_client(auth_client, cfg),
+                        rmcp::transport::streamable_http_client::                        StreamableHttpClientTransport::with_client(auth_client, cfg),
+                        handler,
                     )
                     .await?
                 }
                 None => {
                     run_initialize(
                         config,
-                        rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_config(cfg),
+                        rmcp::transport::streamable_http_client::                        StreamableHttpClientTransport::from_config(cfg),
+                        handler,
                     )
                     .await?
                 }
@@ -181,29 +378,306 @@ async fn connect(config: &ServerConfig) -> Result<Arc<dyn McpSession>, McpError>
     } else {
         Vec::new()
     };
+    // Same gating as prompts: undeclared resource endpoints may answer junk.
+    let resource_infos = if capabilities.resources {
+        RmcpSession::list_resources_raw(&service).await?
+    } else {
+        Vec::new()
+    };
 
     tracing::info!(
         server = %config.name,
         tool_count = tool_infos.len(),
         prompt_count = prompt_infos.len(),
+        resource_count = resource_infos.len(),
         "MCP server initialized"
+    );
+
+    let dead = Arc::new(AtomicBool::new(false));
+    let service = Arc::new(service);
+    spawn_keepalive(
+        Arc::clone(&service),
+        Arc::clone(&name),
+        Arc::clone(&dead),
+        events,
     );
 
     Ok(Arc::new(RmcpSession {
         name,
         service,
         child_pid,
-        tool_infos,
-        prompt_infos,
+        dead,
+        tool_infos: RwLock::new(tool_infos),
+        prompt_infos: RwLock::new(prompt_infos),
+        resource_infos: RwLock::new(resource_infos),
+        has_resources: capabilities.resources,
         timeout: config.timeout,
     }))
 }
 
-type ClientService = rmcp::service::RunningService<rmcp::RoleClient, ()>;
+type ClientService = rmcp::service::RunningService<rmcp::RoleClient, McpClientHandler>;
+
+/// How often the keepalive task pings the server. 30s is comfortably under
+/// typical proxy idle timeouts; the initialize result carries no keepalive
+/// hint in any protocol version we speak, so there is nothing to derive from.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Proxy-backed servers silently drop idle connections; a periodic ping
+/// detects that within one interval instead of surfacing it later as a
+/// mysterious tool-call timeout. On failure the session is marked dead
+/// (call_tool refuses fast) and the transport torn down; the manager flips
+/// the entry to Failed via `on_dead` so the user is offered Reconnect. Tied
+/// to the service's cancellation token, so shutdown stops it.
+fn spawn_keepalive(
+    service: Arc<ClientService>,
+    name: Arc<str>,
+    dead: Arc<AtomicBool>,
+    events: McpEvents,
+) {
+    tokio::spawn(async move {
+        loop {
+            // Session shutdown cancels the service token; `is_closed`
+            // observes it, so the task never outlives the session by more
+            // than one interval.
+            if service.is_closed() {
+                return;
+            }
+            tokio::time::sleep(KEEPALIVE_INTERVAL).await;
+            let ping = service.send_request(rmcp::model::ClientRequest::PingRequest(
+                rmcp::model::PingRequest {
+                    method: Default::default(),
+                    extensions: Default::default(),
+                },
+            ));
+            match tokio::time::timeout(KEEPALIVE_INTERVAL, ping).await {
+                Ok(Ok(_)) => {}
+                _ => {
+                    tracing::warn!(server = %name, "MCP keepalive ping failed; marking session dead");
+                    dead.store(true, Ordering::SeqCst);
+                    events.dead(&name);
+                    service.cancellation_token().cancel();
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// rmcp client handler wiring server notifications to [`McpEvents`]. The
+/// handler cannot re-list itself (it does not own the service), so list
+/// changes surface as callbacks and the manager refreshes.
+struct McpClientHandler {
+    server: Arc<str>,
+    events: McpEvents,
+}
+
+/// A request no frontend can answer: deny with `-32603` so the server can
+/// degrade instead of waiting out its own timeout.
+fn relay_unavailable(what: &str) -> rmcp::model::ErrorData {
+    rmcp::model::ErrorData::internal_error(format!("{what} denied: no frontend is attached"), None)
+}
+
+/// `file://` URI for the workspace root. `Url::from_file_path` rejects
+/// non-UTF-8 paths, so encode the raw OS bytes by hand in that case — every
+/// byte outside the unreserved set is percent-encoded, keeping the URI valid.
+fn file_uri(root: &std::path::Path) -> String {
+    if let Ok(uri) = url::Url::from_file_path(root) {
+        return uri.to_string();
+    }
+    let mut uri = String::from("file:///");
+    for byte in root.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'/' => uri.push('/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(*byte as char)
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
+impl rmcp::ClientHandler for McpClientHandler {
+    async fn on_tool_list_changed(
+        &self,
+        _context: rmcp::service::NotificationContext<rmcp::RoleClient>,
+    ) {
+        tracing::info!(server = %self.server, "tool list changed");
+        self.events.list_changed(&self.server);
+    }
+
+    async fn on_prompt_list_changed(
+        &self,
+        _context: rmcp::service::NotificationContext<rmcp::RoleClient>,
+    ) {
+        tracing::info!(server = %self.server, "prompt list changed");
+        self.events.list_changed(&self.server);
+    }
+
+    async fn on_resource_list_changed(
+        &self,
+        _context: rmcp::service::NotificationContext<rmcp::RoleClient>,
+    ) {
+        tracing::info!(server = %self.server, "resource list changed");
+        self.events.list_changed(&self.server);
+    }
+
+    /// Advertise what this handler actually answers: roots (when a root was
+    /// threaded in), sampling, and form-mode elicitation. The defaults rmcp
+    /// would send declare none of these, so servers never ask.
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut capabilities = rmcp::model::ClientCapabilities::default();
+        if self.events.root.is_some() {
+            let mut roots = rmcp::model::RootsCapabilities::default();
+            roots.list_changed = Some(false);
+            capabilities.roots = Some(roots);
+        }
+        capabilities.sampling = Some(rmcp::model::SamplingCapability::default());
+        capabilities.elicitation = Some(
+            rmcp::model::ElicitationCapability::default()
+                .with_form(rmcp::model::FormElicitationCapability::new()),
+        );
+        rmcp::model::ClientConfig::new(
+            capabilities,
+            rmcp::model::Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+        )
+    }
+
+    /// `roots/list`: answered directly from the threaded workspace root —
+    /// no UI round-trip, the answer is always the same.
+    #[allow(deprecated)] // roots are deprecated by SEP-2577; still used by servers
+    async fn list_roots(
+        &self,
+        _context: rmcp::service::RequestContext<rmcp::RoleClient>,
+    ) -> Result<rmcp::model::ListRootsResult, rmcp::model::ErrorData> {
+        Ok(match &self.events.root {
+            Some(root) => rmcp::model::ListRootsResult::new(vec![
+                rmcp::model::Root::new(file_uri(root)).with_name("workspace"),
+            ]),
+            None => rmcp::model::ListRootsResult::default(),
+        })
+    }
+
+    async fn create_message(
+        &self,
+        params: rmcp::model::CreateMessageRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleClient>,
+    ) -> Result<rmcp::model::CreateMessageResult, rmcp::model::ErrorData> {
+        let Some(tx) = self.events.server_requests.clone() else {
+            return Err(relay_unavailable("sampling"));
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if tx
+            .send(McpServerRequest::Sampling {
+                server: Arc::clone(&self.server),
+                request: params,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return Err(relay_unavailable("sampling"));
+        }
+        match reply_rx.await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(message)) => Err(rmcp::model::ErrorData::internal_error(message, None)),
+            Err(_) => Err(relay_unavailable("sampling")),
+        }
+    }
+
+    /// `elicitation/create`: form requests relay to the frontend; URL-mode
+    /// and unknown variants decline — opening external URLs from a server's
+    /// say-so is not something this client does.
+    async fn create_elicitation(
+        &self,
+        request: rmcp::model::ElicitRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleClient>,
+    ) -> Result<rmcp::model::ElicitResult, rmcp::model::ErrorData> {
+        let (message, schema) = match request {
+            rmcp::model::ElicitRequestParams::FormElicitationParams {
+                message,
+                requested_schema,
+                ..
+            } => (message, requested_schema),
+            _ => {
+                return Ok(rmcp::model::ElicitResult::new(
+                    rmcp::model::ElicitationAction::Decline,
+                ));
+            }
+        };
+        let Some(tx) = self.events.server_requests.clone() else {
+            return Err(relay_unavailable("elicitation"));
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if tx
+            .send(McpServerRequest::Elicitate {
+                server: Arc::clone(&self.server),
+                message,
+                schema,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return Err(relay_unavailable("elicitation"));
+        }
+        match reply_rx.await {
+            Ok(Ok(ElicitOutcome::Accept(content))) => Ok(rmcp::model::ElicitResult::new(
+                rmcp::model::ElicitationAction::Accept,
+            )
+            .with_content(content)),
+            Ok(Ok(ElicitOutcome::Decline)) => Ok(rmcp::model::ElicitResult::new(
+                rmcp::model::ElicitationAction::Decline,
+            )),
+            Ok(Err(message)) => Err(rmcp::model::ErrorData::internal_error(message, None)),
+            Err(_) => Err(relay_unavailable("elicitation")),
+        }
+    }
+
+    #[allow(deprecated)] // MCP logging notification; still emitted by servers
+    async fn on_logging_message(
+        &self,
+        params: rmcp::model::LoggingMessageNotificationParam,
+        _context: rmcp::service::NotificationContext<rmcp::RoleClient>,
+    ) {
+        #[allow(deprecated)]
+        let (level, message) = (params.level, params.data.to_string());
+        let server = self.server.to_string();
+        let level_str = level_str(level);
+        let warns = matches!(
+            level,
+            rmcp::model::LoggingLevel::Warning
+                | rmcp::model::LoggingLevel::Error
+                | rmcp::model::LoggingLevel::Critical
+                | rmcp::model::LoggingLevel::Alert
+                | rmcp::model::LoggingLevel::Emergency
+        );
+        let line = format!("mcp {server}: {message}");
+        if warns {
+            tracing::warn!(server = %server, level = level_str, "MCP log notification: {message}");
+            self.events.log(&server, level_str, &line);
+        } else {
+            tracing::info!(server = %server, level = level_str, "MCP log notification: {message}");
+        }
+    }
+}
+
+#[allow(deprecated)]
+fn level_str(level: rmcp::model::LoggingLevel) -> &'static str {
+    match level {
+        rmcp::model::LoggingLevel::Debug => "debug",
+        rmcp::model::LoggingLevel::Info => "info",
+        rmcp::model::LoggingLevel::Notice => "notice",
+        rmcp::model::LoggingLevel::Warning => "warning",
+        rmcp::model::LoggingLevel::Error => "error",
+        rmcp::model::LoggingLevel::Critical => "critical",
+        rmcp::model::LoggingLevel::Alert => "alert",
+        rmcp::model::LoggingLevel::Emergency => "emergency",
+    }
+}
 
 async fn run_initialize<T, E, A>(
     config: &ServerConfig,
     transport: T,
+    handler: McpClientHandler,
 ) -> Result<ClientService, McpError>
 where
     T: rmcp::transport::IntoTransport<rmcp::RoleClient, E, A>,
@@ -212,7 +686,7 @@ where
     use rmcp::service::ServiceExt as _;
 
     let server = config.name.clone();
-    let init = tokio::time::timeout(config.timeout, ().serve(transport)).await;
+    let init = tokio::time::timeout(config.timeout, handler.serve(transport)).await;
     let result = match init {
         Ok(r) => r,
         Err(_) => {
@@ -243,6 +717,7 @@ where
 struct Capabilities {
     tools: bool,
     prompts: bool,
+    resources: bool,
 }
 
 fn capabilities_of(service: &ClientService) -> Capabilities {
@@ -250,21 +725,37 @@ fn capabilities_of(service: &ClientService) -> Capabilities {
         Some(info) => Capabilities {
             tools: info.capabilities.tools.is_some(),
             prompts: info.capabilities.prompts.is_some(),
+            resources: info.capabilities.resources.is_some(),
         },
         None => Capabilities::default(),
     }
 }
 
-/// A live rmcp session. Tool/prompt listings are captured at connect time
-/// (they are read-mostly; Reconnect picks up changes).
+/// A live rmcp session. Tool/prompt listings are cached at connect time and
+/// re-fetched on `list_changed` notifications; `dead` is set by the keepalive
+/// task when the server stops answering pings.
 struct RmcpSession {
     name: Arc<str>,
-    service: ClientService,
+    service: Arc<ClientService>,
     /// stdio child's pid (its process-group id); `None` for HTTP sessions.
     child_pid: Option<u32>,
-    tool_infos: Vec<ToolInfo>,
-    prompt_infos: Vec<PromptInfo>,
+    /// Set when the keepalive ping failed (or we shut down); further calls
+    /// fail fast instead of waiting out the request timeout against a dead
+    /// transport.
+    dead: Arc<AtomicBool>,
+    tool_infos: RwLock<Vec<ToolInfo>>,
+    prompt_infos: RwLock<Vec<PromptInfo>>,
+    resource_infos: RwLock<Vec<ResourceInfo>>,
+    /// Server declared the `resources` capability: refreshes re-list
+    /// resources only when it did (undeclared endpoints may answer junk).
+    has_resources: bool,
     timeout: Duration,
+}
+
+impl RmcpSession {
+    fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::SeqCst)
+    }
 }
 
 impl RmcpSession {
@@ -300,6 +791,8 @@ impl RmcpSession {
                         .and_then(|v| v.as_object().cloned())
                         .unwrap_or_default(),
                 ),
+                read_only_hint: tool.annotations.as_ref().and_then(|a| a.read_only_hint),
+                destructive_hint: tool.annotations.as_ref().and_then(|a| a.destructive_hint),
             })
             .collect())
     }
@@ -324,6 +817,62 @@ impl RmcpSession {
             })
             .collect())
     }
+
+    async fn list_resources_raw(service: &ClientService) -> Result<Vec<ResourceInfo>, McpError> {
+        let resources = service.list_all_resources().await.map_err(rpc_to_mcp)?;
+        Ok(resources
+            .into_iter()
+            .map(|resource| ResourceInfo {
+                uri: resource.uri,
+                name: resource.name,
+                description: resource.description,
+                mime: resource.mime_type,
+                size: resource.size,
+            })
+            .collect())
+    }
+
+    /// `resources/read`: text inline (clipped like embedded resources),
+    /// blobs as base64 under a mime header line so the model knows what
+    /// the payload is.
+    async fn read_resource_raw(
+        &self,
+        uri: &str,
+    ) -> Result<Vec<rmcp::model::ResourceContents>, McpError> {
+        let params = rmcp::model::ReadResourceRequestParams::new(uri.to_string());
+        let result = self
+            .with_timeout(self.service.read_resource(params))
+            .await?;
+        Ok(result.contents)
+    }
+}
+
+fn render_resource_contents(contents: &[rmcp::model::ResourceContents]) -> String {
+    contents
+        .iter()
+        .map(|content| match content {
+            rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
+                let (clipped, truncated) = clip(text, MAX_RESOURCE_BYTES);
+                if truncated {
+                    format!("{clipped}\n... [output truncated]")
+                } else {
+                    clipped.into()
+                }
+            }
+            rmcp::model::ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => {
+                let mime = mime_type.clone().unwrap_or_else(|| "unknown".into());
+                format!("[base64 blob resource {uri} ({mime})]\n{blob}")
+            }
+            _ => String::new(),
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn rpc_to_mcp(e: rmcp::service::ServiceError) -> McpError {
@@ -341,12 +890,92 @@ fn arguments_object(args: &Value) -> rmcp::model::JsonObject {
     }
 }
 
-fn join_text(content: &[rmcp::model::ContentBlock]) -> String {
-    content
-        .iter()
-        .filter_map(|block| block.as_text().map(|text| text.text.clone()))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Shared `tools/call` tail for both call paths: join content blocks,
+/// append 2025-06-18 `structuredContent` as a fenced JSON block, and
+/// surface `isError` results as `RpcError`.
+fn call_tool_result_to_output(
+    server: &Arc<str>,
+    result: rmcp::model::CallToolResult,
+) -> Result<McpToolOutput, McpError> {
+    let mut output = join_content(&result.content);
+    if let Some(structured) = result.structured_content
+        && let Ok(json) = serde_json::to_string_pretty(&structured)
+    {
+        output
+            .parts
+            .push(McpPart::Text(format!("```json\n{json}\n```")));
+    }
+    if result.is_error.unwrap_or(false) {
+        return Err(McpError::RpcError {
+            server: server.to_string(),
+            code: -1,
+            message: output.joined_text(),
+        });
+    }
+    Ok(output)
+}
+
+/// Cap on an embedded resource's inlined text; beyond this the text is cut
+/// with the repo-wide truncation marker so one tool result cannot flood the
+/// context.
+const MAX_RESOURCE_BYTES: usize = 8 * 1024;
+
+/// Byte-safe clip honoring char boundaries (same contract as the tools'
+/// `clip`), kept local so the MCP layer does not depend on the tools module.
+fn clip(text: &str, max_bytes: usize) -> (&str, bool) {
+    let mut end = max_bytes.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], end < text.len())
+}
+
+fn inline_resource(resource: &rmcp::model::EmbeddedResource) -> String {
+    match &resource.resource {
+        rmcp::model::ResourceContents::TextResourceContents { uri, text, .. } => {
+            let (clipped, truncated) = clip(text, MAX_RESOURCE_BYTES);
+            if truncated {
+                format!("{clipped}\n... [output truncated] (resource {uri})")
+            } else {
+                clipped.into()
+            }
+        }
+        // Binary blobs have no textual form worth a context slot; keep the
+        // uri so the model knows where the data lives.
+        rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => {
+            format!("resource:{uri} [binary blob omitted]")
+        }
+        _ => String::new(),
+    }
+}
+
+/// Flatten a tool result's content blocks in order: text (and resource text)
+/// as text parts, images kept structured, resource links as `resource:`
+/// lines. Nothing is dropped silently.
+pub fn join_content(blocks: &[rmcp::model::ContentBlock]) -> McpToolOutput {
+    let mut parts = Vec::new();
+    for block in blocks {
+        match block {
+            rmcp::model::ContentBlock::Text(text) => parts.push(McpPart::Text(text.text.clone())),
+            rmcp::model::ContentBlock::Image(image) => {
+                parts.push(McpPart::Image(McpToolImage {
+                    data: image.data.clone(),
+                    mime: image.mime_type.clone(),
+                }));
+            }
+            rmcp::model::ContentBlock::Resource(resource) => {
+                parts.push(McpPart::Text(inline_resource(resource)));
+            }
+            rmcp::model::ContentBlock::ResourceLink(link) => {
+                parts.push(McpPart::Text(format!("resource:{}", link.uri)));
+            }
+            rmcp::model::ContentBlock::Audio(_) => {
+                parts.push(McpPart::Text("[audio content omitted]".into()));
+            }
+            _ => {}
+        }
+    }
+    McpToolOutput { parts }
 }
 
 impl McpSession for RmcpSession {
@@ -355,29 +984,177 @@ impl McpSession for RmcpSession {
     }
 
     fn list_tools(&self) -> BoxFuture<'_, Result<Vec<ToolInfo>, McpError>> {
-        Box::pin(async { Ok(self.tool_infos.clone()) })
+        Box::pin(async {
+            Ok(self
+                .tool_infos
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone())
+        })
     }
 
-    fn call_tool(&self, name: &str, args: &Value) -> BoxFuture<'_, Result<String, McpError>> {
+    fn refresh_listings(&self) -> BoxFuture<'_, Result<Listings, McpError>> {
+        Box::pin(async {
+            if self.is_dead() {
+                return Err(McpError::ServerDied {
+                    server: self.name.to_string(),
+                });
+            }
+            let tools = Self::list_tools_raw(&self.service).await?;
+            let prompts = Self::list_prompts_raw(&self.service).await?;
+            let resources = if self.has_resources {
+                Self::list_resources_raw(&self.service).await?
+            } else {
+                Vec::new()
+            };
+            *self.tool_infos.write().unwrap_or_else(|e| e.into_inner()) = tools.clone();
+            *self.prompt_infos.write().unwrap_or_else(|e| e.into_inner()) = prompts.clone();
+            *self
+                .resource_infos
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = resources.clone();
+            Ok(Listings {
+                tools,
+                prompts,
+                resources,
+            })
+        })
+    }
+
+    fn call_tool(
+        &self,
+        name: &str,
+        args: &Value,
+    ) -> BoxFuture<'_, Result<McpToolOutput, McpError>> {
+        if self.is_dead() {
+            return Box::pin(async {
+                Err(McpError::ServerDied {
+                    server: self.name.to_string(),
+                })
+            });
+        }
         let params = rmcp::model::CallToolRequestParams::new(name.to_string())
             .with_arguments(arguments_object(args));
         let fut = self.service.call_tool(params);
         Box::pin(async move {
             let result = self.with_timeout(fut).await?;
-            let text = join_text(&result.content);
-            if result.is_error.unwrap_or(false) {
-                return Err(McpError::RpcError {
+            call_tool_result_to_output(&self.name, result)
+        })
+    }
+
+    /// Phase 6: send `tools/call` as a cancellable request so the request
+    /// id stays ours. rmcp sends no `notifications/cancelled` on future
+    /// drop (`RequestHandle` has no `Drop`), so on cancel (or timeout) we
+    /// notify the server explicitly before giving up on the response.
+    fn call_tool_cancellable<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a Value,
+        cancel: &'a crate::run::CancelToken,
+    ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
+        Box::pin(async move {
+            if self.is_dead() {
+                return Err(McpError::ServerDied {
                     server: self.name.to_string(),
-                    code: -1,
-                    message: text,
                 });
             }
-            Ok(text)
+            let request =
+                rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
+                    rmcp::model::CallToolRequestParams::new(name.to_string())
+                        .with_arguments(arguments_object(args)),
+                ));
+            let peer = self.service.peer().clone();
+            let handle = peer
+                .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
+                .await
+                .map_err(|e| McpError::RpcError {
+                    server: self.name.to_string(),
+                    code: 0,
+                    message: e.to_string(),
+                })?;
+            let id = handle.id.clone();
+            let waiter = handle.await_response();
+            tokio::pin!(waiter);
+            tokio::select! {
+                result = &mut waiter => {
+                    let result = result.map_err(|e| McpError::RpcError {
+                        server: self.name.to_string(),
+                        code: 0,
+                        message: e.to_string(),
+                    })?;
+                    match result {
+                        rmcp::model::ServerResult::CallToolResult(result) => {
+                            call_tool_result_to_output(&self.name, result)
+                        }
+                        // MRTR `input_required` rounds need the session-level
+                        // `call_tool` helper; the cancellable path takes the
+                        // single-round shape (craft advertises no input mode).
+                        _ => Err(McpError::InvalidResponse {
+                            server: self.name.to_string(),
+                            reason: "unexpected tools/call response".into(),
+                        }),
+                    }
+                }
+                _ = cancel.wait() => {
+                    let _ = peer
+                        .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+                            Some(id),
+                            Some("turn cancelled".into()),
+                        ))
+                        .await;
+                    Err(McpError::Cancelled {
+                        server: self.name.to_string(),
+                    })
+                }
+                _ = tokio::time::sleep(self.timeout) => {
+                    let _ = peer
+                        .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+                            Some(id),
+                            Some("request timeout".into()),
+                        ))
+                        .await;
+                    Err(McpError::Timeout {
+                        server: self.name.to_string(),
+                        timeout_ms: self.timeout.as_millis() as u64,
+                    })
+                }
+            }
         })
     }
 
     fn list_prompts(&self) -> BoxFuture<'_, Result<Vec<PromptInfo>, McpError>> {
-        Box::pin(async { Ok(self.prompt_infos.clone()) })
+        Box::pin(async {
+            Ok(self
+                .prompt_infos
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone())
+        })
+    }
+
+    fn list_resources(&self) -> BoxFuture<'_, Result<Vec<ResourceInfo>, McpError>> {
+        Box::pin(async {
+            Ok(self
+                .resource_infos
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone())
+        })
+    }
+
+    fn read_resource<'a>(&'a self, uri: &'a str) -> BoxFuture<'a, Result<String, McpError>> {
+        if self.is_dead() {
+            return Box::pin(async {
+                Err(McpError::ServerDied {
+                    server: self.name.to_string(),
+                })
+            });
+        }
+        let uri = uri.to_string();
+        Box::pin(async move {
+            let contents = self.read_resource_raw(&uri).await?;
+            Ok(render_resource_contents(&contents))
+        })
     }
 
     fn get_prompt(
@@ -403,13 +1180,29 @@ impl McpSession for RmcpSession {
                         rmcp::model::Role::Assistant => "assistant".into(),
                         rmcp::model::Role::User => "user".into(),
                     },
-                    text: message.content.as_text().map(|text| text.text.clone()),
+                    // Non-text prompt content degrades to text: images are
+                    // noted, embedded resources inlined (same rules as tool
+                    // results), so no message is dropped for being non-text.
+                    text: match &message.content {
+                        rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
+                        rmcp::model::ContentBlock::Image(_) => Some("[image omitted]".into()),
+                        rmcp::model::ContentBlock::Resource(resource) => {
+                            Some(inline_resource(resource))
+                        }
+                        rmcp::model::ContentBlock::ResourceLink(link) => {
+                            Some(format!("resource:{}", link.uri))
+                        }
+                        rmcp::model::ContentBlock::Audio(_) => Some("[audio omitted]".into()),
+                        _ => None,
+                    },
                 })
                 .collect())
         })
     }
 
     fn shutdown(&self) -> BoxFuture<'_, ()> {
+        // Stop the keepalive pings and fail every later call fast.
+        self.dead.store(true, Ordering::SeqCst);
         // Cancelling the token terminates the transport task; kill_on_drop
         // reaps the direct child. For stdio, wrappers (npx & co.) fork
         // grandchildren the drop does not reach, so signal the whole process
@@ -425,5 +1218,364 @@ impl McpSession for RmcpSession {
             }
         }
         Box::pin(async {})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize as _;
+
+    fn text(s: &str) -> rmcp::model::ContentBlock {
+        rmcp::model::ContentBlock::text(s)
+    }
+
+    fn image(data: &str, mime: &str) -> rmcp::model::ContentBlock {
+        rmcp::model::ContentBlock::image(data, mime)
+    }
+
+    fn embedded(uri: &str, body: &str) -> rmcp::model::ContentBlock {
+        rmcp::model::ContentBlock::embedded_text(uri, body)
+    }
+
+    fn resource_link(uri: &str) -> rmcp::model::ContentBlock {
+        rmcp::model::Resource::deserialize(serde_json::json!({
+            "uri": uri,
+            "name": "n",
+        }))
+        .map(rmcp::model::ContentBlock::resource_link)
+        .unwrap()
+    }
+
+    #[test]
+    fn text_blocks_join_with_newlines() {
+        let out = join_content(&[text("a"), text("b")]);
+        assert_eq!(out.joined_text(), "a\nb");
+        assert!(!out.has_images());
+    }
+
+    #[test]
+    fn image_blocks_are_retained_structured() {
+        let out = join_content(&[text("cap"), image("QQ==", "image/png")]);
+        assert_eq!(out.joined_text(), "cap");
+        assert_eq!(out.parts.len(), 2);
+        assert!(
+            matches!(out.parts[1], McpPart::Image(ref i) if i.data == "QQ==" && i.mime == "image/png")
+        );
+    }
+
+    #[test]
+    fn embedded_resource_text_is_inlined() {
+        let out = join_content(&[embedded("file:///a.txt", "hello")]);
+        assert_eq!(out.joined_text(), "hello");
+    }
+
+    #[test]
+    fn oversized_resource_text_is_truncated() {
+        let big = "x".repeat(MAX_RESOURCE_BYTES + 100);
+        let out = join_content(&[embedded("file:///big.txt", &big)]);
+        let text = out.joined_text();
+        assert!(text.len() < big.len());
+        assert!(text.contains("... [output truncated]"), "got: {text}");
+        assert!(text.contains("file:///big.txt"));
+    }
+
+    #[test]
+    fn resource_links_render_as_uri_lines() {
+        let out = join_content(&[resource_link("file:///db")]);
+        assert_eq!(out.joined_text(), "resource:file:///db");
+    }
+
+    #[test]
+    fn blob_resources_keep_uri_drop_payload() {
+        let block = rmcp::model::ContentBlock::resource(
+            rmcp::model::ResourceContents::BlobResourceContents {
+                uri: "file:///bin".into(),
+                mime_type: Some("application/octet-stream".into()),
+                blob: "AA==".into(),
+                meta: None,
+            },
+        );
+        let text = join_content(&[block]).joined_text();
+        assert!(text.contains("resource:file:///bin"), "got: {text}");
+        assert!(!text.contains("AA=="));
+    }
+
+    #[test]
+    fn mixed_blocks_keep_order_and_parts() {
+        let out = join_content(&[
+            text("one"),
+            image("QQ==", "image/png"),
+            embedded("file:///r", "res"),
+            resource_link("file:///link"),
+            image("Aw==", "image/jpeg"),
+            text("two"),
+        ]);
+        assert_eq!(out.joined_text(), "one\nres\nresource:file:///link\ntwo");
+        // Interleaving is preserved: parts appear exactly in block order.
+        assert!(matches!(&out.parts[0], McpPart::Text(t) if t == "one"));
+        assert!(matches!(&out.parts[1], McpPart::Image(i) if i.mime == "image/png"));
+        assert!(matches!(&out.parts[4], McpPart::Image(i) if i.mime == "image/jpeg"));
+        assert!(matches!(&out.parts[5], McpPart::Text(t) if t == "two"));
+    }
+    #[test]
+    fn clip_stops_on_char_boundary() {
+        // Multibyte chars: 2 bytes each, so a 3-byte cap keeps 1 full char.
+        let s = "ééé";
+        let (clipped, truncated) = clip(s, 3);
+        assert_eq!(clipped, "é");
+        assert!(truncated);
+        let (all, truncated) = clip(s, 6);
+        assert_eq!(all, s);
+        assert!(!truncated);
+    }
+
+    /// Phase 4, end-to-end over stdio: the server issues `roots/list` and
+    /// `sampling/createMessage` back at the client. Roots answer straight
+    /// from the threaded workspace root; sampling (and elicitation, same
+    /// seam) deny cleanly when no frontend is attached — here the events
+    /// carry no `server_requests` sender, the headless shape.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn server_to_client_requests_roots_and_sampling() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // no python3 on this host; skip rather than fail
+        }
+        const SCRIPT: &str = r#"
+import json, sys
+roots, sampling_error = None, None
+def send(msg): sys.stdout.write(json.dumps(msg) + "\n"); sys.stdout.flush()
+for line in sys.stdin:
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":rid,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"asker","version":"1"}}})
+        send({"jsonrpc":"2.0","id":"r1","method":"roots/list"})
+        send({"jsonrpc":"2.0","id":"s1","method":"sampling/createMessage","params":{"messages":[{"role":"user","content":{"type":"text","text":"hi"}}],"maxTokens":16}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":rid,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
+    elif method == "prompts/list":
+        send({"jsonrpc":"2.0","id":rid,"result":{"prompts":[]}})
+    elif method == "tools/call":
+        send({"jsonrpc":"2.0","id":rid,"result":{"content":[{"type":"text","text":json.dumps({"roots": roots, "sampling_error": sampling_error})}],"isError":False}})
+    elif method is None and rid == "r1":
+        roots = req.get("result", {}).get("roots")
+    elif method is None and rid == "s1":
+        sampling_error = req.get("error", {}).get("message")
+"#;
+        let config = ServerConfig {
+            name: "asker".into(),
+            timeout: Duration::from_secs(5),
+            transport: Transport::Stdio {
+                program: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), SCRIPT.into()],
+                environment: HashMap::new(),
+            },
+        };
+        let events = McpEvents {
+            root: Some(std::path::PathBuf::from("/craft/phase4/cwd")),
+            ..McpEvents::default()
+        };
+        let session = start_session(&config, events)
+            .await
+            .expect("connect mock server");
+
+        let reply = session
+            .call_tool("echo", &serde_json::json!({}))
+            .await
+            .unwrap()
+            .joined_text();
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("tool echoes JSON");
+        assert_eq!(
+            value["sampling_error"]
+                .as_str()
+                .expect("sampling denied with an error"),
+            "sampling denied: no frontend is attached"
+        );
+        let roots = value["roots"].as_array().expect("roots answered");
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0]["uri"], "file:///craft/phase4/cwd");
+
+        session.shutdown().await;
+    }
+
+    /// Phase 6, unit: cancelling the token resolves a pending
+    /// `call_tool_cancellable` promptly — before the server answers and
+    /// well before any request timeout — with `McpError::Cancelled`.
+    #[tokio::test]
+    async fn cancelling_the_token_resolves_a_pending_call_promptly() {
+        struct HangingSession;
+        impl McpSession for HangingSession {
+            fn server_name(&self) -> &str {
+                "hang"
+            }
+            fn list_tools(&self) -> BoxFuture<'_, Result<Vec<ToolInfo>, McpError>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn call_tool(
+                &self,
+                name: &str,
+                _args: &Value,
+            ) -> BoxFuture<'_, Result<McpToolOutput, McpError>> {
+                let name = name.to_string();
+                Box::pin(async move {
+                    // Never answers: only cancellation can end this call.
+                    std::future::pending::<()>().await;
+                    unreachable!("pending never resolves for {name}");
+                })
+            }
+            fn call_tool_cancellable<'a>(
+                &'a self,
+                name: &'a str,
+                args: &'a Value,
+                cancel: &'a crate::run::CancelToken,
+            ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
+                race_call_cancel(self, name, args, cancel)
+            }
+            fn list_prompts(&self) -> BoxFuture<'_, Result<Vec<PromptInfo>, McpError>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn get_prompt(
+                &self,
+                _name: &str,
+                _arguments: &HashMap<String, String>,
+            ) -> BoxFuture<'_, Result<Vec<PromptMessage>, McpError>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn shutdown(&self) -> BoxFuture<'_, ()> {
+                Box::pin(async {})
+            }
+        }
+
+        let session = HangingSession;
+        let (flag, token) = crate::run::cancel_channel();
+        let args = serde_json::json!({});
+        let call = session.call_tool_cancellable("tool", &args, &token);
+        tokio::pin!(call);
+        // Give the call a beat to park on the (never-answering) session,
+        // then cancel the turn.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        flag.set(true);
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut call)
+            .await
+            .expect("cancelled call resolves promptly");
+        assert!(
+            matches!(result, Err(McpError::Cancelled { .. })),
+            "expected Cancelled, got {result:?}"
+        );
+    }
+
+    /// Phase 6, end-to-end over stdio: a cancelled turn tells the server to
+    /// stop the in-flight tool call. The mock server parks the `tools/call`
+    /// and records receipt of `notifications/cancelled` to an evidence file
+    /// (the only channel a child process can hand back); the test waits for
+    /// that record and checks it names the parked request id.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_turn_notifies_the_server_to_stop() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // no python3 on this host; skip rather than fail
+        }
+        const SCRIPT: &str = r#"
+import json, os, sys
+def send(msg): sys.stdout.write(json.dumps(msg) + "\n"); sys.stdout.flush()
+evidence = os.environ.get("CANCEL_EVIDENCE")
+pending = None
+for line in sys.stdin:
+    msg = json.loads(line)
+    method, rid = msg.get("method"), msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":rid,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"hanger","version":"1"}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":rid,"result":{"tools":[{"name":"hang","description":"Hangs until cancelled","inputSchema":{"type":"object"}}]}})
+    elif method == "prompts/list":
+        send({"jsonrpc":"2.0","id":rid,"result":{"prompts":[]}})
+    elif method == "tools/call":
+        pending = rid
+    elif method == "notifications/cancelled":
+        if evidence:
+            with open(evidence, "a") as f:
+                f.write("cancelled " + json.dumps(msg.get("params", {}).get("requestId")) + "\n")
+        # Answer so the connection stays clean for shutdown; the client
+        # has already given up on the result.
+        if pending is not None:
+            send({"jsonrpc":"2.0","id":pending,"result":{"content":[{"type":"text","text":"stopped"}],"isError":False}})
+            pending = None
+"#;
+        let evidence = std::env::temp_dir().join(format!(
+            "craft-mcp-cancel-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = ServerConfig {
+            name: "hanger".into(),
+            timeout: Duration::from_secs(30),
+            transport: Transport::Stdio {
+                program: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), SCRIPT.into()],
+                environment: HashMap::from([(
+                    "CANCEL_EVIDENCE".into(),
+                    evidence.display().to_string(),
+                )]),
+            },
+        };
+        let session = start_session(&config, McpEvents::default())
+            .await
+            .expect("connect mock server");
+
+        let (flag, token) = crate::run::cancel_channel();
+        let args = serde_json::json!({});
+        let call = session.call_tool_cancellable("hang", &args, &token);
+        tokio::pin!(call);
+        // Let the request reach the server before cancelling the turn.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        flag.set(true);
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut call)
+            .await
+            .expect("cancelled call resolves promptly");
+        assert!(
+            matches!(result, Err(McpError::Cancelled { .. })),
+            "expected Cancelled, got {result:?}"
+        );
+        // The server's own record: it received notifications/cancelled
+        // naming the in-flight tools/call request id.
+        let record = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&evidence)
+                    && !text.is_empty()
+                {
+                    return text;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("server recorded the cancel notification");
+        assert!(
+            record.starts_with("cancelled "),
+            "unexpected evidence record: {record}"
+        );
+        assert_ne!(
+            record.trim(),
+            "cancelled null",
+            "cancel notification named no request id: {record}"
+        );
+        let _ = std::fs::remove_file(&evidence);
+        session.shutdown().await;
     }
 }

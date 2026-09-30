@@ -318,7 +318,7 @@ fn emit_reply(tx: &mpsc::UnboundedSender<AgentEvent>, streamed: bool, reply: &st
     }
 }
 
-async fn resolve_model(
+pub(super) async fn resolve_model(
     config: &Config,
     selection: &Selection,
 ) -> Result<crate::providers::DynamicModel, String> {
@@ -654,7 +654,8 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
             tx.clone(),
             cancel.clone(),
         )))
-        .with_subagents(subagents);
+        .with_subagents(subagents)
+        .with_cancel(cancel.clone());
     // B.11: the first prompt must not ship without the MCP tools, but a
     // hung server can't block the turn forever — the gate times out and
     // the turn proceeds with whatever has landed.
@@ -671,6 +672,12 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
                  continuing without their tools"
             ),
         });
+    }
+    // Phase 3: feed MCP tool annotations to the permission engine before the
+    // tool table is built; sync is generation-keyed, so steady-state turns
+    // are a no-op.
+    if let Some(mcp) = workspace.mcp() {
+        permissions.sync_mcp_annotations(&mcp);
     }
     let tools = workspace
         .register_with_mode(mode.clone())

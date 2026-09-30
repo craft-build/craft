@@ -914,33 +914,37 @@ pub fn render_mcp(f: &mut Frame, app: &App, area: Rect) {
         .as_ref()
         .map(|handle| handle.reader())
         .unwrap_or_else(crate::mcp::McpSnapshotReader::empty);
-    render_mcp_sheet(f, &reader, *selected, area);
+    render_mcp_sheet(f, &reader, *selected, app.overlays.mcp_expanded, area);
 }
 
 /// The `/mcp` sheet itself, drawn from any snapshot reader so tests can
 /// feed it a hand-built snapshot. One row per server — name, transport,
-/// tool/prompt counts on the left, status (color-coded) on the right —
-/// plus a detail line carrying the auth URL of a NeedsAuth server.
+/// tool/prompt/resource counts on the left, status (color-coded) on the
+/// right — plus a detail line carrying the auth URL of a NeedsAuth server,
+/// and the expanded server's resources (name + uri) under its row.
 fn render_mcp_sheet(
     f: &mut Frame,
     reader: &crate::mcp::McpSnapshotReader,
     selected: usize,
+    expanded: Option<usize>,
     area: Rect,
 ) {
     let t = theme::current();
     dim(f, area);
-    let infos = reader.load().infos.clone();
+    let snapshot = reader.load();
+    let infos = snapshot.infos.clone();
+    let resources = snapshot.resources.clone();
 
     // Row plan: every server's header row (the one the selection marks),
     // plus a detail row for NeedsAuth / Failed servers.
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     let mut header_rows: Vec<usize> = Vec::new();
-    for info in &infos {
+    for (i, info) in infos.iter().enumerate() {
         header_rows.push(rows.len());
         let (status_label, status_color) = mcp_status_style(info);
         let left = format!(
-            " {} · {} · {} tools · {} prompts",
-            info.name, info.transport_kind, info.tool_count, info.prompt_count
+            " {} · {} · {} tools · {} prompts · {} resources",
+            info.name, info.transport_kind, info.tool_count, info.prompt_count, info.resource_count
         );
         let status = status_label.to_string();
         let gap = 76usize.saturating_sub(left.chars().count() + status.chars().count());
@@ -957,10 +961,28 @@ fn render_mcp_sheet(
                 Style::default().fg(t.danger),
             )]);
         }
+        if expanded == Some(i) {
+            let server_resources: Vec<_> =
+                resources.iter().filter(|r| r.server == info.name).collect();
+            if server_resources.is_empty() {
+                rows.push(vec![Span::styled(
+                    "   (no resources)".to_string(),
+                    Style::default().fg(t.text_tertiary),
+                )]);
+            } else {
+                for resource in server_resources {
+                    rows.push(vec![Span::styled(
+                        format!("   {} — {}", resource.name, resource.uri),
+                        Style::default().fg(t.text_secondary),
+                    )]);
+                }
+            }
+        }
     }
 
     let width = 78.min(area.width.saturating_sub(4));
-    let n = rows.len().clamp(1, 10) as u16;
+    // 16 not 10: an expanded resource list adds rows under its server.
+    let n = rows.len().clamp(1, 16) as u16;
     let rect = centered(width, n + 4, area);
     f.render_widget(Clear, rect);
     let block = boxed(rect);
@@ -968,7 +990,7 @@ fn render_mcp_sheet(
     f.render_widget(block, rect);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "MCP servers — t toggle, r reconnect, esc close",
+            "MCP servers — t toggle, r reconnect, enter resources, esc close",
             Style::default()
                 .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
@@ -1285,6 +1307,7 @@ mod tests {
             transport_kind: "stdio",
             tool_count: 3,
             prompt_count: 1,
+            resource_count: 0,
             status,
             config_path: PathBuf::new(),
             url: None,
@@ -1311,11 +1334,12 @@ mod tests {
                 ),
             ],
             prompts: Vec::new(),
+            resources: Vec::new(),
             generation: 1,
         });
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
-            .draw(|f| render_mcp_sheet(f, &reader, 0, f.area()))
+            .draw(|f| render_mcp_sheet(f, &reader, 0, None, f.area()))
             .unwrap();
         let text = buffer_text(&terminal);
         for needle in [
@@ -1336,6 +1360,53 @@ mod tests {
         }
     }
 
+    /// Phase 5: the sheet shows the resource count, and Enter-expanded
+    /// state renders the server's resources (name + uri) under its row.
+    #[test]
+    fn mcp_sheet_renders_expanded_resources() {
+        let mut info = server_info("res-srv", McpServerStatus::Running);
+        info.resource_count = 2;
+        let reader = McpSnapshotReader::from_snapshot(McpSnapshot {
+            infos: vec![info],
+            prompts: Vec::new(),
+            resources: vec![
+                crate::mcp::McpResourceInfo {
+                    server: "res-srv".into(),
+                    uri: "file:///notes.txt".into(),
+                    name: "notes".into(),
+                    description: String::new(),
+                    mime: Some("text/plain".into()),
+                    size: Some(12),
+                },
+                crate::mcp::McpResourceInfo {
+                    server: "res-srv".into(),
+                    uri: "db://users".into(),
+                    name: "users".into(),
+                    description: String::new(),
+                    mime: None,
+                    size: None,
+                },
+            ],
+            generation: 1,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| render_mcp_sheet(f, &reader, 0, Some(0), f.area()))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("2 resources"), "{text}");
+        assert!(text.contains("notes — file:///notes.txt"), "{text}");
+        assert!(text.contains("users — db://users"), "{text}");
+
+        // Collapsed: the resource rows are absent but the count remains.
+        terminal
+            .draw(|f| render_mcp_sheet(f, &reader, 0, None, f.area()))
+            .unwrap();
+        let collapsed = buffer_text(&terminal);
+        assert!(collapsed.contains("2 resources"));
+        assert!(!collapsed.contains("file:///notes.txt"));
+    }
+
     /// An empty snapshot (no servers configured) still renders the sheet
     /// with its placeholder row instead of panicking.
     #[test]
@@ -1343,7 +1414,7 @@ mod tests {
         let reader = McpSnapshotReader::empty();
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
-            .draw(|f| render_mcp_sheet(f, &reader, 0, f.area()))
+            .draw(|f| render_mcp_sheet(f, &reader, 0, None, f.area()))
             .unwrap();
         assert!(buffer_text(&terminal).contains("no MCP servers configured"));
     }

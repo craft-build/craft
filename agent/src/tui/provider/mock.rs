@@ -418,6 +418,12 @@ impl Provider for MockProvider {
                     Command::SetDraft(_) => {
                         // No persistence behind the scripted demo.
                     }
+                    Command::RunMcpPrompt { .. } => {
+                        let _ = evt_tx.send(AgentEvent::Notice {
+                            tone: Tone::Neutral,
+                            text: "the mock provider has no MCP servers".into(),
+                        });
+                    }
                     Command::CancelSubagent { .. } => {
                         // The mock spawns no subagents; the parent turn
                         // just carries on (mirrors the live provider).

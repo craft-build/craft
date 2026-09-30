@@ -76,7 +76,7 @@ fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
 /// Record a user answer, persisting "always" answers to permissions.bml
 /// (project-local for `*AlwaysLocal`). Write failures degrade to the session
 /// grant — the answer still applies now, it just may be asked again later.
-fn record_answer(
+pub(super) fn record_answer(
     permissions: &PermissionManager,
     tool: &ToolKey,
     scopes: &[String],
@@ -214,14 +214,23 @@ async fn gate_decide(
         return Decision::Stop("cancelled by client".into());
     }
     let name = call.function.name.as_str();
-    let tool = ToolKey::native(name);
+    let tool = ToolKey::parse(name);
     let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &call.function.arguments);
     match permissions.check_multi(&tool, &scopes, force_prompt) {
         PermissionCheck::Allowed => return Decision::Run,
         PermissionCheck::Denied => {
             return Decision::Skip(denied_message(&tool, &scopes));
         }
-        PermissionCheck::NeedsPrompt { .. } => {}
+        PermissionCheck::NeedsPrompt { low_risk, .. } => {
+            // Phase 3: a server-declared read-only tool still prompts, but the
+            // card can phrase it in a neutral, low-risk tone.
+            if low_risk {
+                let _ = tx.send(AgentEvent::Notice {
+                    tone: Tone::Neutral,
+                    text: "server declares this tool read-only (low risk)".into(),
+                });
+            }
+        }
     }
     let id = call.id.clone();
     if permissions.is_auto_review()
@@ -371,6 +380,43 @@ mod tests {
             let decision = pending.await.unwrap();
             assert!(matches!(decision, Decision::Skip(_)), "{name}");
         }
+    }
+
+    /// B.11: an MCP wire-name tool call parks on the approval seam under the
+    /// default config — it is promptable, never a hard deny — and an
+    /// allow-session answer keys the rule as `McpTool`.
+    #[tokio::test]
+    async fn mcp_wire_tool_prompts_and_grants_as_mcp_key() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::env::temp_dir(),
+        ));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (flag, cancel) = crate::run::cancel_channel();
+        let gate = ApprovalGate::new(state.clone(), tx, cancel, permissions.clone(), None);
+        let _ = flag;
+        let pending =
+            tokio::spawn(async move { gate.decide(tool_call("t1", "github__create_issue")).await });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while state.lock().await.pending_approval.is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mcp tool never parked"
+            );
+            tokio::task::yield_now().await;
+        }
+        decide(&state, "t1".into(), PermissionAnswer::AllowSession).await;
+        assert!(matches!(pending.await.unwrap(), Decision::Run));
+
+        let tool = ToolKey::parse("github__create_issue");
+        assert!(
+            permissions
+                .session_rules_snapshot()
+                .iter()
+                .any(|r| r.tool == tool && r.effect == crate::permissions::Effect::Allow),
+            "session grant not keyed as an MCP tool"
+        );
     }
 
     #[tokio::test]

@@ -290,6 +290,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             .workspace
             .clone()
             .with_subagents(subagents)
+            .with_cancel(cancel.clone())
             .register();
         if let Some(hook) = params.before {
             tools = attach_before(tools, hook);
@@ -461,7 +462,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 workspace: params.workspace.clone(),
                 history: history.clone(),
                 cancel: cancel.clone(),
-            cancels: Arc::new(crate::run::cancel::CancelMap::new()),
+                cancels: Arc::new(crate::run::cancel::CancelMap::new()),
                 emit: Arc::new(move |event| turn_event_tx.send(event)),
                 before: params.before.clone(),
             });

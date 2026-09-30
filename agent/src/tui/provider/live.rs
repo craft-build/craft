@@ -9,6 +9,7 @@
 //! explicit user decision.
 
 mod approval;
+mod mcp_request;
 mod question;
 mod turn;
 mod usage_recorder;
@@ -361,6 +362,9 @@ pub struct CraftProvider {
     /// MCP client handle (B.11): installed on the workspace before the
     /// first turn and cloned into the app for the `/mcp` screen.
     mcp: Option<crate::mcp::McpHandle>,
+    /// Receiver for events the MCP manager emits through `McpEvents`
+    /// (log-notification notices); drained by `start`'s provider loop.
+    mcp_evt_rx: mpsc::UnboundedReceiver<AgentEvent>,
 }
 
 impl CraftProvider {
@@ -404,8 +408,22 @@ impl CraftProvider {
         let mut notes = Vec::new();
         // B.11: start the MCP client up front but never await `ready` here —
         // the first frame must not block on a slow server initialize. The
-        // turn path awaits the gate before registering tools.
-        let (mcp, mcp_errors) = crate::mcp::start(cwd).await;
+        // turn path awaits the gate before registering tools. The event
+        // channel is created here (before `start` consumes the provider) so
+        // MCP log notifications can reach the TUI as AgentEvents.
+        let (mcp_evt_tx, mcp_evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let mcp_events = crate::mcp::McpEvents {
+            on_log: Some(Arc::new(move |_server, level, message| {
+                // Warning-or-worse only: the session layer routes info-level
+                // logs to tracing.
+                let _ = mcp_evt_tx.send(AgentEvent::Notice {
+                    tone: Tone::Warning,
+                    text: format!("[{level}] {message}"),
+                });
+            })),
+            ..Default::default()
+        };
+        let (mcp, mcp_errors) = crate::mcp::start_with_events(cwd, mcp_events).await;
         if !mcp_errors.is_empty() {
             notes.push(format!("mcp: {mcp_errors}"));
         }
@@ -506,6 +524,7 @@ impl CraftProvider {
             resume_latest: false,
             resume_session: None,
             mcp,
+            mcp_evt_rx,
         })
     }
 
@@ -629,6 +648,13 @@ impl CraftProvider {
         // Messages submitted while a turn is still running queue here and
         // are sent, in order, when that turn settles (never aborting it).
         let mut pending_messages: VecDeque<PendingMessage> = VecDeque::new();
+        // Phase 4: server-initiated MCP requests (sampling, elicitation)
+        // arrive on their own channel; each is answered on its own task so a
+        // slow model call or a parked form never blocks the command loop.
+        let mut server_requests = ctx
+            .workspace
+            .mcp()
+            .and_then(|handle| handle.take_server_requests());
 
         let _ = evt_tx.send(AgentEvent::SessionInfo {
             cwd: self.cwd_label,
@@ -678,6 +704,27 @@ impl CraftProvider {
                         .await;
                     continue;
                 }
+                req = async { server_requests.as_mut().expect("polled only when present").recv().await },
+                    if server_requests.is_some() => {
+                    match req {
+                        Some(request) => {
+                            mcp_request::spawn_server_request(
+                                mcp_request::ServerRequestCtx {
+                                    state: ctx.state.clone(),
+                                    evt_tx: ctx.evt_tx.clone(),
+                                    permissions: ctx.permissions.clone(),
+                                    config: ctx.config.clone(),
+                                    selection: selection.clone(),
+                                },
+                                request,
+                            );
+                        }
+                        // Every session dropped its sender (shutdown); stop
+                        // polling the closed channel.
+                        None => server_requests = None,
+                    }
+                    continue;
+                }
             };
             // A turn that finished on its own leaves its handle behind;
             // drop it so the turn-running guards (undo/compact/load)
@@ -698,6 +745,22 @@ impl CraftProvider {
                     .await
                 }
                 Command::Shell { command, visible } => handle_shell(&ctx, command, visible),
+                Command::RunMcpPrompt {
+                    qualified,
+                    arguments,
+                    mode,
+                } => {
+                    handle_mcp_prompt(
+                        &ctx,
+                        &selection,
+                        &mut current_turn,
+                        &mut pending_messages,
+                        qualified,
+                        arguments,
+                        mode,
+                    )
+                    .await
+                }
                 Command::Approve { id, always } => {
                     let answer = if always {
                         PermissionAnswer::AllowAlwaysLocal
@@ -809,6 +872,81 @@ async fn handle_send_message(
     // history directly would race the running turn's whole-history commit.
     drain_shell_results(&ctx.shell, &ctx.state).await;
     *current_turn = Some(start_turn(ctx, selection, text, mode, images));
+}
+
+/// `Command::RunMcpPrompt` (`/server:name`): render the prompt on its
+/// server, then send the rendered messages as a normal user turn (queueing
+/// behind a running turn like any other submit). Render failures deny with
+/// a notice instead of a turn.
+async fn handle_mcp_prompt(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &mut Option<AbortHandle>,
+    pending: &mut VecDeque<PendingMessage>,
+    qualified: String,
+    arguments: std::collections::HashMap<String, String>,
+    mode: crate::run::AgentMode,
+) {
+    let Some(handle) = ctx.workspace.mcp() else {
+        notice(ctx, Tone::Danger, "no MCP servers are running").await;
+        return;
+    };
+    match handle.get_prompt(&qualified, &arguments).await {
+        Ok(messages) => {
+            let text = render_prompt_messages(&messages);
+            if text.trim().is_empty() {
+                notice(
+                    ctx,
+                    Tone::Warning,
+                    format!("prompt {qualified} rendered no text"),
+                )
+                .await;
+                return;
+            }
+            handle_send_message(
+                ctx,
+                selection,
+                current_turn,
+                pending,
+                text,
+                mode,
+                Vec::new(),
+            )
+            .await;
+        }
+        Err(err) => {
+            notice(
+                ctx,
+                Tone::Danger,
+                format!("prompt {qualified} failed: {err}"),
+            )
+            .await;
+        }
+    }
+}
+
+/// Flatten rendered prompt messages into one prompt: user messages are the
+/// prompt body; other roles keep their text so context the server prepends
+/// (e.g. an assistant example) is not silently dropped.
+fn render_prompt_messages(messages: &[crate::mcp::session::PromptMessage]) -> String {
+    let mut out = Vec::new();
+    for message in messages {
+        if let Some(text) = message.text.as_deref().filter(|t| !t.trim().is_empty()) {
+            if message.role == "user" {
+                out.push(text.to_string());
+            } else {
+                out.push(format!("[{}]\n{text}", message.role));
+            }
+        }
+    }
+    out.join("\n\n")
+}
+
+async fn notice(ctx: &LoopCtx, tone: Tone, text: impl Into<String>) {
+    let _ = ctx.evt_tx.send(AgentEvent::Notice {
+        tone,
+        text: text.into(),
+    });
 }
 
 /// Drop a settled turn's handle and, if messages queued behind it, send
@@ -1199,8 +1337,19 @@ impl Provider for CraftProvider {
     ) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
         let (evt_tx, evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        // Forward MCP log notices into the same stream the TUI already reads.
+        let mut this = self;
+        let mut mcp_evt_rx = std::mem::replace(&mut this.mcp_evt_rx, mpsc::unbounded_channel().1);
+        let forward_tx = evt_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = mcp_evt_rx.recv().await {
+                if forward_tx.send(event).is_err() {
+                    break;
+                }
+            }
+        });
 
-        tokio::spawn(self.spawn_command_loop(cmd_rx, evt_tx));
+        tokio::spawn(this.spawn_command_loop(cmd_rx, evt_tx));
 
         (cmd_tx, evt_rx)
     }
