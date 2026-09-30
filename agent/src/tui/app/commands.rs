@@ -31,11 +31,11 @@ pub struct CommandSpec {
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "new",
-        slash: None,
+        slash: Some("/new"),
         alias: None,
         label: "New session",
-        hint: "",
-        desc: "",
+        hint: "/new",
+        desc: "Start a new session",
     },
     CommandSpec {
         id: "resume",
@@ -919,6 +919,25 @@ mod tests {
             ),
             "invocation not echoed"
         );
+    }
+
+    /// `/new` is a first-class slash command: it completes and starts a
+    /// fresh session (conversation reset plus a provider `Reset`).
+    #[test]
+    fn new_slash_starts_a_session() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.conversation
+            .messages
+            .push(Message::Assistant("hello".into()));
+        app.composer.text = "/ne".into();
+        assert!(
+            app.slash_matches().iter().any(|(cmd, _)| *cmd == "/new"),
+            "/new missing from completion"
+        );
+        app.run_slash("/new", &tx);
+        assert!(app.conversation.messages.is_empty());
+        assert!(matches!(rx.try_recv(), Ok(Command::Reset)));
     }
 
     /// B.11: `/mcp` appears in slash completion and opens the server
