@@ -328,7 +328,7 @@ mod tests {
     /// "Clear context and implement" resets the conversation first.
     #[test]
     fn clear_and_implement_resets_context() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut app, _dir) = plan_mode_app_with_written_plan();
         app.plan_mode.plan_form.on_plan_ready();
         app.conversation
@@ -348,6 +348,12 @@ mod tests {
                 .messages
                 .iter()
                 .all(|m| !matches!(m, crate::tui::app::Message::User(t) if t == "old"))
+        );
+        // The provider clears the session (and zeroes the context counter)
+        // only via `Reset`; `Clear` is the weaker sibling that keeps files.
+        assert!(
+            matches!(rx.try_recv(), Ok(Command::Reset)),
+            "clear-and-implement resets the session through the provider"
         );
     }
 

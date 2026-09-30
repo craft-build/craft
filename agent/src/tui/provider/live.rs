@@ -1199,6 +1199,28 @@ async fn handle_clear(
     selection: &Selection,
     current_turn: &mut Option<AbortHandle>,
 ) {
+    reset_session(ctx, selection, current_turn, false).await;
+}
+
+/// `Command::Reset`: like `Clear`, plus dropped files and reset chrome.
+async fn handle_reset(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &mut Option<AbortHandle>,
+) {
+    reset_session(ctx, selection, current_turn, true).await;
+}
+
+/// Shared teardown for `Clear` and `Reset`: interrupt any running turn, drop
+/// queued shell results, swap in a fresh linked session, and report an idle
+/// session with its context counter zeroed. `clear_files` additionally drops
+/// the tracked file set and clears its chrome (`Reset`).
+async fn reset_session(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &mut Option<AbortHandle>,
+    clear_files: bool,
+) {
     interrupt(ctx, current_turn);
     {
         let mut shell = ctx.shell.lock().unwrap_or_else(|e| e.into_inner());
@@ -1213,32 +1235,17 @@ async fn handle_clear(
         &ctx.cwd,
         &LoopCtx::model_spec(selection),
     );
-    let _ = ctx.evt_tx.send(AgentEvent::AssistantEnd);
-    let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
-}
-
-/// `Command::Reset`: like `Clear`, plus dropped files and reset chrome.
-async fn handle_reset(
-    ctx: &LoopCtx,
-    selection: &Selection,
-    current_turn: &mut Option<AbortHandle>,
-) {
-    interrupt(ctx, current_turn);
-    {
-        let mut shell = ctx.shell.lock().unwrap_or_else(|e| e.into_inner());
-        shell.clear_results();
-        shell.cancel_all();
+    if clear_files {
+        ctx.files.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
-    *ctx.state.lock().await = SessionState::linked().with_store(
-        ctx.state_dir.as_ref(),
-        &ctx.cwd,
-        &LoopCtx::model_spec(selection),
-    );
-    ctx.files.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let _ = ctx.evt_tx.send(AgentEvent::AssistantEnd);
-    let _ = ctx.evt_tx.send(AgentEvent::FilesSet(Vec::new()));
-    let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+    if clear_files {
+        let _ = ctx.evt_tx.send(AgentEvent::FilesSet(Vec::new()));
+    }
+    // Zero the composer's context counter: the fresh session holds no
+    // context, so a stale label would misreport usage until the next turn.
     let _ = ctx.evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
+    let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
 }
 
 /// `Command::Undo`: refuse while a turn is running, then roll the
@@ -1703,5 +1710,42 @@ mod tests {
                 if text.contains("unknown session id")),
             "{event:?}"
         );
+    }
+
+    /// `/clear` and `/new` both zero the composer's context counter: the
+    /// fresh session carries no context, so the provider must emit a `0.0K`
+    /// label or the old usage lingers until the next turn reports fresh.
+    #[tokio::test]
+    async fn clear_and_reset_zero_the_context_counter() {
+        for clear in [true, false] {
+            let state = Arc::new(Mutex::new(SessionState::linked()));
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let ctx = LoopCtx {
+                evt_tx: tx,
+                ..test_ctx(state)
+            };
+            let selection = Selection {
+                provider: "mock".into(),
+                model: "model".into(),
+                context_length: None,
+            };
+            let mut current_turn = None;
+            if clear {
+                handle_clear(&ctx, &selection, &mut current_turn).await;
+            } else {
+                handle_reset(&ctx, &selection, &mut current_turn).await;
+            }
+
+            let mut zeroed = false;
+            while let Ok(event) = rx.try_recv() {
+                if let AgentEvent::TokenUsage(label) = event {
+                    zeroed = label == "0.0K";
+                }
+            }
+            assert!(
+                zeroed,
+                "clear={clear}: the reset must zero the context counter"
+            );
+        }
     }
 }
