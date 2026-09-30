@@ -123,6 +123,57 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// Greedy word wrap over styled spans (hard-splitting overlong words),
+/// preserving styles across wrapped rows. Mirrors `wrap_rows` semantics:
+/// breaks after the last space that fits, otherwise hard-splits in cells.
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    if width == 0 {
+        return vec![spans];
+    }
+    let cells: Vec<(char, Style)> = spans
+        .iter()
+        .flat_map(|s| s.content.chars().map(|c| (c, s.style)))
+        .collect();
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < cells.len() {
+        let (mut w, mut end) = (0, start);
+        while end < cells.len() {
+            let cw = cells[end].0.width().unwrap_or(0);
+            if w + cw > width {
+                break;
+            }
+            w += cw;
+            end += 1;
+        }
+        let (mut row_end, mut next) = (end, end);
+        if end < cells.len()
+            && let Some(i) = (start + 1..=end).rev().find(|&i| cells[i - 1].0 == ' ')
+        {
+            row_end = i - 1;
+            next = i;
+        }
+        rows.push(run_length_spans(&cells[start..row_end]));
+        start = next;
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows
+}
+
+/// Merge consecutive same-styled chars back into spans.
+fn run_length_spans(cells: &[(char, Style)]) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    for (c, st) in cells {
+        match out.last_mut() {
+            Some(last) if last.style == *st => last.content.to_mut().push(*c),
+            _ => out.push(Span::styled(c.to_string(), *st)),
+        }
+    }
+    out
+}
+
 fn surface_style() -> Style {
     Style::default().bg(theme::current().bg_surface)
 }
@@ -489,7 +540,7 @@ fn tool_block(
         width: usize,
         card_bg: ratatui::style::Color,
         surf: Style,
-    ) -> Line<'static> {
+    ) -> Vec<Line<'static>> {
         let t = theme::current();
         let (sign, fg, bg) = if is_add {
             ("+ ", t.diff_add_text, t.diff_add_bg)
@@ -505,15 +556,27 @@ fn tool_block(
             .filter(|s| !s.is_empty());
         let content = styled_diff_spans(&ln.text, segs.as_deref(), &ln.emph, base, emph_style);
 
-        let mut spans = vec![Span::styled(" ".repeat(BODY_INDENT), surf)];
-        spans.push(gutter_span(ln.nr, gutter_w, card_bg));
-        spans.push(Span::styled(sign, base));
-        spans.extend(content);
-        let w = spans_width(&spans);
-        if w < width {
-            spans.push(Span::styled(" ".repeat(width - w), Style::default().bg(bg)));
+        let lead = vec![
+            Span::styled(" ".repeat(BODY_INDENT), surf),
+            gutter_span(ln.nr, gutter_w, card_bg),
+            Span::styled(sign.to_string(), base),
+        ];
+        let avail = width.saturating_sub(spans_width(&lead)).max(1);
+        let mut rows = wrap_spans(content, avail)
+            .into_iter()
+            .map(|content| {
+                let mut spans = [lead.clone(), content].concat();
+                let w = spans_width(&spans);
+                if w < width {
+                    spans.push(Span::styled(" ".repeat(width - w), Style::default().bg(bg)));
+                }
+                Line::from(spans)
+            })
+            .collect::<Vec<Line<'static>>>();
+        if rows.is_empty() {
+            rows.push(pad_row(lead, width, surf));
         }
-        Line::from(spans)
+        rows
     }
 
     // --- body truncation (ported from the reference's tool display) ---
@@ -580,8 +643,8 @@ fn tool_block(
         _ => None,
     };
     for ln in shown {
-        let row = match ln.kind {
-            LineKind::Gap if is_edit => pad_row(
+        match ln.kind {
+            LineKind::Gap if is_edit => lines.push(pad_row(
                 vec![
                     Span::styled(indent.clone(), surf),
                     Span::styled(
@@ -591,27 +654,39 @@ fn tool_block(
                 ],
                 width,
                 surf,
-            ),
-            LineKind::Add if is_edit => diff_row(ln, true, gutter_w, &mut hl, width, card_bg, surf),
-            LineKind::Del if is_edit => {
-                diff_row(ln, false, gutter_w, &mut hl, width, card_bg, surf)
-            }
+            )),
+            LineKind::Add if is_edit => lines.append(&mut diff_row(
+                ln, true, gutter_w, &mut hl, width, card_bg, surf,
+            )),
+            LineKind::Del if is_edit => lines.append(&mut diff_row(
+                ln, false, gutter_w, &mut hl, width, card_bg, surf,
+            )),
             LineKind::Add | LineKind::Del => {
                 let (sign, fg, bg) = if ln.kind == LineKind::Add {
                     ("+ ", t.diff_add_text, t.diff_add_bg)
                 } else {
                     ("- ", t.diff_del_text, t.diff_del_bg)
                 };
-                let text = format!("{sign}{}", ln.text);
-                let mut spans = vec![
-                    Span::styled(indent.clone(), surf),
-                    Span::styled(text, Style::default().fg(fg).bg(bg)),
-                ];
-                let w = spans_width(&spans);
-                if w < width {
-                    spans.push(Span::styled(" ".repeat(width - w), Style::default().bg(bg)));
-                }
-                Line::from(spans)
+                let fill = Style::default().bg(bg);
+                let lead = vec![Span::styled(indent.clone(), surf), Span::styled(sign, fill)];
+                let content = vec![Span::styled(
+                    ln.text.clone(),
+                    Style::default().fg(fg).bg(bg),
+                )];
+                let avail = width.saturating_sub(spans_width(&lead)).max(1);
+                let mut rows = wrap_spans(content, avail)
+                    .into_iter()
+                    .map(|spans| {
+                        let mut spans = [lead.clone(), spans].concat();
+                        let w = spans_width(&spans);
+                        if w < width {
+                            spans.push(Span::styled(" ".repeat(width - w), fill));
+                        }
+                        Line::from(spans)
+                    })
+                    .collect::<Vec<_>>();
+                lines.append(&mut rows);
+                continue;
             }
             LineKind::Context => {
                 // Source-bearing Context rows (Read cards, edit context)
@@ -621,19 +696,19 @@ fn tool_block(
                     .as_mut()
                     .map(|h| h.highlight_line(&ln.text))
                     .filter(|s| !s.is_empty());
-                let mut spans = vec![Span::styled(indent.clone(), surf)];
+                let mut lead = vec![Span::styled(indent.clone(), surf)];
                 if is_edit {
-                    spans.push(gutter_span(ln.nr, gutter_w, card_bg));
-                    spans.push(Span::styled("  ".to_string(), surf));
+                    lead.push(gutter_span(ln.nr, gutter_w, card_bg));
+                    lead.push(Span::styled("  ".to_string(), surf));
                 }
-                spans.extend(styled_diff_spans(
-                    &ln.text,
-                    segs.as_deref(),
-                    &[],
-                    base,
-                    base,
-                ));
-                pad_row(spans, width, surf)
+                let content = styled_diff_spans(&ln.text, segs.as_deref(), &[], base, base);
+                let avail = width.saturating_sub(spans_width(&lead)).max(1);
+                let mut rows = wrap_spans(content, avail)
+                    .into_iter()
+                    .map(|spans| pad_row([lead.clone(), spans].concat(), width, surf))
+                    .collect::<Vec<_>>();
+                lines.append(&mut rows);
+                continue;
             }
             kind => {
                 let (prefix, fg) = match kind {
@@ -642,20 +717,27 @@ fn tool_block(
                     LineKind::Success => ("", t.success),
                     _ => ("", t.text_secondary),
                 };
-                pad_row(
-                    vec![
-                        Span::styled(indent.clone(), surf),
-                        Span::styled(
-                            format!("{prefix}{}", ln.text),
-                            Style::default().fg(fg).bg(card_bg),
-                        ),
-                    ],
-                    width,
-                    surf,
-                )
+                let style = Style::default().fg(fg).bg(card_bg);
+                let avail = width.saturating_sub(BODY_INDENT + cell_len(prefix)).max(1);
+                let wrapped = wrap_text(&ln.text, avail);
+                for (i, chunk) in wrapped.iter().enumerate() {
+                    let lead = if i == 0 {
+                        prefix
+                    } else {
+                        &" ".repeat(prefix.len())
+                    };
+                    lines.push(pad_row(
+                        vec![
+                            Span::styled(indent.clone(), surf),
+                            Span::styled(format!("{lead}{chunk}"), style),
+                        ],
+                        width,
+                        surf,
+                    ));
+                }
+                continue;
             }
-        };
-        lines.push(row);
+        }
     }
 
     if !notice_before {
@@ -1519,6 +1601,58 @@ mod tests {
             let (_, _, link) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
             assert!(link.is_none());
         }
+    }
+
+    /// F: long tool-card body rows (e.g. permission-denied reasons, command
+    /// output) wrap onto continuation rows instead of overflowing the card.
+    #[test]
+    fn long_body_lines_wrap_within_the_card() {
+        let kind = crate::tui::provider::ToolKind::Bash {
+            cmd: "cargo build".into(),
+        };
+        let long = "permission denied: rm -rf outside the project auto-review: \
+                    this looks destructive and was blocked by the guardrail";
+        let body = vec![ToolLine::new(crate::tui::provider::LineKind::Muted, long)];
+        let (lines, _, _) = tool_block(&kind, "t1", &body, None, false, false, false, false, 40);
+        let text: Vec<String> = lines.iter().map(line_text).collect();
+        // No row exceeds the card width (minus trailing pad is included).
+        assert!(
+            text.iter().all(|l| l.chars().count() <= 40),
+            "row overflowed: {text:?}"
+        );
+        let joined = text.join("\n");
+        assert!(
+            joined.contains("guardrail"),
+            "text was clipped, not wrapped"
+        );
+    }
+
+    /// F: `wrap_spans` keeps span styles across wrapped rows and breaks at
+    /// spaces when possible.
+    #[test]
+    fn wrap_spans_preserves_styles_across_rows() {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::Span;
+        let spans = vec![
+            Span::styled("aaaa ".to_string(), Style::default().fg(Color::Red)),
+            Span::styled("bbbb".to_string(), Style::default().fg(Color::Blue)),
+        ];
+        let rows = super::wrap_spans(spans, 6);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].content, "aaaa");
+        assert_eq!(rows[0][0].style.fg, Some(Color::Red));
+        assert_eq!(rows[1][0].content, "bbbb");
+        assert_eq!(rows[1][0].style.fg, Some(Color::Blue));
+        // A word longer than the width hard-splits in cells.
+        let rows = super::wrap_spans(
+            vec![Span::styled("0123456789".to_string(), Style::default())],
+            4,
+        );
+        let joined: Vec<String> = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.content.clone()).collect())
+            .collect();
+        assert_eq!(joined, vec!["0123", "4567", "89"]);
     }
 
     #[test]
