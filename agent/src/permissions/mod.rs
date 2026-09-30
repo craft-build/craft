@@ -9,9 +9,10 @@
 //!
 //! Ported from the reference `craft-agent/src/permissions.rs` +
 //! `craft-config` permission layer. Deviations: no plugin rule store (no
-//! plugin subsystem yet), no yolo toggle, no plan mode, and no builtin
-//! allow for in-project writes — this repo's approval gate is
-//! ask-by-default for mutations, which the engine preserves. Auto-review
+//! plugin subsystem yet), no yolo toggle, no plan mode, and no plugin rules.
+//! The reference's `builtin_rules(cwd)` are preserved and extended: every
+//! path-scoped mutation except `delete` is pre-approved inside the project
+//! root, and `task` everywhere. Auto-review
 //! (E.7) toggles live here; its reviewer model call lives in
 //! [`crate::auto_review`].
 
@@ -84,13 +85,48 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "view_image",
     "websearch",
     "webfetch",
-    // Subagent launches: the child's tool calls flow through this same
-    // approval gate, so `task` itself needs no decision.
-    "task",
     // Phase 5: MCP resource reads — read-only against the remote server,
     // deny rules can still block them.
     "mcp_read",
 ];
+
+/// Builtins allowed without a decision, matching the reference's
+/// `builtin_rules` non-file-write allow. `task` is not read-only (a
+/// `general` subagent writes), so it lives here, not in [`READ_ONLY_TOOLS`];
+/// the child's own tool calls still pass through this same gate.
+pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task"];
+
+/// File-write tools the builtin rules pre-approve inside the project root.
+/// Covers every mutation the engine scopes by path except `delete`, which is
+/// deliberately left to prompt: destructive removal should always be an
+/// explicit decision. Writes outside the project root still prompt, as do the
+/// gated shell and network tools. Scope-based, so it cannot live in
+/// `tool_defaults`.
+pub const BUILTIN_WRITE_ALLOW_TOOLS: &[&str] = &[
+    "write",
+    "edit",
+    "multiedit",
+    "edit_lines",
+    "insert_lines",
+    "apply_patch",
+    "move",
+];
+
+/// Builtin allow rules, modelled on the reference's `builtin_rules(cwd)`.
+/// Each file-write tool is allowed only under the project root (`cwd/**`); a
+/// deny rule still outranks these because the rule loop returns on the first
+/// deny.
+fn builtin_rules(cwd: &Path) -> Vec<PermissionRule> {
+    let cwd_glob = format!("{}/**", cwd.display());
+    BUILTIN_WRITE_ALLOW_TOOLS
+        .iter()
+        .map(|tool| PermissionRule {
+            tool: ToolKey::native(tool),
+            scope: Some(cwd_glob.clone()),
+            effect: Effect::Allow,
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -345,6 +381,9 @@ struct McpAnnotationTable {
 pub struct PermissionManager {
     session_rules: Mutex<Vec<PermissionRule>>,
     config_rules: Vec<PermissionRule>,
+    /// Reference-style builtin allows (in-project file writes). Checked with
+    /// the other rules, before defaults, so a deny still wins.
+    builtin_rules: Vec<PermissionRule>,
     default: DefaultEffect,
     tool_defaults: HashMap<ToolKey, DefaultEffect>,
     cwd: PathBuf,
@@ -365,7 +404,7 @@ impl PermissionManager {
         if has_wildcard_deny {
             eprintln!(
                 "permissions: wildcard deny detected — this blocks ALL tools including \
-                 builtins (write/edit/multiedit). Use per-tool rules \
+                 builtins (write/edit/multiedit/task). Use per-tool rules \
                  instead if you want selective access."
             );
         }
@@ -376,7 +415,7 @@ impl PermissionManager {
         if has_wildcard_allow {
             eprintln!(
                 "permissions: wildcard allow detected — this permits ALL tools including \
-                 write/edit/multiedit. Use per-tool rules \
+                 builtins (write/edit/multiedit/task). Use per-tool rules \
                  instead if you want selective access."
             );
         }
@@ -387,10 +426,17 @@ impl PermissionManager {
                 .entry(ToolKey::native(name))
                 .or_insert(DefaultEffect::Allow);
         }
+        for name in BUILTIN_ALLOW_TOOLS {
+            tool_defaults
+                .entry(ToolKey::native(name))
+                .or_insert(DefaultEffect::Allow);
+        }
+        let builtin_rules = builtin_rules(&cwd);
 
         Self {
             session_rules: Mutex::new(Vec::new()),
             config_rules: config.rules,
+            builtin_rules,
             default: config.default,
             tool_defaults,
             cwd,
@@ -413,6 +459,7 @@ impl PermissionManager {
         Self {
             session_rules: Mutex::new(Vec::new()),
             config_rules: self.config_rules.clone(),
+            builtin_rules: self.builtin_rules.clone(),
             default: self.default,
             tool_defaults: self.tool_defaults.clone(),
             cwd: self.cwd.clone(),
@@ -485,7 +532,11 @@ impl PermissionManager {
 
         for scope in scopes {
             let mut has_allow = false;
-            for r in session.iter().chain(&self.config_rules) {
+            for r in session
+                .iter()
+                .chain(&self.config_rules)
+                .chain(&self.builtin_rules)
+            {
                 if !rule_reaches(&r.tool, tool) {
                     continue;
                 }
@@ -743,6 +794,13 @@ pub fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec
         )
     {
         return (vec![format!("mcp:{server}:{uri}")], false);
+    }
+    if name == "task" {
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return (vec![format!("task:{description}")], false);
     }
     if name == "bash"
         && let Some(command) = args.get("command").and_then(|v| v.as_str())

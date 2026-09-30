@@ -490,6 +490,120 @@ fn mcp_read_is_read_only_and_scoped_to_server_and_uri() {
     assert_eq!(blocked.check(&tool, &scopes), PermissionCheck::Denied);
 }
 
+/// `task` is a builtin allow (subagent launches flow through this same gate),
+/// not a read-only tool, and its call scope is `task:<description>`.
+#[test]
+fn task_is_allowed_by_default() {
+    let args = serde_json::json!({"description": "research", "prompt": "..."});
+    let (scopes, force_prompt) = scope_for_call(Path::new("/w"), "task", &args);
+    assert!(!force_prompt);
+    assert_eq!(scopes, vec!["task:research".to_string()]);
+
+    let mgr = PermissionManager::new(PermissionsConfig::default(), std::env::temp_dir());
+    let tool = ToolKey::native("task");
+    assert_eq!(mgr.check(&tool, &scopes), PermissionCheck::Allowed);
+    // The allow is scope-agnostic: unrecognized scopes still pass.
+    assert_eq!(
+        mgr.check(&tool, &["*".to_string()]),
+        PermissionCheck::Allowed
+    );
+    assert!(!READ_ONLY_TOOLS.contains(&"task"));
+}
+
+/// A user `tool_defaults` entry for `task` still wins over the builtin allow.
+#[test]
+fn task_explicit_tool_default_wins_over_builtin_allow() {
+    let config = PermissionsConfig {
+        tool_defaults: [(ToolKey::native("task"), DefaultEffect::Prompt)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mgr = PermissionManager::new(config, std::env::temp_dir());
+    let tool = ToolKey::native("task");
+    assert!(needs_prompt(&mgr.check(&tool, &["*".to_string()])));
+}
+
+/// The builtin allow does not outrank an explicit deny.
+#[test]
+fn task_deny_rule_still_denies() {
+    let mgr = mgr_with(std::env::temp_dir().as_ref(), vec![deny_rule("task", None)]);
+    let tool = ToolKey::native("task");
+    assert_eq!(
+        mgr.check(&tool, &["*".to_string()]),
+        PermissionCheck::Denied
+    );
+}
+
+/// Reference parity: the builtin rules pre-approve the file-write tools inside
+/// the project root only; outside it they still prompt.
+#[test]
+fn in_project_file_writes_are_builtin_allowed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(tmp.path(), Vec::new());
+    let inside = tmp.path().join("src/lib.rs").display().to_string();
+    for name in BUILTIN_WRITE_ALLOW_TOOLS {
+        let tool = ToolKey::native(name);
+        assert_eq!(
+            mgr.check(&tool, &[inside.clone()]),
+            PermissionCheck::Allowed,
+            "{name} in-project"
+        );
+        assert!(
+            needs_prompt(&mgr.check(&tool, &["/outside/lib.rs".to_string()])),
+            "{name} out-of-project must still prompt"
+        );
+    }
+}
+
+/// A deny rule outranks the builtin allow, even inside the project.
+#[test]
+fn builtin_write_allow_is_outranked_by_deny() {
+    let tmp = tempfile::tempdir().unwrap();
+    let glob = format!("{}/**", tmp.path().display());
+    let mgr = mgr_with(tmp.path(), vec![deny_rule("write", Some(&glob))]);
+    let inside = tmp.path().join("src/lib.rs").display().to_string();
+    assert_eq!(
+        mgr.check(&ToolKey::native("write"), &[inside]),
+        PermissionCheck::Denied
+    );
+}
+
+/// Builtin allows are rules, so they are consulted before `tool_defaults`: a
+/// user default cannot turn an in-project write back into a prompt (use a deny
+/// rule for that). This matches the reference.
+#[test]
+fn builtin_write_allow_beats_tool_default() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = PermissionsConfig {
+        tool_defaults: [(ToolKey::native("write"), DefaultEffect::Prompt)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mgr = PermissionManager::new(config, tmp.path().to_path_buf());
+    let inside = tmp.path().join("src/lib.rs").display().to_string();
+    assert_eq!(
+        mgr.check(&ToolKey::native("write"), &[inside]),
+        PermissionCheck::Allowed
+    );
+}
+
+/// `delete` is the one path-scoped mutation left out of the builtin allow: it
+/// still prompts even inside the project.
+#[test]
+fn delete_prompts_in_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(tmp.path(), Vec::new());
+    let inside = tmp.path().join("src/lib.rs").display().to_string();
+    assert!(needs_prompt(
+        &mgr.check(&ToolKey::native("delete"), &[inside])
+    ));
+    assert!(BUILTIN_WRITE_ALLOW_TOOLS.contains(&"apply_patch"));
+    assert!(BUILTIN_WRITE_ALLOW_TOOLS.contains(&"move"));
+    assert!(!BUILTIN_WRITE_ALLOW_TOOLS.contains(&"delete"));
+}
+
 #[test]
 fn mcp_wire_tool_defaults_to_prompt_not_deny() {
     let mgr = PermissionManager::new(PermissionsConfig::default(), std::env::temp_dir());

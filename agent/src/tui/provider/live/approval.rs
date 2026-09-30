@@ -364,6 +364,32 @@ mod tests {
         assert!(state.lock().await.pending_approval.is_none());
     }
 
+    /// `task` is a builtin allow (not in `READ_ONLY_TOOLS`) and so runs
+    /// without an approval prompt.
+    #[tokio::test]
+    async fn task_runs_without_approval() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (gate, _flag) = gate(&state);
+        let mut call = tool_call("t1", "task");
+        call.function.arguments = serde_json::json!({"description": "research"});
+        let decision = gate.decide(call).await;
+        assert!(matches!(decision, Decision::Run));
+        assert!(state.lock().await.pending_approval.is_none());
+    }
+
+    /// Reference parity: an in-project file write is a builtin allow, so it
+    /// runs without a prompt; the same write outside the project still parks.
+    #[tokio::test]
+    async fn in_project_write_runs_without_approval() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (gate, _flag) = gate(&state);
+        let inside = std::env::temp_dir().join("craft_builtin_allow_test.rs");
+        let mut call = tool_call("t1", "write");
+        call.function.arguments = serde_json::json!({ "path": inside.display().to_string() });
+        assert!(matches!(gate.decide(call).await, Decision::Run));
+        assert!(state.lock().await.pending_approval.is_none());
+    }
+
     #[tokio::test]
     async fn unknown_and_mutating_tools_require_approval() {
         let state = Arc::new(Mutex::new(SessionState::default()));
@@ -455,7 +481,9 @@ mod tests {
         let (gate, _flag) = make_gate(permissions.clone());
 
         let mut call = tool_call("t1", "write");
-        call.function.arguments = serde_json::json!({ "path": "src/lib.rs" });
+        // Out-of-project: an in-project write is now a builtin allow and would
+        // run without a prompt, so the approval flow is exercised off-project.
+        call.function.arguments = serde_json::json!({ "path": "/proj/src/lib.rs" });
         let pending = tokio::spawn(async move { gate.decide(call).await });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while state.lock().await.pending_approval.is_none() {
@@ -469,7 +497,7 @@ mod tests {
         // a sibling write now runs without asking again.
         let (gate, _flag) = make_gate(permissions);
         let mut sibling = tool_call("t2", "write");
-        sibling.function.arguments = serde_json::json!({ "path": "src/other.rs" });
+        sibling.function.arguments = serde_json::json!({ "path": "/proj/src/other.rs" });
         assert!(matches!(gate.decide(sibling).await, Decision::Run));
         assert!(state.lock().await.pending_approval.is_none());
     }
@@ -528,7 +556,8 @@ mod tests {
             let id = format!("t{i}");
             let (gate, _flag) = make_gate(permissions.clone());
             let mut call = tool_call(&id, "write");
-            call.function.arguments = serde_json::json!({ "path": "src/lib.rs" });
+            // Off-project so it still prompts (in-project writes auto-allow).
+            call.function.arguments = serde_json::json!({ "path": "/proj/src/lib.rs" });
             let pending = tokio::spawn(async move { gate.decide(call).await });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while state.lock().await.pending_approval.is_none() {
@@ -776,7 +805,9 @@ mod tests {
         }));
         let (gate, _state, permissions) = auto_review_gate(reviewer);
         let mut call = tool_call("t1", "write");
-        call.function.arguments = serde_json::json!({ "path": "src/a.rs" });
+        // Out-of-project: in-project writes are a builtin allow now, so this
+        // path is what still reaches the auto-reviewer.
+        call.function.arguments = serde_json::json!({ "path": "/outside/src/a.rs" });
         let Decision::Skip(message) = gate.decide(call).await else {
             panic!("expected skip");
         };
@@ -784,7 +815,7 @@ mod tests {
         // No reviewer decision happened, so nothing was recorded: a retry
         // still falls through to the prompt (NeedsPrompt), not Denied.
         let tool = ToolKey::native("write");
-        let scope = permissions.cwd().join("src/a.rs").display().to_string();
+        let scope = "/outside/src/a.rs".to_string();
         assert!(matches!(
             permissions.check(&tool, &[scope]),
             PermissionCheck::NeedsPrompt { .. }
