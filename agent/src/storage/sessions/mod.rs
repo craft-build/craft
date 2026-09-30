@@ -51,7 +51,7 @@ use archive::ARCHIVE_DIR;
 use index::{load_cwd_index, remove_from_cwd_index};
 use legacy::{locate_session_file, remove_legacy_files, try_remove};
 use log::load_session_at;
-use scan::scan_headers;
+use scan::{read_header_model, scan_headers};
 
 #[cfg(test)]
 use archive::{ARCHIVE_KEEP, ARCHIVE_MAX_BYTES, MSG_PREFIX};
@@ -700,4 +700,35 @@ where
         remove_from_cwd_index(dir, id)?;
         Ok(())
     }
+}
+
+/// The model spec recorded by the most recent session for `cwd`, if any.
+///
+/// Startup uses this to restore the model the user last selected without
+/// loading a whole session: the cwd index names the newest session and only
+/// its header line is read. `None` when there is no session, or the newest
+/// one predates the header recording a model.
+pub fn latest_model(cwd: &str, dir: &StateDir) -> Result<Option<String>, SessionError> {
+    let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
+    latest_model_in(cwd, &sessions_dir)
+}
+
+/// [`latest_model`] against an explicit sessions directory.
+pub fn latest_model_in(cwd: &str, dir: &Path) -> Result<Option<String>, SessionError> {
+    if let Some(path) = load_cwd_index(dir)
+        .get(cwd)
+        .and_then(|id| id.parse::<CraftId>().ok())
+        .and_then(|id| locate_session_file(dir, id))
+    {
+        return Ok(read_header_model(&path));
+    }
+
+    // The index is missing or stale; fall back to scanning headers.
+    let Some(summary) = scan_headers(Some(cwd), dir)?
+        .into_iter()
+        .max_by_key(|s| s.updated_at)
+    else {
+        return Ok(None);
+    };
+    Ok(locate_session_file(dir, summary.id.id()).and_then(|path| read_header_model(&path)))
 }

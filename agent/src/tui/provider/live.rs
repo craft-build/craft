@@ -305,6 +305,22 @@ impl LoopCtx {
     }
 }
 
+/// Resolve a persisted `provider/model` spec (from `--model`, a tier
+/// default, or a prior session's header) against the discovered catalogs.
+/// `None` when the provider is gone or the model is no longer listed.
+fn selection_for_spec(
+    catalogs: &BTreeMap<String, Vec<CatalogModel>>,
+    spec: &str,
+) -> Option<Selection> {
+    let (provider, model) = spec.split_once('/')?;
+    let entry = catalogs.get(provider)?.iter().find(|m| m.id == model)?;
+    Some(Selection {
+        provider: provider.to_string(),
+        model: entry.id.clone(),
+        context_length: entry.context_length,
+    })
+}
+
 /// Flat model menu rows across all usable providers, with the current
 /// selection's index.
 fn catalog_choices(
@@ -471,8 +487,9 @@ impl CraftProvider {
 
         // H.3 model-tier registry: load persisted tier overrides and feed in
         // the discovered catalogs so tier defaults can be resolved.
-        if let Ok(state_dir) = crate::storage::StateDir::resolve() {
-            crate::model_registry::load_from_storage(&state_dir);
+        let state_dir = crate::storage::StateDir::resolve().ok();
+        if let Some(state_dir) = &state_dir {
+            crate::model_registry::load_from_storage(state_dir);
         }
         for (name, provider_config) in &config.providers {
             if let Some(models) = catalogs.get(name) {
@@ -492,25 +509,26 @@ impl CraftProvider {
 
         let (provider, models) = catalogs.iter().next().expect("catalogs is non-empty");
         let first = models.first().expect("each catalog is non-empty");
-        // Prefer the Medium-tier default when the registry can resolve one;
-        // otherwise keep the first catalog entry.
-        let selection =
+        // Reuse the model from the most recent session in this cwd, so the
+        // user does not reselect it every launch. Falls back to the
+        // Medium-tier default, then the first catalog entry; an explicit
+        // `--model` still overrides later via `with_model_spec`.
+        let last_used = state_dir
+            .as_ref()
+            .and_then(|dir| {
+                crate::storage::sessions::latest_model(&cwd.display().to_string(), dir)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|spec| selection_for_spec(&catalogs, &spec));
+        let tier_default =
             crate::model_registry::spec_for_tier_any(crate::model_registry::ModelTier::Medium)
-                .and_then(|spec| {
-                    let (provider, model) = spec.split_once('/')?;
-                    let models = catalogs.get(provider)?;
-                    let entry = models.iter().find(|m| m.id == model)?;
-                    Some(Selection {
-                        provider: provider.to_string(),
-                        model: entry.id.clone(),
-                        context_length: entry.context_length,
-                    })
-                })
-                .unwrap_or(Selection {
-                    provider: provider.clone(),
-                    model: first.id.clone(),
-                    context_length: first.context_length,
-                });
+                .and_then(|spec| selection_for_spec(&catalogs, &spec));
+        let selection = last_used.or(tier_default).unwrap_or(Selection {
+            provider: provider.clone(),
+            model: first.id.clone(),
+            context_length: first.context_length,
+        });
         Ok(Self {
             config: Arc::new(config),
             workspace,
@@ -822,7 +840,7 @@ impl CraftProvider {
                 }
                 Command::Undo => handle_undo(&ctx, &current_turn).await,
                 Command::SelectModel { provider, model } => {
-                    handle_select_model(&ctx, &mut selection, provider, model)
+                    handle_select_model(&ctx, &mut selection, provider, model).await
                 }
             }
         }
@@ -1268,8 +1286,14 @@ async fn handle_undo(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
 }
 
 /// `Command::SelectModel`: switch the selection when the provider/model
-/// pair exists in the catalogs, then re-announce the menu.
-fn handle_select_model(ctx: &LoopCtx, selection: &mut Selection, provider: String, model: String) {
+/// pair exists in the catalogs, remember it in the session so the next
+/// launch reuses it, then re-announce the menu.
+async fn handle_select_model(
+    ctx: &LoopCtx,
+    selection: &mut Selection,
+    provider: String,
+    model: String,
+) {
     let found = ctx
         .catalogs
         .get(&provider)
@@ -1282,6 +1306,11 @@ fn handle_select_model(ctx: &LoopCtx, selection: &mut Selection, provider: Strin
                 model,
                 context_length,
             };
+            let mut guard = ctx.state.lock().await;
+            if let Some(store) = &mut guard.store {
+                store.set_model(LoopCtx::model_spec(selection));
+            }
+            drop(guard);
             let (models, current) = ctx.catalog_choices(selection);
             let _ = ctx.evt_tx.send(AgentEvent::CatalogSet { models, current });
         }
@@ -1370,6 +1399,50 @@ impl Provider for CraftProvider {
 mod tests {
     use super::*;
     use crate::history::Message;
+
+    /// `selection_for_spec` resolves a remembered `provider/model` against
+    /// the discovered catalog, keeps a slash-bearing model id intact, and
+    /// rejects a spec whose provider or model has since gone away.
+    #[test]
+    fn selection_for_spec_resolves_against_the_catalog() {
+        let catalogs: BTreeMap<String, Vec<CatalogModel>> = BTreeMap::from([
+            (
+                "zai".to_string(),
+                vec![CatalogModel {
+                    id: "glm-5.3".into(),
+                    name: Some("GLM-5.3".into()),
+                    description: None,
+                    context_length: Some(200_000),
+                    max_output_tokens: None,
+                }],
+            ),
+            (
+                "openrouter".to_string(),
+                vec![CatalogModel {
+                    id: "anthropic/claude-sonnet-4".into(),
+                    name: None,
+                    description: None,
+                    context_length: None,
+                    max_output_tokens: None,
+                }],
+            ),
+        ]);
+
+        let picked = selection_for_spec(&catalogs, "zai/glm-5.3").unwrap();
+        assert_eq!(picked.provider, "zai");
+        assert_eq!(picked.model, "glm-5.3");
+        assert_eq!(picked.context_length, Some(200_000));
+        // Only the provider alias is split off; a slash-bearing model id
+        // (OpenRouter style) stays whole.
+        assert_eq!(
+            selection_for_spec(&catalogs, "openrouter/anthropic/claude-sonnet-4")
+                .unwrap()
+                .model,
+            "anthropic/claude-sonnet-4"
+        );
+        assert!(selection_for_spec(&catalogs, "gone/model").is_none());
+        assert!(selection_for_spec(&catalogs, "zai/retired-model").is_none());
+    }
 
     /// Bang-mode visible-run results queue and are drained into the session
     /// history exactly once, at the next `SendMessage`.
@@ -1499,6 +1572,52 @@ mod tests {
             current_turn.is_some(),
             "the queued message spawned the next turn"
         );
+    }
+
+    /// Switching the model writes it into the session header right away, so
+    /// a launch with no follow-up turn still reuses the choice.
+    #[tokio::test]
+    async fn selecting_a_model_persists_it_to_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+        let session_ref = crate::id::SessionRef::generate();
+        let store = crate::headless::SessionStore::open_in(
+            state_dir.clone(),
+            session_ref.clone(),
+            "/cwd",
+            "zai/glm-5.3",
+        )
+        .unwrap();
+        let mut state = SessionState::linked();
+        state.store = Some(store);
+        let mut ctx = test_ctx(Arc::new(Mutex::new(state)));
+        ctx.catalogs = BTreeMap::from([(
+            "anthropic".to_string(),
+            vec![CatalogModel {
+                id: "claude-sonnet-4".into(),
+                name: None,
+                description: None,
+                context_length: Some(200_000),
+                max_output_tokens: None,
+            }],
+        )]);
+        let mut selection = Selection {
+            provider: "zai".into(),
+            model: "glm-5.3".into(),
+            context_length: None,
+        };
+
+        handle_select_model(
+            &ctx,
+            &mut selection,
+            "anthropic".into(),
+            "claude-sonnet-4".into(),
+        )
+        .await;
+
+        assert_eq!(selection.provider, "anthropic");
+        let loaded = crate::headless::StoredSession::load(session_ref.id(), &state_dir).unwrap();
+        assert_eq!(loaded.model, "anthropic/claude-sonnet-4");
     }
 
     /// A minimal LoopCtx for the queue/persist tests: only `state`,

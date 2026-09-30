@@ -173,6 +173,23 @@ fn read_last_meta(file: &mut File) -> Option<(String, u64)> {
     None
 }
 
+#[derive(Deserialize)]
+struct JsonlModelOnly {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// The `model` recorded in a session's header line, if any. Reads only the
+/// first line, so restoring the last-used model stays cheap even when the
+/// newest session log is large.
+pub(super) fn read_header_model(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut first_line = String::new();
+    BufReader::new(&mut file).read_line(&mut first_line).ok()?;
+    let header: JsonlModelOnly = serde_json::from_str(first_line.trim_end()).ok()?;
+    header.model.filter(|model| !model.is_empty())
+}
+
 pub(super) fn session_entries(dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
     Ok(fs::read_dir(dir)?
         .map(|e| e.map(|e| e.path()))

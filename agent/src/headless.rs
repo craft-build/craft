@@ -154,6 +154,13 @@ impl SessionStore {
         self.save();
     }
 
+    /// Record the currently selected model without a turn, so the choice is
+    /// restored on the next launch even when no message followed it.
+    pub fn set_model(&mut self, model_spec: String) {
+        self.session.set_model(model_spec);
+        self.save();
+    }
+
     /// Fold a finished run's per-model usage into the session and append one
     /// cost-ledger record per model to `cost.jsonl`. Ledger failures are
     /// warnings, never fatal. A model whose cost could not be resolved records
