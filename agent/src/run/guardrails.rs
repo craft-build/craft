@@ -5,6 +5,14 @@
 //! a call and feeds results back through [`ToolGuardrails::record_result`].
 //! State resets when a compaction run rewrites history (the compacted
 //! conversation no longer describes the calls that tripped the counters).
+//!
+//! Deliberate divergence from the reference: its failure counters never
+//! decayed, so a tool that failed a few non-consecutive times (routine for a
+//! general-purpose tool like `bash`, where a non-zero exit is reported as an
+//! error) warned on *every* later call and, past the block threshold, was
+//! locked out for the rest of the session. Here a successful call clears the
+//! failure streak, and a block trips as a one-shot circuit breaker that
+//! clears the triggering counters, so no tool can be permanently banned.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -86,38 +94,36 @@ impl ToolGuardrails {
     }
 
     pub fn check_before_call(
-        &self,
+        &mut self,
         tool: &str,
         input: &Value,
         is_read_only: bool,
     ) -> GuardrailDecision {
-        let Some(tracker) = self.trackers.get(tool) else {
+        let Some(tracker) = self.trackers.get_mut(tool) else {
             return GuardrailDecision::Allow;
         };
 
         let input_hash = Self::hash_value(input);
-        if tracker.exact_fail_count >= EXACT_REPEAT_BLOCK
-            && input_hash == tracker.last_input_hash.unwrap_or(0)
-        {
+        let exact_repeat = input_hash == tracker.last_input_hash.unwrap_or(0);
+
+        let blocked = (tracker.exact_fail_count >= EXACT_REPEAT_BLOCK && exact_repeat)
+            || tracker.any_fail_count >= SAME_TOOL_FAIL_BLOCK
+            || (is_read_only && tracker.same_result_count >= NO_PROGRESS_BLOCK);
+        if blocked {
+            // A block is a circuit breaker, not a ban: clearing the streak
+            // lets the next attempt run (and, if it succeeds, reset cleanly)
+            // rather than leaving the tool locked out forever, since a
+            // blocked call never reaches `record_result` to clear the count.
+            tracker.exact_fail_count = 0;
+            tracker.any_fail_count = 0;
+            tracker.same_result_count = 0;
             return GuardrailDecision::Block;
-        }
-        if tracker.exact_fail_count >= EXACT_REPEAT_WARN
-            && input_hash == tracker.last_input_hash.unwrap_or(0)
-        {
-            return GuardrailDecision::Warn;
         }
 
-        if tracker.any_fail_count >= SAME_TOOL_FAIL_BLOCK {
-            return GuardrailDecision::Block;
-        }
-        if tracker.any_fail_count >= SAME_TOOL_FAIL_WARN {
-            return GuardrailDecision::Warn;
-        }
-
-        if is_read_only && tracker.same_result_count >= NO_PROGRESS_BLOCK {
-            return GuardrailDecision::Block;
-        }
-        if is_read_only && tracker.same_result_count >= NO_PROGRESS_WARN {
+        let warned = (tracker.exact_fail_count >= EXACT_REPEAT_WARN && exact_repeat)
+            || tracker.any_fail_count >= SAME_TOOL_FAIL_WARN
+            || (is_read_only && tracker.same_result_count >= NO_PROGRESS_WARN);
+        if warned {
             return GuardrailDecision::Warn;
         }
 
@@ -160,6 +166,9 @@ impl ToolGuardrails {
             }
         } else {
             tracker.exact_fail_count = 0;
+            // A success means the tool is working again: clear the streak so
+            // non-consecutive failures cannot accumulate into a block.
+            tracker.any_fail_count = 0;
 
             if is_read_only {
                 let result_hash = Self::hash_result(result);
@@ -196,7 +205,7 @@ mod tests {
 
     #[test]
     fn allow_when_no_history() {
-        let g = ToolGuardrails::new();
+        let mut g = ToolGuardrails::new();
         assert_eq!(
             g.check_before_call("bash", &json!("ls"), false),
             GuardrailDecision::Allow
@@ -263,6 +272,67 @@ mod tests {
         g.reset();
         assert_eq!(
             g.check_before_call("bash", &json!("cmd"), false),
+            GuardrailDecision::Allow
+        );
+    }
+
+    #[test]
+    fn success_clears_failure_streak() {
+        // Non-consecutive failures must not accumulate into a block: a single
+        // success resets the streak. This is the `bash` regression — routine
+        // non-zero exits used to warn on every later call, then lock it out.
+        let mut g = ToolGuardrails::new();
+        for i in 0..SAME_TOOL_FAIL_WARN {
+            g.record_result("bash", &json!(format!("cmd{i}")), "err", true, false);
+        }
+        g.record_result("bash", &json!("ok"), "done", false, false);
+        assert_eq!(
+            g.check_before_call("bash", &json!("next"), false),
+            GuardrailDecision::Allow
+        );
+        for i in 0..SAME_TOOL_FAIL_WARN - 1 {
+            g.record_result("bash", &json!(format!("again{i}")), "err", true, false);
+        }
+        assert_eq!(
+            g.check_before_call("bash", &json!("again"), false),
+            GuardrailDecision::Allow,
+            "failures never reached the warn threshold after the reset"
+        );
+    }
+
+    #[test]
+    fn block_is_a_circuit_breaker_not_a_ban() {
+        let mut g = ToolGuardrails::new();
+        for i in 0..SAME_TOOL_FAIL_BLOCK {
+            g.record_result("bash", &json!(format!("cmd{i}")), "err", true, false);
+        }
+        assert_eq!(
+            g.check_before_call("bash", &json!("other"), false),
+            GuardrailDecision::Block
+        );
+        // The block cleared the streak, so the tool is usable again rather
+        // than locked out for the rest of the session.
+        assert_eq!(
+            g.check_before_call("bash", &json!("other"), false),
+            GuardrailDecision::Allow
+        );
+    }
+
+    #[test]
+    fn no_progress_block_does_not_lock_reads() {
+        let mut g = ToolGuardrails::new();
+        let result = "same output";
+        // The first identical result only seeds `last_result_hash`, so the
+        // counter reaches NO_PROGRESS_BLOCK one record later.
+        for _ in 0..NO_PROGRESS_BLOCK + 1 {
+            g.record_result("read", &json!("path"), result, false, true);
+        }
+        assert_eq!(
+            g.check_before_call("read", &json!("path"), true),
+            GuardrailDecision::Block
+        );
+        assert_eq!(
+            g.check_before_call("read", &json!("path"), true),
             GuardrailDecision::Allow
         );
     }

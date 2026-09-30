@@ -231,7 +231,7 @@ impl ToolDispatch {
         // still cannot loop unproductively.
         let mut pre_warned = false;
         if let Some(guardrails) = &self.guardrails
-            && let Ok(guard) = guardrails.lock()
+            && let Ok(mut guard) = guardrails.lock()
         {
             match guard.check_before_call(&name, &call.function.arguments, read_only) {
                 GuardrailDecision::Allow => {}
