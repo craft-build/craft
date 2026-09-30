@@ -437,32 +437,42 @@ fn tool_block(
     };
 
     // --- header row ---
-    let mut header: Vec<Span<'static>> = vec![Span::styled(marker, marker_style)];
+    let mut prefix: Vec<Span<'static>> = vec![Span::styled(marker, marker_style)];
     match kind {
         ToolKind::Read { .. } | ToolKind::Grep { .. } => {
-            header.push(Span::styled(
+            prefix.push(Span::styled(
                 if collapsed { "▸ " } else { "▾ " }.to_string(),
                 Style::default().fg(t.text_tertiary).bg(card_bg),
             ));
         }
         ToolKind::Bash { .. } => {
-            header.push(Span::styled(
+            prefix.push(Span::styled(
                 "$ ",
                 Style::default().fg(t.text_tertiary).bg(card_bg),
             ));
         }
         ToolKind::Edit { .. } => {
-            header.push(Span::styled(
+            prefix.push(Span::styled(
                 if collapsed { "▸ " } else { "▾ " }.to_string(),
                 Style::default().fg(t.text_tertiary).bg(card_bg),
             ));
         }
     }
-    let prefix_w = spans_width(&header);
-    header.push(Span::styled(
-        tool_label(kind),
-        Style::default().fg(t.text_secondary).bg(card_bg),
-    ));
+    let prefix_w = spans_width(&prefix);
+    // The label wraps onto continuation rows indented under it, so a long
+    // title — a full shell command especially — stays readable instead of
+    // clipping at the card edge.
+    let label = tool_label(kind);
+    let label_style = Style::default().fg(t.text_secondary).bg(card_bg);
+    let label_avail = width.saturating_sub(prefix_w).max(1);
+    let mut label_rows: Vec<Vec<Span<'static>>> = Vec::new();
+    for part in label.split('\n') {
+        let mut rows = wrap_spans(
+            vec![Span::styled(part.to_string(), label_style)],
+            label_avail,
+        );
+        label_rows.append(&mut rows);
+    }
     // OSC-8 link target: the path text inside the header label. Columns
     // count from the row start (marker + caret + label prefix). The row
     // itself is filled in by the renderer once the segment is placed.
@@ -470,7 +480,6 @@ fn tool_block(
     // located by search rather than a fixed prefix.
     let link = match kind {
         ToolKind::Read { path, .. } | ToolKind::Edit { path, .. } => {
-            let label = tool_label(kind);
             let path_off = if matches!(kind, ToolKind::Read { .. }) {
                 Some(cell_len("Read "))
             } else {
@@ -494,20 +503,31 @@ fn tool_block(
         (None, k) if k.collapsible() => Some((tool_summary(k), t.text_tertiary)),
         _ => None,
     };
-    if let Some((text, color)) = right {
-        let used = spans_width(&header) + cell_len(&text) + 2;
-        if used < width {
-            header.push(Span::styled(" ".repeat(width - used), surf));
-        }
-        header.push(Span::styled(
-            format!("{text} "),
-            Style::default().fg(color).bg(card_bg),
-        ));
-    }
-
     let mut lines = Vec::new();
     blank(&mut lines); // top padding
-    lines.push(pad_row(header, width, surf));
+    for (row, label_row) in label_rows.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = if row == 0 {
+            prefix.clone()
+        } else {
+            vec![Span::styled(" ".repeat(prefix_w), surf)]
+        };
+        spans.extend(label_row.iter().cloned());
+        // The badge rides the first row, right-aligned, when it fits beside
+        // the label; a wrapped label leaves no room, so it is dropped.
+        if row == 0
+            && let Some((text, color)) = &right
+        {
+            let used = spans_width(&spans) + cell_len(text) + 2;
+            if used < width {
+                spans.push(Span::styled(" ".repeat(width - used), surf));
+                spans.push(Span::styled(
+                    format!("{text} "),
+                    Style::default().fg(*color).bg(card_bg),
+                ));
+            }
+        }
+        lines.push(pad_row(spans, width, surf));
+    }
 
     let expanded = !kind.collapsible() || !collapsed;
     if !expanded {
@@ -1624,6 +1644,28 @@ mod tests {
         assert!(
             joined.contains("guardrail"),
             "text was clipped, not wrapped"
+        );
+    }
+
+    /// A long tool title (a full shell command) wraps onto continuation rows
+    /// indented under the header instead of clipping at the card edge.
+    #[test]
+    fn long_tool_title_wraps_within_the_card() {
+        let kind = crate::tui::provider::ToolKind::Bash {
+            cmd: "cargo test --package craft --lib some::rather::long::module::path".into(),
+        };
+        let width = 30;
+        let (lines, _, _) = tool_block(&kind, "t1", &[], None, false, false, false, false, width);
+        let text: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(
+            text.iter().all(|l| l.chars().count() <= width),
+            "title row overflowed: {text:?}"
+        );
+        let joined = text.join("\n");
+        assert!(joined.contains("path"), "title was clipped, not wrapped");
+        assert!(
+            joined.contains("$ cargo test"),
+            "first row keeps the prefix"
         );
     }
 

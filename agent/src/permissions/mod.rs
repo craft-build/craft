@@ -84,6 +84,9 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "view_image",
     "websearch",
     "webfetch",
+    // Subagent launches: the child's tool calls flow through this same
+    // approval gate, so `task` itself needs no decision.
+    "task",
     // Phase 5: MCP resource reads — read-only against the remote server,
     // deny rules can still block them.
     "mcp_read",

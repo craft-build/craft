@@ -98,6 +98,18 @@ pub enum McpPart {
 }
 
 impl McpToolOutput {
+    /// Whether a text part already carries `value` as JSON. A 2025-06-18
+    /// server that returns `structuredContent` also echoes the serialized
+    /// JSON in a text block for older clients, so re-appending it would
+    /// duplicate the payload.
+    fn carries_json(&self, value: &serde_json::Value) -> bool {
+        self.parts.iter().any(|part| match part {
+            McpPart::Text(text) => serde_json::from_str::<serde_json::Value>(text.trim())
+                .is_ok_and(|parsed| parsed == *value),
+            McpPart::Image(_) => false,
+        })
+    }
+
     /// All text parts joined with newlines — what an error message or a
     /// text-only consumer sees.
     pub fn joined_text(&self) -> String {
@@ -891,7 +903,9 @@ fn arguments_object(args: &Value) -> rmcp::model::JsonObject {
 }
 
 /// Shared `tools/call` tail for both call paths: join content blocks,
-/// append 2025-06-18 `structuredContent` as a fenced JSON block, and
+/// append 2025-06-18 `structuredContent` as a fenced JSON block when the
+/// blocks don't already carry it (a spec-compliant server echoes the same
+/// JSON in a text block, so re-appending duplicates the payload), and
 /// surface `isError` results as `RpcError`.
 fn call_tool_result_to_output(
     server: &Arc<str>,
@@ -899,6 +913,7 @@ fn call_tool_result_to_output(
 ) -> Result<McpToolOutput, McpError> {
     let mut output = join_content(&result.content);
     if let Some(structured) = result.structured_content
+        && !output.carries_json(&structured)
         && let Ok(json) = serde_json::to_string_pretty(&structured)
     {
         output
@@ -1318,6 +1333,37 @@ mod tests {
         assert!(matches!(&out.parts[4], McpPart::Image(i) if i.mime == "image/jpeg"));
         assert!(matches!(&out.parts[5], McpPart::Text(t) if t == "two"));
     }
+    #[test]
+    fn echoed_structured_content_is_not_appended_twice() {
+        // A 2025-06-18 server echoes the JSON in a text block; honouring it
+        // verbatim must not also append the fenced copy.
+        let mut result = rmcp::model::CallToolResult::success(vec![
+            serde_json::to_string(&serde_json::json!({"series": [1, 2, 3]}))
+                .map(|s| text(&s))
+                .unwrap(),
+        ]);
+        result.structured_content = Some(serde_json::json!({"series": [1, 2, 3]}));
+        let out = call_tool_result_to_output(&Arc::from("srv"), result).unwrap();
+        assert!(
+            !out.joined_text().contains("```"),
+            "got: {}",
+            out.joined_text()
+        );
+        assert_eq!(out.parts.len(), 1);
+    }
+
+    #[test]
+    fn structured_content_is_appended_when_absent_from_blocks() {
+        let mut result = rmcp::model::CallToolResult::success(vec![text("chart ready")]);
+        result.structured_content = Some(serde_json::json!({"series": [1, 2, 3]}));
+        let out = call_tool_result_to_output(&Arc::from("srv"), result).unwrap();
+        assert_eq!(out.parts.len(), 2, "text plus fenced JSON");
+        let text = out.joined_text();
+        assert!(text.contains("chart ready"));
+        assert!(text.contains("```json"), "got: {text}");
+        assert!(text.contains("\"series\""));
+    }
+
     #[test]
     fn clip_stops_on_char_boundary() {
         // Multibyte chars: 2 bytes each, so a 3-byte cap keeps 1 full char.
