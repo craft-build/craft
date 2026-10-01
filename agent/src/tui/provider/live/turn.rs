@@ -584,9 +584,14 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
     let mut history = state.lock().await.history.clone();
     let dedup = state.lock().await.dedup.clone();
     let guardrails = state.lock().await.guardrails.clone();
-    // The plan file is the one write target allowed outside the workspace;
-    // cleared again on every Build-mode turn.
-    workspace.set_plan_path(mode.plan_path().map(|p| p.to_path_buf()));
+    // The plan file is the one write target allowed outside the workspace,
+    // and the exception is session-scoped, not turn-scoped: install it when
+    // a plan is allocated and never clear it here, so the Build-mode turn
+    // that implements the plan (including after a context clear) keeps
+    // access to the plan file.
+    if let Some(plan) = mode.plan_path() {
+        workspace.set_plan_path(Some(plan.to_path_buf()));
+    }
 
     compact_history(
         &state,

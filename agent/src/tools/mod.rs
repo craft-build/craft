@@ -142,9 +142,11 @@ pub struct Workspace {
     /// Host seam for the `question` tool (A.5): the TUI installs the
     /// interactive asker per turn; the default dismisses headlessly.
     questions: Arc<dyn question::AskQuestions>,
-    /// Plan-mode plan file (C.17): the one write target allowed outside the
-    /// workspace root. Shared (like every Workspace cell) so the per-turn
-    /// set is visible through clones.
+    /// Session plan file (C.17): the one write target allowed outside the
+    /// workspace root. Shared (like every Workspace cell) so the set is
+    /// visible through clones — and session-scoped: once a plan is
+    /// allocated, mode switches (notably the Build turn that implements it
+    /// after a context clear) do not revoke the exemption.
     plan_path: std::sync::Arc<std::sync::RwLock<Option<PathBuf>>>,
     /// MCP client handle (B.11): when set, `register_with_mode` appends one
     /// portable tool per published MCP tool under its `server__tool` wire name.
@@ -187,6 +189,14 @@ impl Workspace {
         })
     }
 
+    /// Test seam: point the plans-dir read exemption at an isolated state
+    /// dir instead of the developer's real one.
+    #[cfg(test)]
+    pub(crate) fn with_state_dir(mut self, dir: crate::storage::StateDir) -> Self {
+        self.state_dir = Some(dir);
+        self
+    }
+
     /// Install the subagent seam (A.5). Taken on a workspace clone per turn
     /// (like the question asker) so the launcher can carry the turn's cancel
     /// token, history snapshot, and event channel.
@@ -221,9 +231,11 @@ impl Workspace {
         &self.root
     }
 
-    /// Set (or clear) the plan-mode plan file for the current turn (C.17).
-    /// The plan file lives in the state dir, outside the workspace root;
-    /// `walk` exempts exactly this path from containment.
+    /// Set (or clear) the session's plan file (C.17). The plan file lives
+    /// in the state dir, outside the workspace root; `walk` exempts exactly
+    /// this path from containment. Install when a plan is allocated and
+    /// leave it for the rest of the session — Build-mode turns that
+    /// implement the plan must keep the exception.
     pub fn set_plan_path(&self, path: Option<PathBuf>) {
         *self.plan_path.write().unwrap_or_else(|e| e.into_inner()) = path;
     }
@@ -233,6 +245,19 @@ impl Workspace {
         guard.as_ref().is_some_and(|plan| {
             crate::run::dedup::normalize_write_path(requested)
                 == crate::run::dedup::normalize_write_path(&plan.display().to_string())
+        })
+    }
+
+    /// Read-only exemption for the state dir's plans directory
+    /// (`<state>/plans`): the agent may read the plan files it holds —
+    /// including plans from earlier sessions — but never write there.
+    /// Only the exact session plan file ([`Self::plan_target`]) is
+    /// writable outside the workspace.
+    fn plans_read_target(&self, requested: &str) -> bool {
+        let normalize = crate::run::dedup::normalize_write_path;
+        self.state_dir.as_ref().is_some_and(|dir| {
+            let plans = normalize(&dir.path().join("plans").display().to_string());
+            Path::new(&normalize(requested)).starts_with(&plans)
         })
     }
 
@@ -431,15 +456,17 @@ impl Workspace {
         if requested.is_empty() {
             return Err(invalid("path must not be empty"));
         }
-        // Plan mode (C.17): the plan file lives in the state dir, outside
-        // the workspace root, so exactly this path is exempt from workspace
-        // containment — and from nothing else. It still goes through the
-        // same component-by-component validation below (no `..`, no Git
-        // metadata, no symlinked components), just walked from the path's
-        // own root instead of the workspace root.
-        let plan = self.plan_target(requested);
+        // Outside-workspace exemptions (C.17): the session's plan file, plus
+        // — read only, so the agent can consult earlier plans — the state
+        // dir's plans directory. Both live outside the workspace root and
+        // are exempt from workspace containment and from nothing else: the
+        // same component-by-component validation below still applies (no
+        // `..`, no Git metadata, no symlinked components), just walked from
+        // the path's own root instead of the workspace root.
+        let exempt =
+            self.plan_target(requested) || (!create_dirs && self.plans_read_target(requested));
         let requested = Path::new(requested);
-        let (relative, mut path) = if plan {
+        let (relative, mut path) = if exempt {
             (requested, PathBuf::new())
         } else if requested.is_absolute() {
             (
@@ -468,9 +495,9 @@ impl Workspace {
                 Component::Normal(name) if is_git_component(name) => {
                     return Err(denied("access to Git metadata is not allowed"));
                 }
-                // Plan targets are absolute paths outside the workspace:
+                // Exempt targets are absolute paths outside the workspace:
                 // anchor the walk at the path's own root/prefix.
-                Component::RootDir | Component::Prefix(_) if plan => {
+                Component::RootDir | Component::Prefix(_) if exempt => {
                     path = component.as_os_str().into();
                     continue;
                 }
@@ -880,6 +907,59 @@ mod plan_walk_tests {
         let via_link = link.join("PLAN.md").to_string_lossy().into_owned();
         assert!(workspace.target(&via_link).is_err());
         assert!(workspace.resolve(&via_link).is_err());
+    }
+
+    /// Workspace with the plans-dir exemption pointed at an isolated state
+    /// dir. Returns both tempdir guards plus the canonical state path so
+    /// requested paths share its spelling (macOS tempdirs live under
+    /// symlinked /var).
+    fn plans_workspace() -> (tempfile::TempDir, tempfile::TempDir, PathBuf, Workspace) {
+        let (root, state, workspace, _) = plan_workspace();
+        let canonical = state.path().canonicalize().unwrap();
+        let state_dir = crate::storage::StateDir::from_path(canonical.clone());
+        (root, state, canonical, workspace.with_state_dir(state_dir))
+    }
+
+    #[test]
+    fn plans_dir_reads_outside_workspace_are_exempt() {
+        let (_root, _state, state, workspace) = plans_workspace();
+        let earlier = state.join("plans/old-plan.md");
+        fs::create_dir_all(earlier.parent().unwrap()).unwrap();
+        fs::write(&earlier, "# earlier session's plan").unwrap();
+        let requested = earlier.to_string_lossy().into_owned();
+        assert_eq!(workspace.resolve(&requested).unwrap(), earlier);
+        assert_eq!(workspace.file(&requested).unwrap(), earlier);
+    }
+
+    #[test]
+    fn plans_dir_writes_outside_workspace_are_refused() {
+        let (_root, _state, state, workspace) = plans_workspace();
+        let earlier = state.join("plans/old-plan.md");
+        fs::create_dir_all(earlier.parent().unwrap()).unwrap();
+        let requested = earlier.to_string_lossy().into_owned();
+        assert!(workspace.target(&requested).is_err());
+    }
+
+    #[test]
+    fn state_dir_paths_outside_plans_are_still_refused() {
+        let (_root, _state, state, workspace) = plans_workspace();
+        let sessions = state.join("sessions/session.json");
+        let requested = sessions.to_string_lossy().into_owned();
+        assert!(workspace.resolve(&requested).is_err());
+        assert!(workspace.target(&requested).is_err());
+    }
+
+    /// The implement flow: after clear-context-and-implement the turn runs
+    /// in Build mode, which installs no plan path — the session's plan file
+    /// must keep its exemption so the agent can read (and update) it.
+    #[test]
+    fn plan_file_exemption_survives_the_build_mode_implement_turn() {
+        let (_dir, _state, workspace, plan) = plan_workspace();
+        workspace.set_plan_path(Some(plan.clone()));
+        let requested = plan.to_string_lossy().into_owned();
+        fs::write(workspace.target(&requested).unwrap(), "# the plan").unwrap();
+        // The Build-mode turn installs nothing; the earlier set must hold.
+        assert_eq!(workspace.file(&requested).unwrap(), plan);
     }
 }
 
