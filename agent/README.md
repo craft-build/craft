@@ -10,12 +10,13 @@ Configuration lives in BML format (`barkml`) at `~/.config/craft.bml`, or split 
 
 Each `[providers.<alias>]` chooses a `kind`. Multiple aliases may use the same kind with different credentials, URLs, and model catalogs. `api_key_env` names an environment variable, **not the key itself** — keep secrets in your shell or secret manager.
 
-The following rig-native provider kinds are supported: `anthropic`, `azure`, `chatgpt`, `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openai-compatible`, `openrouter`, `perplexity`, `together`, `venice`, `voyageai`, `xai`, `xiaomimimo`, `zai`.
+The following rig-native provider kinds are supported: `amazon-bedrock`, `anthropic`, `azure`, `chatgpt`, `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openai-compatible`, `openrouter`, `perplexity`, `together`, `venice`, `voyageai`, `xai`, `xiaomimimo`, `zai`.
 
 - `openai` uses Rig's native Responses API client; use `openai-compatible` for Chat Completions. Both accept `base_url`.
 - `anthropic` accepts `base_url` for Anthropic-compatible services. Supply the complete base URL including any path prefix; URLs cannot contain credentials, query parameters, or fragments.
 - Without explicit credentials/URL, native clients use Rig's environment/auth defaults. With overrides, `api_key_env` defaults to the provider's usual key variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...).
 - Ollama and Llamafile support keyless local use (Llamafile rejects `api_key_env`).
+- `amazon-bedrock` (via `rig-bedrock`) authenticates through the AWS default credential chain (env vars, `~/.aws` profiles, SSO) and takes its region from `AWS_REGION`/`AWS_DEFAULT_REGION` or the profile; it rejects `api_key_env` and `base_url` (use `AWS_ENDPOINT_URL` to override the endpoint).
 - Azure takes `base_url` + `api_version` (falling back to `AZURE_ENDPOINT` / `AZURE_API_VERSION`), credentials from `AZURE_API_KEY` or `AZURE_TOKEN`.
 - ChatGPT uses Rig OAuth by default; `api_key_env` selects an access token, optionally with `account_id`.
 - Copilot uses Rig's environment/OAuth defaults; an explicit `api_key_env` selects a Copilot API key.

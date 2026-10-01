@@ -63,3 +63,12 @@ provider "company" {
 provider "ollama" {
   kind = "ollama"
 }
+
+# AWS Bedrock authenticates through the AWS default credential chain
+# (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, ~/.aws profiles, or SSO) and takes
+# its region from AWS_REGION or the profile, so only the model catalog is
+# configured here. Model IDs are Bedrock model IDs or inference-profile ARNs.
+#provider "amazon-bedrock" {
+#  kind = "amazon-bedrock"
+#  model "us.anthropic.claude-sonnet-4-5-v2" { context_length = 200000 }
+#}

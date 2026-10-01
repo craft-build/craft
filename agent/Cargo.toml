@@ -38,6 +38,7 @@ ratatui.workspace = true
 ratatui-image.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+rig-bedrock.workspace = true
 rig-core.workspace = true
 rmcp.workspace = true
 schemars.workspace = true

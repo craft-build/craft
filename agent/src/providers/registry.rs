@@ -13,8 +13,8 @@ use super::catalog::{CatalogModel, merge_catalog};
 use super::dynamic::DynamicModel;
 use super::openai_compat::list_openai_compatible_models;
 use super::{
-    Timeouts, base_url_env, build_azure, build_chatgpt, build_copilot, build_llamafile,
-    build_ollama, credential, timeout_client,
+    Timeouts, base_url_env, build_azure, build_bedrock, build_chatgpt, build_copilot,
+    build_llamafile, build_ollama, credential, timeout_client,
 };
 use crate::config::ProviderConfig;
 use crate::error::{
@@ -203,6 +203,7 @@ macro_rules! providers {
 providers! {
     Anthropic, "anthropic", anthropic::Client, "ANTHROPIC_API_KEY", yes, yes;
     Azure, "azure", azure::Client, build_azure, no, yes;
+    Bedrock, "amazon-bedrock", rig_bedrock::client::Client, build_bedrock, no, yes;
     Chatgpt, "chatgpt", chatgpt::Client, build_chatgpt, no, yes;
     Cohere, "cohere", cohere::Client, "COHERE_API_KEY", no, yes;
     Copilot, "copilot", copilot::Client, build_copilot, yes, yes;

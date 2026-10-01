@@ -65,7 +65,7 @@ The `task` tool spawns child agents with their own context windows and cancel to
 
 ## Supported providers
 
-All rig-native provider kinds are supported, configured by alias in the BML config with per-alias credentials, base URLs, and model catalogs: `anthropic`, `azure`, `chatgpt` (OAuth), `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openai-compatible`, `openrouter`, `perplexity`, `together`, `venice`, `voyageai`, `xai`, `xiaomimimo`, `zai`.
+All rig-native provider kinds are supported, configured by alias in the BML config with per-alias credentials, base URLs, and model catalogs: `amazon-bedrock` (AWS credential chain), `anthropic`, `azure`, `chatgpt` (OAuth), `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openai-compatible`, `openrouter`, `perplexity`, `together`, `venice`, `voyageai`, `xai`, `xiaomimimo`, `zai`.
 
 Model discovery merges configured models with live provider listings and the [models.dev](https://models.dev) catalog (cached) for context-window and pricing metadata.
 

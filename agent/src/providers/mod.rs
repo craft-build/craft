@@ -18,6 +18,7 @@ pub use usage_fetch::{ModelUsageRow, ProviderUsage, UsageLimit};
 
 use std::time::Duration;
 
+use rig_core::client::ProviderClient;
 use rig_core::providers::*;
 use snafu::{OptionExt, ResultExt};
 
@@ -148,6 +149,20 @@ pub(crate) fn build_azure(
         .map_err(crate::error::client_error)
 }
 
+/// Bedrock has no craft-side credential or base URL: the AWS SDK's default
+/// chain (environment credentials, `~/.aws` profiles, SSO, container/IMDS
+/// roles) supplies both credentials and region, resolved lazily on the first
+/// request. The AWS SDK also owns its transport, so the shared reqwest
+/// [`Timeouts`] policy does not apply; AWS call timeouts live in the SDK
+/// config instead.
+pub(crate) fn build_bedrock(
+    _: &ProviderConfig,
+    _: Timeouts,
+    _: &dyn Fn(&str) -> Result<String>,
+) -> Result<rig_bedrock::client::Client> {
+    rig_bedrock::client::Client::from_env().map_err(crate::error::client_error)
+}
+
 pub(crate) fn build_chatgpt(
     config: &ProviderConfig,
     timeouts: Timeouts,
@@ -222,7 +237,9 @@ mod tests {
     };
 
     fn config(kind: ProviderKind, base_url: &str) -> ProviderConfig {
-        let auth = if kind == ProviderKind::Llamafile {
+        // Bedrock takes neither credentials nor a base URL: the AWS default
+        // credential chain owns both.
+        let auth = if matches!(kind, ProviderKind::Llamafile | ProviderKind::Bedrock) {
             ""
         } else {
             "api_key_env = \"CRAFT_TEST_KEY\"\n"
@@ -232,8 +249,13 @@ mod tests {
         } else {
             ""
         };
+        let base = if kind == ProviderKind::Bedrock {
+            String::new()
+        } else {
+            format!("  base_url = \"{base_url}\"\n")
+        };
         Config::parse(&format!(
-            "provider \"test\" {{\n  kind = \"{}\"\n  base_url = \"{base_url}\"\n{auth}{azure}  model \"manual\" {{ name = \"Manual model\" }}\n}}",
+            "provider \"test\" {{\n  kind = \"{}\"\n{base}{auth}{azure}  model \"manual\" {{ name = \"Manual model\" }}\n}}",
             kind.as_str(),
         ))
         .unwrap()
@@ -418,16 +440,20 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_discovery_uses_configured_models() {
-        let config = config(ProviderKind::Voyageai, "http://127.0.0.1:1");
-        assert!(config.discover_models);
-        assert_eq!(
-            build(&config)
-                .models_with(&config, &|_| Ok("test-key".into()))
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
+        for kind in [ProviderKind::Voyageai, ProviderKind::Bedrock] {
+            let config = config(kind, "http://127.0.0.1:1");
+            assert!(config.discover_models);
+            assert_eq!(
+                build(&config)
+                    .models_with(&config, &|_| Ok("test-key".into()))
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "{}",
+                kind.as_str()
+            );
+        }
     }
 
     #[test]

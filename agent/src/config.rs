@@ -522,6 +522,21 @@ impl ProviderConfig {
                 }
                 .fail();
             }
+            if self.kind == ProviderKind::Bedrock {
+                return InvalidSnafu {
+                    reason: "bedrock authenticates through the AWS default credential chain \
+                             (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, ~/.aws profiles, or SSO), \
+                             not api_key_env",
+                }
+                .fail();
+            }
+        }
+        if self.base_url.is_some() && self.kind == ProviderKind::Bedrock {
+            return InvalidSnafu {
+                reason: "bedrock does not accept base_url; override the AWS endpoint with \
+                         AWS_ENDPOINT_URL or a profile endpoint_url in ~/.aws/config",
+            }
+            .fail();
         }
         if let Some(base) = &self.base_url {
             let url = url::Url::parse(base).context(InvalidBaseUrlSnafu)?;
@@ -730,9 +745,23 @@ mod tests {
             "provider \"x\" { kind = \"openai\"\n  api_version = \"v1\" }",
             "provider \"x\" { kind = \"openai\"\n  api_key_env = \"\" }",
             "provider \"x\" { kind = \"openai\"\n  model \"test\" { context_length = 0 } }",
+            "provider \"x\" { kind = \"amazon-bedrock\"\n  api_key_env = \"AWS_ACCESS_KEY_ID\" }",
+            "provider \"x\" { kind = \"amazon-bedrock\"\n  base_url = \"https://bedrock-runtime.us-east-1.amazonaws.com\" }",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn bedrock_config_is_credential_free() {
+        let config = Config::parse(
+            "provider \"bedrock\" {\n  kind = \"amazon-bedrock\"\n  model \"us.anthropic.claude-sonnet-4-5-v2\" { context_length = 200000 }\n}",
+        )
+        .unwrap();
+        let provider = &config.providers["bedrock"];
+        assert_eq!(provider.kind, ProviderKind::Bedrock);
+        assert!(provider.api_key_env.is_none());
+        assert!(provider.base_url.is_none());
     }
 
     #[test]
