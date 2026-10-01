@@ -1,7 +1,11 @@
 [package]
 name = "craft"
-version = "0.1.0"
+version = "1.0.0-beta.1"
 edition = "2024"
+
+[[bin]]
+name = "crafty"
+path = "src/main.rs"
 
 [dependencies]
 agent-client-protocol.workspace = true

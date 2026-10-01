@@ -12,7 +12,7 @@ agent-client-protocol = "2.2"
 aho-corasick = "1"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 arc-swap = "1"
-argosy = "0.5"
+argosy = "0.6"
 async-trait = "0.1"
 barkml = "0.10"
 base64 = "0.23"

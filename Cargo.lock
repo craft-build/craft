@@ -283,9 +283,9 @@ dependencies = [
 
 [[package]]
 name = "argosy"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bc04241c13965be3870a43a4fdde51deea9eefec5975d800d9c6cfcc9177739"
+checksum = "692a8a7b65ccdbb2326edd8532a415d3eed60028e41c7537e1bcb87cdd68f6f3"
 dependencies = [
  "ast-grep-core",
  "ast-grep-language",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "craft"
-version = "0.1.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "agent-client-protocol",
  "aho-corasick",
