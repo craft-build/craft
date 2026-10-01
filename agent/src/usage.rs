@@ -2,14 +2,13 @@
 //! `craft-providers/src/{model.rs, pricing.rs}`.
 //!
 //! A turn is priced once, when it runs, and that number is what gets stored,
-//! summed and shown. History is never re-priced, because rates move. The only
-//! thing that moves them today is a provider's [`PricingSchedule`] (DeepSeek's
-//! peak-hours surcharge), which scales the quoted off-peak table rates inside
-//! its windows.
-//!
-//! The reference resolves rates through its model registry; until that lands
-//! here (H.3), a static [`PricedModel`] table stands in. Unknown models are
-//! unpriced: callers get `None` and show no cost instead of a made-up "$0.000".
+//! summed and shown; history is never re-priced, because rates move. The
+//! only thing that moves them today is a provider's [`PricingSchedule`]
+//! (DeepSeek's peak-hours surcharge), which scales the quoted off-peak
+//! table rates inside its windows. Until the model registry lands here
+//! (H.3), a static [`PricedModel`] table stands in; unknown models are
+//! unpriced: callers get `None` and show no cost instead of a made-up
+//! "$0.000".
 
 use std::collections::HashMap;
 use std::fmt;
@@ -27,9 +26,8 @@ pub(crate) const FLAT_RATE: f64 = 1.0;
 
 /// Token usage reported by the provider for one model call.
 ///
-/// Cache fields are part of the accounting even though the Rig seam does not
-/// surface them yet (they read 0 there); the pricing math keeps its shape so
-/// the numbers are right the day they arrive.
+/// Cache fields stay in the accounting even though the Rig seam reads 0
+/// for them, so the math is right the day they arrive.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Non-cached input tokens. Total input = `input + cache_read + cache_creation`.
@@ -66,9 +64,9 @@ impl AddAssign for TokenUsage {
 }
 
 impl TokenUsage {
-    /// Ready to store, with what the turn was billed. No `From<TokenUsage>` on
-    /// purpose: a caller that forgets the cost quietly loses money from the
-    /// session total, so saying it out loud is mandatory.
+    /// Ready to store, with what the turn was billed. No `From<TokenUsage>`
+    /// on purpose: a caller that forgets the cost quietly loses money from
+    /// the session total.
     pub fn billed(&self, cost: Option<f64>) -> StoredTokenUsage {
         StoredTokenUsage {
             input: self.input,
@@ -341,14 +339,12 @@ pub struct PricedModel {
 }
 
 impl PricedModel {
-    /// The quoted rates, with no wall-clock surcharge. Deterministic, which is
-    /// what makes it right for re-pricing a session whose turns never recorded
-    /// what they paid: the rate back then is unknown, and the table price is
-    /// the honest guess.
+    /// The quoted rates, with no wall-clock surcharge — the honest guess
+    /// when re-pricing a session whose turns never recorded what they paid.
     ///
-    /// `fast` arrives as the user's raw preference and is gated here, against
-    /// *this* model. Callers often price a model they are not running, so a
-    /// gate on their side would answer for the wrong one.
+    /// `fast` arrives as the user's raw preference and is gated here,
+    /// against *this* model; callers often price a model they are not
+    /// running.
     pub fn list_cost(&self, usage: &TokenUsage, fast: bool) -> Option<f64> {
         let fast = fast && self.pricing.fast.is_some();
         (!self.pricing.is_zero()).then(|| usage.cost(&self.pricing, fast))
@@ -574,17 +570,15 @@ pub fn resolve(provider: &str, model_id: &str) -> Option<&'static PricedModel> {
         .map(|(_, m)| m)
 }
 
-/// The bill a session ran up. Status bar, `/usage`, ACP and headless all come
-/// here, so they cannot disagree about the same session.
+/// The bill a session ran up; status bar, `/usage`, ACP and headless all
+/// come here so they cannot disagree.
 ///
 /// Turns record what they paid, so summing those is the truth. Counters
-/// written before that kept no cost, and their estimate against today's table
-/// is settled into the entry here, once: after a later turn merges its own
-/// cost in, the counters no longer say which of them was already paid for, so
-/// estimating again would drop everything the entry had before.
-///
-/// `None` when nothing here is priced, so callers show no cost instead of a
-/// made up "$0.000".
+/// written before that kept no cost; their estimate against today's table is
+/// settled into the entry once — after a later turn merges its own cost in,
+/// the counters no longer say which of them was already paid for, so
+/// estimating again would drop everything the entry had before. `None` when
+/// nothing here is priced.
 pub fn settle_session(
     total: &TokenUsage,
     by_model: &mut HashMap<String, StoredTokenUsage>,
@@ -660,8 +654,6 @@ mod tests {
         .expect("timestamp in range")
     }
 
-    // ---- pricing.rs ports -------------------------------------------------
-
     /// Windows are half-open down to the second, since an off-by-one bills a
     /// whole hour at the wrong rate. Every case also runs on a day before the
     /// epoch, where the timestamp is negative and must not wrap into another
@@ -727,8 +719,6 @@ mod tests {
             "2x during 22:00-02:00 UTC"
         );
     }
-
-    // ---- model.rs ports ---------------------------------------------------
 
     #[test_case(999, "999"         ; "under_thousand")]
     #[test_case(1_000, "1.0k"      ; "thousand")]
@@ -852,8 +842,6 @@ mod tests {
         assert_eq!(model.list_cost(&usage, false), Some(0.66));
         assert_eq!(model.billed_cost_at(&usage, false, at), Some(expected));
     }
-
-    // ---- settle_session ---------------------------------------------------
 
     const CURRENT: &str = "anthropic/claude-sonnet-5";
     /// 1M input tokens at the current model's input rate (2.00).

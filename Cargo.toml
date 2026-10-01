@@ -8,38 +8,79 @@ resolver = "3"
 members = ["agent"]
 
 [workspace.dependencies]
+agent-client-protocol = "2.2"
 aho-corasick = "1"
-agent-client-protocol = "2.1.0"
-base64 = "0.22"
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+arc-swap = "1"
+argosy = "0.5"
+async-trait = "0.1"
+barkml = "0.10"
+base64 = "0.23"
+bs58 = "0.5"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 crossterm = "0.29"
 dirs = "7"
 etcetera = "0.11"
 futures = "0.3"
+htmd = "0.5"
+http = "1"
 ignore = "0.4"
 image = "0.25"
-ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
-arboard = { version = "3", default-features = false, features = ["image-data"] }
+indexmap = "2"
+jiff = "0.2"
+jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
+libc = "0.2"
+minijinja = "2"
 nucleo-matcher = "0.3"
 ratatui = "0.30"
+ratatui-image = {
+  version = "11",
+  default-features = false,
+  features = ["image-defaults", "crossterm"]
+}
 regex = "1"
-rmcp = { version = "3.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "reqwest"] }
-arc-swap = "1"
-barkml = "0.10"
-indexmap = "2"
 reqwest = "0.13"
 rig-core = "0.42"
+rmcp = {
+  version = "3.5",
+  default-features = false,
+  features = [
+    "auth",
+    "client",
+    "reqwest",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest"
+  ]
+}
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
-minijinja = "2"
+serde_yaml = { package = "yaml_serde", version = "0.10" }
+sha2 = "0.11"
+similar = { version = "3", features = ["inline", "unicode"] }
 snafu = "0.9"
+syntect = {
+  version = "5",
+  default-features = false,
+  features = ["default-fancy"]
+}
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 toml = "1"
 toml_edit = "0.25"
+tracing = "0.1"
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
+two-face = {
+  version = "0.5",
+  default-features = false,
+  features = ["syntect-default-fancy"]
+}
+unicode-normalization = "0.1"
+unicode-width = "0.2"
 url = "2"
+uuid = { version = "1", features = ["v4", "v7"] }
 
 [[bin]]
 name = "craft_code"
@@ -53,7 +94,7 @@ pulldown-cmark = "0.13"
 serde.workspace = true
 serde_json.workspace = true
 shell-words = "1"
-similar = "3"
+similar.workspace = true
 tokio.workspace = true
 uuid = { version = "1", features = ["v4"] }
 

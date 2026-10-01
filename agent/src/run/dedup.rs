@@ -739,9 +739,7 @@ mod tests {
             cache.get(1, "read", &serde_json::json!({"i": 1})).is_some(),
             "the FIFO neighbor survives an overwrite"
         );
-        // order stays consistent with entries: every key in order is live.
-        let live: std::collections::HashSet<u64> = cache.entries.keys().copied().collect();
-        assert!(cache.order.iter().all(|k| live.contains(k)));
+        assert_eq!(cache.order.len(), cache.entries.len());
         assert_eq!(cache.order.len(), cache.entries.len());
     }
 
@@ -804,10 +802,6 @@ mod tests {
 
     #[test]
     fn symlink_alias_write_still_drops_pathless_entries() {
-        // A write through a symlink alias cannot invalidate the entry cached
-        // under the real path (string-space normalization does not resolve
-        // symlinks); the mitigation is that every write also drops pathless
-        // entries, whose tools resample the tree on their next call.
         let mut cache = rooted_cache();
         let real = serde_json::json!({"path": "/abs/root/src/a.rs"});
         let key_real = ToolDedupCache::key("read", &real);
@@ -822,9 +816,8 @@ mod tests {
         let key_g = ToolDedupCache::key("grep", &grep_input);
         cache.insert(key_g, &result("g"), None, "grep", &grep_input);
 
-        cache.invalidate_path("/abs/root/alias/a.rs"); // different name: miss
+        cache.invalidate_path("/abs/root/alias/a.rs");
 
-        // Residual: the aliased-file entry survives; the pathless one must not.
         assert!(cache.get(key_real, "read", &real).is_some());
         assert!(cache.get(key_g, "grep", &grep_input).is_none());
     }

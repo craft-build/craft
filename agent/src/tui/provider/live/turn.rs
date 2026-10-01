@@ -104,8 +104,7 @@ impl TurnRenderer {
                 result,
             } => {
                 // A finished task tool call settles its subagent's chat
-                // (task 96): the is_error verdict is the most specific
-                // ending the chat will see.
+                // (task 96): is_error is the most specific ending it sees.
                 if name == "task" {
                     let _ = self.tx.send(AgentEvent::SubagentFinished {
                         tool_use_id: id.clone(),
@@ -114,9 +113,8 @@ impl TurnRenderer {
                 }
                 let done = cards::tool_done(id, &name, &arguments, &result);
                 if let Some((path, status)) = done.touched {
-                    // Poison-tolerant like the rest of the turn: a
-                    // poisoned mutex must not kill the turn task and
-                    // leave the UI stuck "Running".
+                    // Poison-tolerant: a poisoned mutex must not leave
+                    // the UI stuck "Running".
                     lock_sink(&self.files).insert(path, status);
                     let _ = self
                         .tx
@@ -182,11 +180,10 @@ impl TurnRenderer {
                 advisor_tone(&severity),
                 format!("advisor [{severity}]: {message}"),
             ),
-            // The nudge is visible in the next model call; nothing to show.
-            // Live-call rendering of ToolPending/ToolOutput/
-            // ToolResultsSubmitted is Phase 8 tool work; Done is consumed
-            // by the caller; Error rides RunOutcome::Failed; auto-review
-            // renders through its tool card (approval.rs).
+            // Nothing to render: ToolPending/ToolOutput/ToolResultsSubmitted
+            // is Phase 8 tool work; Done is consumed by the caller; Error
+            // rides RunOutcome::Failed; auto-review renders through its tool
+            // card (approval.rs).
             run::Event::Nudge
             | run::Event::ToolPending { .. }
             | run::Event::ToolOutput { .. }
@@ -196,9 +193,9 @@ impl TurnRenderer {
             | run::Event::AutoReviewStart { .. }
             | run::Event::AutoReviewDecision { .. }
             | run::Event::StreamClosed => {}
-            // Subagent events normally go straight from the launcher's
-            // emit closure to the tx; this arm only catches any that ride
-            // the parent stream, and routes them the same way (task 96).
+            // Normally subagent events go straight from the launcher's emit
+            // closure; this arm only catches any riding the parent stream
+            // (task 96) and routes them the same way.
             run::Event::Subagent {
                 tool_use_id,
                 description,
@@ -238,9 +235,9 @@ fn advisor_tone(severity: &str) -> Tone {
 }
 
 /// Convert one forwarded child run event into the `AgentEvent` its task
-/// chat renders (task 96). Tool cards complete from `ToolDone` (the
-/// child's streaming output is filtered upstream); anything the chat has
-/// no surface for is dropped.
+/// chat renders (task 96); anything the chat has no surface for is dropped.
+/// Tool cards complete from `ToolDone` (child streaming output is filtered
+/// upstream).
 fn subagent_event(event: run::Event) -> Option<AgentEvent> {
     match event {
         run::Event::TextDelta(text) => Some(AgentEvent::AssistantDelta(text)),
@@ -288,7 +285,7 @@ fn fmt_tokens(tokens: u64) -> String {
     cards::usage_label(tokens, tokens, None)
 }
 
-/// Sidebar plan items for a `todo_write` call. Its arguments carry the full
+/// Sidebar plan items for a `todo_write` call: the arguments carry the full
 /// replacement list, so the panel mirrors the todo store; children are
 /// indented under their parent.
 fn todo_plan(arguments: &serde_json::Value) -> Vec<PlanItem> {
@@ -332,9 +329,8 @@ pub(super) async fn resolve_model(
     provider.completion_model(&selection.model).map_err(report)
 }
 
-/// Run configured compaction stages whose context-fill threshold is crossed
-/// before the history is sent to the model; commit effectiveness state only.
-/// Posts a notice when a stage actually ran; silence remains the default.
+/// Run armed compaction stages whose threshold is crossed before the
+/// history is sent; silent unless a stage actually ran.
 async fn compact_history(
     state: &Arc<Mutex<SessionState>>,
     config: &Config,
@@ -376,9 +372,9 @@ async fn compact_history(
     }
 }
 
-/// `/compact`: force every armed compaction stage over the session history,
-/// announcing the run and reporting through notices; also refreshes the token
-/// label. An empty or already-compact history reports a neutral no-op (silence
+/// `/compact`: force every armed stage over the session history, announcing
+/// the run and reporting through notices; also refreshes the token label.
+/// An empty or already-compact history reports a neutral no-op (silence
 /// would read as a lost command).
 pub(super) async fn compact_now(
     config: &Config,
@@ -404,8 +400,8 @@ pub(super) async fn compact_now(
     let before = compaction
         .estimator
         .scale(crate::compaction::estimate_tokens(&session.history));
-    // `force_compact` can await an LLM summary before it returns; announce the
-    // run so the pause is not mistaken for a lost command.
+    // `force_compact` can await an LLM summary; announce the run so the
+    // pause is not mistaken for a lost command.
     let _ = tx.send(AgentEvent::Notice {
         tone: Tone::Info,
         text: format!(
@@ -480,8 +476,7 @@ async fn handle_outcome(
 ) -> TurnFlow {
     match outcome {
         RunOutcome::Cancelled => {
-            // Commit the partial run (user message, streamed reply, tool
-            // turns) like MaxTurns does: dropping it would erase the
+            // Commit the partial run: dropping it would erase the
             // interrupted turn from the next prompt's context.
             state.lock().await.history = history.to_vec();
             let _ = tx.send(AgentEvent::AssistantEnd);
@@ -497,8 +492,8 @@ async fn handle_outcome(
             TurnFlow::Abort
         }
         RunOutcome::MaxTurns => {
-            // Keep the partial run: the follow-up prompt continues from
-            // where the budget ran out instead of silently losing it.
+            // Keep the partial run so the follow-up prompt continues
+            // from where the budget ran out.
             state.lock().await.history = history.to_vec();
             let _ = tx.send(AgentEvent::AssistantText(
                 "Reached the turn limit. Send another message to continue.".into(),
@@ -506,8 +501,8 @@ async fn handle_outcome(
             TurnFlow::Commit
         }
         RunOutcome::DoomStop => {
-            // The doom-loop hard stop committed the sanitized partial run;
-            // like MaxTurns, continue from the cut-off on the next message.
+            // The doom-loop stop committed the sanitized partial run;
+            // continue from the cut-off on the next message.
             state.lock().await.history = history.to_vec();
             let _ = tx.send(AgentEvent::AssistantText(
                 "Stopped: the agent appeared stuck in a loop. Send another message to continue."
@@ -542,14 +537,14 @@ async fn handle_outcome(
     }
 }
 
-// A turn that ends with only reasoning (no reply, no tool calls) still
+// A turn ending with only reasoning (no reply, no tool calls) still
 // carries real work; nudge the model to continue instead of stopping.
 const MAX_EMPTY_CONTINUATIONS: usize = 2;
 const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and no tool \
      calls. Continue the task with your reply or the next tool call.";
 
-/// How long a turn waits for every MCP server to settle (B.11). Ten seconds
-/// covers slow initializes without letting a hung server pin the turn.
+/// How long a turn waits for MCP servers to settle (B.11): slow initializes
+/// covered, a hung server cannot pin the turn.
 const MCP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::history::ImageBlock>) {
@@ -585,10 +580,9 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
     let dedup = state.lock().await.dedup.clone();
     let guardrails = state.lock().await.guardrails.clone();
     // The plan file is the one write target allowed outside the workspace,
-    // and the exception is session-scoped, not turn-scoped: install it when
-    // a plan is allocated and never clear it here, so the Build-mode turn
-    // that implements the plan (including after a context clear) keeps
-    // access to the plan file.
+    // and the exception is session-scoped: never cleared here, so the
+    // Build-mode turn that implements the plan keeps access to it (also
+    // after a context clear).
     if let Some(plan) = mode.plan_path() {
         workspace.set_plan_path(Some(plan.to_path_buf()));
     }
@@ -609,8 +603,8 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         context_length: selection.context_length,
     };
 
-    // The approval gate is shared by the parent's dispatch table and every
-    // subagent the task tool spawns, so children cannot bypass approvals.
+    // The approval gate is shared by the dispatch table and every subagent,
+    // so children cannot bypass approvals.
     let approval = Arc::new(ApprovalGate::new(
         state.clone(),
         tx.clone(),
@@ -618,10 +612,9 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         permissions.clone(),
         Some(auto_review_reviewer(model.clone())),
     ));
-    // The question seam (A.5) is per-turn like the approval gate: it parks
-    // on this turn's cancel token and event channel. The subagent seam
-    // (task tool) is installed on the same clone, carrying the turn's
-    // model, history snapshot, cancel token, and event channel.
+    // The question seam (A.5) is per-turn like the approval gate; the
+    // subagent launcher is installed on the same clone, carrying the
+    // turn's model, history snapshot, cancel token, and event channel.
     let subagent_emit_tx = tx.clone();
     let subagents = Arc::new(crate::subagent::SubagentLauncher {
         parent_model: model.clone(),
@@ -664,9 +657,9 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         )))
         .with_subagents(subagents)
         .with_cancel(cancel.clone());
-    // B.11: the first prompt must not ship without the MCP tools, but a
-    // hung server can't block the turn forever — the gate times out and
-    // the turn proceeds with whatever has landed.
+    // B.11: the first prompt must not ship without MCP tools, but a hung
+    // server cannot block forever — the gate times out and the turn
+    // proceeds with whatever has landed.
     if let Some(mcp) = workspace.mcp()
         && tokio::time::timeout(MCP_READY_TIMEOUT, mcp.ready())
             .await
@@ -681,9 +674,9 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
             ),
         });
     }
-    // Phase 3: feed MCP tool annotations to the permission engine before the
-    // tool table is built; sync is generation-keyed, so steady-state turns
-    // are a no-op.
+    // Phase 3: feed MCP tool annotations to the permission engine before
+    // the tool table is built; sync is generation-keyed, so steady state
+    // is a no-op.
     if let Some(mcp) = workspace.mcp() {
         permissions.sync_mcp_annotations(&mcp);
     }
@@ -730,8 +723,8 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
     let mut continuations = MAX_EMPTY_CONTINUATIONS;
     loop {
         let renderer = TurnRenderer::new(tx.clone(), files.clone(), selection.context_length);
-        // The terminal Done's per-model ledger, captured from the event seam;
-        // folded into the session and the cost ledger once the run returns.
+        // The terminal Done's per-model ledger, folded into the session
+        // and the cost ledger once the run returns.
         let done_by_model = Arc::new(std::sync::Mutex::new(None));
         let sink = Arc::clone(&done_by_model);
         let outcome = run::run_with_images(
@@ -773,10 +766,10 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
     {
         let mut session = state.lock().await;
         session.history = history.clone();
-        // The committed turn is persisted, the same seam headless uses, so
-        // `/sessions` can list and reload this conversation. (The clone is
-        // sequenced before the store borrow: field splits do not apply
-        // through the mutex guard's deref.)
+        // Persist through the same seam headless uses, so `/sessions` can
+        // list and reload this conversation. (The clone is sequenced before
+        // the store borrow: field splits do not apply through the guard's
+        // deref.)
         let messages = session.history.clone();
         if let Some(store) = &mut session.store {
             store.record_turn(
@@ -785,8 +778,8 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
             );
         }
     }
-    // Phase 4: detached, best-effort memory extraction into the project's
-    // local argosy. Never blocks or fails the turn.
+    // Phase 4: detached, best-effort memory extraction; never blocks or
+    // fails the turn.
     crate::knowledge_memory::spawn_extraction(
         model,
         history,
@@ -914,8 +907,6 @@ mod tests {
         assert!(text.contains("guardrail blocked read"), "{text}");
     }
 
-    /// An interrupted turn must commit its partial history so the next
-    /// message still carries the interrupted turn's context.
     #[tokio::test]
     async fn cancelled_commits_partial_history() {
         let (renderer, _rx) = renderer();

@@ -131,7 +131,6 @@ mod tests {
         assert_eq!(content.len(), 2);
         assert!(block_text(&content[1]).starts_with("<turn-context>"));
         assert!(block_text(&content[1]).contains("fresh state"));
-        // Input untouched.
         let Message::User { content } = &messages[1] else {
             panic!("user message");
         };

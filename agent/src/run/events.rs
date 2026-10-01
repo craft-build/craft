@@ -245,7 +245,6 @@ impl SessionEvents {
 mod tests {
     use super::*;
 
-    /// An empty stream must not resolve `next()` until the guard drops.
     #[tokio::test]
     async fn empty_stream_resolves_only_after_the_guard_drops() {
         let (guard, mut events) = event_stream();
@@ -255,8 +254,6 @@ mod tests {
         assert!(events.next().await.is_none());
     }
 
-    /// Events queued before the marker are all delivered, in order, then the
-    /// stream closes.
     #[tokio::test]
     async fn events_before_the_marker_are_delivered_in_order() {
         let (guard, mut events) = event_stream();
@@ -276,7 +273,6 @@ mod tests {
         assert_eq!(ids, vec!["one", "two", "three"]);
     }
 
-    /// `next()` stays `None` on every call after the close.
     #[tokio::test]
     async fn closed_stays_none_forever() {
         let (guard, mut events) = event_stream();
@@ -285,8 +281,6 @@ mod tests {
         assert!(events.next().await.is_none());
     }
 
-    /// A sender outliving the guard neither panics nor resurrects the stream:
-    /// its late events stay invisible.
     #[tokio::test]
     async fn late_events_after_the_marker_are_lost() {
         let (guard, mut events) = event_stream();

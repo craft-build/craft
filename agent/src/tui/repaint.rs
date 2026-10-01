@@ -3,7 +3,6 @@
 //! Three ideas, and keeping them apart is what keeps the loop cheap:
 //!
 //! - [`Dirty`]: something changed what is on screen, so a frame is owed.
-//!   Every event the loop handles implies it.
 //! - [`Watch`]: how a poller notices a background thread writing to a shared
 //!   slot, the one kind of change nothing else announces.
 //! - [`Cadence`]: how soon the loop has to come back when no event will wake
@@ -43,8 +42,8 @@ pub(crate) mod expect {
 
 /// Something changed what is on screen, so a frame is owed.
 ///
-/// `#[must_use]` is the whole point of the newtype: a poller added to the
-/// loop a year from now cannot quietly skip its repaint.
+/// `#[must_use]` is the point: a poller added a year from now cannot
+/// quietly skip its repaint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[must_use]
 pub struct Dirty(bool);
@@ -88,10 +87,10 @@ impl BitOrAssign for Dirty {
 /// The last value seen in a shared slot a background thread publishes to, so
 /// `view` renders from here and never loads the slot itself.
 ///
-/// Every publish stores a fresh `Arc`, and holding the last one alive is what
-/// stops its address being reused, so comparing pointers is exact. That asks
-/// nothing of the slot: no `PartialEq`, no generation to remember to bump,
-/// and no stand-in like a length, which misses a same-sized republish.
+/// Every publish stores a fresh `Arc`, and holding the last one alive stops
+/// its address being reused, so comparing pointers is exact: no `PartialEq`,
+/// no generation to bump, and no stand-in like a length, which misses a
+/// same-sized republish.
 pub struct Watch<T>(Option<Arc<T>>);
 
 impl<T> Watch<T> {
@@ -217,8 +216,6 @@ mod tests {
         assert!(!dirty.take());
     }
 
-    /// The empty fold is the common case: a settled session takes it on every
-    /// loop turn.
     #[test]
     fn any_takes_the_soonest_frame_and_keeps_the_motion() {
         assert_eq!(Dirty::any([]), Dirty::NO, "{EXPECT_SETTLED}");

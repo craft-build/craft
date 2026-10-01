@@ -143,10 +143,8 @@ pub struct Workspace {
     /// interactive asker per turn; the default dismisses headlessly.
     questions: Arc<dyn question::AskQuestions>,
     /// Session plan file (C.17): the one write target allowed outside the
-    /// workspace root. Shared (like every Workspace cell) so the set is
-    /// visible through clones — and session-scoped: once a plan is
-    /// allocated, mode switches (notably the Build turn that implements it
-    /// after a context clear) do not revoke the exemption.
+    /// workspace root. Shared so every clone sees the set, and kept for the
+    /// whole session once allocated — mode switches must not revoke it.
     plan_path: std::sync::Arc<std::sync::RwLock<Option<PathBuf>>>,
     /// MCP client handle (B.11): when set, `register_with_mode` appends one
     /// portable tool per published MCP tool under its `server__tool` wire name.
@@ -302,16 +300,12 @@ impl Workspace {
         self.register_with_mode(crate::run::AgentMode::Build)
     }
 
-    /// [`Self::register`] with the turn's mode baked into the table — and
-    /// into the batch child table — so write-gating is a frozen snapshot for
-    /// the whole turn.
     /// One constructor row per tool: the single shared table behind both
     /// [`Self::register_with_mode`] and [`Self::register_subagent`], so the
     /// two registrations cannot drift — a wire name absent here is simply
     /// never registered, never rescued by a wildcard arm. The argosy
-    /// knowledge tools (Phase 1 of the argosy integration) register as
-    /// first-class natives (crate `inspect` replaces craft's port; crate
-    /// `read` registers as `read_document`); both surfaces see them.
+    /// knowledge tools register as first-class natives under their own
+    /// names; both surfaces see them.
     fn builtin_tool_table(&self) -> Vec<(&'static str, PortableDynamicTool)> {
         let mut table = self.core_builtin_table();
         table.extend(argosy_tools());
@@ -358,6 +352,9 @@ impl Workspace {
         ]
     }
 
+    /// [`Self::register`] with the turn's mode baked into the table — and
+    /// into the batch child table — so write-gating is a frozen snapshot for
+    /// the whole turn.
     pub fn register_with_mode(&self, mode: crate::run::AgentMode) -> crate::run::ToolDispatch {
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
         let mut tools: Vec<PortableDynamicTool> = self
@@ -366,8 +363,6 @@ impl Workspace {
             .map(|(_, tool)| tool)
             .collect();
         tools.push(dynamic(batch.clone()));
-        // MCP tools (B.11): one portable tool per published MCP server tool,
-        // registered under the `server__tool` wire name.
         if let Some(handle) = self.mcp() {
             let cancel = self
                 .mcp_cancel
@@ -377,7 +372,6 @@ impl Workspace {
             tools.extend(mcp_tools(&handle, cancel));
             tools.push(mcp_read_tool(&handle));
         }
-        // Introspection snapshot of every other registered tool.
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
         let dispatch = crate::run::ToolDispatch::new(tools)
@@ -402,10 +396,7 @@ impl Workspace {
         };
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
         // The restricted table is the shared builtin table filtered by the
-        // subagent tool budget (`task`, `question`, and `sessions` are in
-        // no budget, so they drop out here). The batch child table is built
-        // from the same restricted set, so batch fan-outs cannot escape the
-        // subagent's tool budget.
+        // subagent tool budget.
         let mut tools: Vec<PortableDynamicTool> = self
             .builtin_tool_table()
             .into_iter()
@@ -489,12 +480,9 @@ impl Workspace {
             return Err(invalid("path must not be empty"));
         }
         // Outside-workspace exemptions (C.17): the session's plan file, plus
-        // — read only, so the agent can consult earlier plans — the state
-        // dir's plans directory. Both live outside the workspace root and
-        // are exempt from workspace containment and from nothing else: the
-        // same component-by-component validation below still applies (no
-        // `..`, no Git metadata, no symlinked components), just walked from
-        // the path's own root instead of the workspace root.
+        // — read only — the state dir's plans directory. Both are exempt from
+        // workspace containment only; the component validation below still
+        // applies, just walked from the path's own root.
         let exempt =
             self.plan_target(requested) || (!create_dirs && self.plans_read_target(requested));
         let requested = Path::new(requested);

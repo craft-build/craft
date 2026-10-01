@@ -87,15 +87,11 @@ fn summary_text(msg: &Message) -> Option<&str> {
 
 /// No-LLM VCC compaction: summarize the head, keep the tail.
 ///
-/// If the first message is itself a VCC summary, it is treated as the previous
-/// summary and compacting starts at the live history after it. The head of the
-/// history is replaced with a single assistant summary message and the tail is
-/// kept verbatim. The last `carry_len` messages are held out of the summary
-/// and re-appended verbatim, so input no turn has answered yet survives
-/// compaction verbatim (same carry protection as the LLM stage). Returns
-/// whether the compacted history is under `token_limit` (per
-/// `estimate_tokens`); `false` signals the caller should fall back to a
-/// heavier compactor.
+/// A leading VCC summary message is treated as the previous summary. The
+/// last `carry_len` messages are held out and re-appended verbatim so
+/// unanswered input survives compaction (same carry protection as the LLM
+/// stage). Returns `false` when the result still exceeds `token_limit`,
+/// signaling the caller to fall back to a heavier compactor.
 pub fn vcc_compact(
     messages: &mut Vec<Message>,
     token_limit: u64,

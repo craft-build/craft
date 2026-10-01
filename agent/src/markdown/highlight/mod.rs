@@ -88,7 +88,7 @@ impl StyledSegment {
 }
 
 /// A theme whose only rule colors comments gray, so tests can observe
-/// scope-driven coloring without shipping a real theme set (task 75).
+/// scope-driven coloring without shipping a real theme set.
 #[cfg(test)]
 fn comment_theme() -> Theme {
     use syntect::highlighting::{Color, StyleModifier, ThemeItem};

@@ -1,10 +1,9 @@
 //! Prompt slot system: templated system/research/general prompts whose
 //! sections are filled from named slots (ported from Craft's
-//! `craft-agent/src/prompt.rs`). Slot entries are collected per prompt and
-//! slot; singleton slots take the last entry (or the default content),
-//! aggregate slots join every entry. The plugin runtime that overrides slots
-//! (J.1) is not ported yet — today callers pass empty slots and get the
-//! defaults.
+//! `craft-agent/src/prompt.rs`). Singleton slots take the last entry (or the
+//! default), aggregate slots join every entry. The plugin runtime that
+//! overrides slots (J.1) is not ported yet, so callers currently pass empty
+//! slots and get the defaults.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -39,9 +38,7 @@ A subagent starts with none of this conversation's context. Write its prompt lik
 - Never delegate understanding. Include file paths, line numbers, and what specifically to change. Do not write "based on your findings, fix the bug."
 - Give a response-length hint (e.g. "report in under 200 words") to control the return payload."#;
 
-/// Tools the harness dispatches natively that agents should prefer. Grows
-/// as tools land so the assembled prompt only ever names real tools; the
-/// argosy knowledge tools and `review` joined with the argosy integration.
+/// Native tools the prompt names as efficient; must only list real tools.
 const NATIVE_EFFICIENT_TOOLS: &[&str] = &[
     "search",
     "search_rules",

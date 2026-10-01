@@ -1061,7 +1061,6 @@ mod tests {
         let result = replace("fn foo() {}", "fn foo() {}", "R", false, None).unwrap();
         assert_eq!(result.pass, Pass::Exact);
 
-        // Whitespace difference forces a fuzzy pass
         let result = replace("let   x  =   1;", "let x = 1;", "R", false, None).unwrap();
         assert_ne!(result.pass.number(), 1);
     }
@@ -1143,12 +1142,11 @@ mod tests {
 
     #[test]
     fn counts_replacements_actually_performed() {
-        // Exact pass, replace_all: every occurrence counts.
         let result = replace("aXbXc", "X", "Y", true, None).unwrap();
         assert_eq!(result.replacements, 2);
 
-        // Fuzzy-only match (whitespace collapsed): still one replacement,
-        // even though the exact needle never occurs in the content.
+        // Fuzzy-only match: still one replacement although the exact
+        // needle never occurs in the content.
         let result = replace("let   x  =   1;", "let x = 1;", R, false, None).unwrap();
         assert_ne!(result.pass, Pass::Exact);
         assert_eq!(result.replacements, 1);

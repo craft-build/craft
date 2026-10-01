@@ -2,10 +2,9 @@
 //!
 //! Ported from the reference (`craft-ui/src/components/messages/{scroll.rs,
 //! segment.rs}`), adapted to this repo: lines are pre-wrapped at build
-//! width, so a segment's height is simply its line count, but the
-//! width-keyed height cache is kept to state the invariant that heights
-//! are only valid at the width the lines were wrapped for (and to serve
-//! the several walks a frame makes over the same segments).
+//! width, so a segment's height is its line count; the width-keyed height
+//! cache states the invariant that heights are only valid at the width the
+//! lines were wrapped for (and serves the several walks a frame makes).
 
 use std::cell::Cell;
 
@@ -29,8 +28,7 @@ struct CachedHeight {
 }
 
 /// One block of pre-wrapped lines (a message bubble, a tool card, a
-/// spacer). Lines are one display row each, so rows == lines and row
-/// slicing is line slicing.
+/// spacer). Lines are one display row each, so row slicing is line slicing.
 pub struct Segment {
     lines: Vec<Line<'static>>,
     /// Inline image rendered below the lines (F.6): occupies `rows` extra
@@ -66,10 +64,9 @@ impl Segment {
         self.cached_height.set(None);
     }
 
-    /// Rows the segment takes at `width`. Lines arrive pre-wrapped for the
-    /// current width, so this is the line count; the cache exists so the
-    /// several walks per frame agree without re-measuring, and so a stale
-    /// width (lines wrapped for another width) is never silently trusted.
+    /// Rows the segment takes at `width`: the line count (lines arrive
+    /// pre-wrapped), plus image rows. Cached so the several walks per frame
+    /// agree, and so a stale width is never silently trusted.
     pub fn height(&self, width: u16) -> u16 {
         if let Some(c) = self.cached_height.get()
             && c.at_width == width
@@ -153,10 +150,9 @@ impl<'a> Layout<'a> {
         }
     }
 
-    /// Pulls `row` back inside its segment. A segment can shrink under a
-    /// stored position (content update, collapse), and the walkers read a
-    /// row past its end as "nothing left", so the position must be kept
-    /// in range for the two to agree.
+    /// Pulls `row` back inside its segment: a segment can shrink under a
+    /// stored position, and the walkers read a row past its end as
+    /// "nothing left", so the two must agree.
     pub fn clamp(&self, pos: ScrollPos) -> ScrollPos {
         ScrollPos {
             seg: pos.seg.min(self.cache.len()),
