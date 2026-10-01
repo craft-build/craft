@@ -45,8 +45,9 @@ pub struct TaskArgs {
     pub description: String,
     /// Detailed task prompt for the agent.
     pub prompt: String,
-    /// Subagent type: "research" (read-only, default) or "general" (can
-    /// modify files).
+    /// Subagent type: "research" (read-only, default), "general" (can
+    /// modify files), or "reviewer" (read-only code reviewer with the
+    /// argosy review tools).
     #[serde(default)]
     pub subagent_type: Option<String>,
     /// Model tier (optional, omit to use the current model, capped at the

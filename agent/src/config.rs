@@ -241,6 +241,15 @@ pub struct AgentConfig {
     pub max_turns: Option<u32>,
     /// Post-turn advisor (C.12).
     pub advisor: AdvisorConfig,
+    /// Post-turn argosy memory extraction (Phase 4 of the argosy
+    /// integration): durable facts from the turn are written into the
+    /// project's local argosy after a successful run. Default on.
+    #[serde(default = "default_memory_extraction")]
+    pub memory_extraction: bool,
+}
+
+fn default_memory_extraction() -> bool {
+    true
 }
 
 impl AgentConfig {

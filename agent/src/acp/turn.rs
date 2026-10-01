@@ -245,7 +245,7 @@ pub(super) async fn run_turn(
         advisor: state.config.agent.advisor.clone(),
         preamble: Some(crate::prompt::build_system_prompt(
             &crate::prompt::Vars::new()
-                .set("{cwd}", cwd)
+                .set("{cwd}", &cwd)
                 .set("{platform}", std::env::consts::OS)
                 .set("{date}", crate::prompt::today_utc()),
             &format!("{}{}", state.config.agent.preamble, instructions_text),
@@ -292,7 +292,15 @@ pub(super) async fn run_turn(
             // Commit this turn only on success: failed and cancelled runs
             // leave the session history untouched. A superseded turn id
             // commits nothing.
-            commit_turn(&state.sessions, &session_id, turn_id, history).await;
+            commit_turn(&state.sessions, &session_id, turn_id, history.clone()).await;
+            // Phase 4: detached, best-effort memory extraction into the
+            // project's local argosy. Never blocks or fails the turn.
+            crate::knowledge_memory::spawn_extraction(
+                model.clone(),
+                history,
+                std::path::PathBuf::from(cwd),
+                state.config.agent.memory_extraction,
+            );
             let _ = responder.respond(AcpPromptResponse::new(StopReason::EndTurn));
         }
         // The driver committed the sanitized partial history; the next prompt
@@ -324,6 +332,9 @@ pub(super) async fn run_turn(
         }
         RunOutcome::Failed(message) => fail!(message),
     }
+    // The responder has already answered; linger only long enough for the
+    // detached memory extraction to land before the session goes away.
+    crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
 }
 
 fn tool_call_start(id: &str, name: &str, arguments: &serde_json::Value) -> AcpToolCall {

@@ -39,10 +39,19 @@ A subagent starts with none of this conversation's context. Write its prompt lik
 - Never delegate understanding. Include file paths, line numbers, and what specifically to change. Do not write "based on your findings, fix the bug."
 - Give a response-length hint (e.g. "report in under 200 words") to control the return payload."#;
 
-/// Tools the harness dispatches natively that agents should prefer. Empty
-/// until `batch`/`code_execution`/`task` are ported; grow this list as they
-/// land so the assembled prompt only ever names real tools.
-const NATIVE_EFFICIENT_TOOLS: &[&str] = &[];
+/// Tools the harness dispatches natively that agents should prefer. Grows
+/// as tools land so the assembled prompt only ever names real tools; the
+/// argosy knowledge tools and `review` joined with the argosy integration.
+const NATIVE_EFFICIENT_TOOLS: &[&str] = &[
+    "search",
+    "search_rules",
+    "ask",
+    "read_document",
+    "outline",
+    "zoom",
+    "astgrep",
+    "review",
+];
 const INSTRUCTIONS_MARKER: &str = "{{instructions}}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -424,8 +433,9 @@ mod tests {
             !out.contains("{{"),
             "unfilled marker left in output:\n{out}"
         );
-        // No efficient tools exist yet; the line must be omitted entirely.
-        assert!(!out.contains("Most efficient tools"));
+        // The argosy integration added native efficient tools, so the line
+        // renders with those even when no slot extras exist.
+        assert!(out.contains("Most efficient tools: search"));
     }
 
     #[test]
@@ -474,7 +484,10 @@ mod tests {
             ],
         );
         let out = assemble(PromptId::System, &s, "");
-        assert!(out.contains("Most efficient tools: outline, foo."));
+        assert!(out.contains(&format!(
+            "Most efficient tools: {}, outline, foo.",
+            NATIVE_EFFICIENT_TOOLS.join(", ")
+        )));
     }
 
     #[test]
@@ -516,7 +529,10 @@ mod tests {
         );
         let out = assemble(PromptId::Research, &s, "");
         assert!(!out.contains("DROPPED"));
-        assert!(out.contains("Most efficient tools: EXTRA."));
+        assert!(out.contains(&format!(
+            "Most efficient tools: {}, EXTRA.",
+            NATIVE_EFFICIENT_TOOLS.join(", ")
+        )));
     }
 
     #[test]

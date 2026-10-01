@@ -150,6 +150,38 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "Browse and run recipes",
     },
     CommandSpec {
+        id: "dream",
+        slash: Some("/dream"),
+        alias: None,
+        label: "Dream (consolidate memory)",
+        hint: "/dream",
+        desc: "Run the argosy memory-consolidation workflow",
+    },
+    CommandSpec {
+        id: "scan",
+        slash: Some("/scan"),
+        alias: None,
+        label: "Scan (document project)",
+        hint: "/scan",
+        desc: "Run the argosy project-documentation workflow",
+    },
+    CommandSpec {
+        id: "review",
+        slash: Some("/review"),
+        alias: None,
+        label: "Review changes",
+        hint: "/review",
+        desc: "Review the working-tree diff (base=/commit=/focus= args)",
+    },
+    CommandSpec {
+        id: "memory",
+        slash: Some("/memory"),
+        alias: None,
+        label: "Search memory",
+        hint: "/memory",
+        desc: "List or search argosy memory concepts",
+    },
+    CommandSpec {
         id: "help",
         slash: Some("/help"),
         alias: None,
@@ -273,6 +305,14 @@ impl App {
             }
             "auto-review" => {
                 let _ = tx.send(Command::ToggleAutoReview);
+            }
+            "dream" => self.submit_argosy_prompt("dream", "", tx),
+            "scan" => self.submit_argosy_prompt("scan", "", tx),
+            "review" => self.submit_argosy_prompt("review", "", tx),
+            "memory" => {
+                let _ = tx.send(Command::ArgosyMemory {
+                    query: String::new(),
+                });
             }
             "help" => self.overlays.modal = Modal::Help,
             "quit" => self.should_quit = true,
@@ -589,6 +629,87 @@ impl App {
         self.view.follow = true;
     }
 
+    /// Run one argosy builtin prompt (Phase 3 of the argosy integration):
+    /// `/dream`, `/scan`, `/review [base=… commit=… focus=…]`, and
+    /// `/memory [query]` (which routes to the provider-side memory search
+    /// instead of the model). Mirrors the custom-command send path.
+    pub(crate) fn submit_argosy_prompt(
+        &mut self,
+        kind: &str,
+        args: &str,
+        tx: &mpsc::UnboundedSender<Command>,
+    ) {
+        if kind == "memory" {
+            self.conversation.assistant_open = false;
+            self.conversation
+                .messages
+                .push(Message::User(if args.is_empty() {
+                    "/memory".to_string()
+                } else {
+                    format!("/memory {args}")
+                }));
+            let _ = tx.send(Command::ArgosyMemory {
+                query: args.to_string(),
+            });
+            self.view.follow = true;
+            return;
+        }
+        let prompt = match kind {
+            "dream" => crate::knowledge::dream_prompt(),
+            "scan" => crate::knowledge::scan_prompt(),
+            "review" => Self::review_prompt_from_args(args),
+            other => Err(format!("unknown argosy prompt: {other}")),
+        };
+        let prompt = match prompt {
+            Ok(prompt) => prompt,
+            Err(err) => {
+                self.push_notice(Tone::Danger, format!("argosy: {err}"));
+                return;
+            }
+        };
+        let echo = if args.is_empty() {
+            format!("/{kind}")
+        } else {
+            format!("/{kind} {args}")
+        };
+        self.conversation.assistant_open = false;
+        self.conversation.messages.push(Message::User(echo));
+        let _ = tx.send(Command::SendMessage(
+            prompt,
+            self.agent_mode(),
+            std::mem::take(&mut self.images.attached),
+        ));
+        self.view.follow = true;
+    }
+
+    /// `/review` arguments: whitespace-separated `base=<rev>`, `commit=<rev>`,
+    /// and repeatable `focus=<path>` tokens.
+    fn review_prompt_from_args(args: &str) -> Result<String, String> {
+        let mut base = None;
+        let mut commit = None;
+        let mut focus = Vec::new();
+        for token in args.split_whitespace() {
+            match token.split_once('=') {
+                Some((key, value)) => match key {
+                    "base" => base = Some(value.to_string()),
+                    "commit" => commit = Some(value.to_string()),
+                    "focus" | "file" => focus.push(value.to_string()),
+                    other => {
+                        return Err(format!(
+                            "unknown /review argument {other:?} (expected base=, commit=, focus=)"
+                        ));
+                    }
+                },
+                None => {
+                    return Err(format!(
+                        "skipped argument {token:?}, expected key=value (base=, commit=, focus=)"
+                    ));
+                }
+            }
+        }
+        crate::knowledge::review_prompt(base.as_deref(), commit.as_deref(), &focus)
+    }
+
     pub(crate) fn run_palette(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
         self.run_command(id, tx);
     }
@@ -822,18 +943,18 @@ mod tests {
     fn custom_command_appears_in_slash_completion() {
         let mut app = App::new();
         app.custom_commands = vec![crate::command::CustomCommand {
-            name: "review".into(),
+            name: "deploy-check".into(),
             description: "Code review".into(),
             content: "Review $ARGUMENTS".into(),
             scope: crate::command::CommandScope::Project,
             accepts_args: true,
         }];
-        app.composer.text = "/rev".into();
+        app.composer.text = "/deploy".into();
         assert!(app.slash_open());
         assert!(
             app.slash_matches()
                 .iter()
-                .any(|(cmd, desc)| cmd == "/review" && desc == "Code review"),
+                .any(|(cmd, desc)| cmd == "/deploy-check" && desc == "Code review"),
             "custom command missing from completion"
         );
     }
@@ -845,23 +966,23 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.custom_commands = vec![crate::command::CustomCommand {
-            name: "review".into(),
+            name: "deploy-check".into(),
             description: String::new(),
             content: "Review the code in $ARGUMENTS".into(),
             scope: crate::command::CommandScope::Project,
             accepts_args: true,
         }];
-        app.composer.set_text("/review src/lib.rs".into());
+        app.composer.set_text("/deploy-check src/lib.rs".into());
         app.submit(&tx);
         assert!(
             matches!(rx.try_recv(), Ok(Command::SendMessage(text, _, _)) if text.contains("src/lib.rs")),
             "rendered prompt not sent"
         );
         assert!(app.composer.text.is_empty(), "composer not cleared");
-        assert_eq!(app.input_history.get(0), Some("/review src/lib.rs"));
+        assert_eq!(app.input_history.get(0), Some("/deploy-check src/lib.rs"));
         assert!(matches!(
             app.conversation.messages.last(),
-            Some(Message::User(echo)) if echo.contains("/review src/lib.rs")
+            Some(Message::User(echo)) if echo.contains("/deploy-check src/lib.rs")
         ));
     }
 

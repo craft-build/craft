@@ -15,7 +15,7 @@ use crate::tools::Workspace;
 
 use super::super::cards::{self, Files};
 use super::SessionState;
-use super::approval::{ApprovalGate, model_reviewer};
+use super::approval::{ApprovalGate, auto_review_reviewer};
 use super::usage_recorder::record_run_usage;
 use crate::tui::provider::{AgentEvent, PlanItem, Status, Tone, ToolCallData};
 
@@ -616,7 +616,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         tx.clone(),
         cancel.clone(),
         permissions.clone(),
-        Some(model_reviewer(model.clone())),
+        Some(auto_review_reviewer(model.clone())),
     ));
     // The question seam (A.5) is per-turn like the approval gate: it parks
     // on this turn's cancel token and event channel. The subagent seam
@@ -772,7 +772,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
     }
     {
         let mut session = state.lock().await;
-        session.history = history;
+        session.history = history.clone();
         // The committed turn is persisted, the same seam headless uses, so
         // `/sessions` can list and reload this conversation. (The clone is
         // sequenced before the store borrow: field splits do not apply
@@ -785,6 +785,14 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
             );
         }
     }
+    // Phase 4: detached, best-effort memory extraction into the project's
+    // local argosy. Never blocks or fails the turn.
+    crate::knowledge_memory::spawn_extraction(
+        model,
+        history,
+        workspace.root().to_path_buf(),
+        config.agent.memory_extraction,
+    );
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
 }
 

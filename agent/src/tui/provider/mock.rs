@@ -359,6 +359,7 @@ impl Provider for MockProvider {
                         }
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
+                    Command::ArgosyMemory { .. } => {}
                     Command::Reset => {
                         if let Some(h) = current.take() {
                             h.abort();

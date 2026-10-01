@@ -65,6 +65,9 @@ pub enum Command {
     SelectModel { provider: String, model: String },
     /// Toggle LLM auto-review of permissions (`/auto-review`).
     ToggleAutoReview,
+    /// `/memory [query]`: search the project's argosy memory concepts and
+    /// render the hits as a notice (Phase 3 of the argosy integration).
+    ArgosyMemory { query: String },
     /// Refresh the per-model usage snapshot shown by `/usage`.
     GetUsage,
     /// Fetch the provider-side usage quota shown by `/usage` (F.5); the

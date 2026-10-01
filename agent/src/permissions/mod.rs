@@ -94,7 +94,39 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
 /// `builtin_rules` non-file-write allow. `task` is not read-only (a
 /// `general` subagent writes), so it lives here, not in [`READ_ONLY_TOOLS`];
 /// the child's own tool calls still pass through this same gate.
-pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task"];
+pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task", "review"];
+
+/// Every argosy tool native name, auto-allowed as the integration plan
+/// requests — except the project-writing code tools (`astgrep` with
+/// `apply`, `conflicts` with `resolve`), which stay on the approval
+/// seam. A user deny rule still outranks these (the rule loop returns on
+/// the first deny). Keyed per-tool on the native name, so a
+/// user-configured MCP server named `argosy` is unaffected.
+pub const ARGOSY_ALLOW_TOOLS: &[&str] = &[
+    "search",
+    "list_skills",
+    "get_skill",
+    "search_rules",
+    "read_memory",
+    "read_document",
+    "write_memory",
+    "delete_memory",
+    "write_rule",
+    "delete_rule",
+    "write_document",
+    "delete_document",
+    "promote",
+    "ask",
+    "outline",
+    "zoom",
+    "inspect",
+    "callgraph",
+    "repomap",
+    "start_review",
+    "review_diff",
+    "report_finding",
+    "review_findings",
+];
 
 /// File-write tools the builtin rules pre-approve inside the project root.
 /// Covers every mutation the engine scopes by path except `delete`, which is
@@ -430,6 +462,18 @@ impl PermissionManager {
             tool_defaults
                 .entry(ToolKey::native(name))
                 .or_insert(DefaultEffect::Allow);
+        }
+        // Argosy tools are natives now: one per-tool allow per name. The
+        // repo-mutating code tools (`astgrep` with `apply`, `conflicts`
+        // with `resolve`) are deliberately absent, so they stay on the
+        // approval seam; a user-written per-tool or server deny rule
+        // still wins.
+        for name in crate::knowledge::tool_definitions() {
+            if crate::permissions::ARGOSY_ALLOW_TOOLS.contains(&name.native) {
+                tool_defaults
+                    .entry(ToolKey::native(name.native))
+                    .or_insert(DefaultEffect::Allow);
+            }
         }
         let builtin_rules = builtin_rules(&cwd);
 

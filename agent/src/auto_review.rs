@@ -147,6 +147,53 @@ pub fn parse_decision(text: &str) -> Result<Decision, ReviewError> {
     })
 }
 
+/// Decision-endpoint auto-approval (Phase 2 of the argosy integration):
+/// answer the same NeedsPrompt question through the configured Jev/laya
+/// endpoint instead of an LLM reviewer call. The endpoint's calibrated
+/// `answer_confidence` is thresholded (≥ 0.5 → allow); anything below, and
+/// any endpoint failure, fails closed exactly like the LLM reviewer.
+pub const DECISION_ALLOW_CONFIDENCE: f32 = 0.5;
+
+pub async fn decide_with_endpoint(
+    provider: std::sync::Arc<dyn argosy::decision::DecisionProvider>,
+    tool: &str,
+    scopes: &[String],
+) -> Result<Decision, ReviewError> {
+    let request = argosy::decision::DecisionRequest::new(serde_json::json!({
+        "tool": tool,
+        "scopes": scopes,
+    }))
+    .ask(
+        "safe",
+        argosy::decision::Question::noul(
+            "Is it safe to run this tool call without asking the user?",
+        ),
+    );
+    let response = tokio::task::spawn_blocking(move || provider.decide(&request))
+        .await
+        .map_err(|e| ReviewError::Provider {
+            message: format!("decision task failed: {e}"),
+        })?
+        .map_err(|e| ReviewError::Provider {
+            message: format!("decision endpoint: {e:#}"),
+        })?;
+    let confidence = response
+        .answer_confidence("safe")
+        .ok_or_else(|| ReviewError::Parse {
+            message: "the decision endpoint returned no calibrated confidence".into(),
+        })?;
+    let allow = confidence >= DECISION_ALLOW_CONFIDENCE;
+    Ok(Decision {
+        verdict: if allow { Verdict::Allow } else { Verdict::Deny },
+        risk: if confidence >= 0.8 {
+            Risk::Low
+        } else {
+            Risk::Medium
+        },
+        rationale: format!("decision endpoint confidence {confidence:.2}"),
+    })
+}
+
 fn review_message(tool: &str, scopes: &[String]) -> Message {
     let scope_list = if scopes.is_empty() {
         "(none)".to_string()
@@ -212,6 +259,70 @@ pub(crate) async fn review_with_deadline<M: CompletionModel>(
 mod tests {
     use super::*;
     use rig_core::test_utils::{MockCompletionModel, MockTurn};
+
+    struct FixedDecision(f32);
+
+    impl argosy::decision::DecisionProvider for FixedDecision {
+        fn is_enabled(&self) -> bool {
+            true
+        }
+
+        fn decide(
+            &self,
+            _request: &argosy::decision::DecisionRequest,
+        ) -> std::result::Result<argosy::decision::DecisionResponse, argosy::error::Error> {
+            let response = serde_json::from_value(serde_json::json!({
+                "answers": {"safe": {"answer_confidence": self.0}}
+            }))
+            .expect("fixed decision deserializes");
+            Ok(response)
+        }
+    }
+
+    /// Phase 2: the endpoint's calibrated confidence maps onto the same
+    /// Decision the LLM reviewer produces — >= 0.5 allows, below denies.
+    #[tokio::test]
+    async fn endpoint_confidence_maps_to_verdicts() {
+        for (confidence, expected) in [
+            (0.9, Verdict::Allow),
+            (0.5, Verdict::Allow),
+            (0.49, Verdict::Deny),
+        ] {
+            let provider: std::sync::Arc<dyn argosy::decision::DecisionProvider> =
+                std::sync::Arc::new(FixedDecision(confidence));
+            let decision = decide_with_endpoint(provider, "write", &["/tmp/x".into()])
+                .await
+                .unwrap();
+            assert_eq!(decision.verdict, expected, "confidence {confidence}");
+            assert!(decision.rationale.contains("confidence"));
+        }
+    }
+
+    /// A response with no calibrated confidence is a parse failure: the
+    /// gate denies without recording a rule.
+    #[tokio::test]
+    async fn endpoint_without_confidence_fails_closed() {
+        struct NoConfidence;
+        impl argosy::decision::DecisionProvider for NoConfidence {
+            fn is_enabled(&self) -> bool {
+                true
+            }
+            fn decide(
+                &self,
+                _request: &argosy::decision::DecisionRequest,
+            ) -> std::result::Result<argosy::decision::DecisionResponse, argosy::error::Error>
+            {
+                Ok(serde_json::from_value(serde_json::json!({"answers": {}}))
+                    .expect("deserializes"))
+            }
+        }
+        let provider: std::sync::Arc<dyn argosy::decision::DecisionProvider> =
+            std::sync::Arc::new(NoConfidence);
+        assert!(matches!(
+            decide_with_endpoint(provider, "write", &[]).await,
+            Err(ReviewError::Parse { .. })
+        ));
+    }
 
     fn decision_json(verdict: &str, risk: &str, rationale: &str) -> String {
         format!(r#"{{"verdict":"{verdict}","risk":"{risk}","rationale":"{rationale}"}}"#)

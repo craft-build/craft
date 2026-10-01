@@ -15,6 +15,8 @@ pub mod history;
 pub mod id;
 pub mod instructions;
 pub mod json_repair;
+pub mod knowledge;
+pub mod knowledge_memory;
 pub mod markdown;
 pub mod mcp;
 pub mod model_registry;

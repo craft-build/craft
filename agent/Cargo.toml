@@ -53,6 +53,7 @@ unicode-normalization = "0.1"
 unicode-width = "0.2"
 url.workspace = true
 uuid = { version = "1", features = ["v4", "v7"] }
+argosy = "0.5"
 
 [dev-dependencies]
 rig-core = { workspace = true, features = ["test-utils"] }

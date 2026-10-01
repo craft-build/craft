@@ -134,14 +134,11 @@ pub struct DiscoveredSkill {
 }
 
 impl DiscoveredSkill {
-    /// Display label for the skill's location: `<builtin>/...` for builtins,
-    /// otherwise the discovered path rendered as-is.
+    /// Display label for the skill's location: synthetic (`<builtin>` or
+    /// `<argosy>`) markers for in-binary sources, otherwise the discovered
+    /// path rendered as-is.
     pub fn location(&self) -> String {
-        if self.scope.is_builtin() {
-            format!("<builtin>/skills/{}/SKILL.md", self.name)
-        } else {
-            self.path.display().to_string()
-        }
+        self.path.display().to_string()
     }
 
     /// The `description` field of the SKILL.md frontmatter, if present.
@@ -184,9 +181,10 @@ impl Discovery {
     }
 
     /// Discover skills: each subdirectory of `<prefix>/skills` containing a
-    /// `SKILL.md` is one skill named after the subdirectory. Built-in skills
-    /// are appended last, so any project or global skill of the same name
-    /// shadows them.
+    /// `SKILL.md` is one skill named after the subdirectory. Skills stored
+    /// in the project's argosy are appended next, then the built-in table,
+    /// so a filesystem skill of the same name shadows both, and an argosy
+    /// skill shadows a builtin.
     pub fn discover_skills(&self) -> Vec<DiscoveredSkill> {
         let mut ordered = Vec::new();
         for (depth, ancestor) in self.cwd.ancestors().enumerate() {
@@ -197,6 +195,20 @@ impl Discovery {
         }
         for dir in self.global_dirs() {
             collect_dirs(&dir, Scope::Global, &mut ordered);
+        }
+        // Test-built Discovery (no home) skips the argosy query entirely.
+        for (name, content) in self
+            .home
+            .as_ref()
+            .map(|_| crate::knowledge::skill_bodies(&self.cwd))
+            .unwrap_or_default()
+        {
+            ordered.push(DiscoveredSkill {
+                path: PathBuf::from(format!("<argosy>/skills/{name}/SKILL.md")),
+                name,
+                scope: Scope::Builtin,
+                content,
+            });
         }
         for (name, content) in BUILTIN_SKILLS {
             ordered.push(DiscoveredSkill {

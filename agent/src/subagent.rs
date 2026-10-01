@@ -40,6 +40,18 @@ pub const RESEARCH_TOOLS: &[&str] = &[
     "websearch",
     "batch",
     "list_tools",
+    // Argosy knowledge tools (read-only, Phase 1).
+    "search",
+    "search_rules",
+    "ask",
+    "read_document",
+    "read_memory",
+    "list_skills",
+    "get_skill",
+    "outline",
+    "zoom",
+    "callgraph",
+    "repomap",
 ];
 
 pub const GENERAL_TOOLS: &[&str] = &[
@@ -70,17 +82,42 @@ pub const GENERAL_TOOLS: &[&str] = &[
     "todo_write",
 ];
 
+/// The reviewer subagent's budget (Phase 5): the read-only research set
+/// plus the argosy review workflow, minus the network tools.
+pub const REVIEWER_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "list",
+    "inspect",
+    "search",
+    "search_rules",
+    "read_document",
+    "read_memory",
+    "start_review",
+    "review_diff",
+    "report_finding",
+    "review_findings",
+];
+
 pub const RESEARCH_PROMPT: &str = "You are a research subagent launched by a parent agent. \
 You have your own context window and read-only tools. Investigate the task you were given and \
 report back: your final message is returned verbatim to the calling agent, so end with a \
 complete, self-contained answer with file:line references. Be concise.";
-
 pub const GENERAL_PROMPT: &str = "You are a general subagent launched by a parent agent. \
 You have your own context window and may modify files. Keep your changes scoped to the task you \
 were given. Your final message is returned verbatim to the calling agent, so end with a \
 complete, self-contained summary of what you did, with file:line references. Be concise.";
 
 const MAX_SCHEMA_RETRIES: u32 = 3;
+
+/// Which restricted tool budget and preamble a subagent runs with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubagentKind {
+    Research,
+    General,
+    Reviewer,
+}
 const SCHEMA_INSTRUCTION_HEAD: &str = "\n\nYou MUST end your final reply with a single JSON object matching this JSON Schema (no prose, no markdown fences, just the JSON object):\n";
 const SCHEMA_INSTRUCTION_TAIL: &str = "\nReturn ONLY that JSON object as your final message.";
 
@@ -218,11 +255,13 @@ impl SubagentLauncher {
 
     /// Run one subagent to completion (reference `run_subagent`).
     pub async fn spawn(&self, req: &SubagentRequest) -> Result<SubagentResult, String> {
-        let general = match req.subagent_type.as_str() {
-            "research" => false,
-            "general" => true,
+        let kind = match req.subagent_type.as_str() {
+            "research" => SubagentKind::Research,
+            "general" => SubagentKind::General,
+            "reviewer" => SubagentKind::Reviewer,
             other => return Err(format!("unknown subagent type: {other}")),
         };
+        let general = kind == SubagentKind::General;
         let (model, child_spec) = self.resolve_model(req.model_tier.as_deref()).await?;
 
         tracing::info!(
@@ -268,10 +307,10 @@ impl SubagentLauncher {
         let base = format!(
             "{}\n\n{}",
             self.base_prompt,
-            if general {
-                GENERAL_PROMPT
-            } else {
-                RESEARCH_PROMPT
+            match kind {
+                SubagentKind::General => GENERAL_PROMPT,
+                SubagentKind::Reviewer => crate::tools::REVIEWER_PROMPT,
+                SubagentKind::Research => RESEARCH_PROMPT,
             }
         );
         let preamble = crate::prompt::build_system_prompt(
@@ -299,7 +338,11 @@ impl SubagentLauncher {
             advisor: self.agent.advisor.clone(),
         };
 
-        let mut tools = self.workspace.register_subagent(general);
+        let mut tools = match kind {
+            SubagentKind::General => self.workspace.register_subagent(true),
+            SubagentKind::Research => self.workspace.register_subagent(false),
+            SubagentKind::Reviewer => self.workspace.register_reviewer(),
+        };
         // The parent's approval gate governs the child's tool calls too
         // (reference shares ctx.permissions with the spawned agent).
         if let Some(hook) = &self.before {

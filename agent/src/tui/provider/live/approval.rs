@@ -69,6 +69,33 @@ pub(super) fn model_reviewer(model: crate::providers::DynamicModel) -> Reviewer 
     })
 }
 
+/// Decision-endpoint reviewer (Phase 2 of the argosy integration): when
+/// `decision.enabled` is set in the argosy user config, permission prompts
+/// are answered by the Jev/laya endpoint via the argosy decision API
+/// instead of the LLM reviewer. Failures deny without recording a rule,
+/// exactly like the model reviewer.
+pub(super) fn endpoint_reviewer(
+    provider: std::sync::Arc<dyn argosy::decision::DecisionProvider>,
+) -> Reviewer {
+    Arc::new(move |tool, scopes| {
+        let provider = provider.clone();
+        Box::pin(
+            async move { crate::auto_review::decide_with_endpoint(provider, &tool, &scopes).await },
+        )
+    })
+}
+
+/// The auto-review reviewer for a turn: the decision endpoint when it is
+/// enabled, otherwise the locked-down LLM reviewer.
+pub(super) fn auto_review_reviewer(model: crate::providers::DynamicModel) -> Reviewer {
+    let decision = crate::knowledge::ArgosyService::global().decision();
+    if decision.is_enabled() {
+        endpoint_reviewer(decision)
+    } else {
+        model_reviewer(model)
+    }
+}
+
 fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
     PermissionError::new(&tool.to_string(), scopes).to_string()
 }
@@ -388,6 +415,41 @@ mod tests {
         call.function.arguments = serde_json::json!({ "path": inside.display().to_string() });
         assert!(matches!(gate.decide(call).await, Decision::Run));
         assert!(state.lock().await.pending_approval.is_none());
+    }
+
+    /// Phase 1 of the argosy integration: the auto-allowed argosy tools
+    /// run without a prompt, main agent and subagent alike.
+    #[tokio::test]
+    async fn argosy_tools_run_without_approval() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        for name in crate::permissions::ARGOSY_ALLOW_TOOLS {
+            let (gate, _flag) = gate(&state);
+            assert!(
+                matches!(gate.decide(tool_call("t1", name)).await, Decision::Run),
+                "{name}"
+            );
+        }
+        assert!(state.lock().await.pending_approval.is_none());
+    }
+
+    /// The repo-mutating argosy code tools are deliberately not in the
+    /// allow list, so they park on the approval seam like any other write.
+    #[tokio::test]
+    async fn argosy_code_tools_require_approval() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        for name in ["astgrep", "conflicts"] {
+            let (gate, _flag) = gate(&state);
+            let call = tool_call("t1", name);
+            let pending = tokio::spawn(async move { gate.decide(call).await });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while state.lock().await.pending_approval.is_none() {
+                if std::time::Instant::now() > deadline {
+                    panic!("{name} ran without approval");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            pending.abort();
+        }
     }
 
     #[tokio::test]

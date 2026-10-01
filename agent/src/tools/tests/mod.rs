@@ -8,7 +8,6 @@ mod apply_patch;
 mod edit;
 mod files;
 mod grep;
-mod inspect;
 mod integration;
 mod mcp;
 mod meta;

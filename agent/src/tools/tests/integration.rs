@@ -195,8 +195,28 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
         .map(|tool| tool.name.as_str())
         .collect();
     names.sort();
+    // Phase 1 of the argosy integration: the argosy knowledge tools and
+    // the `review` tool extend the builtin set; the pinned list asserts the
+    // core tools all survive registration next to them.
+    for expected in [
+        "ask",
+        "search",
+        "write_memory",
+        "start_review",
+        "read_document",
+        "inspect",
+        "review",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "{expected} missing from the table"
+        );
+    }
     assert_eq!(
-        names,
+        names
+            .into_iter()
+            .filter(|name| !crate::knowledge::is_argosy_tool(name) && *name != "review")
+            .collect::<Vec<_>>(),
         [
             "apply_patch",
             "bash",
@@ -210,7 +230,6 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
             "glob",
             "grep",
             "insert_lines",
-            "inspect",
             "list",
             "list_tools",
             "move",

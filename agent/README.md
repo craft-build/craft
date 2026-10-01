@@ -177,6 +177,40 @@ Git metadata (`.git`), and symlink components are refused. Text tools support
 UTF-8 files up to 8 MiB, including CRLF files. File I/O runs on blocking workers,
 serialized across clones of the same workspace handle.
 
+### Argosy knowledge tools
+
+The `argosy` crate is linked in-process (no subprocess, no MCP transport). Every
+argosy tool registers as a first-class native builtin (`search`, `ask`,
+`read_document`, `write_memory`, `start_review`, …; the crate's `read` is
+renamed `read_document` and its `inspect` replaces craft's port), for the main
+agent and subagents alike. All of them
+are auto-allowed (a deny rule still wins), except the repo-mutating code tools
+(`astgrep` with `apply`, `conflicts` with `resolve`), which stay on the
+approval seam. Argosy keeps its own state under
+`~/.local/state/argosy` keyed by project root — nothing is relocated into
+craft's state dir, and writes from craft are visible to the standalone
+`argosy mcp` for the same project. Code-intelligence tools
+(`outline`, `zoom`, `astgrep`, …) run against the
+workspace root; `astgrep` with `apply` and `conflicts` with
+`resolve` are the only ones that write. Skills stored in the project's argosy
+join the `skill` tool's discovery (filesystem skills shadow them; they shadow
+builtins).
+
+Related surfaces:
+
+- `review` tool + `reviewer` subagent type: a read-only reviewer subagent that
+  snapshots the diff via the argosy review tools, records P0–P3 findings, and
+  returns a prioritized verdict. Its definition is installed idempotently to
+  `.craft/agents/reviewer.md`.
+- `/dream`, `/scan`, `/review [base= commit= focus=]`, `/memory [query]` slash
+  commands run argosy's prompt workflows.
+- With `decision.enabled = true` in `~/.config/argosy.bml`, auto-review
+  permission prompts are answered by the Jev/laya decision endpoint (calibrated
+  confidence ≥ 0.5 allows; everything else fails closed). Otherwise the LLM
+  reviewer path runs unchanged.
+- Post-turn memory extraction (default on, `agent.memory_extraction` to
+  disable) writes durable facts from a turn into the project's local argosy.
+
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
 | `read` | `path`, optional `offset` and `limit` | Numbered text and continuation hints with an offset for paging. Defaults to 200 lines; maximum 2000 (`limit = 0` means 2000). |

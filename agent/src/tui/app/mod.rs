@@ -804,6 +804,23 @@ impl App {
             self.submit_mcp_prompt(&prompt, &args, tx);
             return;
         }
+        // Exact `/dream|/scan|/review|/memory [args]` (Phase 3): argosy
+        // builtin prompts, builtin slash names, so like /recipe the
+        // custom-command path cannot claim them.
+        if text.starts_with('/')
+            && let Some((token, rest)) = text.split_once(' ')
+            && matches!(token, "/dream" | "/scan" | "/review" | "/memory")
+        {
+            let args = rest.trim().to_string();
+            let kind = token[1..].to_string();
+            let kind = kind.as_str();
+            self.composer.clear();
+            self.input_history.push(text);
+            self.history_recall.history_index = None;
+            self.history_recall.history_draft.clear();
+            self.submit_argosy_prompt(kind, &args, tx);
+            return;
+        }
         // Exact `/recipe <name> [key=value ...]` (J.5): builtin slash, so
         // the custom-command path does not claim it.
         if text.starts_with("/recipe")

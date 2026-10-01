@@ -93,6 +93,15 @@ impl CraftProvider {
         let workspace = Workspace::new(cwd)
             .map_err(client_error)?
             .with_loaded_instructions(instructions.loaded.clone());
+        // Phase 5 of the argosy integration: best-effort, idempotent install
+        // of the built-in reviewer agent definition into `.craft/agents/`.
+        {
+            let root = cwd.to_path_buf();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::knowledge::install_reviewer_definition(&root, false)
+            })
+            .await;
+        }
         let mut catalogs: BTreeMap<String, Vec<CatalogModel>> = BTreeMap::new();
         let mut notes = Vec::new();
         // B.11: start the MCP client up front but never await `ready` here —

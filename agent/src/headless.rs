@@ -358,6 +358,9 @@ pub struct InteractiveParams {
     pub initial_history: Vec<Message>,
     /// Where the session is persisted; `None` disables persistence.
     pub state_dir: Option<StateDir>,
+    /// Post-turn argosy memory extraction (Phase 4): mirrors
+    /// `agent.memory_extraction`; callers with a config pass it through.
+    pub memory_extraction: bool,
 }
 
 pub struct InteractiveHandle {
@@ -511,6 +514,14 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
             .await;
             watcher.abort();
 
+            // Phase 4: detached, best-effort memory extraction into the
+            // project's local argosy. Never blocks or fails the turn.
+            crate::knowledge_memory::spawn_extraction(
+                model.clone(),
+                history.clone(),
+                params.workspace.root().to_path_buf(),
+                params.memory_extraction,
+            );
             if let Some(store) = &mut store {
                 let by_model = lock_sink(&done_by_model).take().unwrap_or_default();
                 store.record_cost(&by_model, run_params.fast);
@@ -521,6 +532,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
             }
             run_id += 1;
         }
+    crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
         // `guard` drops here, closing the stream.
     });
 
@@ -788,6 +800,7 @@ mod tests {
             session_id: None,
             initial_history: Vec::new(),
             state_dir: Some(state_dir(&tmp)),
+            memory_extraction: false,
         });
         let mut events = handle.events;
 
@@ -827,6 +840,7 @@ mod tests {
             session_id: None,
             initial_history: Vec::new(),
             state_dir: None,
+            memory_extraction: false,
         });
         let mut events = handle.events;
 
@@ -876,6 +890,7 @@ mod tests {
             session_id: None,
             initial_history: Vec::new(),
             state_dir: None,
+            memory_extraction: false,
         });
         let mut events = handle.events;
 
@@ -924,6 +939,7 @@ mod tests {
             session_id: None,
             initial_history: Vec::new(),
             state_dir: None,
+            memory_extraction: false,
         });
         let mut events = handle.events;
 
@@ -994,6 +1010,7 @@ mod tests {
             session_id: None,
             initial_history: Vec::new(),
             state_dir: None,
+            memory_extraction: false,
         });
         let mut events = handle.events;
 

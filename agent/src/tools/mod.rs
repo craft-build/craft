@@ -15,7 +15,6 @@ pub(crate) mod fuzzy_replace;
 mod glob;
 mod grep;
 mod inplace_edit;
-mod inspect;
 mod list;
 mod list_tools;
 pub(crate) mod move_file;
@@ -23,6 +22,7 @@ mod multiedit;
 mod question;
 mod read;
 mod retrieve;
+mod review;
 mod sessions;
 pub(crate) mod skill;
 pub(crate) mod ssrf;
@@ -50,7 +50,6 @@ pub use edit::{
 };
 pub use glob::{Glob, GlobArgs, GlobOutput};
 pub use grep::{Grep, GrepArgs, GrepMatch, GrepOutput};
-pub use inspect::{Inspect, InspectArgs, InspectOutput};
 pub use list::{List, ListArgs, ListOutput};
 pub use list_tools::{ListTools, ListToolsArgs, ListToolsOutput};
 pub use move_file::{MoveFile, MoveFileArgs, MoveFileOutput};
@@ -61,6 +60,7 @@ pub use question::{
 };
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
+pub use review::{REVIEWER_PROMPT, Review, ReviewArgs, ReviewOutput};
 pub use sessions::{Sessions, SessionsArgs, SessionsOutput};
 pub use skill::{Skill, SkillArgs, SkillOutput};
 pub use task::{NoSubagents, SpawnSubagent, Task, TaskArgs, TaskOutput};
@@ -107,7 +107,6 @@ const BUILTIN_TOOL_NAMES: &[&str] = &[
     "bash_status",
     "bash_watch",
     "bash_kill",
-    "inspect",
     "todo_write",
     "retrieve",
     "skill",
@@ -119,10 +118,11 @@ const BUILTIN_TOOL_NAMES: &[&str] = &[
     "batch",
     "list_tools",
     "task",
+    "review",
 ];
 
 pub fn is_builtin_tool(name: &str) -> bool {
-    BUILTIN_TOOL_NAMES.contains(&name)
+    BUILTIN_TOOL_NAMES.contains(&name) || crate::knowledge::is_argosy_tool(name)
 }
 
 /// One fixed root shared by all tools in an agent. Calls are serialized on a
@@ -308,8 +308,17 @@ impl Workspace {
     /// One constructor row per tool: the single shared table behind both
     /// [`Self::register_with_mode`] and [`Self::register_subagent`], so the
     /// two registrations cannot drift — a wire name absent here is simply
-    /// never registered, never rescued by a wildcard arm.
+    /// never registered, never rescued by a wildcard arm. The argosy
+    /// knowledge tools (Phase 1 of the argosy integration) register as
+    /// first-class natives (crate `inspect` replaces craft's port; crate
+    /// `read` registers as `read_document`); both surfaces see them.
     fn builtin_tool_table(&self) -> Vec<(&'static str, PortableDynamicTool)> {
+        let mut table = self.core_builtin_table();
+        table.extend(argosy_tools());
+        table
+    }
+
+    fn core_builtin_table(&self) -> Vec<(&'static str, PortableDynamicTool)> {
         vec![
             ("read", dynamic(Read(self.clone()))),
             ("grep", dynamic(Grep(self.clone()))),
@@ -327,7 +336,6 @@ impl Workspace {
             ("bash_status", dynamic(BashStatus(self.clone()))),
             ("bash_watch", dynamic(BashWatch(self.clone()))),
             ("bash_kill", dynamic(BashKill(self.clone()))),
-            ("inspect", dynamic(Inspect(self.clone()))),
             ("todo_write", dynamic(TodoWrite(self.clone()))),
             (
                 "retrieve",
@@ -346,6 +354,7 @@ impl Workspace {
             ("view_image", dynamic(ViewImage(self.clone()))),
             ("question", dynamic(Question(self.questions.clone()))),
             ("task", dynamic(Task(self.subagents.clone()))),
+            ("review", dynamic(Review(self.subagents.clone()))),
         ]
     }
 
@@ -424,6 +433,29 @@ impl Workspace {
             .with_mode(crate::run::AgentMode::Build);
         let _ = batch.0.set(dispatch.clone());
         dispatch
+    }
+
+    /// The reviewer subagent's table (Phase 5 of the argosy integration):
+    /// the read-only research set plus the argosy review workflow, filtered
+    /// from the same shared builtin table. Plan mode: the reviewer never
+    /// writes.
+    pub fn register_reviewer(&self) -> crate::run::ToolDispatch {
+        let allowed = crate::subagent::REVIEWER_TOOLS;
+        let mut tools: Vec<PortableDynamicTool> = self
+            .builtin_tool_table()
+            .into_iter()
+            .filter(|(name, _)| allowed.contains(name))
+            .map(|(_, tool)| tool)
+            .collect();
+        let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
+        tools.push(dynamic(ListTools(Arc::new(definitions))));
+        crate::run::ToolDispatch::new(tools)
+            .with_write_root((*self.root).clone())
+            .with_compression_store(self.compression_store.clone())
+            .with_snapshots(self.snapshots.clone())
+            // Build mode is safe here: the reviewer's budget contains no
+            // write tools at all.
+            .with_mode(crate::run::AgentMode::Build)
     }
 
     pub(crate) async fn run<T: Send + 'static>(
@@ -672,6 +704,40 @@ macro_rules! impl_tool {
     };
 }
 pub(crate) use impl_tool;
+
+/// The argosy knowledge tools (Phase 1 of the argosy integration): one
+/// portable tool per argosy definition under its native name, calling the
+/// in-process service on the blocking pool. The JSON report is returned as
+/// tool text, mirroring the MCP tool output path.
+fn argosy_tools() -> Vec<(&'static str, PortableDynamicTool)> {
+    crate::knowledge::tool_definitions()
+        .iter()
+        .map(|def| {
+            let name = def.name.clone();
+            (
+                def.native,
+                PortableDynamicTool::new(
+                    def.native,
+                    def.description.clone(),
+                    def.schema.clone(),
+                    move |arguments| {
+                        let name = name.clone();
+                        Box::pin(async move {
+                            match crate::knowledge::call_tool(name, arguments).await {
+                                Ok(report) => Ok(ToolOutput::text(
+                                    serde_json::to_string_pretty(&report).unwrap_or_else(|e| {
+                                        format!("{{\"error\":\"serialize: {e}\"}}")
+                                    }),
+                                )),
+                                Err(e) => Err(failure(e)),
+                            }
+                        })
+                    },
+                ),
+            )
+        })
+        .collect()
+}
 
 /// One portable tool per published MCP tool (B.11). The model sees the
 /// `server__tool` wire name; the closure resolves it back to the qualified

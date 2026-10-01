@@ -217,6 +217,7 @@ impl CraftProvider {
                         if on { "on" } else { "off" }
                     )));
                 }
+                Command::ArgosyMemory { query } => handle_argosy_memory(&ctx, query).await,
                 Command::GetUsage => {
                     let rows = ctx.state.lock().await.usage.rows();
                     let _ = ctx.evt_tx.send(AgentEvent::UsageSnapshot(rows));
@@ -258,6 +259,8 @@ impl CraftProvider {
         // and flush a soft checkpointed draft that never hit its write
         // window, so a keystroke from a second ago still reaches disk.
         persist_on_exit(&ctx, &selection).await;
+        // Drain outstanding memory extractions before the loop task ends.
+    crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
         // B.11: the UI dropped its command half, so no turn can follow; tear
         // the MCP servers down before the loop task ends (bounded by the
         // manager's own shutdown timeout).
@@ -448,6 +451,76 @@ fn handle_shell(ctx: &LoopCtx, command: String, visible: bool) {
     tokio::spawn(crate::tui::shell::run_shell(
         id, command, visible, tx, cancel, shell,
     ));
+}
+
+/// `Command::ArgosyMemory` (Phase 3): search the project's argosy memory
+/// concepts off-loop and render the hits as a notice. Errors degrade to a
+/// warning notice, never a failed turn.
+async fn handle_argosy_memory(ctx: &LoopCtx, query: String) {
+    let filtered = !query.trim().is_empty();
+    let tx = ctx.evt_tx.clone();
+    let cwd = std::path::PathBuf::from(&ctx.cwd);
+    let hit = tokio::task::spawn_blocking(move || {
+        let params = serde_json::json!({
+            "query": if query.trim().is_empty() {
+                "project memories and learnings"
+            } else {
+                query.trim()
+            },
+            "namespaces": ["memory"],
+            "cwd": cwd.display().to_string(),
+        });
+        crate::knowledge::ArgosyService::global()
+            .execute("search", params)
+            .map_err(|e| e.to_string())
+    })
+    .await;
+    let report = match hit {
+        Ok(Ok(report)) => report,
+        Ok(Err(err)) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: format!("/memory: {err}"),
+            });
+            return;
+        }
+        Err(err) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: format!("/memory: search task failed: {err}"),
+            });
+            return;
+        }
+    };
+    let text = format_memory_hits(&report, filtered);
+    let _ = tx.send(AgentEvent::Notice {
+        tone: Tone::Neutral,
+        text,
+    });
+}
+
+/// Render a search report's hits as a compact notice listing.
+fn format_memory_hits(report: &serde_json::Value, filtered: bool) -> String {
+    let hits = report
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if hits.is_empty() {
+        return "no memory concepts matched".to_string();
+    }
+    let mut lines = Vec::new();
+    for hit in hits.iter().take(12) {
+        let uri = hit.get("uri").and_then(|u| u.as_str()).unwrap_or("?");
+        let score = hit.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0);
+        lines.push(format!("- {uri} ({score:.2})"));
+    }
+    let header = if filtered {
+        format!("memory concepts ({}):", hits.len())
+    } else {
+        format!("memory concepts ({}):", hits.len())
+    };
+    format!("{header}\n{}", lines.join("\n"))
 }
 
 /// `Command::FetchUsage`: mark loading, then resolve off-loop so the UI
