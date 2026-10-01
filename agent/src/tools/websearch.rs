@@ -4,7 +4,7 @@
 //! same MCP endpoint, JSON-RPC `web_search_exa` call with `type: auto` /
 //! `livecrawl: fallback`, optional `EXA_API_KEY` via `x-api-key`, 25s
 //! timeout, 5MB cap, and SSE-stream response parsing that extracts the first
-//! non-empty `result.content[1].text` payload.
+//! non-empty `result.content[0].text` payload.
 
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::bash::wrap_untrusted;
-use super::{MAX_OUTPUT_BYTES, Result, invalid};
+use super::{Result, invalid, truncate_output};
 
 const EXA_MCP_ENDPOINT: &str = "https://mcp.exa.ai/mcp";
 const REQUEST_TIMEOUT_SECS: u64 = 25;
@@ -171,21 +171,6 @@ fn extract_text(parsed: &serde_json::Value) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-fn truncate_output(text: &str) -> String {
-    if text.len() <= MAX_OUTPUT_BYTES {
-        return text.to_string();
-    }
-    let mut cut = MAX_OUTPUT_BYTES;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!(
-        "{}\n…[truncated at {} bytes]",
-        &text[..cut],
-        MAX_OUTPUT_BYTES
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,15 +214,6 @@ mod tests {
     fn parse_sse_rejects_invalid_json() {
         let err = parse_sse_response("data: {not json}\n").unwrap_err();
         assert!(err.starts_with("SSE JSON parse error"));
-    }
-
-    #[test]
-    fn truncate_output_respects_cap_and_boundaries() {
-        assert_eq!(truncate_output("short"), "short");
-        let long = "ä".repeat(MAX_OUTPUT_BYTES); // 2 bytes per char
-        let truncated = truncate_output(&long);
-        assert!(truncated.len() < long.len());
-        assert!(truncated.ends_with(&format!("…[truncated at {MAX_OUTPUT_BYTES} bytes]")));
     }
 
     #[tokio::test]

@@ -108,7 +108,16 @@ pub(super) async fn stream_turn<M: CompletionModel + Clone>(
                 return Streamed::Stop(RunOutcome::Failed(message));
             }
             *overflow_recoveries += 1;
-            if !super::recover_from_overflow(params, model, history, doom, emit).await {
+            if !super::recover_from_overflow(
+                params,
+                model,
+                history,
+                doom,
+                Some(message.as_str()),
+                emit,
+            )
+            .await
+            {
                 return Streamed::Stop(RunOutcome::Failed(message));
             }
             // The pre-compaction measurement no longer describes the

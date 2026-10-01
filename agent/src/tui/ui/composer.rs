@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme;
 use crate::markdown::highlight::{Highlighter, SegmentColor};
@@ -66,17 +67,8 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let cursor = app.composer.cursor.min(chars.len());
     let rows = super::messages::wrap_rows(&app.composer.text, text_w);
 
-    // (row, col) of the cursor within the wrapped layout.
-    let mut cursor_row = rows.len() - 1;
-    let mut cursor_col = 0;
-    for (i, &(s, e)) in rows.iter().enumerate() {
-        if cursor <= e {
-            cursor_row = i;
-            cursor_col = cursor - s;
-            break;
-        }
-        cursor_col = e - s;
-    }
+    // (row, cell-column) of the cursor within the wrapped layout.
+    let (cursor_row, cursor_col) = cursor_row_col(&rows, &chars, cursor);
 
     // Scroll so the cursor row stays visible when there are more rows than fit.
     let offset = cursor_row
@@ -87,7 +79,9 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     for (i, &(s, e)) in rows.iter().enumerate().skip(offset).take(view_rows) {
         let y = inset.y + 1 + (i - offset) as u16;
         let line: String = chars[s..e].iter().collect();
-        let w = line.chars().count();
+        // Padding is display cells (the wrap width is cells), so wide
+        // glyphs don't pull the composer row past the box edge.
+        let w = UnicodeWidthStr::width(line.as_str());
         // Bang-prefix highlighting (task 96): only the first wrapped row
         // of a `!` / `!!` line gets the styled sigil and bash colors.
         let mut spans = if s == 0 {
@@ -196,6 +190,32 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::styled(" ".repeat(gap), surf));
     spans.push(Span::styled(right, tertiary));
     f.render_widget(Paragraph::new(Line::from(spans)), info);
+}
+
+/// Display-cell width of a char slice. The composer wraps in cells (see
+/// `wrap_rows`), so cursor columns and row padding must be cells too:
+/// a CJK/emoji glyph advances the cursor by two cells, not one char.
+fn cell_width(chars: &[char]) -> usize {
+    chars
+        .iter()
+        .map(|&c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
+/// (wrapped row, cell column) of the cursor within the wrapped layout
+/// produced by `wrap_rows` (char-index ranges over `chars`).
+fn cursor_row_col(rows: &[(usize, usize)], chars: &[char], cursor: usize) -> (usize, usize) {
+    let mut cursor_row = rows.len() - 1;
+    let mut cursor_col = 0;
+    for (i, &(s, e)) in rows.iter().enumerate() {
+        if cursor <= e {
+            cursor_row = i;
+            cursor_col = cell_width(&chars[s..cursor]);
+            break;
+        }
+        cursor_col = cell_width(&chars[s..e]);
+    }
+    (cursor_row, cursor_col)
 }
 
 /// Bang-prefix highlighting (task 96, ported from the reference's
@@ -379,5 +399,34 @@ mod tests {
         assert!(shell_spans("hello ! world", base()).is_none());
         assert!(shell_spans("just a message", base()).is_none());
         assert!(shell_spans("! ", base()).is_none(), "empty command");
+    }
+
+    /// Wide glyphs before the cursor move it by their CELL width: two
+    /// CJK chars ⇒ column 4, not 2 (finding 59).
+    #[test]
+    fn cursor_column_counts_display_cells_for_cjk() {
+        let chars: Vec<char> = "你好ab".chars().collect();
+        let rows = crate::tui::ui::messages::wrap_rows("你好ab", 10);
+        assert_eq!(cursor_row_col(&rows, &chars, 2), (0, 4));
+        assert_eq!(cursor_row_col(&rows, &chars, 4), (0, 6));
+        // ASCII stays one cell per char.
+        let chars: Vec<char> = "abc".chars().collect();
+        let rows = crate::tui::ui::messages::wrap_rows("abc", 10);
+        assert_eq!(cursor_row_col(&rows, &chars, 2), (0, 2));
+    }
+
+    /// A wrapped row with wide glyphs keeps the cursor on the same
+    /// screen position the text occupies (cells match the wrap).
+    #[test]
+    fn cursor_column_tracks_cells_across_wrap() {
+        // "好好好cd" wraps at 5 cells: 每 char is 2 cells, so the first
+        // row is 好好 (4 cells) + the wrapped remainder.
+        let chars: Vec<char> = "好好好cd".chars().collect();
+        let rows = crate::tui::ui::messages::wrap_rows("好好好cd", 5);
+        assert!(rows.len() > 1, "input wraps at width 5: {rows:?}");
+        // Cursor after the third wide char sits on row 1 at cell 2.
+        let (row, col) = cursor_row_col(&rows, &chars, 3);
+        assert_eq!((row, col), (1, 2));
+        assert_eq!(UnicodeWidthStr::width("好好好cd"), 8);
     }
 }

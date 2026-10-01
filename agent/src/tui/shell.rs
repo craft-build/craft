@@ -294,15 +294,61 @@ fn flush_output(tx: &mpsc::UnboundedSender<AgentEvent>, id: &str, command: &str,
     let _ = tx.send(card(id, command, body_lines(output, false)));
 }
 
+/// Hard cap on one stored output line (finding 60): a single endless
+/// line (e.g. `yes | tr -d '\n'`) would otherwise grow the buffered line
+/// — and the accumulated output — without bound.
+const MAX_LINE_BYTES: usize = 16 * 1024;
+/// Marker appended where a line was hard-capped.
+const LINE_TRUNC_MARKER: &str = "… [truncated]";
+
+/// Copy child output lines into the channel. Lines are hard-capped at
+/// [`MAX_LINE_BYTES`] (with a marker appended) and the remainder of an
+/// oversized line is discarded without storing it, so a newline-free
+/// flood can't grow memory. Lines are decoded lossily: binary output no
+/// longer kills the reader (the old `lines()` loop did).
 fn spawn_line_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    reader: BufReader<R>,
+    mut reader: BufReader<R>,
     tx: mpsc::UnboundedSender<String>,
 ) {
     tokio::spawn(async move {
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if tx.send(line).is_err() {
-                break;
+        loop {
+            let mut bytes = Vec::new();
+            // Bounded read: `take` stops buffering past the cap.
+            let mut limited = tokio::io::AsyncReadExt::take(&mut reader, MAX_LINE_BYTES as u64 + 1);
+            match limited.read_until(b'\n', &mut bytes).await {
+                Ok(0) => break, // EOF with nothing buffered
+                Ok(_) => {
+                    let capped = bytes.len() > MAX_LINE_BYTES;
+                    if capped {
+                        // Drain the rest of the oversized line up to its
+                        // newline without storing it; anything after the
+                        // newline stays buffered for the next iteration.
+                        let mut sink = Vec::new();
+                        loop {
+                            sink.clear();
+                            match (&mut reader).read_until(b'\n', &mut sink).await {
+                                Ok(0) => break,
+                                Ok(_) if sink.ends_with(b"\n") => break,
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
+                        bytes.truncate(MAX_LINE_BYTES);
+                    } else if bytes.ends_with(b"\n") {
+                        bytes.pop();
+                        if bytes.ends_with(b"\r") {
+                            bytes.pop();
+                        }
+                    }
+                    let mut line = String::from_utf8_lossy(&bytes).into_owned();
+                    if capped {
+                        line.push_str(LINE_TRUNC_MARKER);
+                    }
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
             }
         }
     });
@@ -506,5 +552,36 @@ mod tests {
         tok_b.wait().await;
         assert!(tok_b.cancelled(), "the in-flight run is stopped");
         assert!(state.active_ids().is_empty());
+    }
+
+    /// Finding 60: a multi-megabyte single line (no newline) is stored
+    /// capped at `MAX_LINE_BYTES` with the truncation marker, and the
+    /// reader task still terminates at EOF.
+    #[tokio::test]
+    async fn endless_single_line_is_capped_and_marked() {
+        let chunk = vec![b'y'; 4 * 1024 * 1024]; // multi-MB, no '\n'
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_line_reader(BufReader::new(std::io::Cursor::new(chunk)), tx);
+        let line = rx.recv().await.expect("capped line");
+        assert_eq!(line.len(), MAX_LINE_BYTES + LINE_TRUNC_MARKER.len());
+        assert!(line.ends_with(LINE_TRUNC_MARKER));
+        assert!(line[..MAX_LINE_BYTES].chars().all(|c| c == 'y'));
+        assert!(
+            rx.recv().await.is_none(),
+            "drained to EOF: the channel closes with the task"
+        );
+    }
+
+    /// Ordinary lines still pass through untouched, CRLF stripped to LF.
+    #[tokio::test]
+    async fn reader_yields_normal_lines_unchanged() {
+        let input = b"one\ntwo\r\nthree".to_vec();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_line_reader(BufReader::new(std::io::Cursor::new(input)), tx);
+        let mut got = Vec::new();
+        while let Some(l) = rx.recv().await {
+            got.push(l);
+        }
+        assert_eq!(got, ["one", "two", "three"]);
     }
 }

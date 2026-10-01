@@ -72,12 +72,14 @@ impl AskQuestions for DismissAsk {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuestionArgs {
     /// List of questions to ask the user
     pub questions: Vec<QuestionInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuestionInput {
     /// The question text
     pub question: String,
@@ -95,6 +97,7 @@ pub struct QuestionInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuestionOptionInput {
     /// Option label
     pub label: String,
@@ -353,5 +356,22 @@ mod tests {
     async fn tool_rejects_empty_questions() {
         let tool = Question(Arc::new(DismissAsk));
         assert!(tool.call(QuestionArgs { questions: vec![] }).await.is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_arg_fields() {
+        assert!(serde_json::from_str::<QuestionArgs>(r#"{"questions": [], "stray": 1}"#).is_err());
+        assert!(
+            serde_json::from_str::<QuestionArgs>(
+                r#"{"questions": [{"question": "q?", "stray": 1}]}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<QuestionArgs>(
+                r#"{"questions": [{"question": "q?", "options": [{"label": "a", "stray": 1}]}]}"#
+            )
+            .is_err()
+        );
     }
 }

@@ -63,11 +63,20 @@ pub struct CostSummary {
     pub by_model: Vec<(String, f64, u64)>,
     pub by_session: Vec<(String, f64, u64)>,
     pub records: usize,
+    /// Records whose cost could not be priced (`cost_usd: None`). These are
+    /// excluded from `total_cost` — never flatten them to `$0.00`.
+    pub unpriced_records: usize,
 }
 
 impl CostSummary {
     pub fn session_count(&self) -> usize {
         self.by_session.len()
+    }
+
+    /// User-facing total cost: the priced total plus an explicit marker
+    /// when some usage was unpriced, `n/a` when nothing could be priced.
+    pub fn display_total_cost(&self) -> String {
+        format_total_cost(self.total_cost, self.unpriced_records)
     }
 }
 
@@ -147,12 +156,19 @@ fn read_records(path: &Path) -> Result<Vec<CostRecord>, StorageError> {
 fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
     let mut total_cost = 0.0f64;
     let mut total_tokens = 0u64;
+    let mut unpriced_records = 0usize;
     let mut by_model: HashMap<String, (f64, u64)> = HashMap::new();
     let mut by_session: HashMap<String, (f64, u64)> = HashMap::new();
 
     for r in &records {
         let tokens = r.usage.total();
+        // `None` means unpriced (no price data for the model), not free:
+        // it contributes tokens but no dollars — flattening it into the
+        // totals would silently under-report a period's real spend.
         let cost = r.cost_usd.unwrap_or(0.0);
+        if r.cost_usd.is_none() {
+            unpriced_records += 1;
+        }
         // Keyed on the full spec so the same model id served by two providers
         // (e.g. anthropic vs an aggregator) stays in separate rows.
         let spec = if r.provider.is_empty() {
@@ -194,6 +210,7 @@ fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
         by_model,
         by_session,
         records: records.len(),
+        unpriced_records,
     })
 }
 
@@ -236,6 +253,24 @@ pub fn format_usd(v: f64) -> String {
 /// Compact token count via the shared formatter in `usage.rs`.
 pub fn format_cost_tokens(v: u64) -> String {
     format_tokens(v)
+}
+
+/// Render a cost total for user-facing display, keeping unpriced usage
+/// (`cost_usd: None` — the model has no price data) out of the dollar
+/// amount instead of flattening it to `$0.00`:
+///
+/// - no unpriced usage renders exactly like today (`format_usd`);
+/// - a mix of priced and unpriced renders the priced total with an
+///   explicit `+ n/a` marker;
+/// - all-unpriced renders `n/a`, never a misleading `$0.00`.
+pub fn format_total_cost(priced: f64, unpriced: usize) -> String {
+    if unpriced == 0 {
+        format_usd(priced)
+    } else if priced > 0.0 {
+        format!("{} + n/a ({unpriced} unpriced)", format_usd(priced))
+    } else {
+        "n/a".into()
+    }
 }
 
 #[cfg(test)]
@@ -413,5 +448,61 @@ mod tests {
         assert_eq!(format_cost_tokens(950), "950");
         assert_eq!(format_cost_tokens(1_500), "1.5k");
         assert_eq!(format_cost_tokens(2_500_000), "2.5m");
+    }
+
+    fn unpriced_rec(model: &str, tokens: u64) -> CostRecord {
+        let mut r = rec(model, 0.0, tokens);
+        r.cost_usd = None;
+        r
+    }
+
+    #[test]
+    fn unpriced_records_count_for_usage_not_cost() {
+        let (_tmp, ledger) = tmp_ledger();
+        ledger.append(&rec("priced", 0.25, 100)).unwrap();
+        ledger.append(&unpriced_rec("unpriced", 400)).unwrap();
+        let s = ledger.summary().unwrap();
+        assert_eq!(s.records, 2);
+        assert_eq!(s.total_tokens, 500);
+        assert!(
+            (s.total_cost - 0.25).abs() < 1e-9,
+            "unpriced usage must not add dollars, got {}",
+            s.total_cost
+        );
+    }
+
+    #[test]
+    fn display_total_cost_marks_mixed_unpriced_usage() {
+        let (_tmp, ledger) = tmp_ledger();
+        ledger.append(&rec("priced", 0.5, 1000)).unwrap();
+        ledger.append(&unpriced_rec("local", 4000)).unwrap();
+        let s = ledger.summary().unwrap();
+        assert_eq!(s.unpriced_records, 1);
+        let out = s.display_total_cost();
+        assert!(out.starts_with("$0.50"), "priced total first, got: {out}");
+        assert!(
+            out.contains("n/a") && out.contains("1 unpriced"),
+            "unpriced usage must be explicit, got: {out}"
+        );
+        assert!(!out.contains("$0.00"), "got: {out}");
+    }
+
+    #[test]
+    fn display_total_cost_all_unpriced_is_na_not_zero() {
+        let (_tmp, ledger) = tmp_ledger();
+        ledger.append(&unpriced_rec("m", 100)).unwrap();
+        let s = ledger.summary().unwrap();
+        assert_eq!(s.display_total_cost(), "n/a");
+    }
+
+    #[test]
+    fn display_total_cost_all_priced_is_unchanged() {
+        let (_tmp, ledger) = tmp_ledger();
+        ledger.append(&rec("a", 1.0, 10)).unwrap();
+        ledger.append(&rec("b", 0.5, 10)).unwrap();
+        let s = ledger.summary().unwrap();
+        assert_eq!(s.unpriced_records, 0);
+        assert_eq!(s.display_total_cost(), "$1.50");
+        assert_eq!(CostSummary::default().display_total_cost(), "$0.00");
     }
 }

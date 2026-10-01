@@ -221,8 +221,11 @@ impl App {
             });
         match text {
             Some(text) => {
-                copy_to_clipboard(&text);
-                self.push_notice(Tone::Success, "copied the last reply to the clipboard");
+                if copy_to_clipboard(&text) {
+                    self.push_notice(Tone::Success, "copied the last reply to the clipboard");
+                } else {
+                    self.push_notice(Tone::Warning, "copy failed: no clipboard tool");
+                }
             }
             None => self.push_notice(Tone::Neutral, "nothing to copy yet"),
         }
@@ -695,7 +698,6 @@ mod tests {
     }
 
     /// `/auto-review` routes a toggle command to the provider.
-    #[test]
     /// J.5: `/recipe` opens the picker; running an unknown recipe warns
     /// through a notice instead of sending anything.
     #[test]

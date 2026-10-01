@@ -8,12 +8,18 @@ use std::borrow::Cow;
 use std::iter;
 use std::mem;
 
-use super::highlight::{CodeHighlighter, SegmentColor, StyledSegment};
+use super::highlight::{CodeHighlighter, SegmentColor};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{
     Block, BlockKind, Emphasis, InlineSpan, LineBlock, SpanKind, block_prefix, parse, parse_inline,
 };
+
+mod highlight_cache;
+mod table;
+
+use highlight_cache::{coalesce_adjacent_spans, wrap_code_lines};
+use table::render_table;
 
 /// Prefix for the first line of a code block.
 pub const CODE_BAR: &str = "│ ";
@@ -23,7 +29,6 @@ pub const CODE_BAR_WRAP: &str = "│";
 /// and terminal from runaway output.
 pub const TOOL_OUTPUT_MAX_LINE_BYTES: usize = 1_500;
 const HR_CHAR: char = '─';
-const MIN_COL_WIDTH: usize = 5;
 const LONG_LINE_SUFFIX: &str = "...";
 
 /// Semantic style token. Emphasis (bold/italic/strike/underline) lives on
@@ -205,45 +210,6 @@ struct RenderState<'a> {
     highlighters: &'a mut Vec<CodeHighlighter>,
     table_col_widths: &'a mut Vec<Vec<usize>>,
     incremental: bool,
-}
-
-impl RenderState<'_> {
-    /// A streaming block keeps growing, so it advances its own highlighter and
-    /// pays only for the lines that just arrived. Everyone else renders text
-    /// that is already finished, where the shared content cache turns a
-    /// re-render at a new width into a lookup.
-    fn code_segments(&mut self, lang: &str, code: &str) -> Vec<Vec<StyledSegment>> {
-        if !self.incremental {
-            return super::highlight::highlight_block(lang, code);
-        }
-        if self.code_idx >= self.highlighters.len() {
-            self.highlighters.push(CodeHighlighter::new(lang));
-        }
-        self.highlighters[self.code_idx].update(code)
-    }
-}
-
-/// Streaming can split tokens differently than a oneshot render because the
-/// highlighter sees partial input. Merging identical neighbours keeps the
-/// span shape stable.
-fn coalesce_adjacent_spans(spans: &mut Vec<Span>) {
-    if spans.len() < 2 {
-        return;
-    }
-    let mut write = 0;
-    for read in 1..spans.len() {
-        if spans[write].style == spans[read].style && spans[write].emphasis == spans[read].emphasis
-        {
-            let tail = mem::take(&mut spans[read].text);
-            spans[write].text.push_str(&tail);
-        } else {
-            write += 1;
-            if write != read {
-                spans.swap(write, read);
-            }
-        }
-    }
-    spans.truncate(write + 1);
 }
 
 fn render_block(
@@ -438,81 +404,6 @@ fn fit_width(text: &str, max_width: usize) -> usize {
     text.len()
 }
 
-fn wrap_code_lines(lines: &mut Vec<Line>, start: usize, width: u16) {
-    let width = width as usize;
-    if width == 0 {
-        return;
-    }
-    let tail = lines.split_off(start);
-    for line in tail {
-        if line.width() <= width {
-            lines.push(line);
-        } else {
-            lines.extend(split_line_with_bar(line, width));
-        }
-    }
-}
-
-fn split_line_with_bar(line: Line, width: usize) -> Vec<Line> {
-    if line.spans.is_empty() {
-        return vec![line];
-    }
-
-    let bar_span = line.spans[0].clone();
-    let content_spans: Vec<Span> = line.spans[1..].to_vec();
-    let first_avail = width.saturating_sub(CODE_BAR.width());
-    let cont_avail = width.saturating_sub(CODE_BAR_WRAP.width());
-
-    let rows = wrap_spans_impl(content_spans, first_avail, cont_avail, false, false);
-
-    let mut result: Vec<Line> = Vec::new();
-    for (i, mut row) in rows.into_iter().enumerate() {
-        let mut spans = Vec::with_capacity(row.len() + 1);
-        if i == 0 {
-            spans.push(bar_span.clone());
-        } else {
-            spans.push(Span::new(CODE_BAR_WRAP, StyleToken::CodeBar));
-        }
-        spans.append(&mut row);
-        result.push(Line {
-            kind: LineKind::Code,
-            spans,
-        });
-    }
-
-    result
-}
-
-fn cell_display_width(cell: &str) -> usize {
-    parse_inline(cell).iter().map(|s| s.text.width()).sum()
-}
-
-fn constrain_col_widths(col_widths: &mut [usize], available: usize) {
-    let total: usize = col_widths.iter().sum();
-    if total <= available {
-        return;
-    }
-    for w in col_widths.iter_mut() {
-        *w = (*w * available / total).max(MIN_COL_WIDTH).min(*w);
-    }
-    let mut excess = col_widths.iter().sum::<usize>().saturating_sub(available);
-    while excess > 0 {
-        let max_w = col_widths.iter().copied().max().unwrap_or(0);
-        if max_w <= MIN_COL_WIDTH {
-            break;
-        }
-        for w in col_widths.iter_mut() {
-            if excess == 0 {
-                break;
-            }
-            if *w == max_w && *w > MIN_COL_WIDTH {
-                *w -= 1;
-                excess -= 1;
-            }
-        }
-    }
-}
-
 /// Core span-wrapping algorithm shared by paragraph wrapping and code-bar wrapping.
 ///
 /// `first_width` / `cont_width` allow different available widths for the first
@@ -586,148 +477,6 @@ fn wrap_spans_impl(
     result
 }
 
-fn spans_width(spans: &[Span]) -> usize {
-    spans.iter().map(|s| s.text.width()).sum()
-}
-
-fn cell_spans(cell: &str, header: bool) -> Vec<Span> {
-    parse_inline(cell)
-        .into_iter()
-        .map(
-            |InlineSpan {
-                 text,
-                 kind,
-                 emphasis,
-             }| {
-                let mut emphasis = emphasis;
-                if header {
-                    emphasis.bold = true;
-                }
-                let style = if kind == SpanKind::Code {
-                    StyleToken::InlineCode
-                } else {
-                    StyleToken::Text
-                };
-                Span::with_emphasis(text, style, emphasis)
-            },
-        )
-        .collect()
-}
-
-fn render_table(
-    rows: &[Vec<String>],
-    header_end: usize,
-    width: u16,
-    persistent_widths: &mut Vec<usize>,
-) -> Vec<Line> {
-    let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    if col_count == 0 {
-        return Vec::new();
-    }
-
-    let overhead = col_count * 3 + 1;
-    let min_box_width = overhead + col_count * MIN_COL_WIDTH;
-    if (width as usize) < min_box_width {
-        return render_table_compact(rows, header_end, width);
-    }
-
-    let mut col_widths = vec![0usize; col_count];
-    for row in rows {
-        for (c, cell) in row.iter().enumerate() {
-            col_widths[c] = col_widths[c].max(cell_display_width(cell));
-        }
-    }
-
-    let available = (width as usize) - overhead;
-
-    persistent_widths.resize(persistent_widths.len().max(col_count), 0);
-    for (i, w) in col_widths.iter_mut().enumerate() {
-        persistent_widths[i] = persistent_widths[i].max(*w);
-        *w = persistent_widths[i];
-    }
-
-    constrain_col_widths(&mut col_widths, available);
-
-    let mut lines = Vec::new();
-
-    let border = |left: &str, mid: &str, right: &str, fill: &str| -> Line {
-        let mut spans = vec![Span::new(left, StyleToken::TableBorder)];
-        for (i, &w) in col_widths.iter().enumerate() {
-            spans.push(Span::new(fill.repeat(w + 2), StyleToken::TableBorder));
-            if i < col_count - 1 {
-                spans.push(Span::new(mid, StyleToken::TableBorder));
-            }
-        }
-        spans.push(Span::new(right, StyleToken::TableBorder));
-        Line {
-            kind: LineKind::TableBorder,
-            spans,
-        }
-    };
-
-    lines.push(border("╭", "┬", "╮", "─"));
-
-    for (ri, row) in rows.iter().enumerate() {
-        let header = ri < header_end;
-
-        let wrapped_cells: Vec<Vec<Vec<Span>>> = (0..col_count)
-            .map(|c| {
-                let cell = row.get(c).map(String::as_str).unwrap_or("");
-                wrap_spans_impl(
-                    cell_spans(cell, header),
-                    col_widths[c],
-                    col_widths[c],
-                    true,
-                    true,
-                )
-            })
-            .collect();
-
-        let row_height = wrapped_cells.iter().map(|c| c.len()).max().unwrap_or(1);
-        let row_emphasis = if header {
-            Emphasis::BOLD
-        } else {
-            Emphasis::default()
-        };
-
-        for line_idx in 0..row_height {
-            let mut spans = vec![Span::new("│ ", StyleToken::TableBorder)];
-            for (c, &w) in col_widths.iter().enumerate() {
-                let sub_line = wrapped_cells[c].get(line_idx);
-                let content_width = sub_line.map_or(0, |sl| spans_width(sl));
-
-                let pad = w.saturating_sub(content_width);
-
-                if let Some(sl) = sub_line {
-                    spans.extend(sl.iter().cloned());
-                }
-                spans.push(Span::with_emphasis(
-                    " ".repeat(pad + 1),
-                    StyleToken::Text,
-                    row_emphasis,
-                ));
-                if c < col_count - 1 {
-                    spans.push(Span::new("│ ", StyleToken::TableBorder));
-                } else {
-                    spans.push(Span::new("│", StyleToken::TableBorder));
-                }
-            }
-            lines.push(Line {
-                kind: LineKind::TableRow,
-                spans,
-            });
-        }
-
-        if ri + 1 < rows.len() {
-            lines.push(border("├", "┼", "┤", "─"));
-        }
-    }
-
-    lines.push(border("╰", "┴", "╯", "─"));
-
-    lines
-}
-
 pub fn hr_text(width: u16) -> String {
     iter::repeat_n(HR_CHAR, width as usize).collect()
 }
@@ -762,29 +511,6 @@ pub fn truncate_long_lines_at(text: &str, max_bytes: usize) -> Cow<'_, str> {
         result.push('\n');
     }
     Cow::Owned(result)
-}
-
-/// Fallback when the terminal is too narrow for box-drawing borders.
-fn render_table_compact(rows: &[Vec<String>], header_end: usize, width: u16) -> Vec<Line> {
-    const CELL_SEP: &str = " | ";
-    let mut lines = Vec::new();
-    for (ri, row) in rows.iter().enumerate() {
-        let header = ri < header_end;
-        let mut spans: Vec<Span> = Vec::new();
-        for (c, cell) in row.iter().enumerate() {
-            if c > 0 {
-                spans.push(Span::new(CELL_SEP, StyleToken::TableBorder));
-            }
-            spans.extend(cell_spans(cell, header));
-        }
-        for row_spans in wrap_spans_impl(spans, width as usize, width as usize, true, true) {
-            lines.push(Line {
-                kind: LineKind::TableRow,
-                spans: row_spans,
-            });
-        }
-    }
-    lines
 }
 
 #[cfg(test)]
@@ -1262,35 +988,6 @@ mod tests {
             rendered, expected,
             "wrapped output must preserve all visible text"
         );
-    }
-
-    #[test]
-    fn coalesce_merges_same_style_and_splits_different() {
-        let mut spans = vec![
-            Span::new("aa", StyleToken::Text),
-            Span::new("bb", StyleToken::Text),
-            Span::new("cc", StyleToken::InlineCode),
-            Span::new("dd", StyleToken::InlineCode),
-            Span::new("ee", StyleToken::Text),
-        ];
-        coalesce_adjacent_spans(&mut spans);
-        assert_eq!(spans.len(), 3, "three groups after coalesce");
-        assert_eq!(spans[0].text, "aabb");
-        assert_eq!(spans[0].style, StyleToken::Text);
-        assert_eq!(spans[1].text, "ccdd");
-        assert_eq!(spans[1].style, StyleToken::InlineCode);
-        assert_eq!(spans[2].text, "ee");
-        assert_eq!(spans[2].style, StyleToken::Text);
-    }
-
-    #[test]
-    fn coalesce_does_not_merge_different_emphasis() {
-        let mut spans = vec![
-            Span::new("plain", StyleToken::Text),
-            Span::with_emphasis("bold", StyleToken::Text, Emphasis::BOLD),
-        ];
-        coalesce_adjacent_spans(&mut spans);
-        assert_eq!(spans.len(), 2, "different emphasis must not merge");
     }
 
     #[test_case(10 ; "narrow")]

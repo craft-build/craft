@@ -1,8 +1,9 @@
 //! Linux sandbox via `bubblewrap` (`bwrap`). Requires `bwrap` on PATH. Wraps the
 //! argv so the process gets a read-only view of the root filesystem with the
 //! workspace bind-mounted read-write, and (when network is denied) an unshared
-//! network namespace with only loopback. Ported from reference
-//! `craft-sandbox/src/linux.rs`.
+//! network namespace with only loopback. The payload also runs in a fresh PID
+//! namespace (`--unshare-pid`) — see the note where the flag is added. Ported
+//! from reference `craft-sandbox/src/linux.rs`.
 
 use std::process::Command;
 
@@ -40,6 +41,29 @@ pub fn apply(command: &mut Command, profile: &SandboxProfile) -> Result<(), Sand
     if profile.network == NetworkPolicy::Denied {
         wrapped.arg("--unshare-net");
     }
+
+    // Process-signal confinement: bwrap unshares namespaces *before* forking
+    // the payload, so a fresh PID namespace fully covers the confined process
+    // (a raw `unshare(CLONE_NEWPID)` would only affect future children).
+    // Without this the payload shares the host PID namespace and could
+    // `kill(2)` / signal any process owned by the same UID outside the
+    // sandbox — other agent shells, editors, the harness itself. With a fresh
+    // PID namespace the payload sees only its own tree and can signal nothing
+    // outside it; the `--proc` mount below then exposes only that tree.
+    //
+    // Support: `--unshare-pid` predates every other bwrap flag this file
+    // already relies on (`--unshare-net`, `--bind`, …), so there is nothing
+    // cheaper to detect against. bwrap always creates a user+mount namespace
+    // too, so a kernel that forbids the PID namespace forbids the whole
+    // sandbox identically — there is no partial-failure mode to recover from,
+    // and a hard bwrap failure surfaces through the normal spawn-error path.
+    //
+    // Remaining attack surface this does NOT close: the shared mount/IPC
+    // namespaces mean a payload can still reach host processes indirectly —
+    // the abstract Unix-socket namespace (when network is allowed), a shared
+    // session D-Bus, and same-UID `ptrace` targets remain reachable.
+    // Filesystem confinement is the primary line of defense for those.
+    wrapped.arg("--unshare-pid");
 
     // Read-only base first — later --bind mounts override it for their paths.
     wrapped
@@ -145,6 +169,10 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(args.contains(&"--unshare-net".to_string()));
+        assert!(
+            args.contains(&"--unshare-pid".to_string()),
+            "payload must run in a fresh PID namespace so it cannot signal host processes"
+        );
         assert!(
             args.windows(2).any(|w| w[0] == "--dev" && w[1] == "/dev"),
             "a fresh /dev must be mounted so /dev/null stays writable despite the read-only root"

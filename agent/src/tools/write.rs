@@ -69,8 +69,10 @@ impl Write {
         } else {
             String::new()
         };
-        let mut staged =
-            tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(io_error)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| failure("resolved path has no parent directory"))?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
         staged
             .write_all(args.content.as_bytes())
             .map_err(io_error)?;

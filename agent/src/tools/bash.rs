@@ -14,6 +14,7 @@ use std::{
     collections::HashMap,
     path::Path,
     process::Stdio,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::{Arc, Mutex},
 };
 
@@ -36,6 +37,8 @@ const DEFAULT_WATCH_TIMEOUT_SECS: u64 = 60;
 /// Poll cadence for background task supervision and `bash_watch`.
 const POLL: Duration = Duration::from_millis(100);
 const READ_CHUNK: usize = 4096;
+/// Newest output retained per pipe before the oldest bytes are dropped.
+const MAX_BUFFERED_OUTPUT: usize = MAX_OUTPUT_BYTES * 4;
 
 /// `find` targets that would scan an entire disk or system tree. The deny
 /// guard keeps the agent from hanging on a full-disk walk.
@@ -49,7 +52,44 @@ const DANGEROUS_FIND_ROOTS: [&str; 23] = [
 // Background job registry
 // ---------------------------------------------------------------------------
 
-type OutputBuf = Arc<Mutex<String>>;
+/// A job's piped output: bounded so an endless writer cannot OOM the
+/// process, and carrying a tally of dropped bytes for the marker.
+#[derive(Default)]
+struct OutputBuffer {
+    text: String,
+    dropped: u64,
+}
+
+impl OutputBuffer {
+    /// Append a chunk, dropping the oldest bytes (char-boundary safe) once
+    /// the buffer exceeds [`MAX_BUFFERED_OUTPUT`].
+    fn push(&mut self, text: &str) {
+        self.text.push_str(text);
+        if self.text.len() > MAX_BUFFERED_OUTPUT {
+            let mut cut = self.text.len() - MAX_BUFFERED_OUTPUT;
+            while !self.text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.dropped += cut as u64;
+            self.text.drain(..cut);
+        }
+    }
+
+    /// The retained text, prefixed with a dropped-bytes marker when
+    /// earlier output was cut to keep the buffer bounded.
+    fn snapshot(&self) -> String {
+        if self.dropped > 0 {
+            format!(
+                "[truncated {} bytes of earlier output]\n{}",
+                self.dropped, self.text
+            )
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
+type OutputBuf = Arc<Mutex<OutputBuffer>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BgState {
@@ -72,6 +112,10 @@ pub(crate) struct BgJob {
     /// exited nor been killed. `None` once `bash_kill` takes it or the
     /// waiter reaps it.
     child: Arc<Mutex<Option<ChildGuard>>>,
+    /// Readers still draining the pipes. A reaped child can leave pipe
+    /// bytes undrained, so terminal-state delivery waits for this to
+    /// reach zero before treating the output as complete.
+    pending_readers: Arc<AtomicUsize>,
 }
 
 impl BgJob {
@@ -84,7 +128,7 @@ impl BgJob {
     }
 
     fn snapshot_output(&self) -> String {
-        truncate_output(&compress_output(&self.output.lock().unwrap().clone()))
+        truncate_output(&compress_output(&self.output.lock().unwrap().snapshot()))
     }
 }
 
@@ -110,6 +154,28 @@ impl BashJobs {
 
     fn get(&self, id: &str) -> Option<BgJob> {
         self.inner.lock().unwrap().jobs.get(id).cloned()
+    }
+
+    /// Whether the job reached a terminal state (exited or killed) AND
+    /// its pipes finished draining: the waiter can reap the child while
+    /// the readers still hold buffered output.
+    fn terminal(&self, id: &str) -> bool {
+        self.get(id).is_some_and(|job| {
+            matches!(
+                *job.state.lock().unwrap(),
+                BgState::Exited(_) | BgState::Killed
+            ) && job.pending_readers.load(Ordering::Acquire) == 0
+        })
+    }
+
+    /// Clear a finished job's output buffer: `bash_status` calls this once
+    /// it has delivered the terminal report, so finished output is not
+    /// retained for the rest of the session. The job record stays so
+    /// `bash_kill` can still report the already-exited state.
+    fn release_output(&self, id: &str) {
+        if let Some(job) = self.get(id) {
+            *job.output.lock().unwrap() = OutputBuffer::default();
+        }
     }
 }
 
@@ -139,17 +205,51 @@ fn spawn_waiter(job: &BgJob) {
     });
 }
 
-/// Append a piped stream into the shared output buffer until EOF.
-async fn drain<R: tokio::io::AsyncRead + Unpin>(mut reader: R, buf: OutputBuf) {
+/// Length of the longest prefix of `bytes` whose end is likely a complete
+/// UTF-8 sequence: a final partial sequence (up to 3 bytes) is held back
+/// for the next chunk instead of being lossy-decoded mid-character.
+fn utf8_complete_len(bytes: &[u8]) -> usize {
+    let min = bytes.len().saturating_sub(3);
+    for end in (min..=bytes.len()).rev() {
+        if std::str::from_utf8(&bytes[..end]).is_ok() {
+            return end;
+        }
+    }
+    // Earlier bytes are already invalid UTF-8; emit them lossy.
+    min
+}
+
+/// Append a piped stream into the shared (bounded) output buffer until EOF,
+/// then mark this reader drained.
+async fn drain<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    buf: OutputBuf,
+    pending: Option<Arc<AtomicUsize>>,
+) {
     let mut chunk = [0u8; READ_CHUNK];
+    // May hold an incomplete UTF-8 sequence split across reads.
+    let mut carry: Vec<u8> = Vec::new();
     loop {
         match reader.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => buf
-                .lock()
-                .unwrap()
-                .push_str(&String::from_utf8_lossy(&chunk[..n])),
+            Ok(0) => {
+                if !carry.is_empty() {
+                    let text = String::from_utf8_lossy(&carry).into_owned();
+                    buf.lock().unwrap().push(&text);
+                }
+                break;
+            }
+            Err(_) => break,
+            Ok(n) => {
+                carry.extend_from_slice(&chunk[..n]);
+                let complete = utf8_complete_len(&carry);
+                let text = String::from_utf8_lossy(&carry[..complete]).into_owned();
+                carry.drain(..complete);
+                buf.lock().unwrap().push(&text);
+            }
         }
+    }
+    if let Some(pending) = pending {
+        pending.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -402,7 +502,7 @@ impl Bash {
         // Snapshot files targeted by in-place edits (`sed -i` / `perl -i`)
         // before anything runs, so `/undo` can restore them. Detection fails
         // open: ambiguity yields no paths and no snapshots.
-        for rel in crate::inplace_edit::detect_inplace_edit_paths(&command) {
+        for rel in crate::tools::inplace_edit::detect_inplace_edit_paths(&command) {
             let abs = if rel.is_absolute() {
                 rel
             } else {
@@ -418,16 +518,19 @@ impl Bash {
         let output: OutputBuf = Arc::default();
 
         if args.background {
+            let pending_readers = Arc::new(AtomicUsize::new(0));
             let job = BgJob {
                 command,
                 output: output.clone(),
                 state: Arc::new(Mutex::new(BgState::Running)),
                 child: Arc::new(Mutex::new(Some(guard))),
+                pending_readers: pending_readers.clone(),
             };
             // The registry holds the live child; the readers drain its pipes
-            // into the shared buffer until EOF.
+            // into the shared buffer until EOF, decrementing the pending
+            // count so terminal-state delivery waits for complete output.
             let mut held = job.child.lock().unwrap().take().unwrap();
-            spawn_readers(&mut held, &output);
+            spawn_readers(&mut held, &output, Some(&pending_readers));
             job.child.lock().unwrap().replace(held);
             spawn_waiter(&job);
             let id = workspace.bash_jobs.register(job);
@@ -438,7 +541,7 @@ impl Bash {
                 ),
             });
         }
-        let mut readers = spawn_readers(&mut guard, &output);
+        let mut readers = spawn_readers(&mut guard, &output, None);
 
         // Reap the child, then join the readers: `wait` can return while the
         // pipe still holds undrained tail bytes.
@@ -455,7 +558,7 @@ impl Bash {
         match tokio::time::timeout(Duration::from_secs(timeout_secs), wait_and_drain).await {
             Ok(status) => {
                 let code = status?.code().unwrap_or(-1);
-                let text = truncate_output(&compress_output(&output.lock().unwrap().clone()));
+                let text = truncate_output(&compress_output(&output.lock().unwrap().snapshot()));
                 if code == 0 {
                     Ok(BashOutput {
                         text: format_exit(&text, code),
@@ -468,7 +571,7 @@ impl Bash {
                 // Kill the whole process group and reap it before reporting;
                 // dropping the guard would do the same, but unreaped.
                 guard.kill_and_reap().await;
-                let partial = truncate_output(&compress_output(&output.lock().unwrap().clone()));
+                let partial = truncate_output(&compress_output(&output.lock().unwrap().snapshot()));
                 let body = wrap_untrusted(&partial);
                 let detail = if body.is_empty() {
                     format!("tool bash timed out after {timeout_secs}s")
@@ -481,13 +584,33 @@ impl Bash {
     }
 }
 
-fn spawn_readers(guard: &mut ChildGuard, output: &OutputBuf) -> Vec<tokio::task::JoinHandle<()>> {
+fn spawn_readers(
+    guard: &mut ChildGuard,
+    output: &OutputBuf,
+    pending: Option<&Arc<AtomicUsize>>,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let mut readers = Vec::new();
+    // Counted before spawn so a reader that finishes instantly can never
+    // make the counter dip below its true value mid-registration.
     if let Some(stdout) = guard.take_stdout() {
-        readers.push(tokio::spawn(drain(stdout, output.clone())));
+        if let Some(p) = pending {
+            p.fetch_add(1, Ordering::AcqRel);
+        }
+        readers.push(tokio::spawn(drain(
+            stdout,
+            output.clone(),
+            pending.cloned(),
+        )));
     }
     if let Some(stderr) = guard.take_stderr() {
-        readers.push(tokio::spawn(drain(stderr, output.clone())));
+        if let Some(p) = pending {
+            p.fetch_add(1, Ordering::AcqRel);
+        }
+        readers.push(tokio::spawn(drain(
+            stderr,
+            output.clone(),
+            pending.cloned(),
+        )));
     }
     readers
 }
@@ -597,6 +720,11 @@ impl PortableTool for BashStatus {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output> {
         let (text, is_error) = Bash(self.0.clone()).status_text(&args.task_id)?;
+        // The terminal report has been delivered; release the finished
+        // job's retained output buffer.
+        if self.0.bash_jobs.terminal(&args.task_id) {
+            self.0.bash_jobs.release_output(&args.task_id);
+        }
         if is_error {
             Err(failure(text))
         } else {
@@ -925,6 +1053,136 @@ mod tests {
             sleep(Duration::from_millis(50)).await;
         }
         drop(dir);
+    }
+
+    /// Wait for a background job to reach a terminal state.
+    async fn wait_terminal(workspace: &Workspace, id: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !workspace.bash_jobs.terminal(id) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "task {id} never finished"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn background_output_buffer_is_bounded() {
+        let (_dir, workspace) = workspace();
+        let out = invoke(
+            &Bash(workspace.clone()),
+            json!({"command": "yes padded-output-line | head -c 500000", "background": true}),
+        )
+        .await
+        .unwrap();
+        let text = out
+            .into_tool_output()
+            .unwrap()
+            .as_text()
+            .unwrap()
+            .to_string();
+        let id = text
+            .lines()
+            .find_map(|l| l.strip_prefix("Background task: "))
+            .expect("task id");
+        wait_terminal(&workspace, id).await;
+        // The bounded buffer kept only the newest bytes, and the status
+        // report carries the dropped-bytes marker.
+        let job = workspace.bash_jobs.get(id).expect("job");
+        let buf = job.output.lock().unwrap();
+        assert!(
+            buf.text.len() <= MAX_BUFFERED_OUTPUT,
+            "buffer {} exceeded cap {}",
+            buf.text.len(),
+            MAX_BUFFERED_OUTPUT
+        );
+        assert!(buf.dropped > 0);
+        drop(buf);
+        let status = invoke(&BashStatus(workspace.clone()), json!({"task_id": id}))
+            .await
+            .unwrap();
+        let text = status
+            .into_tool_output()
+            .unwrap()
+            .as_text()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("truncated"), "{text}");
+        // And the delivered terminal report released the retained buffer.
+        let job = workspace.bash_jobs.get(id).expect("job record stays");
+        assert!(job.output.lock().unwrap().text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bash_status_releases_output_of_terminal_job() {
+        let (_dir, workspace) = workspace();
+        let out = invoke(
+            &Bash(workspace.clone()),
+            json!({"command": "echo done", "background": true}),
+        )
+        .await
+        .unwrap();
+        let text = out
+            .into_tool_output()
+            .unwrap()
+            .as_text()
+            .unwrap()
+            .to_string();
+        let id = text
+            .lines()
+            .find_map(|l| l.strip_prefix("Background task: "))
+            .expect("task id");
+        wait_terminal(&workspace, id).await;
+        let first = invoke(&BashStatus(workspace.clone()), json!({"task_id": id}))
+            .await
+            .unwrap();
+        assert!(
+            first
+                .into_tool_output()
+                .unwrap()
+                .as_text()
+                .unwrap()
+                .contains("exited")
+        );
+        // The buffer was released after delivery; the job record stays, so
+        // a follow-up status still resolves (now with no output).
+        let second = invoke(&BashStatus(workspace.clone()), json!({"task_id": id}))
+            .await
+            .unwrap();
+        assert!(
+            second
+                .into_tool_output()
+                .unwrap()
+                .as_text()
+                .unwrap()
+                .contains("exited")
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_boundary_multibyte_output_is_intact() {
+        let (_dir, workspace) = workspace();
+        // 4095 ASCII bytes then a 3-byte char straddles the 4 KiB read
+        // chunk: naive lossy-per-chunk decoding would emit U+FFFD.
+        let out = invoke(
+            &Bash(workspace.clone()),
+            json!({"command": "printf '%4095s' ' ' | tr ' ' 'a'; printf '\\342\\202\\254'; printf 'xxxxxxxx'"}),
+        )
+        .await
+        .unwrap();
+        let text = out
+            .into_tool_output()
+            .unwrap()
+            .as_text()
+            .unwrap()
+            .to_string();
+        assert!(
+            text.contains('€'),
+            "missing €: {}",
+            &text[..64.min(text.len())]
+        );
+        assert!(!text.contains('\u{fffd}'), "replacement char leaked");
     }
 
     #[tokio::test]

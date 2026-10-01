@@ -10,7 +10,7 @@
 //! (matching the reference, which only records pre-existing contents).
 //! Out of scope by design: `delete` has no pre-delete capture. Bash
 //! in-place edits (`sed -i` / `perl -i`) are detected by
-//! [`crate::inplace_edit`] and noted before execution.
+//! [`crate::tools::inplace_edit`] and noted before execution.
 
 use std::{
     collections::HashMap,
@@ -92,10 +92,15 @@ impl SnapshotManager {
             Ok(_) => {}
             Err(_) => return,
         }
+        // The state lock is held across the read: releasing it beforehand
+        // would let a concurrent writer change the file between the read
+        // and the state update, snapshotting the wrong bytes for this
+        // state. Holds stay bounded — reads here are workdir-scoped and
+        // capped at 5 MiB (checked above).
+        let mut state = self.state.lock().unwrap();
         let Ok(content) = fs::read_to_string(&abs) else {
             return;
         };
-        let mut state = self.state.lock().unwrap();
         if state.active.label.is_none() {
             state.active.label = Some(AUTO_LABEL.to_owned());
         }
@@ -211,6 +216,32 @@ mod tests {
         fs::write(&file, "original content").unwrap();
         mgr.note(&file);
         fs::write(&file, "modified content").unwrap();
+        assert_eq!(mgr.snapshot_count(), 1);
+    }
+
+    /// Lock ordering: `note` holds the state lock across the file read, so
+    /// a `note` on another thread must block until the current lock holder
+    /// releases. (Deterministic: the worker can only finish after the
+    /// guard drops.)
+    #[test]
+    fn note_blocks_on_state_lock_until_guard_drops() {
+        let (_tmp, dir) = tmp_dir();
+        let mgr = SnapshotManager::new(&dir);
+        let file = dir.join("foo.rs");
+        fs::write(&file, "original").unwrap();
+
+        let guard = mgr.state.lock().unwrap();
+        let worker = {
+            let mgr = mgr.clone();
+            let file = file.clone();
+            std::thread::spawn(move || mgr.note(&file))
+        };
+        assert!(
+            !worker.is_finished(),
+            "note must block on the state lock while the guard is held"
+        );
+        drop(guard);
+        worker.join().unwrap();
         assert_eq!(mgr.snapshot_count(), 1);
     }
 

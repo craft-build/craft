@@ -154,24 +154,77 @@ fn check_multi_partial_coverage_prompts_uncovered() {
 
 #[test]
 fn scope_matches_prefix_token_boundary() {
-    assert!(scope_matches("git *", "git diff"));
-    assert!(scope_matches("git *", "git"));
-    assert!(!scope_matches("pwd *", "pwdx /"));
-    assert!(scope_matches("prefix*", "prefix-thing"));
-    assert!(scope_matches("exact", "exact"));
-    assert!(!scope_matches("exact", "exactly"));
+    let root = Path::new("/");
+    assert!(scope_matches(root, "git *", "git diff"));
+    assert!(scope_matches(root, "git *", "git"));
+    assert!(!scope_matches(root, "pwd *", "pwdx /"));
+    assert!(scope_matches(root, "prefix*", "prefix-thing"));
+    assert!(scope_matches(root, "exact", "exact"));
+    assert!(!scope_matches(root, "exact", "exactly"));
 }
 
 #[test]
 fn universal_scopes_match_everything() {
+    let root = Path::new("/");
     for pattern in ["*", "**", "/*", "/**"] {
-        assert!(is_universal_scope(pattern), "{pattern}");
-        assert!(scope_matches(pattern, "/anything/at/all"), "{pattern}");
-        assert!(scope_matches(pattern, "git push"), "{pattern}");
+        assert!(is_universal_scope(root, pattern), "{pattern}");
+        assert!(
+            scope_matches(root, pattern, "/anything/at/all"),
+            "{pattern}"
+        );
+        assert!(scope_matches(root, pattern, "git push"), "{pattern}");
     }
-    assert!(!is_universal_scope("/tmp/**"));
-    assert!(scope_matches("/tmp/**", "/tmp/a/b"));
-    assert!(!scope_matches("/tmp/**", "/var/tmp"));
+    assert!(!is_universal_scope(root, "/tmp/**"));
+    assert!(scope_matches(root, "/tmp/**", "/tmp/a/b"));
+    assert!(!scope_matches(root, "/tmp/**", "/var/tmp"));
+}
+
+#[test]
+fn dir_glob_never_matches_non_path_scope() {
+    // Finding 3: a dir-scoped rule must not cover a bash command line. The
+    // old code cwd-normalized the value, so `/repo/**` could swallow
+    // `rm -rf /` (or wrongly stop matching real paths after a chdir).
+    let root = Path::new("/repo");
+    assert!(!scope_matches(root, "/some/dir/**", "rm -rf /"));
+    assert!(!scope_matches(root, "/repo/**", "git push"));
+    assert!(scope_matches(root, "/some/dir/**", "/some/dir/file.txt"));
+    assert!(scope_matches(root, "/some/dir/**", "/some/dir"));
+}
+
+#[test]
+fn relative_glob_resolves_against_permission_root_not_process_cwd() {
+    // Finding 3: `dist/**` matches relative to the manager's configured
+    // root, wherever the process happens to run. Both roots are absolute
+    // and nonexistent, so the outcome cannot depend on the process cwd.
+    let root_a = Path::new("/workspace/project-a");
+    let root_b = Path::new("/workspace/project-b");
+    assert!(scope_matches(root_a, "dist/**", "dist/x"));
+    assert!(!scope_matches(root_a, "dist/**", "other/x"));
+    assert!(scope_matches(root_b, "dist/**", "dist/x"));
+    assert!(scope_matches(
+        root_a,
+        "dist/**",
+        "/workspace/project-a/dist/x"
+    ));
+    assert!(!scope_matches(
+        root_a,
+        "dist/**",
+        "/workspace/project-b/dist/x"
+    ));
+}
+
+#[test]
+fn relative_dir_rule_uses_manager_cwd_for_bash_scopes() {
+    // Same fix, end-to-end through PermissionManager: the rule resolves
+    // against the manager's cwd even though the process cwd differs.
+    let root_a = Path::new("/workspace/project-a");
+    let mgr = mgr_with(root_a, vec![allow_rule("bash", Some("dist/**"))]);
+    let tool = ToolKey::native("bash");
+    assert!(matches!(
+        mgr.check(&tool, &["dist/x".to_string()]),
+        PermissionCheck::Allowed
+    ));
+    assert!(needs_prompt(&mgr.check(&tool, &["other/x".to_string()])));
 }
 
 #[test]
@@ -181,6 +234,7 @@ fn dir_glob_matches_before_dir_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().join("dist");
     assert!(scope_matches(
+        tmp.path(),
         &format!("{}/**", base.display()),
         &base.join("foo.txt").display().to_string()
     ));
@@ -232,7 +286,9 @@ fn session_rules_allow_without_disk() {
     let tmp = tempfile::tempdir().unwrap();
     let mgr = mgr_with(tmp.path(), vec![]);
     let tool = ToolKey::native("write");
-    let scopes = vec!["src/lib.rs".to_string()];
+    // Outside the manager's root, so the builtin `cwd/**` pre-approval does
+    // not apply and the session grant is what carries the allow.
+    let scopes = vec!["/outside/src/lib.rs".to_string()];
     assert!(needs_prompt(&mgr.check(&tool, &scopes)));
 
     mgr.apply_decision(&tool, &scopes, &PermissionAnswer::AllowSession);
@@ -242,9 +298,9 @@ fn session_rules_allow_without_disk() {
     ));
 
     // A different directory still prompts: the session grant generalized
-    // to the parent dir (`src/**`), not to every file.
+    // to the parent dir (`/outside/src/**`), not to every file.
     assert!(needs_prompt(
-        &mgr.check(&tool, &["docs/other.rs".to_string()])
+        &mgr.check(&tool, &["/outside/docs/other.rs".to_string()])
     ));
 }
 

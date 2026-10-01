@@ -85,11 +85,9 @@ impl Edit {
                 "edited file would exceed the 8 MiB tool size limit",
             ));
         }
-        let replacements = if args.replace_all {
-            before.match_indices(&args.old_string).count()
-        } else {
-            1
-        };
+        // Count what the winning pass actually replaced; an exact-only recount
+        // reports 0 when a fuzzy pass did the work.
+        let replacements = result.replacements;
         let pass = if result.pass == fuzzy_replace::Pass::Exact {
             String::new()
         } else {
@@ -132,7 +130,10 @@ pub(crate) fn persist(
     workspace.note_snapshot(path);
     // Stage beside the destination for same-filesystem atomic replacement.
     // Preserve exact bytes outside the replacement, including CRLF and BOM.
-    let mut staged = tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(io_error)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| failure("resolved path has no parent directory"))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
     staged.write_all(after.as_bytes()).map_err(io_error)?;
     staged
         .as_file()
@@ -372,6 +373,32 @@ mod tests {
             EditLines::replace_lines("aaa\nbbb\nccc", 2, 2, "BBB").unwrap(),
             "aaa\nBBB\nccc"
         );
+    }
+
+    #[test]
+    fn fuzzy_replace_all_reports_actual_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(tmp.path()).unwrap();
+        std::fs::write(
+            tmp.path().join("f.txt"),
+            "let   x  =   1;\nlet   x  =   1;\n",
+        )
+        .unwrap();
+        let out = Edit::execute(
+            &workspace,
+            EditArgs {
+                path: "f.txt".into(),
+                old_string: "let x = 1;".into(),
+                new_string: "let y = 2;".into(),
+                replace_all: true,
+                occurrence: None,
+            },
+        )
+        .unwrap();
+        // An exact recount of old_string would report 0; the fuzzy pass
+        // replaced both lines.
+        assert!(!out.pass.is_empty());
+        assert_eq!(out.replacements, 2);
     }
 
     #[test]

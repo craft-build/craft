@@ -6,8 +6,10 @@
 //! `crate::permissions::PermissionRule`).
 //!
 //! Each session is stored as `{uuid}.jsonl`, one JSON record per line. The
-//! format is crash-safe: on load, any trailing run of unparseable lines is
-//! discarded (a partial flush may corrupt multiple trailing records).
+//! format is crash-safe: on load, each record that fails to parse is
+//! skipped with a stderr warning, wherever it sits in the file (a partial
+//! flush may corrupt multiple records, not just trailing ones). A header
+//! whose id is unparseable fails with `CorruptHeaderId` instead.
 //! [`SessionLog`](log::SessionLog) tracks cursor state to enable O(delta)
 //! incremental saves.
 //!

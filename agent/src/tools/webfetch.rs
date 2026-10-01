@@ -20,7 +20,7 @@ use serde::Deserialize;
 
 use super::bash::wrap_untrusted;
 use super::ssrf::{self, GuardedDns};
-use super::{MAX_OUTPUT_BYTES, Result, invalid};
+use super::{Result, invalid, truncate_output};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 120;
@@ -342,21 +342,6 @@ fn strip_html(html: &str) -> String {
     out.trim().to_string()
 }
 
-fn truncate_output(text: &str) -> String {
-    if text.len() <= MAX_OUTPUT_BYTES {
-        return text.to_string();
-    }
-    let mut cut = MAX_OUTPUT_BYTES;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!(
-        "{}\n…[truncated at {} bytes]",
-        &text[..cut],
-        MAX_OUTPUT_BYTES
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,17 +400,6 @@ mod tests {
             let err = render_body("GIF89a", "image/gif", format).unwrap_err();
             assert_eq!(err, "image content cannot be displayed as text");
         }
-    }
-
-    #[test]
-    fn truncate_output_respects_cap_and_boundaries() {
-        let short = "hello";
-        assert_eq!(truncate_output(short), "hello");
-        let long = "ä".repeat(MAX_OUTPUT_BYTES); // 2 bytes per char
-        let truncated = truncate_output(&long);
-        assert!(truncated.len() < long.len());
-        assert!(truncated.ends_with(&format!("…[truncated at {MAX_OUTPUT_BYTES} bytes]")));
-        assert!(truncated.is_char_boundary(truncated.len() - 1));
     }
 
     // ── strip_html: port of the reference spec.lua cases ──

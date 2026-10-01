@@ -12,7 +12,57 @@ use std::future::Future;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{CancelFlag, CancelToken, cancel_channel};
+use tokio::sync::watch;
+
+/// Cancellation shared between a surface and its run: set the flag, and the
+/// run stops at the next stream/dispatch/turn boundary.
+#[derive(Clone)]
+pub struct CancelToken {
+    rx: watch::Receiver<u64>,
+    epoch: u64,
+}
+
+/// The setting half of a [`CancelToken`].
+#[derive(Clone)]
+pub struct CancelFlag {
+    tx: watch::Sender<u64>,
+}
+
+/// Create a cancellation pair, initially not cancelled.
+pub fn cancel_channel() -> (CancelFlag, CancelToken) {
+    let (tx, rx) = watch::channel(0);
+    (CancelFlag { tx }, CancelToken { rx, epoch: 0 })
+}
+
+impl CancelToken {
+    pub fn cancelled(&self) -> bool {
+        *self.rx.borrow() != self.epoch
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.rx.clone()
+    }
+}
+
+impl CancelFlag {
+    /// Cancellation is monotonic and epoch-scoped: `set(true)` bumps the
+    /// generation and can never be overwritten by a concurrent re-arm,
+    /// while `set(false)` is a no-op — a fresh turn starts clean by
+    /// minting a new token at the current generation.
+    pub fn set(&self, cancelled: bool) {
+        if cancelled {
+            self.tx.send_modify(|generation| *generation += 1);
+        }
+    }
+
+    /// A token sharing this flag's state.
+    pub fn token(&self) -> CancelToken {
+        CancelToken {
+            rx: self.tx.subscribe(),
+            epoch: *self.tx.borrow(),
+        }
+    }
+}
 
 const CANCELLED: &str = "cancelled";
 

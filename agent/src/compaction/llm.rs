@@ -139,6 +139,8 @@ fn message_text(message: &Message) -> Option<String> {
 /// oversized prompt: an overflow retry ladder cannot fix those.
 const OUTPUT_CAP_FIELDS: [&str; 3] = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
 
+/// The single shared context-overflow classifier: compaction's retry
+/// ladder and `run::stream::classify_string` both consult it.
 /// Detects context-window overflow in a provider error string across
 /// providers (ported from Craft's `craft-providers::error`):
 /// - Anthropic:  413 "prompt is too long"
@@ -160,7 +162,11 @@ pub(crate) fn is_context_overflow_body(message: &str) -> bool {
         || m.contains("too long")
         || m.contains("too many")
         || m.contains("maximum")
-        || m.contains("context_length_exceeded");
+        || m.contains("context_length_exceeded")
+        // Generic provider phrasing with no explicit "exceeds": the old
+        // stream classifier treated any "context window" error mention as
+        // overflow, and the run loop keeps that semantics.
+        || m.contains("context window");
     is_scope && is_overflow
 }
 
@@ -504,6 +510,65 @@ mod tests {
             "rate limited",
         ] {
             assert!(!is_context_overflow_body(message), "{message:?}");
+        }
+    }
+
+    /// Table-driven test over the shared classifier, mined from both former
+    /// implementations (`run::stream::is_context_overflow` and this file's
+    /// provider table). Where the two disagreed, this superset's semantics
+    /// win — notably output-cap complaints (`max_tokens`) are never prompt
+    /// overflow, and a bare "maximum tokens per request" tier message is.
+    #[test]
+    fn shared_overflow_classifier_covers_both_call_sites() {
+        let cases: &[(&str, bool)] = &[
+            // compaction provider table (Anthropic / OpenAI / Ollama /
+            // Mistral / Bedrock shapes)
+            ("prompt is too long", true),
+            (
+                "This model's maximum context length is 8192 tokens. However, you requested 9850 tokens",
+                true,
+            ),
+            ("context length exceeded", true),
+            (
+                "Prompt contains 321774 tokens and 0 draft tokens, too large for model with 262144 maximum context length",
+                true,
+            ),
+            ("Input is too long for requested model", true),
+            // former run::stream positives
+            (
+                "Error: prompt is too long: 210744 tokens > 200000 maximum",
+                true,
+            ),
+            (
+                "This model's maximum context length is 4096 tokens. However, you requested ...",
+                true,
+            ),
+            (
+                "The input token count (524389) exceeds the maximum number of tokens allowed (1048576)",
+                true,
+            ),
+            ("conversation exceeds the model context window", true),
+            // negatives from both sites
+            ("rate limit exceeded, retry after 30s", false),
+            ("invalid api key", false),
+            ("connection closed before response", false),
+            ("rate limited", false),
+            // dis-ambiguators: output caps are not prompt overflow
+            ("Invalid 'max_tokens': integer above maximum value", false),
+            (
+                "input length and `max_tokens` exceed context limit: 10922 + 8192 > 8192",
+                false,
+            ),
+            // tier-cap phrasing the old stream classifier missed; the
+            // superset reads it as the overflow it is
+            ("maximum tokens per request is 128000 for this tier", true),
+        ];
+        for (message, expected) in cases {
+            assert_eq!(
+                is_context_overflow_body(message),
+                *expected,
+                "classification mismatch: {message}"
+            );
         }
     }
 

@@ -256,14 +256,36 @@ async fn serve_callback(
     }
 }
 
+/// Program + argv used to open `url` in the system default browser.
+///
+/// The URL is server-derived (an OAuth authorization endpoint), so it must
+/// never be re-parsed by a shell: `cmd /C start <url>` runs the URL through
+/// cmd.exe tokenization, where `&`, `|`, `&&`, etc. are command separators —
+/// a crafted `state`/`prompt` parameter could smuggle a second command.
+/// Every branch here is a direct spawn with the URL as a single argv element;
+/// `os` is a parameter so the arg shape is unit-testable off-platform.
+fn browser_launcher(os: &str, url: &str) -> (&'static str, Vec<String>) {
+    match os {
+        // rundll32 dispatches to the shell's file-protocol handler for the
+        // URL scheme with no cmd.exe parsing in between.
+        "windows" => (
+            "rundll32",
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
+        ),
+        "macos" => ("open", vec![url.to_string()]),
+        _ => ("xdg-open", vec![url.to_string()]),
+    }
+}
+
 fn open_browser(url: &str) {
-    let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
-        ("open", vec![url])
-    } else if cfg!(target_os = "windows") {
-        ("cmd", vec!["/C", "start", url])
-    } else {
-        ("xdg-open", vec![url])
-    };
+    #[cfg(target_os = "windows")]
+    const OS: &str = "windows";
+    #[cfg(target_os = "macos")]
+    const OS: &str = "macos";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    const OS: &str = "other";
+
+    let (program, args) = browser_launcher(OS, url);
     if std::process::Command::new(program)
         .args(args)
         .spawn()
@@ -348,5 +370,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(url, format!("http://127.0.0.1:{port}/cb?code=a&state=b"));
+    }
+
+    #[test]
+    fn windows_launcher_never_routes_through_a_shell() {
+        // A server-derived URL containing cmd.exe metacharacters must reach
+        // the browser as one inert argv element, not shell syntax.
+        let url = "https://auth.example/authorize?state=a&evil=1&calc.exe";
+        let (program, args) = browser_launcher("windows", url);
+        assert_eq!(program, "rundll32");
+        assert_eq!(args, ["url.dll,FileProtocolHandler", url]);
+    }
+
+    #[test]
+    fn unix_launchers_pass_the_url_as_a_single_argv_element() {
+        for os in ["macos", "linux", "other"] {
+            let url = "https://auth.example/cb?a=1&b=2";
+            let (program, args) = browser_launcher(os, url);
+            assert!(
+                matches!(program, "open" | "xdg-open"),
+                "unexpected launcher {program} for {os}"
+            );
+            assert_eq!(args, [url]);
+        }
     }
 }

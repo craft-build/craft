@@ -153,6 +153,12 @@ impl ToolDispatch {
         self.compression_store.as_ref()
     }
 
+    /// The workspace root anchoring write-path conflict normalization, if
+    /// one was set with `with_write_root`.
+    pub fn write_root(&self) -> Option<&std::path::Path> {
+        self.write_root.as_deref()
+    }
+
     /// Share the session's snapshot manager so the run loop can commit
     /// turn sessions and the surface can drive `/undo`.
     pub fn with_snapshots(mut self, snapshots: SnapshotManager) -> Self {
@@ -313,7 +319,18 @@ impl ToolDispatch {
                     &call.function.arguments,
                 );
             } else if ToolDedupCache::is_write(&name) {
-                let paths = dedup::extract_write_paths(&name, &call.function.arguments);
+                let mut paths = dedup::extract_write_paths(&name, &call.function.arguments);
+                if name == "move" {
+                    // `move` also rewrites imports elsewhere; those files
+                    // appear only in the result text.
+                    let text = result
+                        .content
+                        .iter()
+                        .map(|c| c.to_text())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    paths.extend(crate::tools::move_file::rewritten_files(&text));
+                }
                 if paths.is_empty() {
                     guard.invalidate_pathless();
                 } else {
@@ -362,11 +379,12 @@ impl ToolDispatch {
 }
 
 /// Tools whose calls mutate files and must honor the plan-mode gate. Mirrors
-/// dedup's write classification plus the mutators dedup does not track
-/// (`fuzzy_replace`). `batch` is absent on purpose: its children execute
+/// dedup's write classification exactly: fuzzy replacement ships inside
+/// `edit`/`multiedit`, both already gated, and no standalone `fuzzy_replace`
+/// tool is registered. `batch` is absent on purpose: its children execute
 /// through this same dispatch table and pass the gate individually.
 fn is_gated_write(name: &str) -> bool {
-    ToolDedupCache::is_write(name) || name == "fuzzy_replace"
+    ToolDedupCache::is_write(name)
 }
 
 /// Every path a gated write call touches.
@@ -763,9 +781,12 @@ mod plan_mode_tests {
     #[tokio::test]
     async fn plan_mode_allows_writing_the_plan_file_itself() {
         let dir = tempfile::tempdir().unwrap();
-        let plan = dir.path().join("state/plans/alpha.md");
+        // Canonicalize: macOS tempdirs live under symlinked /var, and the
+        // plan walk rejects symlinked components.
+        let root = dir.path().canonicalize().unwrap();
+        let plan = root.join("state/plans/alpha.md");
         std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
-        let dispatch = dispatch(dir.path(), AgentMode::Plan(plan.clone()));
+        let dispatch = dispatch(&root, AgentMode::Plan(plan.clone()));
         let result = run(&dispatch, write_call(&plan.display().to_string())).await;
         assert!(
             !result.is_error,
@@ -808,6 +829,26 @@ mod plan_mode_tests {
         let result = run(&dispatch, write_call("src/main.rs")).await;
         assert!(!result.is_error, "build mode write must run");
         assert!(dir.path().join("src/main.rs").exists());
+    }
+
+    #[test]
+    fn gated_write_table_covers_registered_writes_only() {
+        for name in [
+            "write",
+            "edit",
+            "edit_lines",
+            "insert_lines",
+            "multiedit",
+            "delete",
+        ] {
+            assert!(is_gated_write(name), "{name} must be gated in plan mode");
+        }
+        assert!(
+            !is_gated_write("fuzzy_replace"),
+            "no tool is registered under that name; it must not appear in the gate"
+        );
+        assert!(!is_gated_write("read"));
+        assert!(!is_gated_write("bash"));
     }
 
     #[tokio::test]

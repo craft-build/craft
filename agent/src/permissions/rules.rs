@@ -42,29 +42,51 @@ pub(super) fn rule_reaches(rule_key: &ToolKey, actual: &ToolKey) -> bool {
     }
 }
 
-pub(super) fn rule_matches_scope(rule: &PermissionRule, scope: &str) -> bool {
+pub(super) fn rule_matches_scope(root: &Path, rule: &PermissionRule, scope: &str) -> bool {
     match &rule.scope {
         None => true,
-        Some(pattern) => scope_matches(pattern, scope),
+        Some(pattern) => scope_matches(root, pattern, scope),
     }
 }
 
-/// Absolutize first, then resolve symlinks in the leading components that
-/// exist and append the rest as written. The order matters: a relative rule
-/// like `dist/**` has to match before the dir exists, and
-/// `incremental_canonicalize` leaves a relative path relative when the leading
-/// component is missing.
-fn normalize_scope_prefix(path: &str) -> PathBuf {
-    let abs = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
+/// Absolutize against the permission root first, then resolve symlinks in
+/// the leading components that exist and append the rest as written. The
+/// order matters: a relative rule like `dist/**` has to match before the dir
+/// exists, and `incremental_canonicalize` leaves a relative path relative
+/// when the leading component is missing. The root is the manager's
+/// configured cwd, not the process cwd — under ACP the two differ.
+fn normalize_scope_prefix(root: &Path, path: &str) -> PathBuf {
+    let p = Path::new(path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else if path.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(p)
+    };
     paths::incremental_canonicalize(&abs).unwrap_or_else(|| paths::normalize_path(&abs))
+}
+
+/// Whether a scope value looks like a filesystem path rather than bash
+/// command text, a bare word, or a non-path scope (`task:...`, `*`).
+/// Conservative: absolute and dot/tilde-relative spellings always count, and
+/// a whitespace-free value containing a separator does too. Bash segments
+/// like `rm -rf /` carry whitespace and never count, so a dir-scoped rule
+/// cannot match a command line.
+fn is_path_shaped(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+        || (value.contains('/') && !value.chars().any(char::is_whitespace))
 }
 
 /// A pattern with nothing left once its trailing glob is taken off covers
 /// every scope: `*` and `**`, but also `/*` and `/**`, which reduce to a
 /// prefix every absolute path starts with.
-pub fn is_universal_scope(pattern: &str) -> bool {
+pub fn is_universal_scope(root: &Path, pattern: &str) -> bool {
     match pattern.strip_suffix("/**") {
-        Some(prefix) => is_root(&normalize_scope_prefix(prefix)),
+        Some(prefix) => prefix.is_empty() || is_root(&normalize_scope_prefix(root, prefix)),
         None => {
             let stem = pattern.trim_end_matches('*');
             stem.len() < pattern.len() && matches!(stem, "" | "/")
@@ -79,18 +101,30 @@ fn is_root(path: &Path) -> bool {
 /// For the `/**` path pattern, `Path::starts_with` is used to compare
 /// components rather than characters, which handles both `/` and `\\`
 /// transparently on all platforms.
-pub fn scope_matches(pattern: &str, value: &str) -> bool {
+pub fn scope_matches(root: &Path, pattern: &str, value: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix("/**") {
-        let norm_prefix = normalize_scope_prefix(prefix);
-        // A root prefix covers every scope, bash commands included. Those are
-        // not paths, so a plain prefix test would miss them.
+        // `/**` itself: an empty prefix is the filesystem root and covers
+        // every scope, bash commands included.
+        let norm_prefix = if prefix.is_empty() {
+            PathBuf::from("/")
+        } else {
+            normalize_scope_prefix(root, prefix)
+        };
+        // Only a genuinely root prefix (`/**`) covers every scope. A
+        // directory pattern never matches a non-path value: bash command text
+        // is not a location under any directory, and normalizing it against
+        // the root would let dir-scoped rules silently cover commands (or,
+        // after a cwd change, wrongly fail real paths).
         if is_root(&norm_prefix) {
             return true;
         }
-        let norm_value = normalize_scope_prefix(value);
+        if !is_path_shaped(value) {
+            return false;
+        }
+        let norm_value = normalize_scope_prefix(root, value);
         return norm_value == norm_prefix || norm_value.starts_with(&norm_prefix);
     }
-    if is_universal_scope(pattern) {
+    if is_universal_scope(root, pattern) {
         return true;
     }
     if let Some(prefix) = pattern.strip_suffix(" *") {

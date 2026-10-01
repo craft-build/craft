@@ -92,6 +92,8 @@ pub struct StatsView {
     /// Models beyond the rendered cap.
     pub models_overflow: usize,
     pub total_cost: f64,
+    /// Ledger records with no price data, excluded from `total_cost`.
+    pub unpriced_records: usize,
     pub total_tokens: u64,
     pub sessions: usize,
     pub empty: bool,
@@ -319,7 +321,9 @@ impl App {
                     } else {
                         // Prefill `key=` stubs for parameters without a
                         // default so Enter submits once they are filled.
-                        self.composer.text = format!(
+                        // `set_text` leaves the cursor at the end so the
+                        // user keeps typing after the stubs.
+                        self.composer.set_text(format!(
                             "/recipe {} {}",
                             entry.name,
                             entry
@@ -328,7 +332,7 @@ impl App {
                                 .map(|p| format!("{p}="))
                                 .collect::<Vec<_>>()
                                 .join(" ")
-                        );
+                        ));
                     }
                 }
             }
@@ -632,6 +636,32 @@ mod tests {
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// `/recipe` with parameters prefills the `key=` stubs and leaves the
+    /// composer cursor at the end of the prefilled line (not wherever it
+    /// was before), so typing continues after the stubs.
+    #[test]
+    fn recipe_prefill_places_cursor_at_end() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("/rec".into());
+        app.composer.cursor = 2; // simulate a mid-text leftover position
+        app.overlays.modal = Modal::Recipes {
+            entries: vec![RecipeEntry {
+                name: "deploy".into(),
+                description: "ship it".into(),
+                params: vec!["env".into(), "tag".into()],
+            }],
+            selected: 0,
+        };
+        app.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "/recipe deploy env= tag=");
+        assert_eq!(
+            app.composer.cursor,
+            app.composer.text.chars().count(),
+            "cursor == len of the prefilled line"
+        );
     }
 
     // --- /mcp screen (B.11) ---

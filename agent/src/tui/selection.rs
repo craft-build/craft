@@ -113,16 +113,94 @@ pub(crate) fn extract_selection_text(frame_text: &[String], sel: Selection) -> S
     parts.join("\n")
 }
 
-/// Copy text to the system clipboard (macOS `pbcopy`).
-pub(crate) fn copy_to_clipboard(text: &str) {
+/// One clipboard mechanism: an external tool (with its selection args)
+/// or the terminal's OSC-52 escape sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardBackend {
+    Tool(&'static str, &'static [&'static str]),
+    Osc52,
+}
+
+/// Mechanisms to try, in order. macOS ships `pbcopy`; Wayland/X11
+/// sessions carry exactly one of `wl-copy`/`xclip`/`xsel`; the OSC-52
+/// terminal escape needs no tool at all but only reaches the system
+/// clipboard where the terminal supports it, so it is the last resort.
+fn clipboard_backends() -> &'static [ClipboardBackend] {
+    #[cfg(target_os = "macos")]
+    {
+        &[
+            ClipboardBackend::Tool("pbcopy", &[]),
+            ClipboardBackend::Osc52,
+        ]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        &[
+            ClipboardBackend::Tool("wl-copy", &[]),
+            ClipboardBackend::Tool("xclip", &["-selection", "clipboard"]),
+            ClipboardBackend::Tool("xsel", &["--clipboard", "--input"]),
+            ClipboardBackend::Osc52,
+        ]
+    }
+    #[cfg(not(unix))]
+    {
+        &[ClipboardBackend::Osc52]
+    }
+}
+
+/// Copy text to the system clipboard, returning whether any mechanism
+/// accepted it. The caller flashes "Copied" only for a real copy —
+/// on a box with no clipboard tool the old pbcopy-only code flashed
+/// "Copied" for a copy that never happened (finding 66).
+pub(crate) fn copy_to_clipboard(text: &str) -> bool {
+    copy_with_backends(clipboard_backends(), text, &pipe_to_tool, &write_osc52)
+}
+
+/// Try each backend in order; effects are injectable so tests fake the
+/// environment instead of spawning real tools.
+fn copy_with_backends(
+    backends: &[ClipboardBackend],
+    text: &str,
+    run_tool: &dyn Fn(&str, &[&str], &str) -> bool,
+    write_osc52: &dyn Fn(&str) -> bool,
+) -> bool {
+    backends.iter().any(|b| match b {
+        ClipboardBackend::Tool(cmd, args) => run_tool(cmd, args, text),
+        ClipboardBackend::Osc52 => write_osc52(text),
+    })
+}
+
+/// Pipe `text` into `cmd args`; a spawn failure (tool missing) or a
+/// non-zero exit both count as "this mechanism can't copy here".
+fn pipe_to_tool(cmd: &str, args: &[&str], text: &str) -> bool {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
+    let Ok(mut child) = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
     }
+    child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+/// OSC-52 (`ESC ] 52 ; c ; <base64> BEL`) asks the terminal to set its
+/// own clipboard. Needs no external tool; the terminal may ignore it.
+fn write_osc52(text: &str) -> bool {
+    use base64::Engine;
+    use std::io::Write;
+    let seq = format!(
+        "\u{1b}]52;c;{}\u{7}",
+        base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
+    );
+    let mut stdout = std::io::stdout();
+    stdout.write_all(seq.as_bytes()).is_ok() && stdout.flush().is_ok()
 }
 
 #[cfg(test)]
@@ -207,5 +285,58 @@ mod tests {
         assert!(rect_contains(region, 3, 3));
         assert!(!rect_contains(region, 6, 3));
         assert!(!rect_contains(region, 3, 12));
+    }
+
+    /// Finding 66: no clipboard tool and no working terminal escape
+    /// reports failure — the caller must not flash "Copied".
+    #[test]
+    fn no_available_mechanism_reports_failure() {
+        let backends = [
+            ClipboardBackend::Tool("wl-copy", &[]),
+            ClipboardBackend::Tool("xclip", &["-selection", "clipboard"]),
+            ClipboardBackend::Osc52,
+        ];
+        let copied = copy_with_backends(&backends, "hello", &|_, _, _| false, &|_| false);
+        assert!(!copied, "nothing worked: no copy happened");
+    }
+
+    /// The first working tool wins and receives the text; fallbacks
+    /// after it are not touched.
+    #[test]
+    fn first_working_tool_receives_the_text() {
+        let backends = [
+            ClipboardBackend::Tool("wl-copy", &[]),
+            ClipboardBackend::Tool("xclip", &["-selection", "clipboard"]),
+            ClipboardBackend::Osc52,
+        ];
+        let seen = std::cell::RefCell::new(Vec::new());
+        let run_tool = |cmd: &str, args: &[&str], text: &str| {
+            seen.borrow_mut()
+                .push((cmd.to_string(), args.join(" "), text.to_string()));
+            cmd == "xclip"
+        };
+        let copied = copy_with_backends(&backends, "payload", &run_tool, &|_| {
+            panic!("OSC-52 fallback not reached: a real tool copied");
+        });
+        assert!(copied);
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[
+                ("wl-copy".to_string(), String::new(), "payload".to_string()),
+                (
+                    "xclip".to_string(),
+                    "-selection clipboard".to_string(),
+                    "payload".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// Every platform probed ends with the tool-free OSC-52 escape.
+    #[test]
+    fn osc52_is_always_the_last_resort() {
+        let backends = clipboard_backends();
+        assert!(!backends.is_empty());
+        assert_eq!(backends.last(), Some(&ClipboardBackend::Osc52));
     }
 }

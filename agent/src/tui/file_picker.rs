@@ -69,6 +69,10 @@ pub(crate) struct Match {
 
 pub(crate) struct Session {
     pub(crate) files: Vec<String>,
+    /// Snapshot of `files` handed to the match workers; rebuilt only when
+    /// the walker delivered new paths, so a keystroke never re-clones the
+    /// whole corpus (the workers `Arc::clone` it instead).
+    corpus_snap: Arc<[String]>,
     pub(crate) matches: Vec<Match>,
     pub(crate) total_matches: usize,
 
@@ -139,6 +143,7 @@ impl FilePicker {
 
         self.session = Some(Session {
             files: Vec::new(),
+            corpus_snap: Arc::from([]),
             matches: Vec::new(),
             total_matches: 0,
             query: String::new(),
@@ -186,7 +191,9 @@ impl FilePicker {
         let Some(s) = &mut self.session else {
             return false;
         };
-        s.query.insert_str(s.query.chars().count(), text);
+        // Append at the end; a chars-count used as a byte index panics on
+        // multi-byte queries (`insert_str` requires a char boundary).
+        s.query.push_str(text);
         s.cursor = s.query.chars().count();
         refresh_matches(s);
         true
@@ -413,7 +420,13 @@ fn spawn_match_job(s: &mut Session) {
         return;
     }
     let generation = s.match_gen;
-    let files = s.files.clone();
+    // Share the corpus with the worker instead of cloning it: paths only
+    // ever append, so a length change is the whole invalidation story and
+    // an unchanged corpus reuses the same Arc across keystrokes.
+    if s.corpus_snap.len() != s.files.len() {
+        s.corpus_snap = Arc::from(s.files.as_slice());
+    }
+    let files = Arc::clone(&s.corpus_snap);
     let query = s.query.clone();
     let (tx, rx) = std::sync::mpsc::channel::<MatchJobResult>();
     let spawned = thread::Builder::new()
@@ -597,6 +610,7 @@ mod tests {
         let mut picker = FilePicker::new();
         picker.session = Some(Session {
             files: Vec::new(),
+            corpus_snap: Arc::from([]),
             matches: Vec::new(),
             total_matches: 0,
             query: String::new(),
@@ -613,6 +627,18 @@ mod tests {
             match_rx: None,
         });
         (picker, tx)
+    }
+
+    #[test]
+    fn paste_after_multibyte_char_appends_at_end() {
+        let (mut picker, _tx) = hand_fed_picker();
+        let s = picker.session.as_mut().unwrap();
+        s.query = "caf\u{00e9}".to_string();
+        s.cursor = s.query.chars().count();
+        assert!(picker.handle_paste("s"));
+        let s = picker.session.as_ref().unwrap();
+        assert_eq!(s.query, "caf\u{00e9}s");
+        assert_eq!(s.cursor, 5);
     }
 
     fn inject_file(picker: &mut FilePicker, path: &str) {
@@ -685,6 +711,31 @@ mod tests {
             "every applied match came from the current query's job"
         );
         assert!(picker.session.as_ref().unwrap().match_rx.is_none());
+    }
+
+    /// The corpus handed to the matcher is Arc-shared: with no new walker
+    /// paths, consecutive keystrokes reuse the same snapshot allocation
+    /// instead of re-cloning the Vec.
+    #[test]
+    fn corpus_snapshot_is_shared_across_keystrokes() {
+        let (mut picker, _tx) = hand_fed_picker();
+        {
+            let s = picker.session.as_mut().unwrap();
+            for i in 0..100 {
+                s.files.push(format!("src/mod_{i:04}.rs"));
+            }
+        }
+        // First query spawns a job, which materializes the snapshot.
+        picker.handle_key(key(KeyCode::Char('m')));
+        assert!(picker.session.as_ref().unwrap().match_rx.is_some());
+        let first = Arc::clone(&picker.session.as_ref().unwrap().corpus_snap);
+        // Second keystroke bumps the generation while the job runs; the
+        // follow-up job must reuse the same Arc (no clone of the corpus).
+        picker.handle_key(key(KeyCode::Char('z')));
+        converge_matches(&mut picker);
+        let s = picker.session.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&first, &s.corpus_snap));
+        assert_eq!(s.query, "mz");
     }
 
     #[test]

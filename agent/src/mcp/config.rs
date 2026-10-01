@@ -153,6 +153,7 @@ pub enum RawTransport {
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RawStdioFields {
     pub command: Vec<String>,
     #[serde(default)]
@@ -160,6 +161,7 @@ pub struct RawStdioFields {
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RawHttpFields {
     pub url: String,
     #[serde(default)]
@@ -256,6 +258,17 @@ fn expand_map(
         .collect()
 }
 
+/// The OAuth callback listener must bind loopback only; anything else would
+/// expose the auth-flow endpoint to the network.
+fn is_loopback_callback_hostname(hostname: &str) -> bool {
+    if matches!(hostname, "localhost" | "::1" | "[::1]") {
+        return true;
+    }
+    hostname
+        .parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|addr| addr.is_loopback())
+}
+
 pub fn parse_server(name: String, server: RawServerConfig) -> Result<ServerConfig, McpError> {
     if !is_valid_server_name(&name) {
         return Err(McpError::Config {
@@ -295,6 +308,18 @@ pub fn parse_server(name: String, server: RawServerConfig) -> Result<ServerConfi
             {
                 return Err(McpError::Config {
                     message: format!("server '{name}' oauth.callback_path must start with '/'"),
+                });
+            }
+            if let Some(host) = cfg
+                .oauth
+                .as_ref()
+                .and_then(|o| o.callback_hostname.as_ref())
+                && !is_loopback_callback_hostname(host)
+            {
+                return Err(McpError::Config {
+                    message: format!(
+                        "server '{name}' oauth.callback_hostname '{host}' must be a loopback address (localhost, 127.0.0.0/8, or ::1)"
+                    ),
                 });
             }
             Transport::Http {
@@ -646,6 +671,60 @@ mod tests {
         );
         let err = parse_server("acme".into(), config.mcp["acme"].clone()).unwrap_err();
         assert!(err.to_string().contains("callback_path"));
+    }
+
+    #[test]
+    fn oauth_callback_hostname_must_be_loopback() {
+        for bad in [
+            "0.0.0.0",
+            "evil.example.com",
+            "127.0.0.1@evil.com",
+            "10.0.0.5",
+        ] {
+            let config = parse_mcp(&format!(
+                "mcp \"acme\" {{ url = \"https://mcp.acme.example.com/mcp\"\n  oauth {{ client_id = \"acme-client\"\n    callback_hostname = \"{bad}\" }} }}",
+            ));
+            let err = parse_server("acme".into(), config.mcp["acme"].clone()).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("callback_hostname"), "bad={bad} got: {msg}");
+            assert!(msg.contains("loopback"), "bad={bad} got: {msg}");
+        }
+        for good in ["localhost", "127.0.0.1", "127.1.2.3", "::1", "[::1]"] {
+            let config = parse_mcp(&format!(
+                "mcp \"acme\" {{ url = \"https://mcp.acme.example.com/mcp\"\n  oauth {{ client_id = \"acme-client\"\n    callback_hostname = \"{good}\" }} }}",
+            ));
+            parse_server("acme".into(), config.mcp["acme"].clone())
+                .unwrap_or_else(|e| panic!("good={good} got: {e}"));
+        }
+    }
+
+    fn raw_block_error(text: &str) -> String {
+        let doc = crate::bml::parse(text).unwrap();
+        match servers_from_doc(&doc) {
+            Ok(_) => panic!("expected a config error"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn mixed_stdio_and_http_keys_are_a_hard_error() {
+        let err = raw_block_error(
+            "mcp \"srv\" { command = [\"server\"]\n  url = \"https://mcp.example.com/mcp\" }",
+        );
+        assert!(err.contains("did not match any variant"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_key_in_stdio_block_errors() {
+        let err = raw_block_error("mcp \"srv\" { command = [\"server\"]\n  bogus = 1 }");
+        assert!(err.contains("did not match any variant"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_key_in_http_block_errors() {
+        let err =
+            raw_block_error("mcp \"srv\" { url = \"https://mcp.example.com/mcp\"\n  bogus = 1 }");
+        assert!(err.contains("did not match any variant"), "got: {err}");
     }
 
     #[test]

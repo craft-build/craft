@@ -13,39 +13,53 @@ use super::{Event, RunOutcome, RunParams};
 pub(crate) const END_MARKER: &str = "[The turn ended here; the run was cut short.]";
 
 /// Recalibrate and force a compaction after the request overflowed the
-/// context window. Returns whether recovery is possible at all (a run without
-/// a compaction context cannot recover). `history` is compacted in place; the
-/// un-committed turn is left intact and re-appended by the retried request.
+/// context window. Returns whether recovery happened: a run without a
+/// compaction context cannot recover, and a compaction that declines to run
+/// left the prompt untouched, so the caller must surface the overflow error
+/// instead of blindly retrying the identical oversized prompt. `history` is
+/// compacted in place; the un-committed turn is left intact and re-appended
+/// by the retried request.
 pub(super) async fn recover_from_overflow<M: CompletionModel + Clone>(
     params: &RunParams,
     model: &M,
     history: &mut Vec<Message>,
     doom: &mut doom::DoomTracker,
+    error_text: Option<&str>,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> bool {
     let Some(ctx) = &params.compaction else {
         return false;
     };
-    // `maybe_compact` awaits, so the engine runs on a clone; recalibration
-    // and the write-back happen in short critical sections against the
-    // live state so a concurrent session-side update is not clobbered.
+    let estimated = crate::compaction::estimate_tokens(history);
+    // A failed request reports no usage, but overflow error bodies commonly
+    // name the real prompt size ("...you requested 8192 tokens"). Calibrate
+    // the estimator from it against the LIVE state: `absorb_run` below only
+    // merges disarm/carry flags, so recalibrating the clone would be lost.
+    // No parse ⇒ leave the estimate alone (never recalibrate to a bogus
+    // value like the window bound).
+    if let Some(actual) = error_text.and_then(parse_overflow_prompt_size)
+        && let Ok(mut guard) = ctx.state.lock()
+    {
+        guard.recalibrate(actual, estimated);
+    }
+    // `force_compact` awaits, so the engine runs on a clone; the write-back
+    // happens in a short critical section against the live state so a
+    // concurrent session-side update is not clobbered.
     let Some(mut state) = ctx.state.lock().ok().map(|guard| guard.clone()) else {
         return false;
     };
-    let estimated = crate::compaction::estimate_tokens(history);
-    // A failed request reports no usage: `actual = 0` makes recalibration a
-    // safe no-op. The window bound in the error text is never used as the
-    // actual prompt size (it would over-inflate the multiplier).
-    state.recalibrate(0, estimated);
     let window = ctx.context_length.map(u64::from).unwrap_or(0);
     let before = state.estimator.scale(estimated);
     emit(Event::AutoCompacting {
         context_size: before,
         context_window: window,
     });
-    CompactionEngine::new(ctx.stages.clone())
+    // Overflow recovery forces every armed stage: the provider already
+    // proved the prompt does not fit, so waiting for fill thresholds would
+    // just retry the identical oversized request.
+    let ran = CompactionEngine::new(ctx.stages.clone())
         .with_buffer(ctx.buffer)
-        .maybe_compact(&mut state, model, history, ctx.context_length)
+        .force_compact(&mut state, model, history, ctx.context_length)
         .await;
     let after = state
         .estimator
@@ -70,7 +84,86 @@ pub(super) async fn recover_from_overflow<M: CompletionModel + Clone>(
     if let Ok(mut guard) = ctx.state.lock() {
         guard.absorb_run(&state);
     }
-    true
+    // A declined compaction changed nothing, so the retried request would
+    // overflow byte-identically; tell the caller to fail with the provider's
+    // error instead of looping.
+    ran
+}
+
+/// Best-effort prompt size parsed out of a provider overflow error body, to
+/// feed estimator recalibration. Providers phrase these differently —
+/// OpenAI-style "maximum context length is 8192 tokens. However, you
+/// requested 9016 tokens.", Anthropic-style "prompt is too long: 213132
+/// tokens > 200000 maximum". A number following a request-size keyword wins
+/// outright; otherwise the largest token-adjacent number is the offending
+/// size (the window bound is the smaller figure), and a lone candidate next
+/// to window words is treated as the window bound, not the prompt — no safe
+/// parse. `None` means "do not recalibrate".
+pub(super) fn parse_overflow_prompt_size(text: &str) -> Option<u64> {
+    // All offsets are measured against the lowercased copy: keyword finds
+    // and number spans must agree, and `to_lowercase` can change byte
+    // lengths (e.g. 'İ' grows), so mixing the two panics on char
+    // boundaries.
+    let lower = text.to_lowercase();
+    let numbers = numbers_in(&lower);
+    // A request-size keyword ("you requested 9016 tokens", "you sent 9000")
+    // names the offending prompt size directly: the first number after it.
+    for keyword in ["requested", "you sent", "resulted in"] {
+        if let Some(at) = lower.find(keyword) {
+            let after = at + keyword.len();
+            if let Some(&(value, _, _)) = numbers
+                .iter()
+                .find(|&&(_, start, _)| start >= after && start < after + 64)
+            {
+                return Some(value);
+            }
+        }
+    }
+    // "N tokens"-style candidates: a token mention within a few characters.
+    let candidates: Vec<u64> = numbers
+        .iter()
+        .filter(|&&(_, _, end)| lower[end..lower.len().min(end + 12)].contains("token"))
+        .map(|&(value, _, _)| value)
+        .collect();
+    match candidates.as_slice() {
+        [] => None,
+        [single] => {
+            // One token-sized figure next to window words ("maximum context
+            // length is 8192 tokens") is the window bound — the exact value
+            // the old code refused to recalibrate to — not the prompt size.
+            let window_words = ["maximum", "context length", "context window", " window"];
+            (!window_words.iter().any(|w| lower.contains(w))).then_some(*single)
+        }
+        // With several sizes on the table, the offending prompt is the
+        // largest: overflow means it exceeded the window bound.
+        many => many.iter().copied().max(),
+    }
+}
+
+/// Scan `text` for integer literals (internal grouping commas stripped),
+/// returning `(value, start, end)` per number.
+fn numbers_in(text: &str) -> Vec<(u64, usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut value: u64 = 0;
+        while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b',') {
+            if bytes[i] != b',' {
+                value = value
+                    .saturating_mul(10)
+                    .saturating_add(u64::from(bytes[i] - b'0'));
+            }
+            i += 1;
+        }
+        out.push((value, start, i));
+    }
+    out
 }
 
 /// Commit a partial turn and end the run at its budget or the doom hard
@@ -222,5 +315,91 @@ fn close_dangling_calls(turn: &mut Vec<Message>, note: &str) {
             })
             .collect();
         turn.push(Message::User { content });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_openai_style_requested_size() {
+        assert_eq!(
+            parse_overflow_prompt_size(
+                "This model's maximum context length is 8192 tokens. However, you requested 10000 tokens."
+            ),
+            Some(10000),
+            "the request-size keyword names the offending prompt, not the window"
+        );
+    }
+
+    #[test]
+    fn parses_resulted_in_style() {
+        assert_eq!(
+            parse_overflow_prompt_size(
+                "maximum context length is 4096 tokens, however your messages resulted in 9016 tokens"
+            ),
+            Some(9016)
+        );
+    }
+
+    #[test]
+    fn comma_grouped_numbers_parse() {
+        assert_eq!(
+            parse_overflow_prompt_size("you requested 200,000 tokens"),
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn multiple_token_figures_take_the_largest() {
+        assert_eq!(
+            parse_overflow_prompt_size("prompt of 9000 tokens exceeds the limit of 8192 tokens"),
+            Some(9000),
+            "overflow means the prompt size exceeded the window bound"
+        );
+    }
+
+    #[test]
+    fn lone_window_bound_is_not_a_prompt_size() {
+        assert_eq!(
+            parse_overflow_prompt_size("exceeded the maximum context length of 4096 tokens"),
+            None,
+            "the window bound must never become the recalibration target"
+        );
+        assert_eq!(
+            parse_overflow_prompt_size("prompt is too long: 213132 tokens > 200000 maximum"),
+            None,
+            "a single figure when window words are present is ambiguous: stay safe"
+        );
+    }
+
+    #[test]
+    fn lone_size_without_window_words_parses() {
+        assert_eq!(
+            parse_overflow_prompt_size("prompt is too long at 213132 tokens"),
+            Some(213132)
+        );
+    }
+
+    #[test]
+    fn no_numbers_means_no_recalibration() {
+        assert_eq!(parse_overflow_prompt_size("context window"), None);
+        assert_eq!(parse_overflow_prompt_size(""), None);
+    }
+
+    #[test]
+    fn case_changing_chars_do_not_shift_number_offsets() {
+        // 'İ' lowercases to a longer sequence: number offsets measured on
+        // the original text would slice the lowercased copy mid-character
+        // (panic) or miss the "tokens" mention.
+        assert_eq!(
+            parse_overflow_prompt_size("\u{130}stanbul prompt: 9016 tokens"),
+            Some(9016)
+        );
+        assert_eq!(
+            parse_overflow_prompt_size("\u{212a} request resulted in 7000 tokens"),
+            Some(7000)
+        );
     }
 }

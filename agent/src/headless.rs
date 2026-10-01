@@ -425,14 +425,13 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         while let Some(prompt) = input_rx.recv().await {
             let event_tx = guard.sender(run_id);
 
-            // Last model swap requested before this turn wins.
-            if let Some((new_model, new_spec)) = model_rx.try_recv().ok().or_else(|| {
-                let mut last = None;
-                while let Ok(next) = model_rx.try_recv() {
-                    last = Some(next);
-                }
-                last
-            }) {
+            // Last model swap requested before this turn wins: drain the
+            // queue and apply only the most recent spec.
+            let mut swap = None;
+            while let Ok(next) = model_rx.try_recv() {
+                swap = Some(next);
+            }
+            if let Some((new_model, new_spec)) = swap {
                 model = new_model;
                 model_spec = new_spec
                     .as_ref()
@@ -847,6 +846,56 @@ mod tests {
         assert!(
             two.iter()
                 .any(|e| matches!(e, Event::TextDelta(t) if t.contains("from second")))
+        );
+
+        drop(handle.input_tx);
+        let _ = handle.task.await;
+    }
+
+    #[tokio::test]
+    async fn interactive_last_queued_model_swap_wins() {
+        let initial = mock(vec![vec![
+            MockStreamEvent::text("from initial"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let stale = mock(vec![vec![
+            MockStreamEvent::text("from stale"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let latest = mock(vec![vec![
+            MockStreamEvent::text("from latest"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let handle = spawn_interactive(InteractiveParams {
+            model: initial,
+            model_spec: Some(Arc::from("mock/initial")),
+            run: RunParams::default(),
+            workspace: workspace(),
+            before: None,
+            initial_wd: std::env::temp_dir(),
+            session_id: None,
+            initial_history: Vec::new(),
+            state_dir: None,
+        });
+        let mut events = handle.events;
+
+        // Both swaps land in the queue before the turn starts (swaps are
+        // only drained after a prompt arrives); the LAST one must win.
+        handle
+            .model_tx
+            .send((stale, Some(Arc::from("mock/stale"))))
+            .unwrap();
+        handle
+            .model_tx
+            .send((latest, Some(Arc::from("mock/latest"))))
+            .unwrap();
+        handle.input_tx.send("go".into()).unwrap();
+        let events = drain_until_done(&mut events).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::TextDelta(t) if t.contains("from latest"))),
+            "the last queued model swap must win: {events:?}"
         );
 
         drop(handle.input_tx);

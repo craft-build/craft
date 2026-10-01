@@ -236,17 +236,29 @@ fn render_task_header(f: &mut Frame, app: &App, idx: usize, area: Rect) {
 fn snapshot_frame(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let buf = f.buffer_mut();
-    app.view.frame_text = (0..area.height)
-        .map(|r| {
-            (0..area.width)
-                .map(|c| {
-                    buf.cell((c, r))
-                        .map(|cell| crate::tui::hyperlink::strip_osc8(cell.symbol()))
-                        .unwrap_or_else(|| " ".to_string())
-                })
-                .collect()
-        })
-        .collect();
+    let frame_text = &mut app.view.frame_text;
+    // Reuse the snapshot rows across frames: at spinner cadence a fresh
+    // Vec of freshly allocated row strings per frame is measurable churn.
+    frame_text.resize(area.height as usize, String::new());
+    for (r, line) in frame_text.iter_mut().enumerate() {
+        line.clear();
+        line.reserve(area.width as usize);
+        for c in 0..area.width {
+            match buf.cell((c, r as u16)) {
+                Some(cell) => {
+                    let symbol = cell.symbol();
+                    // Only hyperlink cells can carry OSC 8; push plain
+                    // cells without paying the strip's allocation.
+                    if symbol.contains('\u{1b}') {
+                        line.push_str(&crate::tui::hyperlink::strip_osc8(symbol));
+                    } else {
+                        line.push_str(symbol);
+                    }
+                }
+                None => line.push(' '),
+            }
+        }
+    }
 }
 
 fn render_selection(f: &mut Frame, app: &App) {
@@ -606,6 +618,7 @@ mod tests {
             by_session: vec![("0123456789abcdef".into(), 1.5, 100_000)],
             models_overflow: 0,
             total_cost: 1.5,
+            unpriced_records: 0,
             total_tokens: 100_000,
             sessions: 3,
             empty: false,
@@ -696,6 +709,7 @@ mod tests {
             ],
             models_overflow: 2,
             total_cost: 2.0,
+            unpriced_records: 0,
             total_tokens: 150_000,
             sessions: 2,
             empty: false,

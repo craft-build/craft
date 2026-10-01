@@ -46,7 +46,12 @@ fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
         return (Frontmatter::default(), content);
     };
 
-    let yaml = &rest[1..end + 1];
+    // `get` slicing: a multi-byte char right after the opening `---` makes
+    // `1` a non-char-boundary; treat malformed fences as absent instead of
+    // panicking on untrusted command files.
+    let Some(yaml) = rest.get(1..end + 1) else {
+        return (Frontmatter::default(), content);
+    };
     let body = rest[end + 4..].trim();
 
     let fm = serde_yaml::from_str(yaml).unwrap_or_default();
@@ -310,6 +315,15 @@ mod tests {
         let (fm, body) = parse_frontmatter(input);
         assert_eq!(fm.name.as_deref(), expected_name);
         assert_eq!(body, expected_body);
+    }
+
+    #[test]
+    fn multibyte_char_after_fence_does_not_panic() {
+        // `---€\n---`: byte 1 falls inside the € sign; byte slicing would
+        // panic. Malformed frontmatter is treated as absent.
+        let (fm, body) = parse_frontmatter("---€\n---\nbody");
+        assert_eq!(fm.name, None);
+        assert_eq!(body, "---€\n---\nbody");
     }
 
     #[test]

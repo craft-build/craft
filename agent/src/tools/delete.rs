@@ -55,6 +55,14 @@ impl Delete {
                 }
                 Err(error) => return Err(error),
             };
+            // Refuse the workspace root itself: `delete {files: ["."]}`
+            // passes the containment guard yet would erase the project.
+            if path == *workspace.root() {
+                return Err(invalid(format!(
+                    "refusing to delete the workspace root ({})",
+                    workspace.display(&path)
+                )));
+            }
             let display = workspace.display(&path);
             let metadata = match fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,

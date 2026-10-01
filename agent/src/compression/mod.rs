@@ -95,6 +95,30 @@ pub fn detect_content_type(text: &str) -> ContentType {
         return ContentType::Diff;
     }
 
+    // Grep-style search results: a non-indented `path:` header followed by
+    // indented `  n: match` lines (the exact shape `tools::grep` renders).
+    // Must run before the numbered-code density check, which those
+    // indented match lines also satisfy.
+    let mut search_match_lines = 0usize;
+    let mut headers_followed_by_match = 0usize;
+    let mut prev_was_header = false;
+    for line in text.lines() {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if indented && CODE_LINE_PATTERN.is_match(line) {
+            search_match_lines += 1;
+            if prev_was_header {
+                headers_followed_by_match += 1;
+                prev_was_header = false;
+            }
+        } else {
+            prev_was_header =
+                !indented && !line.trim().is_empty() && !CODE_LINE_PATTERN.is_match(line);
+        }
+    }
+    if search_match_lines >= 2 && headers_followed_by_match > 0 {
+        return ContentType::SearchResult;
+    }
+
     let code_line_count = text
         .lines()
         .filter(|l| CODE_LINE_PATTERN.is_match(l))
@@ -203,6 +227,51 @@ mod tests {
         }
         text.push_str("error: boom\n");
         assert_eq!(detect_content_type(&text), ContentType::Log);
+    }
+
+    #[test]
+    fn detect_grep_shaped_search_results() {
+        // Mirrors `tools::grep` output: `path:` group headers with
+        // two-space-indented `n: match` lines beneath them.
+        let mut text = String::new();
+        for f in 0..4 {
+            text.push_str(&format!("src/file{f}.rs:\n"));
+            for m in 0..3 {
+                text.push_str(&format!("  {}: let needle = match();\n", (m + 1) * 7));
+            }
+        }
+        assert_eq!(detect_content_type(&text), ContentType::SearchResult);
+    }
+
+    #[test]
+    fn prose_is_not_a_search_result() {
+        let text = "This explains the failure.\nIt spans several sentences.\n\
+                    None of them look like grep output.\nA final remark.\n";
+        assert_eq!(detect_content_type(text), ContentType::PlainText);
+    }
+
+    #[test]
+    fn search_result_compression_follows_config_limits() {
+        // max_search_files / max_matches_per_file were dead while detection
+        // never selected SearchResult; they must govern the output now.
+        let mut text = String::new();
+        for f in 0..6 {
+            text.push_str(&format!("src/file{f}.rs:\n"));
+            for m in 0..6 {
+                text.push_str(&format!("  {}: matched code line here\n", m + 1));
+            }
+        }
+        let cfg = CompressionConfig {
+            max_search_files: 2,
+            max_matches_per_file: 2,
+            ..config()
+        };
+        let compressed = compress_for_llm(&text, &cfg);
+        assert!(compressed.contains("src/file1.rs"));
+        assert!(!compressed.contains("src/file2.rs"));
+        assert!(compressed.contains("4 more files omitted"));
+        assert!(compressed.contains("4 more matches in this file"));
+        assert!(compressed.len() < text.len());
     }
 
     #[test]

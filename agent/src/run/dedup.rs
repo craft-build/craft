@@ -270,6 +270,13 @@ pub fn extract_write_paths(name: &str, input: &Value) -> Vec<String> {
             .map(String::from)
             .collect();
     }
+    if name == "move" {
+        return ["source", "destination"]
+            .iter()
+            .filter_map(|key| input.get(key).and_then(Value::as_str))
+            .map(String::from)
+            .collect();
+    }
     extract_file_path(input).into_iter().collect()
 }
 
@@ -664,6 +671,37 @@ mod tests {
             ),
             vec!["/d.rs".to_string()]
         );
+    }
+
+    #[test]
+    fn write_paths_cover_move_source_and_destination() {
+        let input = serde_json::json!({"source": "/a.rs", "destination": "/b.rs"});
+        assert_eq!(
+            extract_write_paths("move", &input),
+            vec!["/a.rs".to_string(), "/b.rs".to_string()]
+        );
+    }
+
+    /// A move rewrites imports in third-party files (named only in the
+    /// result text); those reads must not replay from cache afterwards.
+    #[test]
+    fn move_rewritten_files_invalidate_stale_reads() {
+        let mut cache = rooted_cache();
+        let input = serde_json::json!({"path": "src/main.rs"});
+        let key = ToolDedupCache::key("read", &input);
+        cache.insert(key, &result("v"), Some("src/main.rs"), "read", &input);
+
+        let moved_output =
+            "moved a.rs -> b.rs\nupdated imports in 1 file(s)\n  src/main.rs: 1 reference(s)";
+        let mut paths = extract_write_paths(
+            "move",
+            &serde_json::json!({"source": "a.rs", "destination": "b.rs"}),
+        );
+        paths.extend(crate::tools::move_file::rewritten_files(moved_output));
+        for path in paths {
+            cache.invalidate_path(&path);
+        }
+        assert!(cache.get(key, "read", &input).is_none());
     }
 
     #[test]

@@ -39,6 +39,34 @@ const REDIRECT_TYPES: [&str; 3] = ["file_redirect", "heredoc_redirect", "herestr
 /// `cd *` allow rule then quietly covers whatever runs after the `&&`.
 const WALK_THROUGH_TYPES: [&str; 4] = ["program", "list", "pipeline", "redirected_statement"];
 
+/// Commands whose first token delegates to another command read from its own
+/// arguments. An allow rule remembered for the wrapper (`sh *`, `env *`)
+/// would silently cover whatever runs inside, so a segment led by one of
+/// these always forces a prompt. `find`/`grep` join only when they carry an
+/// `-exec`-family flag, which is what runs the delegated command.
+const WRAPPER_COMMANDS: [&str; 12] = [
+    "eval", "exec", "sh", "bash", "zsh", "dash", "env", "nice", "stdbuf", "xargs", "parallel",
+    "watch",
+];
+
+/// Whether this segment runs delegated commands an allow rule for the first
+/// token must never cover. Path-qualified invocations (`/bin/sh -c ...`) are
+/// matched by basename.
+fn segment_delegates(segment: &str) -> bool {
+    let mut tokens = segment.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let base = first.rsplit('/').next().unwrap_or(first);
+    if WRAPPER_COMMANDS.contains(&base) {
+        return true;
+    }
+    if matches!(base, "find" | "grep") {
+        return tokens.any(|t| matches!(t, "-exec" | "-execdir" | "-ok" | "-okdir" | "-delete"));
+    }
+    false
+}
+
 fn is_complex(node: Node) -> bool {
     COMPLEX_TYPES.contains(&node.kind())
         || (0..node.child_count() as u32).any(|i| node.child(i).is_some_and(is_complex))
@@ -119,9 +147,14 @@ pub fn permission_scopes(command: &str) -> Option<BashScopes> {
     if scopes.is_empty() {
         scopes.push(command.to_string());
     }
+    // A segment led by a wrapper command (`sh -c ...`, `env rm ...`,
+    // `find ... -exec rm`, ...) hides the real command behind the wrapper's
+    // first token, which is all an allow rule sees. Prompt instead of
+    // trusting a remembered rule for the wrapper.
+    let force_prompt = scopes.iter().any(|s| segment_delegates(s));
     Some(BashScopes {
         scopes,
-        force_prompt: false,
+        force_prompt,
     })
 }
 
@@ -199,6 +232,47 @@ mod tests {
         let s = scopes("if [ x");
         assert_eq!(s.scopes, vec!["if [ x"]);
         assert!(s.force_prompt);
+    }
+
+    #[test]
+    fn wrapper_commands_force_prompt() {
+        // An `sh *`/`env *`/... allow rule must never cover these segments.
+        for cmd in [
+            "sh -c 'rm -rf x'",
+            "bash -c 'rm -rf x'",
+            "env foo=1 rm x",
+            "find . -exec rm {} +",
+            "find . -execdir rm {} \\;",
+            "find . -name '*.tmp' -delete",
+            "grep -r foo . -exec rm {} +",
+            "xargs rm",
+            "eval '*'",
+            "exec rm x",
+            "nice rm x",
+            "stdbuf -oL rm x",
+            "parallel rm",
+            "watch rm x",
+            "/bin/sh -c 'rm x'",
+        ] {
+            let s = scopes(cmd);
+            assert!(s.force_prompt, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn wrapper_in_a_chain_still_forces_prompt() {
+        let s = scopes("cargo build && sh -c 'rm -rf x'");
+        assert_eq!(s.scopes, vec!["cargo build", "sh -c 'rm -rf x'"]);
+        assert!(s.force_prompt);
+    }
+
+    #[test]
+    fn benign_commands_do_not_force_prompt() {
+        let s = scopes("cargo build && git status");
+        assert!(!s.force_prompt);
+        // `find`/`grep` without -exec are plain read-only commands.
+        let s = scopes("find . -name '*.rs' && grep -r foo .");
+        assert!(!s.force_prompt);
     }
 
     #[test]

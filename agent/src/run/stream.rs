@@ -132,7 +132,10 @@ pub(crate) fn classify_error(error: &CompletionError) -> ErrorKind {
 }
 
 fn classify_string(message: &str) -> ErrorKind {
-    if is_context_overflow(message) {
+    // The single shared context-overflow classifier lives in compaction
+    // (its superset also rejects oversized *output* caps, which stream
+    // errors for prompt overflow cannot be mistaken for either).
+    if crate::compaction::llm::is_context_overflow_body(message) {
         return ErrorKind::Overflow;
     }
     let message = message.to_ascii_lowercase();
@@ -283,24 +286,6 @@ fn usage_from_response(
     }
 }
 
-/// Whether a provider stream error means the prompt exceeded the context
-/// window (ported from the reference's `AgentError::is_overflow`; ours has
-/// only the provider's message string to classify). Matches the phrasings of
-/// the major providers; deliberately excludes rate limits and output
-/// truncation, which surface as `FinishReason::Length`, not stream errors.
-pub(crate) fn is_context_overflow(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    [
-        "prompt is too long",                                 // Anthropic
-        "maximum context length",                             // OpenAI
-        "context window",                                     // generic
-        "input length and `max_tokens` exceed context limit", // Anthropic variant
-        "exceeds the maximum number of tokens",               // Gemini
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
-
 impl StreamFailure {
     pub(crate) fn is_overflow(&self) -> bool {
         matches!(self, Self::Error { kind, .. } if kind.is_overflow())
@@ -329,14 +314,18 @@ mod tests {
 
     #[test]
     fn classifies_provider_overflow_messages() {
+        // Cases from the former local classifier, re-expressed against the
+        // shared superset in `compaction::llm` (the full table lives there).
         for message in [
             "Error: prompt is too long: 210744 tokens > 200000 maximum",
             "This model's maximum context length is 4096 tokens. However, you requested ...",
-            "input length and `max_tokens` exceed context limit: 10922 + 8192 > 8192",
             "The input token count (524389) exceeds the maximum number of tokens allowed (1048576)",
             "conversation exceeds the model context window",
         ] {
-            assert!(is_context_overflow(message), "should match: {message}");
+            assert!(
+                crate::compaction::llm::is_context_overflow_body(message),
+                "should match: {message}"
+            );
             assert!(StreamFailure::error(message).is_overflow());
         }
     }
@@ -347,9 +336,14 @@ mod tests {
             "rate limit exceeded, retry after 30s",
             "invalid api key",
             "connection closed before response",
-            "maximum tokens per request is 128000 for this tier",
+            // The shared classifier rejects output-cap complaints: retrying
+            // with a shorter prompt cannot fix a `max_tokens` bid too high.
+            "input length and `max_tokens` exceed context limit: 10922 + 8192 > 8192",
         ] {
-            assert!(!is_context_overflow(message), "must not match: {message}");
+            assert!(
+                !crate::compaction::llm::is_context_overflow_body(message),
+                "must not match: {message}"
+            );
             assert!(!StreamFailure::error(message).is_overflow());
         }
         assert!(

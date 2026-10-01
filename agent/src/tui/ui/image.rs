@@ -23,6 +23,14 @@ use ratatui_image::{Image, Resize};
 /// consume the whole scrollback.
 const MAX_IMAGE_ROWS: u16 = 30;
 
+/// Pixel budget for a decoded image (`MAX_IMAGE_PIXELS`, matching the
+/// attachment cap below): anything past it — including a `u32` overflow
+/// in `w * h` — is refused before/after decode.
+fn exceeds_pixel_cap(w: u32, h: u32) -> bool {
+    w.checked_mul(h)
+        .map_or(true, |p| p as usize > MAX_IMAGE_PIXELS)
+}
+
 /// The single probed `Picker`. `Picker::from_query_stdio` sends kitty/DA/DSR
 /// queries and reads the replies straight from stdin, so it must run before
 /// the input reader thread starts (see [`probe`]); probing later races the
@@ -65,14 +73,28 @@ impl ImagePicker {
 
     /// Build a renderable image state from a base64-encoded image payload,
     /// scaled to fit `avail_width` columns. Returns `None` if the bytes
-    /// can't be decoded.
+    /// can't be decoded or the image exceeds the pixel cap.
     pub fn render_state(&self, data_b64: &str, avail_width: u16) -> Option<ImageRenderState> {
         let raw = base64::engine::general_purpose::STANDARD
             .decode(data_b64.as_bytes())
             .ok()?;
+        // Pixel cap BEFORE any full decode: a hostile multi-hundred-MP
+        // PNG decodes to gigabytes and OOMs the process. Read just the
+        // headers for the dimensions and refuse past the cap; formats
+        // without a readable header fall through to the post-decode
+        // check below.
+        if let Ok(reader) =
+            image::ImageReader::new(std::io::Cursor::new(&raw)).with_guessed_format()
+            && let Ok((w, h)) = reader.into_dimensions()
+            && exceeds_pixel_cap(w, h)
+        {
+            return None;
+        }
         let dyn_img = image::load_from_memory(&raw).ok()?;
-        let img = dyn_img.to_rgba8();
-        let (px_w, px_h) = img.dimensions();
+        let (px_w, px_h) = image::GenericImageView::dimensions(&dyn_img);
+        if exceeds_pixel_cap(px_w, px_h) {
+            return None;
+        }
         let font = self.picker.font_size();
         let fw = font.width.max(1) as u32;
         let fh = font.height.max(1) as u32;
@@ -313,5 +335,91 @@ mod tests {
         assert!(picker.render_state("not base64!!", 40).is_none());
         let empty = base64::engine::general_purpose::STANDARD.encode(b"");
         assert!(picker.render_state(&empty, 40).is_none());
+    }
+
+    /// The cap predicate itself: 8 MP is the boundary, overflow counts
+    /// as over the cap.
+    #[test]
+    fn pixel_cap_boundary_and_overflow() {
+        assert!(!exceeds_pixel_cap(2000, 4000)); // exactly 8 MP
+        assert!(exceeds_pixel_cap(3000, 3000)); // 9 MP
+        assert!(exceeds_pixel_cap(u32::MAX, 2)); // w*h overflow
+        assert!(!exceeds_pixel_cap(0, 0));
+    }
+
+    /// PNG chunk CRC (IEEE, poly 0xEDB88320), table-free: only used to
+    /// forge test fixtures.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ ((crc & 1).wrapping_neg() & 0xEDB8_8320);
+            }
+        }
+        !crc
+    }
+
+    fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut signed = kind.to_vec();
+        signed.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&signed).to_be_bytes());
+        out
+    }
+
+    /// A tiny PNG whose IHDR alone declares `w x h` (8-bit RGBA, empty
+    /// IDAT — headers are all the decoder needs for `into_dimensions`).
+    fn header_only_png_b64(w: u32, h: u32) -> String {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        png.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+        png.extend_from_slice(&png_chunk(b"IDAT", &[]));
+        base64::engine::general_purpose::STANDARD.encode(&png)
+    }
+
+    /// A hostile PNG header declaring 400 Mpx is rejected from its
+    /// headers alone — no multi-GB buffer is ever decoded (finding 62).
+    #[test]
+    fn render_state_rejects_oversized_dimensions_from_header() {
+        let picker = ImagePicker::new();
+        let tiny_file = header_only_png_b64(20_000, 20_000);
+        assert!(
+            tiny_file.len() < 256,
+            "fixture stays tiny: {}",
+            tiny_file.len()
+        );
+        assert!(picker.render_state(&tiny_file, 40).is_none());
+    }
+
+    /// An image at exactly the cap still loads (the guard is not
+    /// trigger-happy). Gray 8-bit keeps the fixture buffer small.
+    #[test]
+    fn render_state_accepts_dimensions_at_the_cap() {
+        let picker = ImagePicker::new();
+        let img = image::GrayImage::new(4000, 2000); // == MAX_IMAGE_PIXELS
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+        assert!(picker.render_state(&b64, 40).is_some());
+    }
+
+    /// Just over the cap is refused even for a fully valid file.
+    #[test]
+    fn render_state_rejects_dimensions_just_over_the_cap() {
+        let picker = ImagePicker::new();
+        let img = image::GrayImage::new(4002, 2000); // > 8_000_000 px
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+        assert!(picker.render_state(&b64, 40).is_none());
     }
 }

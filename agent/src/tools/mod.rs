@@ -14,6 +14,7 @@ mod edit;
 pub(crate) mod fuzzy_replace;
 mod glob;
 mod grep;
+mod inplace_edit;
 mod inspect;
 mod list;
 mod list_tools;
@@ -279,40 +280,58 @@ impl Workspace {
     /// [`Self::register`] with the turn's mode baked into the table — and
     /// into the batch child table — so write-gating is a frozen snapshot for
     /// the whole turn.
+    /// One constructor row per tool: the single shared table behind both
+    /// [`Self::register_with_mode`] and [`Self::register_subagent`], so the
+    /// two registrations cannot drift — a wire name absent here is simply
+    /// never registered, never rescued by a wildcard arm.
+    fn builtin_tool_table(&self) -> Vec<(&'static str, PortableDynamicTool)> {
+        vec![
+            ("read", dynamic(Read(self.clone()))),
+            ("grep", dynamic(Grep(self.clone()))),
+            ("glob", dynamic(Glob(self.clone()))),
+            ("list", dynamic(List(self.clone()))),
+            ("edit", dynamic(Edit(self.clone()))),
+            ("edit_lines", dynamic(EditLines(self.clone()))),
+            ("insert_lines", dynamic(InsertLines(self.clone()))),
+            ("multiedit", dynamic(MultiEdit(self.clone()))),
+            ("apply_patch", dynamic(ApplyPatch(self.clone()))),
+            ("write", dynamic(Write(self.clone()))),
+            ("delete", dynamic(Delete(self.clone()))),
+            ("move_file", dynamic(MoveFile(self.clone()))),
+            ("bash", dynamic(Bash(self.clone()))),
+            ("bash_status", dynamic(BashStatus(self.clone()))),
+            ("bash_watch", dynamic(BashWatch(self.clone()))),
+            ("bash_kill", dynamic(BashKill(self.clone()))),
+            ("inspect", dynamic(Inspect(self.clone()))),
+            ("todo_write", dynamic(TodoWrite(self.clone()))),
+            (
+                "retrieve",
+                dynamic(Retrieve(self.compression_store.clone())),
+            ),
+            ("skill", dynamic(Skill::new(self.root().to_path_buf()))),
+            (
+                "sessions",
+                dynamic(Sessions::new(
+                    self.root().display().to_string(),
+                    self.state_dir.clone(),
+                )),
+            ),
+            ("webfetch", dynamic(Webfetch)),
+            ("websearch", dynamic(Websearch)),
+            ("view_image", dynamic(ViewImage(self.clone()))),
+            ("question", dynamic(Question(self.questions.clone()))),
+            ("task", dynamic(Task(self.subagents.clone()))),
+        ]
+    }
+
     pub fn register_with_mode(&self, mode: crate::run::AgentMode) -> crate::run::ToolDispatch {
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
-        let mut tools: Vec<PortableDynamicTool> = vec![
-            dynamic(Read(self.clone())),
-            dynamic(Grep(self.clone())),
-            dynamic(Glob(self.clone())),
-            dynamic(List(self.clone())),
-            dynamic(Edit(self.clone())),
-            dynamic(EditLines(self.clone())),
-            dynamic(InsertLines(self.clone())),
-            dynamic(MultiEdit(self.clone())),
-            dynamic(ApplyPatch(self.clone())),
-            dynamic(Write(self.clone())),
-            dynamic(Delete(self.clone())),
-            dynamic(MoveFile(self.clone())),
-            dynamic(Bash(self.clone())),
-            dynamic(BashStatus(self.clone())),
-            dynamic(BashWatch(self.clone())),
-            dynamic(BashKill(self.clone())),
-            dynamic(Inspect(self.clone())),
-            dynamic(TodoWrite(self.clone())),
-            dynamic(Retrieve(self.compression_store.clone())),
-            dynamic(Skill::new(self.root().to_path_buf())),
-            dynamic(Sessions::new(
-                self.root().display().to_string(),
-                self.state_dir.clone(),
-            )),
-            dynamic(Webfetch),
-            dynamic(Websearch),
-            dynamic(ViewImage(self.clone())),
-            dynamic(Question(self.questions.clone())),
-            dynamic(Task(self.subagents.clone())),
-            dynamic(batch.clone()),
-        ];
+        let mut tools: Vec<PortableDynamicTool> = self
+            .builtin_tool_table()
+            .into_iter()
+            .map(|(_, tool)| tool)
+            .collect();
+        tools.push(dynamic(batch.clone()));
         // MCP tools (B.11): one portable tool per published MCP server tool,
         // registered under the `server__tool` wire name.
         if let Some(handle) = self.mcp() {
@@ -348,62 +367,17 @@ impl Workspace {
             crate::subagent::RESEARCH_TOOLS
         };
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
-        let mut tools: Vec<PortableDynamicTool> = Vec::new();
-        for candidate in [
-            "read",
-            "grep",
-            "glob",
-            "list",
-            "edit",
-            "edit_lines",
-            "insert_lines",
-            "multiedit",
-            "apply_patch",
-            "write",
-            "delete",
-            "move_file",
-            "bash",
-            "bash_status",
-            "bash_watch",
-            "bash_kill",
-            "inspect",
-            "todo_write",
-            "retrieve",
-            "skill",
-            "webfetch",
-            "websearch",
-            "view_image",
-        ] {
-            if !allowed.contains(&candidate) {
-                continue;
-            }
-            let tool = match candidate {
-                "read" => dynamic(Read(self.clone())),
-                "grep" => dynamic(Grep(self.clone())),
-                "glob" => dynamic(Glob(self.clone())),
-                "list" => dynamic(List(self.clone())),
-                "edit" => dynamic(Edit(self.clone())),
-                "edit_lines" => dynamic(EditLines(self.clone())),
-                "insert_lines" => dynamic(InsertLines(self.clone())),
-                "multiedit" => dynamic(MultiEdit(self.clone())),
-                "apply_patch" => dynamic(ApplyPatch(self.clone())),
-                "write" => dynamic(Write(self.clone())),
-                "delete" => dynamic(Delete(self.clone())),
-                "move_file" => dynamic(MoveFile(self.clone())),
-                "bash" => dynamic(Bash(self.clone())),
-                "bash_status" => dynamic(BashStatus(self.clone())),
-                "bash_watch" => dynamic(BashWatch(self.clone())),
-                "bash_kill" => dynamic(BashKill(self.clone())),
-                "inspect" => dynamic(Inspect(self.clone())),
-                "todo_write" => dynamic(TodoWrite(self.clone())),
-                "retrieve" => dynamic(Retrieve(self.compression_store.clone())),
-                "skill" => dynamic(Skill::new(self.root().to_path_buf())),
-                "webfetch" => dynamic(Webfetch),
-                "websearch" => dynamic(Websearch),
-                _ => dynamic(ViewImage(self.clone())),
-            };
-            tools.push(tool);
-        }
+        // The restricted table is the shared builtin table filtered by the
+        // subagent tool budget (`task`, `question`, and `sessions` are in
+        // no budget, so they drop out here). The batch child table is built
+        // from the same restricted set, so batch fan-outs cannot escape the
+        // subagent's tool budget.
+        let mut tools: Vec<PortableDynamicTool> = self
+            .builtin_tool_table()
+            .into_iter()
+            .filter(|(name, _)| allowed.contains(name))
+            .map(|(_, tool)| tool)
+            .collect();
         if allowed.contains(&"batch") {
             tools.push(dynamic(batch.clone()));
         }
@@ -457,31 +431,27 @@ impl Workspace {
         if requested.is_empty() {
             return Err(invalid("path must not be empty"));
         }
-        // Plan mode (C.17): the plan file is the one target exempt from
-        // workspace containment (the reference exempts it from the boundary
-        // block the same way).
-        if self.plan_target(requested) {
-            let plan = Path::new(requested);
-            if create_dirs {
-                let name = plan
-                    .file_name()
-                    .ok_or_else(|| invalid("path must name a file, not a directory"))?;
-                let parent = plan.parent().unwrap_or(Path::new("")).to_path_buf();
-                fs::create_dir_all(&parent).map_err(io_error)?;
-                return Ok((parent, Some(Component::Normal(name))));
-            }
-            return Ok((plan.to_path_buf(), None));
-        }
+        // Plan mode (C.17): the plan file lives in the state dir, outside
+        // the workspace root, so exactly this path is exempt from workspace
+        // containment — and from nothing else. It still goes through the
+        // same component-by-component validation below (no `..`, no Git
+        // metadata, no symlinked components), just walked from the path's
+        // own root instead of the workspace root.
+        let plan = self.plan_target(requested);
         let requested = Path::new(requested);
-        let relative = if requested.is_absolute() {
-            requested
-                .strip_prefix(self.root())
-                .map_err(|_| denied("path is outside the workspace"))?
+        let (relative, mut path) = if plan {
+            (requested, PathBuf::new())
+        } else if requested.is_absolute() {
+            (
+                requested
+                    .strip_prefix(self.root())
+                    .map_err(|_| denied("path is outside the workspace"))?,
+                self.root().to_path_buf(),
+            )
         } else {
-            requested
+            (requested, self.root().to_path_buf())
         };
         let mut components = relative.components().peekable();
-        let mut path = self.root().to_path_buf();
         while let Some(component) = components.next() {
             if create_dirs && components.peek().is_none() {
                 return match component {
@@ -497,6 +467,12 @@ impl Workspace {
                 Component::CurDir => continue,
                 Component::Normal(name) if is_git_component(name) => {
                     return Err(denied("access to Git metadata is not allowed"));
+                }
+                // Plan targets are absolute paths outside the workspace:
+                // anchor the walk at the path's own root/prefix.
+                Component::RootDir | Component::Prefix(_) if plan => {
+                    path = component.as_os_str().into();
+                    continue;
                 }
                 Component::Normal(_) => path.push(component),
                 _ => {
@@ -596,6 +572,18 @@ pub(crate) fn clip(text: &str, max_bytes: usize) -> (&str, bool) {
         end -= 1;
     }
     (&text[..end], end < text.len())
+}
+
+/// Clip tool output at [`MAX_OUTPUT_BYTES`] (char-boundary safe, via [`clip`])
+/// and append a marker when anything was dropped. The single output-clipping
+/// implementation shared by the output-producing tools.
+pub(crate) fn truncate_output(text: &str) -> String {
+    let (clipped, truncated) = clip(text, MAX_OUTPUT_BYTES);
+    if truncated {
+        format!("{clipped}\n... [output truncated]")
+    } else {
+        clipped.to_string()
+    }
 }
 
 pub(crate) fn invalid(message: impl Into<String>) -> ToolExecutionError {
@@ -818,4 +806,95 @@ where
             })
         },
     )
+}
+
+#[cfg(test)]
+mod plan_walk_tests {
+    //! Plan-mode (C.17) containment exemption: only the workspace-boundary
+    //! rule is relaxed for the plan file; the component validation (no
+    //! `..`, no symlinks, no Git metadata) still applies.
+
+    use super::*;
+
+    fn plan_workspace() -> (tempfile::TempDir, tempfile::TempDir, Workspace, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        // Canonicalize so the plan path itself is free of symlinked
+        // components (macOS tempdirs live under symlinked /var).
+        let plan = state.path().canonicalize().unwrap().join("PLAN.md");
+        (dir, state, workspace, plan)
+    }
+
+    #[test]
+    fn plan_file_write_outside_workspace_still_works() {
+        let (_dir, _state, workspace, plan) = plan_workspace();
+        workspace.set_plan_path(Some(plan.clone()));
+        let requested = plan.to_string_lossy().into_owned();
+        let target = workspace.target(&requested).unwrap();
+        assert_eq!(target, plan);
+        fs::write(&target, "the plan").unwrap();
+        assert_eq!(workspace.resolve(&requested).unwrap(), plan);
+        assert_eq!(fs::read_to_string(&plan).unwrap(), "the plan");
+    }
+
+    #[test]
+    fn plan_file_write_creates_missing_parent_dirs() {
+        let (_dir, _state, workspace, plan) = plan_workspace();
+        let nested = plan.parent().unwrap().join("nested/deep/PLAN.md");
+        workspace.set_plan_path(Some(nested.clone()));
+        let target = workspace.target(&nested.to_string_lossy()).unwrap();
+        assert_eq!(target, nested);
+        fs::write(&target, "plan").unwrap();
+        assert_eq!(fs::read_to_string(&nested).unwrap(), "plan");
+    }
+
+    #[test]
+    fn plan_path_with_parent_component_is_rejected() {
+        let (_dir, _state, workspace, plan) = plan_workspace();
+        workspace.set_plan_path(Some(plan.clone()));
+        // `sub/../PLAN.md` normalizes to the plan path (so it passes the
+        // plan_target check) but must still fail component validation.
+        let sneaky = plan
+            .parent()
+            .unwrap()
+            .join("sub")
+            .join("..")
+            .join("PLAN.md");
+        let sneaky = sneaky.to_string_lossy().into_owned();
+        assert!(workspace.target(&sneaky).is_err());
+        assert!(workspace.resolve(&sneaky).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_path_through_symlinked_directory_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let (_dir, _state, workspace, plan) = plan_workspace();
+        workspace.set_plan_path(Some(plan.clone()));
+        // A symlink to the plan directory resolves (in normalization) to the
+        // plan path, but the raw walk must refuse the symlinked component.
+        let link_dir = tempfile::tempdir().unwrap();
+        let link = link_dir.path().canonicalize().unwrap().join("link");
+        symlink(plan.parent().unwrap(), &link).unwrap();
+        let via_link = link.join("PLAN.md").to_string_lossy().into_owned();
+        assert!(workspace.target(&via_link).is_err());
+        assert!(workspace.resolve(&via_link).is_err());
+    }
+}
+
+#[cfg(test)]
+mod truncate_output_tests {
+    use super::{MAX_OUTPUT_BYTES, truncate_output};
+
+    #[test]
+    fn respects_cap_boundary_and_marker() {
+        assert_eq!(truncate_output("hello"), "hello");
+        let long = "ä".repeat(MAX_OUTPUT_BYTES); // 2 bytes per char, cap lands mid-char
+        let truncated = truncate_output(&long);
+        assert!(truncated.len() < long.len());
+        assert!(truncated.ends_with("\n... [output truncated]"));
+        let clipped = truncated.trim_end_matches("\n... [output truncated]");
+        assert!(clipped.len() <= MAX_OUTPUT_BYTES);
+    }
 }

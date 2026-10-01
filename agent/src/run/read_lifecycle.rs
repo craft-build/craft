@@ -46,7 +46,13 @@ pub enum ReadState {
 struct FileOperation {
     msg_index: usize,
     tool_call_id: String,
+    /// The argument string as the model spelled it; kept for user-visible
+    /// marker text.
     file_path: String,
+    /// [`crate::run::dedup::PathNormalizer`] key: `./a.rs`, `a.rs`, and the
+    /// anchored absolute spelling key the same file identically, so a write
+    /// under one spelling staleness-marks a read recorded under another.
+    file_key: String,
     op_kind: OpKind,
     /// For reads: the 0-indexed line range [start, end). None means full file.
     line_range: Option<Range<usize>>,
@@ -65,9 +71,12 @@ pub struct ReadClassification {
 /// assistant messages) are never marked Stale — the model still needs the read
 /// content for its next edit. Reads from the most recent assistant message are
 /// never Superseded, to avoid re-read feedback loops.
-pub fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
+/// `root` anchors path normalization: `None` collapses only structural
+/// aliases (`./a.rs` ≡ `a.rs`); the workspace root also unifies relative
+/// and absolute spellings of one file.
+pub fn classify_reads(history: &[Message], root: Option<&str>) -> Vec<ReadClassification> {
     let move_rewrites = collect_move_rewrites(history);
-    let operations = collect_file_operations(history, &move_rewrites);
+    let operations = collect_file_operations(history, &move_rewrites, root);
     let by_file = group_by_file(&operations);
     let (working_set_files, last_assistant_msg) = compute_working_set(&operations);
 
@@ -114,10 +123,15 @@ fn collect_move_rewrites(history: &[Message]) -> HashMap<&str, Vec<String>> {
 }
 
 /// Walk assistant tool calls and record one `FileOperation` per file touched.
+/// Keys are normalized through the write-root-anchored
+/// [`crate::run::dedup::PathNormalizer`]: only the keying is normalized, the
+/// original argument spelling is kept for display.
 fn collect_file_operations(
     history: &[Message],
     move_rewrites: &HashMap<&str, Vec<String>>,
+    root: Option<&str>,
 ) -> Vec<FileOperation> {
+    let normalizer = crate::run::dedup::PathNormalizer::new(root);
     let mut operations: Vec<FileOperation> = Vec::new();
 
     for (msg_index, msg) in history.iter().enumerate() {
@@ -157,6 +171,7 @@ fn collect_file_operations(
                         operations.push(FileOperation {
                             msg_index,
                             tool_call_id: call.id.clone(),
+                            file_key: normalizer.normalize(&file_path),
                             file_path,
                             op_kind: OpKind::Edit,
                             line_range: None,
@@ -185,6 +200,7 @@ fn collect_file_operations(
                         operations.push(FileOperation {
                             msg_index,
                             tool_call_id: call.id.clone(),
+                            file_key: normalizer.normalize(&file_path),
                             file_path,
                             op_kind: OpKind::Edit,
                             line_range: None,
@@ -202,6 +218,7 @@ fn collect_file_operations(
             operations.push(FileOperation {
                 msg_index,
                 tool_call_id: call.id.clone(),
+                file_key: normalizer.normalize(&file_path),
                 file_path,
                 op_kind,
                 line_range,
@@ -211,11 +228,11 @@ fn collect_file_operations(
     operations
 }
 
-/// Group operations by file path (preserving order).
+/// Group operations by normalized file key (preserving order).
 fn group_by_file(operations: &[FileOperation]) -> HashMap<&str, Vec<&FileOperation>> {
     let mut map: HashMap<&str, Vec<&FileOperation>> = HashMap::new();
     for op in operations {
-        map.entry(op.file_path.as_str()).or_default().push(op);
+        map.entry(op.file_key.as_str()).or_default().push(op);
     }
     map
 }
@@ -242,7 +259,7 @@ fn compute_working_set(operations: &[FileOperation]) -> (HashSet<&str>, Option<u
             matches!(op.op_kind, OpKind::Edit | OpKind::Write)
                 && recent_assistant_indices.contains(&op.msg_index)
         })
-        .map(|op| op.file_path.as_str())
+        .map(|op| op.file_key.as_str())
         .collect();
 
     let last_assistant_msg = operations.iter().map(|op| op.msg_index).max();
@@ -257,7 +274,7 @@ fn classify_read(
     last_assistant_msg: Option<usize>,
 ) -> ReadClassification {
     let file_ops = by_file
-        .get(op.file_path.as_str())
+        .get(op.file_key.as_str())
         .expect("every operation is keyed in by_file");
 
     let has_later_edit = file_ops.iter().any(|other| {
@@ -266,7 +283,7 @@ fn classify_read(
 
     // Working set protection: the model still needs the read content for
     // subsequent edits of actively-edited files.
-    if has_later_edit && !working_set_files.contains(op.file_path.as_str()) {
+    if has_later_edit && !working_set_files.contains(op.file_key.as_str()) {
         return classification(op, ReadState::Stale);
     }
 
@@ -379,9 +396,16 @@ fn apply_lifecycle(
 }
 
 /// Run read lifecycle management over a request view, returning total chars
-/// removed. Callers pass the request-only copy: committed history is untouched.
-pub fn apply_to_request(history: &mut [Message], store: Option<&SharedCompressionStore>) -> usize {
-    let classifications = classify_reads(history);
+/// removed. Callers pass the request-only copy: committed history is
+/// untouched. `root` anchors the path normalizer at the workspace write root
+/// so aliased spellings key one file identically; display markers keep the
+/// spelling the model used.
+pub fn apply_to_request(
+    history: &mut [Message],
+    store: Option<&SharedCompressionStore>,
+    root: Option<&str>,
+) -> usize {
+    let classifications = classify_reads(history, root);
     apply_lifecycle(history, &classifications, store)
 }
 
@@ -473,7 +497,7 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "line 1\nline 2\nline 3"),
         ];
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(classifications.len(), 1);
         assert_eq!(classifications[0].state, ReadState::Fresh);
         assert_eq!(classifications[0].file_path, "/src/main.rs");
@@ -499,7 +523,7 @@ mod tests {
             ),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(find_by_id(&classifications, "t1").state, ReadState::Stale);
         assert_eq!(find_by_id(&classifications, "t2").state, ReadState::Fresh);
     }
@@ -519,7 +543,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let cls = classify_reads(&messages);
+        let cls = classify_reads(&messages, None);
         assert_eq!(find_by_id(&cls, "t1").state, ReadState::Stale);
     }
 
@@ -533,7 +557,7 @@ mod tests {
             tool_use_msg("t2", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t2", "new content"),
         ];
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(classifications.len(), 2);
         assert_eq!(classifications[0].state, ReadState::Superseded);
         assert_eq!(classifications[0].tool_call_id, "t1");
@@ -559,7 +583,7 @@ mod tests {
             tool_result_msg("t3", "new content"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(find_by_id(&classifications, "t1").state, ReadState::Stale);
         assert_eq!(find_by_id(&classifications, "t3").state, ReadState::Fresh);
     }
@@ -581,7 +605,7 @@ mod tests {
             tool_result_msg("t3", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(find_by_id(&classifications, "t1").state, ReadState::Stale);
         assert_eq!(find_by_id(&classifications, "t2").state, ReadState::Fresh);
     }
@@ -598,7 +622,7 @@ mod tests {
                 tool_result_msg("t2", "ok"),
             ];
             messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-            let cls = classify_reads(&messages);
+            let cls = classify_reads(&messages, None);
             assert_eq!(
                 find_by_id(&cls, "t1").state,
                 ReadState::Stale,
@@ -624,7 +648,7 @@ mod tests {
             tool_result_msg("t3", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let cls = classify_reads(&messages);
+        let cls = classify_reads(&messages, None);
         assert_eq!(find_by_id(&cls, "t1").state, ReadState::Stale);
         assert_eq!(find_by_id(&cls, "t2").state, ReadState::Fresh);
     }
@@ -647,7 +671,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let removed = apply_to_request(&mut messages, None);
+        let removed = apply_to_request(&mut messages, None, None);
         assert!(removed > 0);
         let Message::User { content } = &messages[2] else {
             panic!("tool result message");
@@ -669,7 +693,7 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "fresh content"),
         ];
-        let removed = apply_to_request(&mut messages, None);
+        let removed = apply_to_request(&mut messages, None, None);
         assert_eq!(removed, 0);
         let Message::User { content } = &messages[2] else {
             panic!("tool result message");
@@ -694,7 +718,7 @@ mod tests {
             tool_result_msg("t2", original_text),
         ];
         let store = crate::compression::store::shared_store();
-        let removed = apply_to_request(&mut messages, Some(&store));
+        let removed = apply_to_request(&mut messages, Some(&store), None);
         assert!(removed > 0);
         let Message::User { content } = &messages[2] else {
             panic!("tool result message");
@@ -739,7 +763,7 @@ mod tests {
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
         let store = crate::compression::store::shared_store();
-        apply_to_request(&mut messages, Some(&store));
+        apply_to_request(&mut messages, Some(&store), None);
         let Message::User { content } = &messages[2] else {
             panic!("tool result message");
         };
@@ -772,7 +796,7 @@ mod tests {
             ),
             tool_result_msg("t2", "lines 51-100"),
         ];
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(
             classifications[0].state,
             ReadState::Fresh,
@@ -799,7 +823,7 @@ mod tests {
             tool_use_msg("t2", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t2", "all content"),
         ];
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(
             classifications[0].state,
             ReadState::Superseded,
@@ -826,7 +850,7 @@ mod tests {
             ),
             tool_result_msg("t2", "lines 50-150"),
         ];
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(
             classifications[0].state,
             ReadState::Fresh,
@@ -853,7 +877,7 @@ mod tests {
             ),
             tool_result_msg("t2", "lines 51-100"),
         ];
-        let classifications = classify_reads(&messages);
+        let classifications = classify_reads(&messages, None);
         assert_eq!(classifications[0].state, ReadState::Fresh, "adjacent");
         assert_eq!(classifications[1].state, ReadState::Fresh, "adjacent");
     }
@@ -874,7 +898,7 @@ mod tests {
             ),
             tool_result_msg("t2", "ok"),
         ];
-        let cls = classify_reads(&messages);
+        let cls = classify_reads(&messages, None);
         assert_eq!(
             find_by_id(&cls, "t1").state,
             ReadState::Fresh,
@@ -898,7 +922,7 @@ mod tests {
         ];
         // 2 original + (LOOKBACK-2) gap = LOOKBACK total assistant msgs → in the set.
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK - 2));
-        let cls = classify_reads(&messages);
+        let cls = classify_reads(&messages, None);
         assert_eq!(
             find_by_id(&cls, "t1").state,
             ReadState::Fresh,
@@ -906,7 +930,7 @@ mod tests {
         );
 
         messages.extend(gap_assistant_turns(2));
-        let cls = classify_reads(&messages);
+        let cls = classify_reads(&messages, None);
         assert_eq!(
             find_by_id(&cls, "t1").state,
             ReadState::Stale,
@@ -938,13 +962,95 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let removed = apply_to_request(&mut messages, None);
+        let removed = apply_to_request(&mut messages, None, None);
         assert_eq!(removed, 0, "error results are left untouched");
     }
 
     #[test]
     fn no_reads_produces_empty_classifications() {
         let messages = vec![user_msg("hello"), Message::assistant("hi")];
-        assert!(classify_reads(&messages).is_empty());
+        assert!(classify_reads(&messages, None).is_empty());
+    }
+
+    #[test]
+    fn path_spelling_aliases_key_the_same_file() {
+        // A write under one spelling staleness-marks a read recorded under
+        // another: both `./a.rs` and `a.rs` normalize to the same key.
+        for (read_path, write_path) in [("./a.rs", "a.rs"), ("a.rs", "./a.rs")] {
+            let mut messages = vec![
+                user_msg("read"),
+                tool_use_msg("t1", "read", json!({"path": read_path})),
+                tool_result_msg("t1", "content"),
+                user_msg("write"),
+                tool_use_msg("t2", "write", json!({"path": write_path, "content": "x"})),
+                tool_result_of_msg("t2", "write", "ok"),
+            ];
+            messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+            let cls = classify_reads(&messages, None);
+            assert_eq!(
+                find_by_id(&cls, "t1").state,
+                ReadState::Stale,
+                "{read_path} read must stale-date from the {write_path} write"
+            );
+        }
+    }
+
+    #[test]
+    fn root_anchored_keying_unifies_relative_and_absolute_spellings() {
+        // Anchored at the write root, a relative read and an absolute write
+        // of the same file key identically; rootless keying cannot prove
+        // them equal and stays fresh.
+        let mut messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "src/a.rs"})),
+            tool_result_msg("t1", "content"),
+            user_msg("edit"),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/ws/src/a.rs", "old_string": "x", "new_string": "y"}),
+            ),
+            tool_result_msg("t2", "ok"),
+        ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let anchored = classify_reads(&messages, Some("/ws"));
+        assert_eq!(find_by_id(&anchored, "t1").state, ReadState::Stale);
+        let rootless = classify_reads(&messages, None);
+        assert_eq!(find_by_id(&rootless, "t1").state, ReadState::Fresh);
+    }
+
+    #[test]
+    fn stale_marker_keeps_the_original_path_spelling() {
+        // Keying is normalized, but the user-visible marker names the path
+        // the way the model spelled it when it read the file.
+        let mut messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "./src/a.rs"})),
+            tool_result_msg(
+                "t1",
+                "a long read result with enough content in it to be replaced by the stale marker",
+            ),
+            user_msg("edit"),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "src/a.rs", "old_string": "x", "new_string": "y"}),
+            ),
+            tool_result_msg("t2", "ok"),
+        ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        apply_to_request(&mut messages, None, None);
+        let Message::User { content } = &messages[2] else {
+            panic!("tool result message");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("tool result block");
+        };
+        let text = result.content[0].to_text();
+        assert!(text.starts_with(STALE_MARKER_PREFIX), "{text}");
+        assert!(
+            text.contains("./src/a.rs"),
+            "original spelling kept in marker: {text}"
+        );
     }
 }

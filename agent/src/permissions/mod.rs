@@ -540,7 +540,7 @@ impl PermissionManager {
                 if !rule_reaches(&r.tool, tool) {
                     continue;
                 }
-                if !rule_matches_scope(r, scope) {
+                if !rule_matches_scope(&self.cwd, r, scope) {
                     continue;
                 }
                 match r.effect {

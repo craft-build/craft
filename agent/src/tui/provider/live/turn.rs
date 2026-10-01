@@ -114,7 +114,10 @@ impl TurnRenderer {
                 }
                 let done = cards::tool_done(id, &name, &arguments, &result);
                 if let Some((path, status)) = done.touched {
-                    self.files.lock().expect("files lock").insert(path, status);
+                    // Poison-tolerant like the rest of the turn: a
+                    // poisoned mutex must not kill the turn task and
+                    // leave the UI stuck "Running".
+                    lock_sink(&self.files).insert(path, status);
                     let _ = self
                         .tx
                         .send(AgentEvent::FilesSet(cards::touched_files(&self.files)));

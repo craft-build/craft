@@ -159,9 +159,30 @@ impl Recipe {
         recipe_path: &Path,
     ) -> Result<String, RecipeError> {
         let recipe_dir: PathBuf = recipe_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // Includes must stay inside the recipe directory. Canonicalize both
+        // sides (the recipe dir may itself contain symlinks) and reject any
+        // resolved path that escapes: absolute names, `..` traversal, or a
+        // symlink pointing outside. A non-canonicalizable include is simply
+        // not found (minijinja's normal 'template not found' error).
+        let recipe_dir = std::fs::canonicalize(&recipe_dir).unwrap_or(recipe_dir);
         let mut env = Environment::new();
         env.set_loader(move |name| {
-            let p = recipe_dir.join(name);
+            let escapes = || {
+                minijinja::Error::new(
+                    minijinja::ErrorKind::TemplateNotFound,
+                    format!("include must stay inside the recipe directory: {name}"),
+                )
+            };
+            if Path::new(name).is_absolute() {
+                return Err(escapes());
+            }
+            let p = match std::fs::canonicalize(recipe_dir.join(name)) {
+                Ok(p) => p,
+                Err(_) => return Ok(None),
+            };
+            if !p.starts_with(&recipe_dir) {
+                return Err(escapes());
+            }
             if !p.is_file() {
                 return Ok(None);
             }
@@ -450,6 +471,62 @@ mod tests {
         let params = recipe.resolve_parameters(&HashMap::new()).unwrap();
         let out = recipe.render(&params, &p).unwrap();
         assert_eq!(out, "Main. Sub-step for security");
+    }
+
+    #[test]
+    fn render_rejects_includes_escaping_recipe_dir() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "secret.txt", "TOP-SECRET");
+        let recipes = tmp.path().join("recipes");
+        write(
+            &recipes,
+            "sub.yaml",
+            "instructions: \"Sub-step\"\nparameters: []\n",
+        );
+        // `../secret.txt` exists one level up but must never be included.
+        let p = write(
+            &recipes,
+            "main.yaml",
+            "instructions: \"Main. {% include '../secret.txt' %}\"\nparameters: []\n",
+        );
+        let recipe = load(&p).unwrap();
+        let params = recipe.resolve_parameters(&HashMap::new()).unwrap();
+        match recipe.render(&params, &p) {
+            Ok(out) => assert!(!out.contains("TOP-SECRET"), "{out}"),
+            Err(_) => {}
+        }
+        // Absolute include names are rejected even when they point back
+        // inside the recipe directory.
+        let abs = recipes.join("sub.yaml");
+        let p = write(
+            &recipes,
+            "abs.yaml",
+            &format!(
+                "instructions: \"Main. {{% include '{}' %}}\"\nparameters: []\n",
+                abs.display()
+            ),
+        );
+        let recipe = load(&p).unwrap();
+        let params = recipe.resolve_parameters(&HashMap::new()).unwrap();
+        match recipe.render(&params, &p) {
+            Ok(out) => assert!(!out.contains("Sub-step"), "{out}"),
+            Err(_) => {}
+        }
+        // Includes inside the recipe directory still work.
+        let tmp2 = TempDir::new().unwrap();
+        write(
+            tmp2.path(),
+            "sub.yaml",
+            "instructions: \"Sub-step\"\nparameters: []\n",
+        );
+        let p = write(
+            tmp2.path(),
+            "ok.yaml",
+            "instructions: \"Main. {% include 'sub.yaml' %}\"\nparameters: []\n",
+        );
+        let recipe = load(&p).unwrap();
+        let params = recipe.resolve_parameters(&HashMap::new()).unwrap();
+        assert_eq!(recipe.render(&params, &p).unwrap(), "Main. Sub-step");
     }
 
     #[test]

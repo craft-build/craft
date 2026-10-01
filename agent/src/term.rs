@@ -226,7 +226,9 @@ __craft_preexec() {
   craft term log "$BASH_COMMAND" >/dev/null 2>&1
 }
 trap '__craft_preexec' DEBUG
-@craft() { craft term run "$*"; }
+# `@craft() {` is a syntax error in bash: bare `name() {` definitions require
+# a valid shell identifier. The `function` keyword form accepts a word name.
+function @craft { craft term run "$@"; }
 "#;
 
 const BASH_NOT_FOUND: &str = r#"command_not_found_handle() {
@@ -317,6 +319,57 @@ mod tests {
     }
 
     #[test]
+    fn bash_init_script_parses_under_bash_dash_n() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let Ok(mut child) = Command::new("bash").arg("-n").stdin(Stdio::piped()).spawn() else {
+            eprintln!("skipping: no bash available in environment");
+            return;
+        };
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(init_script(&ShellKind::Bash, true).as_bytes())
+            .unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "bash -n rejected the init script");
+    }
+
+    #[test]
+    fn bash_craft_function_forwards_positional_args() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let Ok(mut child) = Command::new("bash")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            eprintln!("skipping: no bash available in environment");
+            return;
+        };
+        let harness = format!(
+            "craft() {{ printf '<%s>\\n' \"$@\"; }}\n{}\n@craft one \"two three\"\n",
+            init_script(&ShellKind::Bash, false)
+        );
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(harness.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            stdout.contains("<term>\n<run>\n<one>\n<two three>\n"),
+            "args were not forwarded as positional params: {stdout}"
+        );
+    }
+
     fn with_not_found_appends_the_handler() {
         for shell in [&ShellKind::Bash, &ShellKind::Zsh, &ShellKind::Fish] {
             assert!(init_script(shell, true).contains("craft term run \"The command '$"));

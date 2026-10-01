@@ -23,16 +23,21 @@ mod overflow;
 mod read_lifecycle;
 mod recency;
 mod retry;
+mod stats;
 mod stream;
 mod task_set;
 mod turns;
+mod view;
 
+pub use cancel::{CancelFlag, CancelToken, cancel_channel};
 pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
 pub(crate) use dispatch::dispatch_tool_calls;
 pub use dispatch::{
     AfterExecute, BeforeExecute, BoxFuture, Decision, DispatchOutcome, ToolDispatch,
 };
-pub use events::{Envelope, EventSender, EventStreamGuard, SessionEvents, event_stream};
+pub use events::{
+    DoneReason, Envelope, Event, EventSender, EventStreamGuard, SessionEvents, event_stream,
+};
 pub use guardrails::{SharedGuardrails, shared_guardrails};
 pub use mode::{AgentMode, PLAN_WRITE_RESTRICTED};
 #[cfg(test)]
@@ -43,211 +48,24 @@ use overflow::{
 };
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use retry::RetryCtx;
+use stats::{RunStats, served_spec};
 pub use stream::TurnOutput;
+use view::compress_request_view;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use rig_core::completion::CompletionModel;
-use tokio::sync::watch;
 
-use crate::compression::{self, CompressionConfig};
+use crate::compression::CompressionConfig;
 use crate::config::{CompactionBuffer, CompactionConfig};
 use crate::edge;
-use crate::history::{self, ImageBlock, Message};
-
-/// Events emitted as the run progresses; consumed by the TUI and ACP
-/// surfaces. Ported from the reference's `AgentEvent` taxonomy
-/// (`craft-agent/src/types.rs`): variants whose backing subsystem is not yet
-/// ported (retry ladder, stagnation tracker, auto-review plumbing, live tool
-/// buffers) are forward substrate — defined but never emitted here.
-#[allow(dead_code)] // forward substrate for C.2/C.8/auto-review/LiveToolBuf tasks
-#[derive(Clone, Debug)]
-pub enum Event {
-    /// A streamed chunk of the assistant reply.
-    TextDelta(String),
-    /// A streamed chunk of the model's reasoning.
-    ThinkingDelta(String),
-    /// A tool call is queued but not yet running.
-    ToolPending { id: String, name: String },
-    /// The model issued a tool call.
-    ToolStart {
-        id: String,
-        name: String,
-        arguments: serde_json::Value,
-    },
-    /// `content` is the full accumulated output so far, not a delta.
-    ToolOutput { id: String, content: String },
-    /// A tool call finished (ran, failed, or was skipped).
-    ToolDone {
-        id: String,
-        name: String,
-        arguments: serde_json::Value,
-        result: history::ToolResult,
-    },
-    /// A wave of tool results was appended to the turn; `message` carries
-    /// every result of the wave in call order.
-    ToolResultsSubmitted { message: Message },
-    /// One model call completed: its usage report and the estimated size of
-    /// the context the model just saw.
-    TurnComplete {
-        usage: history::Usage,
-        context_size: u64,
-    },
-    /// The run ended. `context_window` is a `0` sentinel until window sizes
-    /// reach the run seam (model-registry work).
-    Done {
-        usage: history::Usage,
-        context_size: u64,
-        context_window: u64,
-        num_turns: u32,
-        reason: DoneReason,
-        /// What the run's turns were billed (H.6). `None` when no model in
-        /// the run is priced, so callers show no cost instead of "$0.000".
-        cost: Option<f64>,
-        /// Per-model usage with each model's recorded (billed) cost, for the
-        /// session ledger and `cost.jsonl`. Unpriced models carry `None`.
-        by_model: HashMap<String, crate::usage::StoredTokenUsage>,
-    },
-    /// Human-readable, non-fatal status text.
-    Info(String),
-    /// The post-turn advisor (C.12) reviewed the run's delta and produced
-    /// this note. Emitted whether or not the run continues on it.
-    AdvisorNote { severity: String, message: String },
-    /// The run failed; paired with a terminal `Done` carrying the reason.
-    Error(String),
-    /// A recoverable stream failure is being retried (attempt is 1-based).
-    Retry {
-        attempt: u32,
-        message: String,
-        delay_ms: u64,
-    },
-    AutoCompacting {
-        context_size: u64,
-        context_window: u64,
-    },
-    CompactionDone {
-        context_size_before: u64,
-        context_size_after: u64,
-        context_window: u64,
-    },
-    /// The doom-loop grace prompt was injected (fires exactly once per
-    /// run, at the grace threshold). `similarity` is reference-taxonomy
-    /// residue: here it carries the doom score normalized toward
-    /// `HARD_STOP_THRESHOLD` (1.0 = about to hard-stop).
-    StagnationDetected { similarity: f32 },
-    AutoReviewStart {
-        id: String,
-        tool: String,
-        scopes: Vec<String>,
-    },
-    AutoReviewDecision {
-        id: String,
-        tool: String,
-        scopes: Vec<String>,
-        verdict: String,
-        risk: String,
-        rationale: String,
-    },
-    /// The model returned an empty reply after tool calls and was nudged
-    /// to continue.
-    Nudge,
-    /// Authentication failed (401) and the run paused for re-authentication
-    /// (E.10); `attempt` is 1-based. The run resumes after the responder
-    /// succeeds or fails with the message.
-    AuthRequired { attempt: u32, message: String },
-    /// End-of-stream marker; emitted only by [`EventStreamGuard::drop`] and
-    /// swallowed by [`SessionEvents::next`].
-    StreamClosed,
-    /// An event from a `task`-spawned subagent (A.5), tagged with the
-    /// spawning call's id and description. `tool_use_id` is the key the
-    /// task-chats view routes by; the child's own `Done`, `Error`,
-    /// `ToolOutput`, and `ToolPending` events are filtered before this.
-    Subagent {
-        tool_use_id: String,
-        description: String,
-        event: Box<Event>,
-    },
-}
-
-/// Why a run ended, riding the terminal [`Event::Done`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DoneReason {
-    /// The model finished without pending tool calls.
-    Stop,
-    /// The turn budget ran out (partial history committed).
-    MaxTurns,
-    /// Every continuation of a truncated reply was spent.
-    MaxTokens,
-    Cancelled,
-    Error,
-    /// The doom-loop score reached the hard-stop threshold; the sanitized
-    /// partial history (with an end marker) was committed.
-    DoomStop,
-}
-
-impl From<&RunOutcome> for DoneReason {
-    fn from(outcome: &RunOutcome) -> Self {
-        match outcome {
-            RunOutcome::Done { .. } => Self::Stop,
-            RunOutcome::MaxTurns => Self::MaxTurns,
-            RunOutcome::MaxTokens { .. } => Self::MaxTokens,
-            RunOutcome::Cancelled => Self::Cancelled,
-            RunOutcome::Failed(_) => Self::Error,
-            RunOutcome::DoomStop => Self::DoomStop,
-        }
-    }
-}
-
-/// Cancellation shared between a surface and its run: set the flag, and the
-/// run stops at the next stream/dispatch/turn boundary.
-#[derive(Clone)]
-pub struct CancelToken {
-    rx: watch::Receiver<u64>,
-    epoch: u64,
-}
-
-/// The setting half of a [`CancelToken`].
-#[derive(Clone)]
-pub struct CancelFlag {
-    tx: watch::Sender<u64>,
-}
-
-/// Create a cancellation pair, initially not cancelled.
-pub fn cancel_channel() -> (CancelFlag, CancelToken) {
-    let (tx, rx) = watch::channel(0);
-    (CancelFlag { tx }, CancelToken { rx, epoch: 0 })
-}
-
-impl CancelToken {
-    pub fn cancelled(&self) -> bool {
-        *self.rx.borrow() != self.epoch
-    }
-
-    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
-        self.rx.clone()
-    }
-}
-
-impl CancelFlag {
-    /// Cancellation is monotonic and epoch-scoped: `set(true)` bumps the
-    /// generation and can never be overwritten by a concurrent re-arm,
-    /// while `set(false)` is a no-op — a fresh turn starts clean by
-    /// minting a new token at the current generation.
-    pub fn set(&self, cancelled: bool) {
-        if cancelled {
-            self.tx.send_modify(|generation| *generation += 1);
-        }
-    }
-
-    /// A token sharing this flag's state.
-    pub fn token(&self) -> CancelToken {
-        CancelToken {
-            rx: self.tx.subscribe(),
-            epoch: *self.tx.borrow(),
-        }
-    }
-}
+use crate::history::{ImageBlock, Message};
+// Module names for the test tree: `run/tests/*` qualifies `history::` and
+// `compression::` through this scope.
+#[cfg(test)]
+use crate::compression;
+#[cfg(test)]
+use crate::history;
 
 /// How many times a run recovers from a context-overflow stream error by
 /// compacting and retrying before the error is surfaced (reference
@@ -458,52 +276,6 @@ pub enum RunOutcome {
     DoomStop,
 }
 
-/// Run-wide accumulators for the terminal [`Event::Done`].
-#[derive(Default)]
-struct RunStats {
-    usage: history::Usage,
-    context_size: u64,
-    turns: u32,
-    /// Per-model ledger (H.6): turns are priced when they run and their cost
-    /// recorded, so summing is the truth (see `usage::settle_session`).
-    by_model: HashMap<String, crate::usage::StoredTokenUsage>,
-}
-
-/// The spec to bill: the model that actually answered the call. Retry-chain
-/// fallbacks and reauth-refreshed models carry only a bare model id, so the
-/// primary spec's provider prefixes it.
-fn served_spec(
-    primary: Option<&str>,
-    served_fallback: Option<&str>,
-    refreshed: Option<&crate::providers::DynamicModel>,
-) -> Option<Arc<str>> {
-    let primary = primary?;
-    let label = served_fallback
-        .or_else(|| refreshed.and_then(|m| m.label()))
-        .unwrap_or_else(|| primary.rsplit_once('/').map_or(primary, |(_, m)| m));
-    // A label with a slash is already a full spec (possibly cross-provider);
-    // only a bare id borrows the primary's provider.
-    let spec = if label.contains('/') {
-        label.to_owned()
-    } else {
-        let provider = primary.split_once('/').map_or(primary, |(p, _)| p);
-        format!("{provider}/{label}")
-    };
-    Some(spec.into())
-}
-
-impl RunStats {
-    /// Fold one model call's usage into the ledger, pricing the turn against
-    /// today's table. An unresolvable spec still counts its tokens, unpriced.
-    fn add_usage(&mut self, usage: &history::Usage, spec: Option<&str>, fast: bool) {
-        self.usage.add(*usage);
-        let Some(spec) = spec else { return };
-        let tokens = crate::usage::TokenUsage::from(usage);
-        let cost = crate::usage::resolve_spec(spec).and_then(|m| m.billed_cost(&tokens, fast));
-        *self.by_model.entry(spec.to_owned()).or_default() += tokens.billed(cost);
-    }
-}
-
 /// Drive one multi-turn run. `history` is the caller-owned conversation; the
 /// prompt is appended as the turn's first user message. `emit` receives every
 /// event as it happens (it must not block).
@@ -584,20 +356,29 @@ async fn run_inner<M: CompletionModel + Clone>(
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> (RunOutcome, RunStats) {
     // A trailing grace prompt from a previous run must not replay as if
-    // the user asked for it, but a failed run commits nothing: capture the
-    // stripped tail so history stays byte-identical when the run fails.
-    let grace_tail = history.last().cloned();
-    let before = history.len();
+    // the user asked for it, but a failed run commits nothing — not even
+    // the overflow recovery's in-place compaction of the caller's history.
+    // Keep a pristine snapshot so history stays byte-identical when the run
+    // fails (commit points append their sanitized turns only on non-failed
+    // outcomes, so a failed run leaves exactly these bytes).
+    let pristine = history.clone();
+    let carry_anchor: Option<Option<usize>> = params
+        .compaction
+        .as_ref()
+        .map(|ctx| ctx.state.lock().ok().and_then(|guard| guard.carry_from()));
     strip_trailing_grace_prompt(history);
-    let grace_tail = (history.len() < before).then_some(grace_tail).flatten();
-    let stripped = grace_tail.is_some().then(|| history.clone());
     let (outcome, stats) =
         run_loop(model, params, tools, history, prompt, images, cancel, emit).await;
-    if let Some(message) = grace_tail
-        && matches!(outcome, RunOutcome::Failed(_))
-        && stripped.as_ref().is_some_and(|s| s == history)
-    {
-        history.push(message);
+    if matches!(outcome, RunOutcome::Failed(_)) {
+        *history = pristine;
+        if let (Some(ctx), Some(anchor)) = (&params.compaction, carry_anchor)
+            && let Ok(mut guard) = ctx.state.lock()
+        {
+            match anchor {
+                Some(index) => guard.protect_from(index),
+                None => guard.mark_answered(),
+            }
+        }
     }
     (outcome, stats)
 }
@@ -692,7 +473,14 @@ async fn run_loop<M: CompletionModel + Clone>(
         {
             full = with_tail;
         }
-        read_lifecycle::apply_to_request(&mut full, tools.compression_store());
+        let write_root = tools
+            .write_root()
+            .map(|root| root.to_string_lossy().into_owned());
+        read_lifecycle::apply_to_request(
+            &mut full,
+            tools.compression_store(),
+            write_root.as_deref(),
+        );
         compress_request_view(&mut full, &params.compression);
         let prompt_tokens = crate::compaction::estimate_tokens(&full).max(measured_prompt_tokens);
         let window = params.compaction.as_ref().and_then(|c| c.context_length);
@@ -798,34 +586,10 @@ async fn run_loop<M: CompletionModel + Clone>(
     }
 }
 
-/// Rewrite tool-result texts in the request copy through pre-compression.
-/// Only the wire view is affected: `turn` and `history` keep raw results.
-/// Request-time compression is unconditional (per the reference);
-/// `protect_recent_tool_outputs` is a compaction-stage knob, not ours.
-fn compress_request_view(full: &mut [Message], config: &CompressionConfig) {
-    for message in full {
-        let Message::User { content } = message else {
-            continue;
-        };
-        for block in content {
-            if let history::UserContent::ToolResult(result) = block {
-                // Verbatim tools (e.g. `read`) return caller-selected content;
-                // compressing it would drop lines the model explicitly asked for.
-                if !compression::should_compress_tool(&result.name) {
-                    continue;
-                }
-                for item in &mut result.content {
-                    if let history::ToolResultContent::Text(text) = item {
-                        text.text = compression::compress_for_llm(&text.text, config);
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
-#[path = "tests.rs"]
+// The module is `run_tests` (a sibling inline `mod tests` exists below);
+// the split harness lives in `tests/mod.rs`.
+#[path = "tests/mod.rs"]
 mod run_tests;
 
 #[cfg(test)]

@@ -1,5 +1,11 @@
 //! The append-only JSONL log: record types, [`SessionLog`], parsing, and
 //! full-file writes.
+//!
+//! Load-time corruption policy: every record that fails to parse is
+//! skipped with a stderr warning, wherever it sits in the file — trailing
+//! or not. The two exceptions are a header with an unparseable id
+//! ([`SessionError::CorruptHeaderId`]) and a file with no valid header at
+//! all (surfaced as `NotFound`).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};

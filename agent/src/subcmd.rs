@@ -86,7 +86,7 @@ fn render_stats(summary: &CostSummary, ledger_path: &Path, sessions: bool) -> St
     }
     let mut out = format!(
         "Total cost:   {}\nTotal tokens: {}\nRecords:      {} across {} sessions\n\n",
-        format_usd(summary.total_cost),
+        summary.display_total_cost(),
         format_tokens(summary.total_tokens),
         summary.records,
         summary.session_count(),
@@ -633,6 +633,7 @@ mod tests {
             by_model: vec![("anthropic/m".into(), 1.5, 3_000_000)],
             by_session: vec![("s1".into(), 1.0, 2_000_000), ("s2".into(), 0.5, 1_000_000)],
             records: 2,
+            unpriced_records: 0,
         };
         let by_model = render_stats(&summary, Path::new("/tmp/cost.jsonl"), false);
         assert!(by_model.contains("Total cost:   $1.50"));

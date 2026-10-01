@@ -59,6 +59,7 @@ fn stats_view(summary: crate::storage::stats::CostSummary) -> StatsView {
         by_session,
         models_overflow,
         total_cost: summary.total_cost,
+        unpriced_records: summary.unpriced_records,
         total_tokens: summary.total_tokens,
         sessions,
         empty: false,
@@ -116,6 +117,7 @@ mod tests {
             by_model: (0..15).map(|i| (format!("p/m{i}"), 0.1, 100)).collect(),
             by_session: (0..10).map(|i| (format!("s{i}"), 0.2, 200)).collect(),
             records: 25,
+            unpriced_records: 0,
         };
         let view = stats_view(summary);
         assert_eq!(view.rows.len(), 12);

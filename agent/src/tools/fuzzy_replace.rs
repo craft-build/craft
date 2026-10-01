@@ -47,6 +47,8 @@ impl Pass {
 pub(crate) struct ReplaceResult {
     pub content: String,
     pub pass: Pass,
+    /// Number of occurrences the winning pass actually replaced.
+    pub replacements: usize,
 }
 
 pub(crate) fn replace(
@@ -129,6 +131,7 @@ fn replace_inner(
                 return Some(ReplaceResult {
                     content: content.replace(matched.as_str(), &text),
                     pass,
+                    replacements: at.len(),
                 });
             }
             return None;
@@ -149,6 +152,7 @@ fn replace_inner(
                 return Some(ReplaceResult {
                     content: apply_at(start, end, &text),
                     pass,
+                    replacements: 1,
                 });
             }
             return None;
@@ -161,6 +165,7 @@ fn replace_inner(
             return Some(ReplaceResult {
                 content: apply_at(start, end, &text),
                 pass,
+                replacements: 1,
             });
         }
 
@@ -533,15 +538,17 @@ fn unicode_normalized(content: &str, find: &str) -> Vec<String> {
                 if !words.is_empty() {
                     let escaped: Vec<String> = words.iter().map(|w| regex::escape(w)).collect();
                     let pattern = escaped.join(r"[\s\u00a0]+");
+                    // Match against the NFKD of the *original* trimmed line,
+                    // then translate match offsets back through the per-char
+                    // decomposition map: slicing the original line with NFKD
+                    // offsets panics on characters that decompose (e.g. `ﬁ`).
+                    let trimmed = content_lines[i].trim();
+                    let nfkd_trimmed: String = trimmed.nfkd().collect();
                     if let Ok(re) = Regex::new(&pattern)
-                        && let Some(m) = re.find(nfkd_line.trim())
+                        && let Some(m) = re.find(&nfkd_trimmed)
+                        && let Some(slice) = nfkd_slice(trimmed, m.start(), m.end())
                     {
-                        let byte_start = m.start();
-                        let byte_end = m.end();
-                        let trimmed = content_lines[i].trim();
-                        if byte_end <= trimmed.len() {
-                            results.push(trimmed[byte_start..byte_end].to_string());
-                        }
+                        results.push(slice);
                     }
                 }
             }
@@ -556,6 +563,38 @@ fn unicode_normalized(content: &str, find: &str) -> Vec<String> {
     }
 
     results
+}
+
+/// Slice `original` (a trimmed line) by byte offsets measured against its
+/// NFKD form, rounding outward to original char boundaries so a match that
+/// ends inside a decomposed character still covers the whole character.
+fn nfkd_slice(original: &str, nfkd_start: usize, nfkd_end: usize) -> Option<String> {
+    let mut nfkd_pos = 0usize;
+    let mut start = None;
+    let mut end = None;
+    for (orig_idx, ch) in original.char_indices() {
+        let decomposed_len: usize = ch.nfkd().map(char::len_utf8).sum();
+        let nfkd_char_end = nfkd_pos + decomposed_len;
+        // Inclusive on both sides: an offset falling inside a decomposed
+        // character covers that whole character (start rounds down to its
+        // first byte, end rounds up past its last).
+        if start.is_none() && nfkd_start < nfkd_char_end {
+            start = Some(orig_idx);
+        }
+        nfkd_pos = nfkd_char_end;
+        if end.is_none() && nfkd_end <= nfkd_pos {
+            end = Some(orig_idx + ch.len_utf8());
+        }
+        if start.is_some() && end.is_some() {
+            break;
+        }
+    }
+    let start = start?;
+    let end = end.or((nfkd_end >= nfkd_pos).then_some(original.len()))?;
+    if start >= end {
+        return None;
+    }
+    Some(original[start..end].to_string())
 }
 
 fn escape_normalized(content: &str, unescaped_find: &str) -> Vec<String> {
@@ -827,6 +866,30 @@ mod tests {
         }
     }
 
+    // NFKD offsets are byte-lengths of the decomposed form; slicing the
+    // original line with them panics on `ﬁ` (3 bytes -> "fi", 2 bytes).
+    #[test]
+    fn nfkd_offsets_map_back_to_char_boundaries() {
+        assert_eq!(
+            replace_simple("super\u{fb01}sh darts", "superfish darts", R).unwrap(),
+            R
+        );
+    }
+
+    #[test]
+    fn nfkd_slice_rounds_outward_to_char_boundaries() {
+        let line = "a\u{fb01}c"; // "aﬁc", NFKD "afic"
+        assert_eq!(nfkd_slice(line, 0, 4), Some("a\u{fb01}c".to_string()));
+        assert_eq!(nfkd_slice(line, 1, 3), Some("\u{fb01}".to_string()));
+        assert_eq!(nfkd_slice(line, 1, 1), None);
+        // Offsets landing *inside* a decomposition cover the whole char on
+        // both edges: "ish" within NFKD "fish" starts inside `ﬁ`.
+        assert_eq!(
+            nfkd_slice("\u{fb01}sh", 1, 4),
+            Some("\u{fb01}sh".to_string())
+        );
+    }
+
     #[test]
     fn fuzzy_match_reindents_new_string() {
         let content = "class Foo\n  def bar\n    baz(\n      a,\n    )\n  end\nend\n";
@@ -1076,5 +1139,31 @@ mod tests {
     fn replace_all_replaces_every_occurrence() {
         let all = replace("aXbXc", "X", "Y", true, None).unwrap().content;
         assert_eq!(all, "aYbYc");
+    }
+
+    #[test]
+    fn counts_replacements_actually_performed() {
+        // Exact pass, replace_all: every occurrence counts.
+        let result = replace("aXbXc", "X", "Y", true, None).unwrap();
+        assert_eq!(result.replacements, 2);
+
+        // Fuzzy-only match (whitespace collapsed): still one replacement,
+        // even though the exact needle never occurs in the content.
+        let result = replace("let   x  =   1;", "let x = 1;", R, false, None).unwrap();
+        assert_ne!(result.pass, Pass::Exact);
+        assert_eq!(result.replacements, 1);
+
+        // Fuzzy pass with replace_all counts the matched candidate's
+        // occurrences, not the (zero) exact ones.
+        let result = replace(
+            "let   x  =   1;\nlet   x  =   2;",
+            "let x = 1;",
+            R,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_ne!(result.pass, Pass::Exact);
+        assert_eq!(result.replacements, 1);
     }
 }

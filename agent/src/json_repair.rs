@@ -60,7 +60,11 @@ pub fn extract_json(text: &str) -> Result<Value, String> {
     if let Ok(v @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str(trimmed) {
         return Ok(v);
     }
-    let slice = last_balanced(trimmed).ok_or("no JSON object found in model response")?;
+    // The quote-aware scan can find no candidate at all (e.g. braces it
+    // misattributes to strings ahead of the real object); fall back to the
+    // naive last-`{` window and let the repair pass try its luck on that.
+    let slice = last_balanced(trimmed).or_else(|| trimmed.rfind('{').map(|i| &trimmed[i..]));
+    let slice = slice.ok_or("no JSON object found in model response")?;
     repair_loads(slice, &RepairOpts::default())
         .map_err(|e| format!("invalid JSON: {e}"))
         .and_then(|v| match v {
@@ -127,6 +131,16 @@ mod tests {
     #[test]
     fn braces_inside_strings_do_not_confuse_extraction() {
         let text = r#"{"note":"contains } bracket"} {"verdict":"allow"}"#;
+        assert_eq!(extract_json(text).unwrap(), json!({"verdict": "allow"}));
+    }
+
+    /// A truncated object has no closing bracket at all, so the quote-aware
+    /// backward scan finds nothing. The naive last-`{` fallback still hands
+    /// a repairable window to jsonrepair.
+    #[test]
+    fn falls_back_to_naive_last_brace_when_scan_finds_nothing() {
+        let text = r#"{"verdict": "allow"  "#;
+        assert!(last_balanced(text).is_none());
         assert_eq!(extract_json(text).unwrap(), json!({"verdict": "allow"}));
     }
 

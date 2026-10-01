@@ -63,64 +63,56 @@ pub fn validate_and_upgrade_url(url: &str) -> Result<String, String> {
     ))
 }
 
-pub fn extract_host(url: &str) -> Option<&str> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let host_port = rest.split('/').next()?;
-    if host_port.contains('@') {
-        return None; // userinfo (user:pass@) is not supported; reject clearly
+/// Parse the URL once with the `url` crate and return its canonical host and
+/// port. `url`'s host parsing lowercases domains and normalizes trailing
+/// dots, and reqwest keys its `resolve_to_addrs` override by the very same
+/// `host_str()` value — so THIS canonical string is the only key the caller
+/// may pin `GuardedDns` addresses under. Hand-parsing the URL string here
+/// instead would let spellings like `EXAMPLE.com` or `example.com.` silently
+/// miss the pin and fall back to live (unvetted) DNS.
+fn canonical_host_and_port(url: &str) -> Result<(String, u16), String> {
+    // The URL version in use rejects zone IDs outright, which would turn a
+    // fail-closed "blocked" verdict into a parse error; pre-check so a scoped
+    // literal can never fall through to DNS as a hostname.
+    if let Some(start) = url.find('[')
+        && let Some(end) = url[start..].find(']')
+        && url[start..start + end].contains('%')
+    {
+        return Err("blocked: zone-scoped IPv6 address is not allowed".into());
     }
-    if let Some(bracketed) = host_port.strip_prefix('[') {
-        bracketed.split(']').next()
-    } else {
-        host_port.split(':').next()
+    let parsed = url::Url::parse(url).map_err(|e| format!("cannot parse URL '{url}': {e}"))?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err(format!("URL must be http:// or https://, got: {url}"));
     }
-}
-
-pub fn extract_port(url: &str) -> Option<u16> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let host_port = rest.split('/').next()?;
-    if host_port.starts_with('[') {
-        let closing = host_port.find(']')?;
-        host_port
-            .get(closing + 1..)
-            .and_then(|s| s.strip_prefix(':'))
-            .and_then(|p| p.parse().ok())
-    } else {
-        host_port
-            .rsplit_once(':')
-            .and_then(|(_, port)| port.parse().ok())
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("userinfo (user:pass@) is not allowed in URLs".into());
     }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("cannot extract host from URL: {url}"))?
+        .to_string();
+    // Explicit ports win; webfetch upgrades http to https first, so the
+    // scheme default is 443 in practice.
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    Ok((host, port))
 }
 
 /// Resolve the URL's host and vet every answer. On success the caller must pin
 /// `addrs` on its client so the connection cannot be re-resolved to a
 /// different (possibly private) address between check and connect.
 pub async fn resolve_and_check_ssrf(url: &str) -> Result<GuardedDns, String> {
-    if let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        && rest.split('/').next().is_some_and(|hp| hp.contains('@'))
-    {
-        return Err("userinfo (user:pass@) is not allowed in URLs".into());
-    }
-    let host = extract_host(url).ok_or("cannot extract host from URL")?;
+    let (host, port) = canonical_host_and_port(url)?;
 
-    if let Some(ip) = parse_literal_ip(host)? {
+    if let Some(ip) = parse_literal_ip(&host)? {
         if is_private_ip(&ip) {
             return Err(format!("blocked: {ip} is a private/metadata address"));
         }
-        let port = extract_port(url).unwrap_or(443);
         return Ok(GuardedDns {
-            host: host.to_string(),
+            host,
             addrs: vec![SocketAddr::new(ip, port)],
         });
     }
 
-    let port = extract_port(url).unwrap_or(443);
     let addr = format!("{host}:{port}");
     let addrs: Vec<_> = resolve(&addr)
         .await
@@ -140,10 +132,7 @@ pub async fn resolve_and_check_ssrf(url: &str) -> Result<GuardedDns, String> {
         }
     }
 
-    Ok(GuardedDns {
-        host: host.to_string(),
-        addrs,
-    })
+    Ok(GuardedDns { host, addrs })
 }
 
 /// What to do with a redirect hop. `Stop` hands the hop back to the caller,
@@ -321,19 +310,52 @@ mod tests {
         assert!(validate_and_upgrade_url("example.com").is_err());
     }
 
+    /// Regression for the DNS-pin key mismatch: the URL must be parsed with
+    /// the `url` crate (not hand-split), because reqwest parses the request
+    /// URL with the same crate and keys `resolve_to_addrs` by its
+    /// `host_str()`. Any spelling difference between the pin key and the
+    /// host reqwest connects to silently falls back to unvetted live DNS.
     #[test]
-    fn extract_host_handles_ports_and_ipv6() {
-        assert_eq!(extract_host("https://example.com"), Some("example.com"));
+    fn canonical_host_matches_reqwest_resolve_key() {
+        // Mixed case: reqwest connects to a URL parsed with the same crate,
+        // so its key is `example.com`; the vetted GuardedDns host must be
+        // exactly that string for the pin to apply.
         assert_eq!(
-            extract_host("https://example.com:8080/path"),
-            Some("example.com")
+            canonical_host_and_port("https://EXample.COM/path").unwrap(),
+            ("example.com".to_string(), 443)
         );
-        assert_eq!(extract_host("https://[::1]/path"), Some("::1"));
-        assert_eq!(extract_host("https://[::1]:8080/path"), Some("::1"));
-        assert_eq!(extract_host("https://192.168.1.1:443"), Some("192.168.1.1"));
-        assert_eq!(extract_host("not-a-url"), None);
-        assert_eq!(extract_host("https://user:pass@127.0.0.1/"), None);
-        assert_eq!(extract_host("https://@192.168.1.1/"), None);
+        // Trailing-dot spelling: the url crate keeps the dot, and reqwest
+        // will ask for exactly the same string — the invariant is that the
+        // pin key IS the url-crate `host_str()`, dot or no dot, never a
+        // hand-re-parsed variant of it.
+        assert_eq!(
+            canonical_host_and_port("https://www.example.com./").unwrap(),
+            (
+                url::Url::parse("https://www.example.com./")
+                    .unwrap()
+                    .host_str()
+                    .unwrap()
+                    .to_string(),
+                443
+            )
+        );
+        // Ports: explicit port wins; https defaults to 443.
+        assert_eq!(
+            canonical_host_and_port("https://example.com:8443/x").unwrap(),
+            ("example.com".to_string(), 8443)
+        );
+        // IPv6 literal: the url crate's `host_str()` keeps the brackets, and
+        // reqwest's override lookup uses the URI host in the same bracketed
+        // form — the old hand-parser stripped brackets and its IPv6 pins
+        // silently missed.
+        assert_eq!(
+            canonical_host_and_port("https://[::1]:9090/path").unwrap(),
+            ("[::1]".to_string(), 9090)
+        );
+        // Garbage and non-http(s) schemes are rejected, as is userinfo.
+        assert!(canonical_host_and_port("not-a-url").is_err());
+        assert!(canonical_host_and_port("ftp://example.com").is_err());
+        assert!(canonical_host_and_port("https://user:pass@127.0.0.1/").is_err());
     }
 
     #[tokio::test]
@@ -342,15 +364,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("userinfo"), "{err}");
-    }
-
-    #[test]
-    fn extract_port_handles_ports_and_ipv6() {
-        assert_eq!(extract_port("https://example.com"), None);
-        assert_eq!(extract_port("https://example.com:8080/path"), Some(8080));
-        assert_eq!(extract_port("https://[::1]/path"), None);
-        assert_eq!(extract_port("https://[::1]:9090/path"), Some(9090));
-        assert_eq!(extract_port("http://example.com:3000"), Some(3000));
     }
 
     #[tokio::test]

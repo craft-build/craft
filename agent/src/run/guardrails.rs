@@ -53,6 +53,9 @@ struct ToolTracker {
     last_result_hash: Option<u64>,
     same_result_count: usize,
     last_input_hash: Option<u64>,
+    /// Input hash of the most recent *errored* call: the exact-failure
+    /// streak only grows while consecutive failures repeat this input.
+    last_error_hash: Option<u64>,
 }
 
 impl ToolTracker {
@@ -63,6 +66,7 @@ impl ToolTracker {
             last_result_hash: None,
             same_result_count: 0,
             last_input_hash: None,
+            last_error_hash: None,
         }
     }
 }
@@ -148,7 +152,16 @@ impl ToolGuardrails {
         let mut warning = None;
 
         if is_error {
-            tracker.exact_fail_count += 1;
+            // "Exact" means the same call failing again: only an input
+            // identical to the last errored call continues the streak, so
+            // alternating between genuinely different failures cannot
+            // trip the exact-loop thresholds.
+            if tracker.last_error_hash == Some(input_hash) {
+                tracker.exact_fail_count += 1;
+            } else {
+                tracker.exact_fail_count = 1;
+            }
+            tracker.last_error_hash = Some(input_hash);
             tracker.any_fail_count += 1;
 
             if tracker.exact_fail_count == EXACT_REPEAT_WARN {
@@ -166,6 +179,7 @@ impl ToolGuardrails {
             }
         } else {
             tracker.exact_fail_count = 0;
+            tracker.last_error_hash = None;
             // A success means the tool is working again: clear the streak so
             // non-consecutive failures cannot accumulate into a block.
             tracker.any_fail_count = 0;
@@ -202,6 +216,50 @@ impl ToolGuardrails {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn alternating_failures_never_trip_exact_loop() {
+        // Two different failing inputs alternating must leave the exact-failure
+        // streak at 1, so the exact-repeat thresholds never fire; only the
+        // same-tool streak (its own guardrail) may warn.
+        let mut g = ToolGuardrails::new();
+        for _ in 0..EXACT_REPEAT_BLOCK * 2 {
+            g.record_result("bash", &json!("cmd_a"), "err", true, false);
+            g.record_result("bash", &json!("cmd_b"), "err", true, false);
+        }
+        assert_eq!(
+            g.check_before_call("bash", &json!("cmd_a"), false),
+            GuardrailDecision::Block,
+            "only the any-failure circuit breaker may trip"
+        );
+        let mut g = ToolGuardrails::new();
+        g.record_result("bash", &json!("cmd_a"), "err", true, false);
+        g.record_result("bash", &json!("cmd_b"), "err", true, false);
+        // The last errored call was cmd_b: the differing failures left the
+        // exact streak at 1 (the unchecked counter would already have hit
+        // EXACT_REPEAT_WARN) and any_fail below the same-tool warn, so
+        // neither guardrail fires here.
+        assert_eq!(
+            g.check_before_call("bash", &json!("cmd_b"), false),
+            GuardrailDecision::Allow
+        );
+    }
+
+    #[test]
+    fn interleaved_failure_prevents_exact_loop_block() {
+        // A, A, B, A: the differing failure in the middle resets the exact
+        // streak, so the last call leaves it at 1 — only the same-tool
+        // failure warn applies. Under the old unconditional counter the
+        // streak would have reached EXACT_REPEAT_BLOCK and blocked.
+        let mut g = ToolGuardrails::new();
+        for input in ["cmd_a", "cmd_a", "cmd_b", "cmd_a"] {
+            g.record_result("bash", &json!(input), "err", true, false);
+        }
+        assert_eq!(
+            g.check_before_call("bash", &json!("cmd_a"), false),
+            GuardrailDecision::Warn
+        );
+    }
 
     #[test]
     fn allow_when_no_history() {

@@ -70,8 +70,23 @@ pub async fn fetch_usage(config: &ProviderConfig) -> Result<Option<ProviderUsage
         .or_else(|| config.kind.api_key_env_default().map(str::to_string))
         .unwrap_or_else(|| "DEEPSEEK_API_KEY".to_string());
     let key = credential(&env_name)?;
-    let body = get_text(&key, DEEPSEEK_BALANCE_URL).await?;
+    let body = get_text(&key, &deepseek_balance_url(config)).await?;
     Ok(Some(parse_deepseek_balance(&body)))
+}
+
+/// Balance endpoint for this config. With no `base_url` override the known
+/// DeepSeek endpoint is used. When `base_url` IS overridden the hardcoded
+/// `api.deepseek.com` must NOT be contacted — the bearer key would leak to a
+/// host the user never consented to (corporate proxies, mirrors). The balance
+/// path lives above the `/v1` API prefix, matching how `openai_compat`
+/// normalizes a configured base (`trim_end_matches('/')`).
+fn deepseek_balance_url(config: &ProviderConfig) -> String {
+    let Some(base) = config.base_url.as_deref() else {
+        return DEEPSEEK_BALANCE_URL.to_string();
+    };
+    let base = base.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{base}/user/balance")
 }
 
 async fn get_text(key: &str, url: &str) -> Result<String> {
@@ -162,6 +177,39 @@ mod tests {
         assert_eq!(
             limit.detail.as_deref(),
             Some("total: $110.00, topped-up: $100.00, granted: $10.00")
+        );
+    }
+
+    fn deepseek_config(base_url: Option<&str>) -> ProviderConfig {
+        ProviderConfig {
+            kind: ProviderKind::Deepseek,
+            api_key_env: None,
+            base_url: base_url.map(str::to_string),
+            api_version: None,
+            account_id: None,
+            discover_models: false,
+            models: Default::default(),
+        }
+    }
+
+    /// Regression for the credential-exfiltration hazard: with an overridden
+    /// base_url the bearer key must never be posted to api.deepseek.com.
+    #[test]
+    fn custom_base_url_never_targets_the_hardcoded_deepseek_host() {
+        let url = deepseek_balance_url(&deepseek_config(Some("https://proxy.corp.example/v1")));
+        assert_eq!(url, "https://proxy.corp.example/user/balance");
+        assert!(!url.contains("api.deepseek.com"), "{url}");
+
+        // Base without the /v1 prefix also works, trailing slashes trimmed.
+        let url = deepseek_balance_url(&deepseek_config(Some("https://mirror.example/")));
+        assert_eq!(url, "https://mirror.example/user/balance");
+    }
+
+    #[test]
+    fn default_base_url_uses_the_known_deepseek_endpoint() {
+        assert_eq!(
+            deepseek_balance_url(&deepseek_config(None)),
+            DEEPSEEK_BALANCE_URL
         );
     }
 

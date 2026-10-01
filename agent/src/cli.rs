@@ -786,15 +786,7 @@ mod tests {
 /// stream-json`), or a verbose transcript (`--verbose`). SDK-mode
 /// stream-json input remains unported.
 pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<()> {
-    for flag in ["--fork-session", "--include-partial-messages"] {
-        let set = match flag {
-            "--fork-session" => cli.fork_session,
-            _ => cli.include_partial_messages,
-        };
-        if set {
-            eprintln!("warning: {flag} is accepted but not implemented yet");
-        }
-    }
+    // One warning per unimplemented option, in a stable order.
     for flag in [
         "--image",
         "--verbose",

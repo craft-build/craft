@@ -145,8 +145,10 @@ impl ApplyPatch {
             )));
         }
         workspace.note_snapshot(&path);
-        let mut staged =
-            tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(io_error)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| failure("resolved path has no parent directory"))?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
         staged.write_all(contents.as_bytes()).map_err(io_error)?;
         staged.as_file().sync_all().map_err(io_error)?;
         if workspace.target(requested)? != path || path.exists() {

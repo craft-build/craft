@@ -502,9 +502,15 @@ fn write_statement(out: &mut String, stmt: &Statement, indent: usize, is_root: b
                     labels
                         .iter()
                         .map(|l| {
+                            // Escape so the double-quoted label re-parses to
+                            // the same string under the parser's strict
+                            // unescape rules (`\"`, `\\`, `\n`, ...); an
+                            // unescaped `"` or `\` would corrupt write-back.
                             format!(
                                 " \"{}\"",
-                                l.as_string().map(String::as_str).unwrap_or_default()
+                                barkml::escape_string(
+                                    l.as_string().map(String::as_str).unwrap_or_default()
+                                )
                             )
                         })
                         .collect::<String>()
@@ -642,6 +648,21 @@ mod tests {
         let doc = Statement::new_module("main", IndexMap::new(), meta());
         let text = to_text(&doc);
         assert!(text.trim().is_empty() || parse(&text).is_ok(), "{text}");
+    }
+
+    #[test]
+    fn to_text_escapes_labels_for_round_trip() {
+        let mut doc = Statement::new_module("main", IndexMap::new(), meta());
+        let label = "my \"quoted\" srv \\ dir\ttab\nnewline";
+        let block = ensure_labeled_block(&mut doc, "mcp", label);
+        upsert_assign(block, "enabled", bool_value(true));
+        let text = to_text(&doc);
+        let reparsed =
+            parse(&text).unwrap_or_else(|error| panic!("reparse failed: {error}\n{text}"));
+        assert_eq!(find_label(&reparsed, "mcp").as_deref(), Some(label));
+        let block = reparsed.blocks().find(|(id, _, _)| *id == "mcp").unwrap().2;
+        let enabled = block.find_child("enabled").unwrap().get_value().unwrap();
+        assert_eq!(enabled.as_bool(), Some(&true));
     }
 
     #[test]
