@@ -4,11 +4,13 @@
 //! flags are parsed and stored here for the full headless mode (task 84).
 
 use std::io::IsTerminal;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::error::{InvalidSnafu, Result};
 use crate::id::SessionRef;
+use crate::run::BeforeExecute;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -40,6 +42,34 @@ pub enum CliMode {
     /// Parsed for compatibility, rejected by [`Cli::validate`] until Flow
     /// mode is ported (task 99).
     Flow,
+}
+
+/// The resolved permission posture for a run: standard (fail closed on
+/// unresolved asks headlessly), `--yolo` (bypass every check, including
+/// deny rules), or `-A/--auto-review` (a reviewer answers asks). A single
+/// choice: the two bypasses are mutually exclusive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PermissionPolicy {
+    #[default]
+    Standard,
+    Yolo,
+    AutoReview,
+}
+
+impl PermissionPolicy {
+    /// Map the parsed flags, rejecting the impossible combination up front
+    /// so every surface (print, term, recipe, TUI) enforces the same rule.
+    pub fn from_flags(yolo: bool, auto_review: bool) -> Result<Self> {
+        match (yolo, auto_review) {
+            (true, true) => InvalidSnafu {
+                reason: "--yolo and --auto-review are mutually exclusive".to_string(),
+            }
+            .fail(),
+            (true, false) => Ok(Self::Yolo),
+            (false, true) => Ok(Self::AutoReview),
+            (false, false) => Ok(Self::Standard),
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -336,10 +366,17 @@ impl Cli {
         self.print && matches!(self.input_format, InputFormat::StreamJson)
     }
 
+    /// The run's permission policy from `--yolo` / `-A`; the exclusive
+    /// pair is rejected here (via [`Cli::validate`]) for every surface.
+    pub fn permission_policy(&self) -> Result<PermissionPolicy> {
+        PermissionPolicy::from_flags(self.yolo, self.auto_review)
+    }
+
     /// Cross-flag validation the reference performs before dispatch.
     /// Parse-level mistakes (bad enum values, unknown flags) are already
     /// handled by clap.
     pub fn validate(&self) -> Result<()> {
+        self.permission_policy()?;
         if matches!(self.mode, CliMode::Flow) {
             return InvalidSnafu {
                 reason: "--mode flow is not available yet (Flow mode is ported last)",
@@ -528,6 +565,7 @@ mod tests {
         assert_eq!(cli.output_format, OutputFormat::Text);
         assert_eq!(cli.input_format, InputFormat::Text);
         assert!(cli.images.is_empty());
+        assert_eq!(cli.permission_policy().unwrap(), PermissionPolicy::Standard);
         assert!(cli.validate().is_ok());
     }
 
@@ -577,6 +615,59 @@ mod tests {
         assert!(cli.auto_review);
         assert_eq!(cli.allowed_tools, ["Read", "Grep"]);
         assert_eq!(cli.disallowed_tools, ["bash"]);
+        // Parsing accepts both; the pair is rejected by validate() (and by
+        // the policy mapping), never by the flag surface itself.
+        assert!(cli.permission_policy().is_err());
+    }
+
+    #[test]
+    fn permission_policy_maps_flags_and_rejects_the_pair() {
+        assert_eq!(
+            parse(&["-p", "hi"]).unwrap().permission_policy().unwrap(),
+            PermissionPolicy::Standard
+        );
+        assert_eq!(
+            parse(&["-p", "--yolo", "hi"])
+                .unwrap()
+                .permission_policy()
+                .unwrap(),
+            PermissionPolicy::Yolo
+        );
+        assert_eq!(
+            parse(&["-p", "-A", "hi"])
+                .unwrap()
+                .permission_policy()
+                .unwrap(),
+            PermissionPolicy::AutoReview
+        );
+        let both = parse(&["--yolo", "-A", "hi"]).unwrap();
+        let err = both.validate().unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+    }
+
+    /// Print, term, and recipe all resolve their policy from the same
+    /// top-level flags, and print lands it on the query itself.
+    #[test]
+    fn every_entry_point_maps_the_same_policy() {
+        for args in [
+            vec!["--yolo", "-p", "hi"],
+            vec!["--yolo", "term", "run", "fix it"],
+            vec!["--yolo", "recipe", "run", "audit"],
+        ] {
+            let cli = parse(&args).unwrap();
+            assert_eq!(
+                cli.permission_policy().unwrap(),
+                PermissionPolicy::Yolo,
+                "{args:?}"
+            );
+        }
+        let cli = parse(&["-p", "-A", "hi"]).unwrap();
+        let query = HeadlessQuery::for_print(&cli, "hi".into(), None).unwrap();
+        assert_eq!(query.policy, PermissionPolicy::AutoReview);
+        assert_eq!(query.session_id, None);
+        // The impossible pair is rejected at the mapping, not just validate.
+        let both = parse(&["-p", "--yolo", "-A", "hi"]).unwrap();
+        assert!(HeadlessQuery::for_print(&both, "hi".into(), None).is_err());
     }
 
     #[test]
@@ -827,16 +918,7 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
     config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
     run_headless_query(
         config,
-        HeadlessQuery {
-            prompt,
-            context: Vec::new(),
-            images: cli.images.clone(),
-            model: cli.model.clone(),
-            output_format: cli.output_format.clone(),
-            verbose: cli.verbose,
-            mode: cli.mode.clone(),
-            session_id: cli.resume_session()?,
-        },
+        HeadlessQuery::for_print(cli, prompt, cli.resume_session()?)?,
     )
     .await
 }
@@ -871,6 +953,27 @@ pub struct HeadlessQuery {
     pub verbose: bool,
     pub mode: CliMode,
     pub session_id: Option<SessionRef>,
+    /// Whether `--yolo` / `-A` bypass the permission gate.
+    pub policy: PermissionPolicy,
+}
+
+impl HeadlessQuery {
+    /// The `--print` mapping, straight off the parsed CLI, so the
+    /// flag→policy mapping is unit-testable without loading config or
+    /// touching the network.
+    pub fn for_print(cli: &Cli, prompt: String, session_id: Option<SessionRef>) -> Result<Self> {
+        Ok(Self {
+            prompt,
+            context: Vec::new(),
+            images: cli.images.clone(),
+            model: cli.model.clone(),
+            output_format: cli.output_format.clone(),
+            verbose: cli.verbose,
+            mode: cli.mode.clone(),
+            session_id,
+            policy: cli.permission_policy()?,
+        })
+    }
 }
 
 pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery) -> Result<()> {
@@ -961,10 +1064,28 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
     let cwd_str = cwd.display().to_string();
     // Headless session environment: instructions + permissions + workspace
     // + connected MCP, through the shared runtime setup contract. The
-    // permission engine is built here even though print mode consults
-    // nothing yet (the gate lands as its own task).
+    // permission policy lands on the engine before the gate reads it, and
+    // the gate below enforces it on every dispatch (batch children and
+    // subagents included).
     let env =
         crate::runtime::workspace_env(&cwd, crate::runtime::McpStartup::Connected, false).await?;
+    match q.policy {
+        PermissionPolicy::Standard => {}
+        PermissionPolicy::Yolo => env.permissions.set_yolo(true),
+        PermissionPolicy::AutoReview => env.permissions.set_auto_review(true),
+    }
+    // Destructive-hinted MCP tools must force a decision even under an
+    // allow rule, exactly like the TUI/ACP gates: feed the engine the
+    // published annotations before the gate reads it.
+    if let Some(mcp) = env.workspace.mcp() {
+        env.permissions.sync_mcp_annotations(&mcp);
+    }
+    let reviewer = (q.policy == PermissionPolicy::AutoReview)
+        .then(|| crate::auto_review::reviewer_for(model.clone()));
+    let before = Some(Arc::new(crate::headless::HeadlessGate::new(
+        Arc::clone(&env.permissions),
+        reviewer,
+    )) as Arc<dyn BeforeExecute>);
     let workspace = env.workspace;
     let state_dir = crate::storage::StateDir::resolve().ok();
 
@@ -1016,7 +1137,7 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
         model_spec: params.model_spec.clone(),
         run: params,
         workspace,
-        before: None,
+        before,
         prompt,
         images,
         initial_wd: cwd,

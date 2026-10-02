@@ -46,7 +46,9 @@ async fn main() -> Result<(), Error> {
             tools,
             names,
         }) => craft::subcmd::prompt(variant.clone(), *plan, *tools, *names).await,
-        Some(Commands::Term { action }) => craft::term::run(action.clone()).await,
+        Some(Commands::Term { action }) => {
+            craft::term::run(action.clone(), cli.permission_policy()?).await
+        }
         Some(Commands::Recipe { action }) => match action.clone() {
             craft::cli::RecipeAction::List => craft::subcmd::recipe_list().await,
             craft::cli::RecipeAction::Run {
@@ -54,7 +56,16 @@ async fn main() -> Result<(), Error> {
                 param,
                 model,
                 output_format,
-            } => craft::subcmd::recipe_run(&name, &param, model, output_format).await,
+            } => {
+                craft::subcmd::recipe_run(
+                    &name,
+                    &param,
+                    model,
+                    output_format,
+                    cli.permission_policy()?,
+                )
+                .await
+            }
         },
         None => {
             let mut config = Config::load().await?;

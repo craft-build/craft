@@ -219,10 +219,24 @@ impl ArgosyService {
         }
     }
 
-    /// The process-global service, built on first use.
+    /// The process-global service, built on first use. Construction may
+    /// build a `reqwest::blocking` client from the decision config, which
+    /// panics inside an async context — so the first build hops to a plain
+    /// thread when the caller is on a runtime.
     pub fn global() -> &'static Self {
         static SERVICE: OnceLock<ArgosyService> = OnceLock::new();
-        SERVICE.get_or_init(ArgosyService::new)
+        if let Some(service) = SERVICE.get() {
+            return service;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            return SERVICE.get_or_init(Self::new);
+        }
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| SERVICE.get_or_init(Self::new))
+                .join()
+                .expect("argosy service init thread panicked")
+        })
     }
 
     /// The configured decision endpoint provider (a `Disabled` no-op when

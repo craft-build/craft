@@ -469,6 +469,7 @@ pub async fn recipe_run(
     raw_params: &[String],
     model: Option<String>,
     output_format: crate::cli::OutputFormat,
+    policy: crate::cli::PermissionPolicy,
 ) -> Result<()> {
     use std::io::{BufRead, Write};
 
@@ -573,6 +574,7 @@ pub async fn recipe_run(
             verbose: false,
             mode: crate::cli::CliMode::Build,
             session_id: None,
+            policy,
         },
     )
     .await

@@ -63,7 +63,7 @@ When a request still overflows after compaction, an escalating ladder collapses 
 
 Every execution surface (TUI, `--print` headless, ACP) obtains the shared pieces of a session from `agent/src/runtime.rs`, so equivalent sessions receive equivalent run policies:
 
-- `runtime::workspace_env(cwd, mcp, install_reviewer)` — instruction discovery, the workspace (MCP handle installed), and the permission engine. All surfaces construct the `PermissionManager`, even where nothing consults it yet.
+- `runtime::workspace_env(cwd, mcp, install_reviewer)` — instruction discovery, the workspace (MCP handle installed), and the permission engine. Every surface constructs the `PermissionManager` and consults it: the TUI prompt overlay, the ACP `session/request_permission`, and the headless gate below.
 - `runtime::catalog_metadata` / `runtime::ResolvedModel` — a model choice plus its catalog metadata (`context_length`, `max_output_tokens`). Lookup only: it never enforces catalog membership, so `--model` ids the catalog does not list stay usable.
 - `runtime::new_compaction_state` / `runtime::compaction_ctx` — the session-shared compaction state (linked to the dedup cache and guardrail counters) and the per-run context (stages, buffer, window). Headless `--print` runs carry this too: output caps are clamped into the model's context window and in-run overflow recovery compacts and retries.
 - `runtime::run_policy` — the only `RunParams` constructor: system prompt, sampling, turn bound, continuation bound, compression, compaction, reauth hook, model spec, advisor.
@@ -100,6 +100,7 @@ Paths are workspace-relative or absolute beneath the canonical workspace root; `
 ## Permissions, snapshots, auto-review
 
 - BML rule blocks (allow / deny / ask, scoped to bash or MCP, wildcards). Bash commands are parsed so compound commands request each sub-command's approval. `--yolo` / `--dangerously-skip-permissions` disables prompting.
+- Headless runs (`--print`, `term run`, `recipe run`) enforce the same rules through a permission gate with no interactive approver: unresolved asks fail closed with guidance naming the opt-outs, and denied calls never execute. `--yolo` (bypass everything) and `-A/--auto-review` (an LLM or decision-endpoint reviewer answers asks, fail-closed) are the deliberate opt-outs — mutually exclusive, rejected at `Cli::validate`. The gate covers batch children and subagent dispatch.
 - Auto-review mode (`-A/--auto-review`): an LLM reviewer answers permission prompts, fail-closed below a confidence threshold.
 - Snapshots: files are snapshotted before mutations (first-wins, ≤5 MiB, text only) and `/undo` walks them back.
 
@@ -111,7 +112,7 @@ Sessions are crash-safe append-only JSONL files with an index, archive, and usag
 
 ## CLI
 
-`crafty` (binary) supports `--print` (headless, `--output-format text|stream-json`, Claude Code-compatible), `--image PATH`, `-m/--model provider/model`, `-c` continue, `-s/--session` resume, `--mode build|plan`, `--allowedTools` / `--disallowed-tools`, `--max-turns`, `--system-prompt` overrides, and a set of accepted-but-ignored Claude Code SDK compatibility flags.
+`crafty` (binary) supports `--print` (headless, `--output-format text|stream-json`, Claude Code-compatible), `--image PATH`, `-m/--model provider/model`, `-c` continue, `-s/--session` resume, `--mode build|plan`, `--allowedTools` / `--disallowed-tools`, `--max-turns`, `--system-prompt` overrides, `--yolo` / `-A/--auto-review` (permission policy; enforced in headless runs too), and a set of accepted-but-ignored Claude Code SDK compatibility flags.
 
 Subcommands: `acp` (agent-client-protocol server on stdio), `completions <shell>`, `models`, `stats [--sessions]`, `doctor [--export]` (diagnose and self-heal provider config), `update [-y]` / `rollback` (digest-pinned self-update), `prompt [system|research|general] [--plan|--tools|--names]`, `term init|log|run|info` (shell integration), `recipe list|run`.
 

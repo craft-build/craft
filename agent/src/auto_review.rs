@@ -12,6 +12,7 @@
 //! compaction summarizer. Deviation: no reviewer-side cancel token (the
 //! reference races one); the deadline alone bounds the call.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use rig_core::completion::{CompletionModel, message::AssistantContent};
@@ -192,6 +193,50 @@ pub async fn decide_with_endpoint(
         },
         rationale: format!("decision endpoint confidence {confidence:.2}"),
     })
+}
+
+// --- Injectable reviewer seam -----------------------------------------------
+//
+// Shared by the TUI and headless approval gates so both ask the same
+// question the same way; tests inject scripted verdicts instead of a live
+// provider.
+
+/// One-shot reviewer call answering a NeedsPrompt decision.
+pub(crate) type Reviewer = Arc<
+    dyn Fn(String, Vec<String>) -> crate::run::BoxFuture<Result<Decision, ReviewError>>
+        + Send
+        + Sync,
+>;
+
+/// Production reviewer: one locked-down model call per NeedsPrompt decision.
+pub(crate) fn model_reviewer(model: crate::providers::DynamicModel) -> Reviewer {
+    Arc::new(move |tool, scopes| {
+        let model = model.clone();
+        Box::pin(async move { review(&model, &tool, &scopes).await })
+    })
+}
+
+/// Decision-endpoint reviewer (Phase 2 of the argosy integration): when
+/// `decision.enabled` is set in the argosy user config, permission prompts
+/// are answered by the Jev/laya endpoint via the argosy decision API
+/// instead of the LLM reviewer. Failures deny without recording a rule,
+/// exactly like the model reviewer.
+pub(crate) fn endpoint_reviewer(provider: Arc<dyn argosy::decision::DecisionProvider>) -> Reviewer {
+    Arc::new(move |tool, scopes| {
+        let provider = provider.clone();
+        Box::pin(async move { decide_with_endpoint(provider, &tool, &scopes).await })
+    })
+}
+
+/// The auto-review reviewer for a session: the decision endpoint when it is
+/// enabled, otherwise the locked-down LLM reviewer.
+pub(crate) fn reviewer_for(model: crate::providers::DynamicModel) -> Reviewer {
+    let decision = crate::knowledge::ArgosyService::global().decision();
+    if decision.is_enabled() {
+        endpoint_reviewer(decision)
+    } else {
+        model_reviewer(model)
+    }
 }
 
 fn review_message(tool: &str, scopes: &[String]) -> Message {

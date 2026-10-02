@@ -15,7 +15,7 @@ use crate::tools::Workspace;
 
 use super::super::cards::{self, Files};
 use super::SessionState;
-use super::approval::{ApprovalGate, auto_review_reviewer};
+use super::approval::ApprovalGate;
 use super::usage_recorder::record_run_usage;
 use crate::tui::provider::{AgentEvent, PlanItem, Status, Tone, ToolCallData};
 
@@ -609,7 +609,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         tx.clone(),
         cancel.clone(),
         permissions.clone(),
-        Some(auto_review_reviewer(model.clone())),
+        Some(crate::auto_review::reviewer_for(model.clone())),
     ));
     // The question seam (A.5) is per-turn like the approval gate; the
     // subagent launcher is installed on the same clone, carrying the

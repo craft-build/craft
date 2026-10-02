@@ -612,6 +612,75 @@ mod tests {
         );
         assert_eq!(state.error.as_deref(), Some("provider exploded"));
         assert_eq!(state.result_text, "provider exploded");
+        // The exit contract: a run failure surfaces as an error so the
+        // caller exits nonzero. A permission denial is NOT one (below).
+        assert_eq!(
+            state.finish(&OutputFormat::StreamJson, 5).unwrap(),
+            Some("provider exploded".to_string())
+        );
+    }
+
+    /// The event sequence a denied headless call produces: the deny rides
+    /// the tool-results wave (the `user` event), the run still ends as a
+    /// normal success, so text mode prints the reply and exits zero.
+    #[test]
+    fn denied_run_transcript_carries_the_deny_and_still_succeeds() {
+        let mut state = transcript();
+        state.init("/project", &["bash".into()]).unwrap();
+        state
+            .observe(Event::ToolStart {
+                id: "t1".into(),
+                name: "bash".into(),
+                arguments: json!({"command": "rm -rf /"}),
+            })
+            .unwrap();
+        state
+            .observe(Event::TurnComplete {
+                usage: Usage::default(),
+                context_size: 10,
+            })
+            .unwrap();
+        state
+            .observe(Event::ToolResultsSubmitted {
+                message: Message::User {
+                    content: vec![UserContent::ToolResult(ToolResult::text(
+                        "t1",
+                        "bash",
+                        "Permission denied for `bash` (`rm -rf /`). User guidance: \
+                         this headless run has no interactive approver.",
+                    ))],
+                },
+            })
+            .unwrap();
+        assert!(
+            state
+                .observe(Event::Done {
+                    usage: Usage::default(),
+                    context_size: 10,
+                    context_window: 0,
+                    num_turns: 1,
+                    reason: DoneReason::Stop,
+                    cost: None,
+                    by_model: Default::default(),
+                })
+                .unwrap()
+        );
+
+        // The deny-bearing results wave is emitted as a `user` event.
+        let events = match std::mem::replace(&mut state.out, WireOut::None) {
+            WireOut::Json(events) => events,
+            _ => panic!("verbose text mode collects a JSON array"),
+        };
+        let user = events
+            .iter()
+            .find(|e| e["type"] == "user")
+            .expect("the tool-results wave emits a user event");
+        assert!(
+            user.to_string().contains("Permission denied for"),
+            "the deny must ride the transcript: {user}"
+        );
+        // A denial is a normal outcome: no error, nonzero exit not owed.
+        assert_eq!(state.finish(&OutputFormat::Text, 10).unwrap(), None);
     }
 
     #[test]

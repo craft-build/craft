@@ -27,7 +27,7 @@ struct ShellEntry {
     ts: u64,
 }
 
-pub async fn run(action: TermAction) -> Result<()> {
+pub async fn run(action: TermAction, policy: crate::cli::PermissionPolicy) -> Result<()> {
     match action {
         TermAction::Init {
             shell,
@@ -38,7 +38,7 @@ pub async fn run(action: TermAction) -> Result<()> {
             query,
             model,
             output_format,
-        } => run_query(query.join(" "), model, output_format).await,
+        } => run_query(query.join(" "), model, output_format, policy).await,
         TermAction::Info => info(),
     }
 }
@@ -128,6 +128,7 @@ async fn run_query(
     query: String,
     model: Option<String>,
     output_format: OutputFormat,
+    policy: crate::cli::PermissionPolicy,
 ) -> Result<()> {
     let history = read_history();
     let context = if history.is_empty() {
@@ -152,6 +153,7 @@ async fn run_query(
             verbose: false,
             mode: crate::cli::CliMode::default(),
             session_id: None,
+            policy,
         },
     )
     .await

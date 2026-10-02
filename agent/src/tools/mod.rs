@@ -154,6 +154,11 @@ pub struct Workspace {
     /// install a subagent launcher per turn; the default reports that
     /// subagents are unavailable.
     subagents: Arc<dyn task::SpawnSubagent>,
+    /// Session-wide before-execute hook (the approval gate). Applied inside
+    /// every dispatch-table registration, so the batch fan-out's snapshot of
+    /// the table — taken during registration, before any post-register
+    /// `ToolDispatch::with_before` could reach it — consults the gate too.
+    before: Option<Arc<dyn crate::run::dispatch::BeforeExecute>>,
     /// Phase 6: the turn's cancellation token, installed per turn like the
     /// question seam. MCP tool calls race it so a cancelled turn tells the
     /// server to stop. Shared cell so every clone (batch, subagents) sees
@@ -184,6 +189,7 @@ impl Workspace {
             mcp: std::sync::Arc::new(std::sync::RwLock::new(None)),
             subagents: Arc::new(task::NoSubagents),
             mcp_cancel: Default::default(),
+            before: None,
         })
     }
 
@@ -192,6 +198,14 @@ impl Workspace {
     #[cfg(test)]
     pub(crate) fn with_state_dir(mut self, dir: crate::storage::StateDir) -> Self {
         self.state_dir = Some(dir);
+        self
+    }
+
+    /// Install the session's before-execute hook (approval gate). See the
+    /// `before` field: registering through a workspace that carries the
+    /// hook is what gates batch children, not a post-register attach.
+    pub fn with_before(mut self, hook: Arc<dyn crate::run::dispatch::BeforeExecute>) -> Self {
+        self.before = Some(hook);
         self
     }
 
@@ -392,6 +406,11 @@ impl Workspace {
             .with_compression_store(self.compression_store.clone())
             .with_snapshots(self.snapshots.clone())
             .with_mode(mode);
+        // The gate must be in the table before the batch snapshot below.
+        let dispatch = match &self.before {
+            Some(hook) => dispatch.with_before(Arc::clone(hook)),
+            None => dispatch,
+        };
         let _ = batch.0.set(dispatch.clone());
         dispatch
     }
@@ -434,6 +453,11 @@ impl Workspace {
             .with_compression_store(self.compression_store.clone())
             .with_snapshots(self.snapshots.clone())
             .with_mode(crate::run::AgentMode::Build);
+        // Same as above: the subagent's own batch fan-out must see the gate.
+        let dispatch = match &self.before {
+            Some(hook) => dispatch.with_before(Arc::clone(hook)),
+            None => dispatch,
+        };
         let _ = batch.0.set(dispatch.clone());
         dispatch
     }

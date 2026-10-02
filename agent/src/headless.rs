@@ -20,8 +20,10 @@ use tokio::task::JoinHandle;
 
 use crate::history::{self, Message};
 use crate::id::SessionRef;
+use crate::permissions::{
+    PermissionCheck, PermissionError, PermissionManager, ToolKey, scope_for_call,
+};
 use crate::providers::DynamicModel;
-use crate::run::ToolDispatch;
 use crate::run::dispatch::BeforeExecute;
 use crate::run::events::{SessionEvents, event_stream};
 use crate::run::{Event, RunParams, cancel_channel};
@@ -196,6 +198,131 @@ impl SessionStore {
     }
 }
 
+/// The headless permission gate (`--print`, `craft term run`,
+/// `craft recipe run`): the permission engine decides every tool call, and
+/// where an interactive surface would prompt, headless fails closed — the
+/// auto-review reviewer answers when the session started with `-A`,
+/// otherwise the call is skipped with guidance naming the deliberate
+/// opt-outs. Installing it on the dispatch table covers batch children and
+/// subagent dispatch through the shared `before` hook; the `question` tool
+/// degrades to `DismissAsk` headlessly, so nothing can park on a user.
+pub struct HeadlessGate {
+    permissions: Arc<PermissionManager>,
+    /// One reviewer call per `NeedsPrompt` decision; `None` when the run
+    /// did not start with auto-review on.
+    reviewer: Option<crate::auto_review::Reviewer>,
+}
+
+impl HeadlessGate {
+    pub fn new(
+        permissions: Arc<PermissionManager>,
+        reviewer: Option<crate::auto_review::Reviewer>,
+    ) -> Self {
+        Self {
+            permissions,
+            reviewer,
+        }
+    }
+}
+
+impl BeforeExecute for HeadlessGate {
+    fn decide(&self, call: history::ToolCall) -> crate::run::BoxFuture<crate::run::Decision> {
+        let gate = Self {
+            permissions: Arc::clone(&self.permissions),
+            reviewer: self.reviewer.clone(),
+        };
+        Box::pin(async move { gate_decide(gate, call).await })
+    }
+}
+
+fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
+    PermissionError::new(&tool.to_string(), scopes).to_string()
+}
+
+/// What an unresolved ask becomes headlessly: a skip whose guidance says
+/// why and lists every deliberate opt-out, instead of hanging or allowing.
+fn headless_deny_message(tool: &ToolKey, scopes: &[String]) -> String {
+    PermissionError::with_guidance(
+        &tool.to_string(),
+        scopes,
+        "this headless run has no interactive approver, so the call was not run; \
+         re-run with --yolo to bypass permission checks, with -A/--auto-review \
+         to let a reviewer decide, or pre-approve the call in permissions.bml"
+            .to_string(),
+    )
+    .to_string()
+}
+
+async fn gate_decide(gate: HeadlessGate, call: history::ToolCall) -> crate::run::Decision {
+    let HeadlessGate {
+        permissions,
+        reviewer,
+    } = gate;
+    let name = call.function.name.as_str();
+    let tool = ToolKey::parse(name);
+    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &call.function.arguments);
+    match permissions.check_multi(&tool, &scopes, force_prompt) {
+        PermissionCheck::Allowed => crate::run::Decision::Run,
+        PermissionCheck::Denied => crate::run::Decision::Skip(denied_message(&tool, &scopes)),
+        PermissionCheck::NeedsPrompt { .. } => {
+            if permissions.is_auto_review()
+                && let Some(reviewer) = reviewer.as_ref()
+            {
+                auto_review_decide(reviewer, &permissions, &tool, &scopes).await
+            } else {
+                crate::run::Decision::Skip(headless_deny_message(&tool, &scopes))
+            }
+        }
+    }
+}
+
+/// Auto-review path for a `NeedsPrompt` decision: one reviewer call answers
+/// the prompt, its verdict is recorded as a session rule, and the outcome
+/// is reported back to the model. Reviewer failures (timeout, provider
+/// error, unparseable output) deny without recording a rule — the reviewer
+/// never actually decided. Mirrors the TUI gate minus the overlay events.
+async fn auto_review_decide(
+    reviewer: &crate::auto_review::Reviewer,
+    permissions: &Arc<PermissionManager>,
+    tool: &ToolKey,
+    scopes: &[String],
+) -> crate::run::Decision {
+    match reviewer(tool.to_string(), scopes.to_vec()).await {
+        Ok(decision) => {
+            let allow = decision.verdict == crate::auto_review::Verdict::Allow;
+            permissions.apply_auto_review(tool, scopes, allow);
+            eprintln!(
+                "auto-review {}: {} — {}",
+                decision.verdict.as_str(),
+                decision.risk.as_str(),
+                decision.rationale
+            );
+            if allow {
+                return crate::run::Decision::Run;
+            }
+            crate::run::Decision::Skip(
+                PermissionError::with_guidance(
+                    &tool.to_string(),
+                    scopes,
+                    format!("auto-review: {}", decision.rationale),
+                )
+                .to_string(),
+            )
+        }
+        Err(err) => {
+            eprintln!("auto-review failed closed: {err}");
+            crate::run::Decision::Skip(
+                PermissionError::with_guidance(
+                    &tool.to_string(),
+                    scopes,
+                    format!("auto-review denied this action: {err}"),
+                )
+                .to_string(),
+            )
+        }
+    }
+}
+
 /// A ready-to-run one-shot turn: model, run parameters, tools workspace,
 /// and the prompt to send.
 pub struct HeadlessParams {
@@ -274,6 +401,13 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             .as_ref()
             .and_then(|s| s.split('/').next().map(str::to_owned))
             .unwrap_or_default();
+        // The gate rides the workspace itself so every registration — the
+        // turn's table, batch fan-outs, subagent children — sees it; a
+        // post-register attach would miss the batch snapshot.
+        let gated_workspace = match &params.before {
+            Some(hook) => params.workspace.clone().with_before(Arc::clone(hook)),
+            None => params.workspace.clone(),
+        };
         let subagents = Arc::new(crate::subagent::SubagentLauncher {
             parent_model: params.model.clone(),
             parent_spec: params.model_spec.as_deref().unwrap_or("").to_owned(),
@@ -286,22 +420,17 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             },
             compression: run_params.compression.clone(),
             base_prompt: String::new(),
-            workspace: params.workspace.clone(),
+            workspace: gated_workspace.clone(),
             history: Vec::new(),
             cancel: cancel.clone(),
             cancels: Arc::new(crate::run::cancel::CancelMap::new()),
             emit: Arc::new(move |event| subagent_event_tx.send(event)),
             before: params.before.clone(),
         });
-        let mut tools = params
-            .workspace
-            .clone()
+        let tools = gated_workspace
             .with_subagents(subagents)
             .with_cancel(cancel.clone())
             .register();
-        if let Some(hook) = params.before {
-            tools = attach_before(tools, hook);
-        }
 
         let mut store = store;
         // The terminal Done's per-model ledger, captured from the event
@@ -456,6 +585,13 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 .as_ref()
                 .and_then(|s| s.split('/').next().map(str::to_owned))
                 .unwrap_or_default();
+            // The gate rides the workspace itself so every registration —
+            // this turn's table, batch fan-outs, subagent children — sees
+            // it; a post-register attach would miss the batch snapshot.
+            let turn_workspace = match &params.before {
+                Some(hook) => params.workspace.clone().with_before(Arc::clone(hook)),
+                None => params.workspace.clone(),
+            };
             let subagents = Arc::new(crate::subagent::SubagentLauncher {
                 parent_model: model.clone(),
                 parent_spec: model_spec.as_deref().unwrap_or("").to_owned(),
@@ -468,21 +604,14 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 },
                 compression: run_params.compression.clone(),
                 base_prompt: String::new(),
-                workspace: params.workspace.clone(),
+                workspace: turn_workspace.clone(),
                 history: history.clone(),
                 cancel: cancel.clone(),
                 cancels: Arc::new(crate::run::cancel::CancelMap::new()),
                 emit: Arc::new(move |event| turn_event_tx.send(event)),
                 before: params.before.clone(),
             });
-            let mut tools = params
-                .workspace
-                .clone()
-                .with_subagents(subagents)
-                .register();
-            if let Some(hook) = &params.before {
-                tools = attach_before(tools, Arc::clone(hook));
-            }
+            let tools = turn_workspace.with_subagents(subagents).register();
 
             let watcher = {
                 let cancel_rx = Arc::clone(&cancel_rx);
@@ -546,10 +675,6 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         persistence_error,
         task,
     }
-}
-
-fn attach_before(tools: ToolDispatch, hook: Arc<dyn BeforeExecute>) -> ToolDispatch {
-    tools.with_before(hook)
 }
 
 async fn drain_cancel(cancel_rx: &Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<()>>>) {
@@ -1039,5 +1164,494 @@ mod tests {
 
         drop(handle.input_tx);
         let _ = handle.task.await;
+    }
+
+    // --- HeadlessGate --------------------------------------------------------
+
+    use crate::permissions::{Effect, PermissionRule, PermissionsConfig, READ_ONLY_TOOLS};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn manager(root: &std::path::Path) -> Arc<PermissionManager> {
+        Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            root.to_path_buf(),
+        ))
+    }
+
+    fn deny(permissions: &PermissionManager, tool: ToolKey) {
+        permissions.add_session_rule(PermissionRule {
+            tool,
+            scope: None,
+            effect: Effect::Deny,
+        });
+    }
+
+    async fn decide(
+        gate: &HeadlessGate,
+        name: &str,
+        args: serde_json::Value,
+    ) -> crate::run::Decision {
+        gate.decide(history::ToolCall::new("t1", name, args)).await
+    }
+
+    fn allow_reviewer() -> (crate::auto_review::Reviewer, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let reviewer: crate::auto_review::Reviewer = Arc::new(move |_tool, _scopes| {
+            seen.fetch_add(1, Ordering::Relaxed);
+            let decision = crate::auto_review::Decision {
+                verdict: crate::auto_review::Verdict::Allow,
+                risk: crate::auto_review::Risk::Low,
+                rationale: "local read-only build".into(),
+            };
+            Box::pin(async move { Ok(decision) })
+        });
+        (reviewer, calls)
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_pass_the_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gate = HeadlessGate::new(manager(tmp.path()), None);
+        for name in READ_ONLY_TOOLS {
+            assert!(
+                matches!(
+                    decide(&gate, name, serde_json::json!({})).await,
+                    crate::run::Decision::Run
+                ),
+                "{name} should run without a decision"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_rules_block_bash_mutations_and_mcp_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        deny(&permissions, ToolKey::native("bash"));
+        deny(&permissions, ToolKey::native("write"));
+        deny(&permissions, ToolKey::parse("github__create_issue"));
+        let gate = HeadlessGate::new(permissions, None);
+        for (name, args) in [
+            ("bash", serde_json::json!({"command": "rm -rf /"})),
+            (
+                "write",
+                serde_json::json!({"path": "out.rs", "content": "x"}),
+            ),
+            ("github__create_issue", serde_json::json!({"title": "x"})),
+        ] {
+            match decide(&gate, name, args).await {
+                crate::run::Decision::Skip(reason) => assert!(
+                    reason.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+                    "{name}: {reason}"
+                ),
+                other => panic!("{name} must be denied, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unresolved_asks_fail_closed_with_headless_guidance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gate = HeadlessGate::new(manager(tmp.path()), None);
+        // `bash` defaults to an ask; headless has no approver to answer it.
+        match decide(&gate, "bash", serde_json::json!({"command": "cargo build"})).await {
+            crate::run::Decision::Skip(reason) => {
+                assert!(
+                    reason.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+                    "{reason}"
+                );
+                for opt in ["--yolo", "--auto-review", "permissions.bml"] {
+                    assert!(reason.contains(opt), "guidance must name {opt}: {reason}");
+                }
+            }
+            other => panic!("an unresolved ask must skip, not {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn destructive_mcp_hints_fail_closed_despite_allow_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        permissions.add_session_rule(PermissionRule {
+            tool: ToolKey::parse("db__drop_table"),
+            scope: None,
+            effect: Effect::Allow,
+        });
+        permissions.register_mcp_annotations("db", "drop_table", Some(false), Some(true));
+        let gate = HeadlessGate::new(permissions, None);
+        match decide(
+            &gate,
+            "db__drop_table",
+            serde_json::json!({"table": "users"}),
+        )
+        .await
+        {
+            crate::run::Decision::Skip(reason) => {
+                assert!(
+                    reason.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+                    "{reason}"
+                );
+                assert!(
+                    reason.contains("--yolo"),
+                    "guidance must name the opt-outs: {reason}"
+                );
+            }
+            other => panic!("a destructive hint must force a decision, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn yolo_runs_even_under_explicit_denies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        deny(&permissions, ToolKey::native("bash"));
+        permissions.set_yolo(true);
+        let gate = HeadlessGate::new(permissions, None);
+        assert!(matches!(
+            decide(&gate, "bash", serde_json::json!({"command": "rm -rf /"})).await,
+            crate::run::Decision::Run
+        ));
+    }
+
+    #[tokio::test]
+    async fn auto_review_allow_runs_and_records_a_session_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        permissions.set_auto_review(true);
+        let (reviewer, calls) = allow_reviewer();
+        let gate = HeadlessGate::new(Arc::clone(&permissions), Some(reviewer));
+        let args = serde_json::json!({"command": "cargo build"});
+        for _ in 0..2 {
+            assert!(matches!(
+                decide(&gate, "bash", args.clone()).await,
+                crate::run::Decision::Run
+            ));
+        }
+        // The recorded session rule answers the second call; one review.
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_review_deny_skips_with_rationale_and_sticks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        permissions.set_auto_review(true);
+        let reviewer: crate::auto_review::Reviewer = Arc::new(move |_tool, _scopes| {
+            let decision = crate::auto_review::Decision {
+                verdict: crate::auto_review::Verdict::Deny,
+                risk: crate::auto_review::Risk::High,
+                rationale: "destructive glob".into(),
+            };
+            Box::pin(async move { Ok(decision) })
+        });
+        let gate = HeadlessGate::new(Arc::clone(&permissions), Some(reviewer));
+        let args = serde_json::json!({"command": "rm -rf /"});
+        match decide(&gate, "bash", args.clone()).await {
+            crate::run::Decision::Skip(reason) => {
+                assert!(reason.contains("auto-review: destructive glob"), "{reason}");
+            }
+            other => panic!("a deny verdict must skip, not {other:?}"),
+        }
+        // The verdict became a session rule: the sibling call is denied
+        // outright, never reaching a reviewer.
+        let reason = match decide(&gate, "bash", args).await {
+            crate::run::Decision::Skip(reason) => reason,
+            other => panic!("expected the recorded deny, got {other:?}"),
+        };
+        assert!(!reason.contains("auto-review"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn auto_review_failure_fails_closed_without_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        permissions.set_auto_review(true);
+        let reviewer: crate::auto_review::Reviewer = Arc::new(move |_tool, _scopes| {
+            let error = crate::auto_review::ReviewError::Timeout {
+                deadline: std::time::Duration::from_secs(30),
+            };
+            Box::pin(async move { Err(error) })
+        });
+        let gate = HeadlessGate::new(Arc::clone(&permissions), Some(reviewer));
+        match decide(&gate, "bash", serde_json::json!({"command": "cargo build"})).await {
+            crate::run::Decision::Skip(reason) => {
+                assert!(reason.contains("auto-review denied"), "{reason}");
+            }
+            other => panic!("a failed review must deny, not {other:?}"),
+        }
+        // Nothing was decided, so nothing was recorded.
+        assert!(!matches!(
+            permissions.check(&ToolKey::native("bash"), &["cargo build".to_string()]),
+            PermissionCheck::Denied
+        ));
+        // And a session that somehow lost its reviewer still fails closed.
+        let gate = HeadlessGate::new(permissions, None);
+        assert!(matches!(
+            decide(&gate, "bash", serde_json::json!({"command": "cargo build"})).await,
+            crate::run::Decision::Skip(_)
+        ));
+    }
+
+    // --- Gate-wired execution -------------------------------------------------
+
+    /// The concatenated text of one tool result, for deny-text assertions.
+    fn result_text(result: &history::ToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                history::ToolResultContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn tool_results(events: &[Event]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ToolDone { name, result, .. } => Some((name.clone(), result_text(result))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A spawn-shaped [`HeadlessParams`] with the real gate installed:
+    /// permissions rooted at `tmp`, workspace at `tmp`.
+    fn gated(
+        model: DynamicModel,
+        tmp: &tempfile::TempDir,
+        permissions: Arc<PermissionManager>,
+        reviewer: Option<crate::auto_review::Reviewer>,
+    ) -> HeadlessParams {
+        let before = Some(
+            Arc::new(HeadlessGate::new(Arc::clone(&permissions), reviewer))
+                as Arc<dyn BeforeExecute>,
+        );
+        HeadlessParams {
+            model,
+            model_spec: Some(Arc::from("mock/model")),
+            run: RunParams::default(),
+            workspace: Workspace::new(tmp.path()).unwrap(),
+            before,
+            prompt: "go".into(),
+            images: Vec::new(),
+            initial_wd: tmp.path().to_path_buf(),
+            state_dir: Some(state_dir(tmp)),
+            session_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_calls_never_execute_and_report_back_to_the_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        deny(&permissions, ToolKey::native("bash"));
+        deny(&permissions, ToolKey::native("write"));
+        let marker = tmp.path().join("marker");
+        let model = mock(vec![
+            vec![
+                MockStreamEvent::tool_call(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": format!("touch {}", marker.display())}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::tool_call(
+                    "t2",
+                    "write",
+                    serde_json::json!({"path": "blocked.rs", "content": "never"}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done anyway"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let mut handle = spawn(gated(model, &tmp, permissions, None));
+        let events = drain_until_done(&mut handle.events).await;
+        let _ = handle.task.await;
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(Event::Done {
+                    reason: crate::run::DoneReason::Stop,
+                    ..
+                })
+            ),
+            "a denial is a normal end, not a run failure"
+        );
+        assert!(!marker.exists(), "the denied bash call must not run");
+        assert!(
+            !tmp.path().join("blocked.rs").exists(),
+            "the denied write must not run"
+        );
+        let results = tool_results(&events);
+        assert_eq!(results.len(), 2);
+        for (name, text) in &results {
+            assert!(
+                text.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+                "{name} result must carry the deny: {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn yolo_actually_runs_what_standard_denies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        deny(&permissions, ToolKey::native("write"));
+        permissions.set_yolo(true);
+        let model = mock(vec![
+            vec![
+                MockStreamEvent::tool_call(
+                    "t1",
+                    "write",
+                    serde_json::json!({"path": "free.rs", "content": "made it"}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let mut handle = spawn(gated(model, &tmp, permissions, None));
+        drain_until_done(&mut handle.events).await;
+        let _ = handle.task.await;
+        assert!(
+            tmp.path().join("free.rs").exists(),
+            "yolo must bypass the deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_review_allows_an_ask_into_execution() {
+        // `bash` is the genuine ask (never builtin-allowed); the sandbox
+        // wrapper must be off because nested sandbox-exec is denied on
+        // hosts that already run the test process sandboxed.
+        // SAFETY: single process-wide test knob, same as the bash tool tests.
+        unsafe { std::env::set_var("CRAFT_SANDBOX", "off") };
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        permissions.set_auto_review(true);
+        let (reviewer, _calls) = allow_reviewer();
+        let marker = tmp.path().join("reviewed-marker");
+        let model = mock(vec![
+            vec![
+                MockStreamEvent::tool_call(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": format!("touch {}", marker.display())}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let mut handle = spawn(gated(model, &tmp, permissions, Some(reviewer)));
+        let events = drain_until_done(&mut handle.events).await;
+        let _ = handle.task.await;
+        assert!(
+            marker.exists(),
+            "an allowed verdict must let the call execute: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_children_go_through_the_headless_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = manager(tmp.path());
+        // The parent batch call is allowed so the children are what matter.
+        permissions.add_session_rule(PermissionRule {
+            tool: ToolKey::native("batch"),
+            scope: None,
+            effect: Effect::Allow,
+        });
+        deny(&permissions, ToolKey::native("write"));
+        let model = mock(vec![
+            vec![
+                MockStreamEvent::tool_call(
+                    "t1",
+                    "batch",
+                    serde_json::json!({"tool_calls": [
+                        {"tool": "write", "parameters": {"path": "child.rs", "content": "no"}}
+                    ]}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let mut handle = spawn(gated(model, &tmp, permissions, None));
+        let events = drain_until_done(&mut handle.events).await;
+        let _ = handle.task.await;
+        assert!(
+            !tmp.path().join("child.rs").exists(),
+            "the denied batch child must not run"
+        );
+        let results = tool_results(&events);
+        let batch = results
+            .iter()
+            .find(|(name, _)| name == "batch")
+            .expect("the batch call itself completed");
+        assert!(
+            batch
+                .1
+                .contains(crate::permissions::PERMISSION_DENIED_PREFIX),
+            "the child denial must surface in the batch result: {}",
+            batch.1
+        );
+    }
+
+    #[tokio::test]
+    async fn question_calls_complete_as_dismissed_headlessly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = mock(vec![
+            vec![
+                MockStreamEvent::tool_call(
+                    "t1",
+                    "question",
+                    serde_json::json!({"questions": [
+                        {"question": "which?", "options": [{"label": "a"}, {"label": "b"}]}
+                    ]}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("ok"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let mut handle = spawn(gated(model, &tmp, manager(tmp.path()), None));
+        let events = drain_until_done(&mut handle.events).await;
+        let _ = handle.task.await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(Event::Done {
+                    reason: crate::run::DoneReason::Stop,
+                    ..
+                })
+            ),
+            "a dismissed ask ends the run normally, it never hangs"
+        );
+        let asked = tool_results(&events);
+        assert!(
+            asked
+                .iter()
+                .any(|(name, text)| name == "question" && text.contains("dismissed")),
+            "{asked:?}"
+        );
     }
 }

@@ -51,50 +51,7 @@ impl ApprovalGate {
 }
 
 /// Injectable reviewer so gate tests run without a live provider.
-pub(super) type Reviewer = Arc<
-    dyn Fn(
-            String,
-            Vec<String>,
-        ) -> crate::run::BoxFuture<
-            Result<crate::auto_review::Decision, crate::auto_review::ReviewError>,
-        > + Send
-        + Sync,
->;
-
-/// Production reviewer: one locked-down model call per NeedsPrompt decision.
-pub(super) fn model_reviewer(model: crate::providers::DynamicModel) -> Reviewer {
-    Arc::new(move |tool, scopes| {
-        let model = model.clone();
-        Box::pin(async move { crate::auto_review::review(&model, &tool, &scopes).await })
-    })
-}
-
-/// Decision-endpoint reviewer (Phase 2 of the argosy integration): when
-/// `decision.enabled` is set in the argosy user config, permission prompts
-/// are answered by the Jev/laya endpoint via the argosy decision API
-/// instead of the LLM reviewer. Failures deny without recording a rule,
-/// exactly like the model reviewer.
-pub(super) fn endpoint_reviewer(
-    provider: std::sync::Arc<dyn argosy::decision::DecisionProvider>,
-) -> Reviewer {
-    Arc::new(move |tool, scopes| {
-        let provider = provider.clone();
-        Box::pin(
-            async move { crate::auto_review::decide_with_endpoint(provider, &tool, &scopes).await },
-        )
-    })
-}
-
-/// The auto-review reviewer for a turn: the decision endpoint when it is
-/// enabled, otherwise the locked-down LLM reviewer.
-pub(super) fn auto_review_reviewer(model: crate::providers::DynamicModel) -> Reviewer {
-    let decision = crate::knowledge::ArgosyService::global().decision();
-    if decision.is_enabled() {
-        endpoint_reviewer(decision)
-    } else {
-        model_reviewer(model)
-    }
-}
+pub(super) use crate::auto_review::Reviewer;
 
 fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
     PermissionError::new(&tool.to_string(), scopes).to_string()
