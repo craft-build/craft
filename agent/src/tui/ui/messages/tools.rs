@@ -14,6 +14,7 @@ pub(super) fn tool_label(kind: &ToolKind) -> String {
         ToolKind::Read { path, .. } => format!("Read {path}"),
         ToolKind::Grep { pattern, .. } => format!("Grep \"{pattern}\""),
         ToolKind::Bash { cmd } => cmd.clone(),
+        ToolKind::Card { cmd, .. } => cmd.clone(),
         ToolKind::Edit { path, .. } => format!("Edit {path}"),
     }
 }
@@ -22,7 +23,8 @@ pub(super) fn tool_summary(kind: &ToolKind) -> String {
     match kind {
         ToolKind::Read { summary, .. }
         | ToolKind::Grep { summary, .. }
-        | ToolKind::Edit { summary, .. } => summary.clone(),
+        | ToolKind::Edit { summary, .. }
+        | ToolKind::Card { summary, .. } => summary.clone(),
         _ => String::new(),
     }
 }

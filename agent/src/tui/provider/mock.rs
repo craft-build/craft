@@ -480,6 +480,7 @@ mod tests {
                     ToolKind::Grep { .. } => saw_grep = true,
                     ToolKind::Edit { .. } => saw_edit = true,
                     ToolKind::Bash { .. } => saw_bash = true,
+                    ToolKind::Card { .. } => {}
                 },
                 AgentEvent::StatusChanged(Status::WaitingApproval) => break,
                 _ => {}

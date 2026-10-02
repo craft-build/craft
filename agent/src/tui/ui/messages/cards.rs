@@ -50,7 +50,7 @@ pub(super) fn tool_block(
     // --- header row ---
     let mut prefix: Vec<Span<'static>> = vec![Span::styled(marker, marker_style)];
     match kind {
-        ToolKind::Read { .. } | ToolKind::Grep { .. } => {
+        ToolKind::Read { .. } | ToolKind::Grep { .. } | ToolKind::Card { .. } => {
             prefix.push(Span::styled(
                 if collapsed { "▸ " } else { "▾ " }.to_string(),
                 Style::default().fg(t.text_tertiary).bg(card_bg),
@@ -103,7 +103,7 @@ pub(super) fn tool_block(
                 hyperlink::Hyperlink::new(0, start as u16, (start + cell_len(path)) as u16, uri)
             })
         }
-        ToolKind::Grep { .. } | ToolKind::Bash { .. } => None,
+        ToolKind::Grep { .. } | ToolKind::Bash { .. } | ToolKind::Card { .. } => None,
     };
     let blank = |lines: &mut Vec<Line<'static>>| lines.push(pad_row(Vec::new(), width, surf));
 

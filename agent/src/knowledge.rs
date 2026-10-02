@@ -539,9 +539,272 @@ pub async fn call_tool(tool: String, args: Value) -> Result<Value, String> {
     .map_err(|e| format!("argosy tool task failed: {e}"))?
 }
 
+/// A scalar string field of a JSON report.
+fn report_str<'a>(report: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    report.get(key).and_then(serde_json::Value::as_str)
+}
+
+/// `search`-shaped reports (`SearchReport.hits`): one URI row per hit with
+/// score and description, indented facets. `search_rules` hits also carry
+/// the `good`/`bad` sections.
+fn render_hits(report: &serde_json::Value) -> Option<String> {
+    let hits = report.get("hits")?.as_array()?;
+    if hits.is_empty() {
+        return Some("no hits".to_string());
+    }
+    let mut rows = Vec::new();
+    for hit in hits {
+        let uri = report_str(hit, "uri").unwrap_or("<missing uri>");
+        let head = match hit.get("score").and_then(serde_json::Value::as_f64) {
+            Some(score) => format!("{uri} (score {score:.2})"),
+            None => uri.to_string(),
+        };
+        let mut row = vec![head];
+        if let Some(desc) = report_str(hit, "description") {
+            row.push(format!("  {desc}"));
+        }
+        for key in ["language", "category"] {
+            if let Some(value) = report_str(hit, key) {
+                row.push(format!("  {key}: {value}"));
+            }
+        }
+        if let Some(tags) = hit.get("tags").and_then(serde_json::Value::as_array) {
+            let tags: Vec<&str> = tags.iter().filter_map(|t| t.as_str()).collect();
+            if !tags.is_empty() {
+                row.push(format!("  tags: {}", tags.join(", ")));
+            }
+        }
+        for key in ["good", "bad"] {
+            if let Some(text) = report_str(hit, key) {
+                row.push(format!("  {key}: {text}"));
+            }
+        }
+        rows.push(row.join("\n"));
+    }
+    Some(rows.join("\n\n"))
+}
+
+/// Render an argosy tool report (`ArgosyService::execute` output) as
+/// human-readable text instead of pretty-printed JSON: reports whose point
+/// is one embedded text block (`content`/`text`/`drafted`) surface it
+/// directly, structured reports (search, skills, writes, review) render
+/// as compact rows. Unknown shapes fall back to pretty JSON.
+pub fn render_report_text(tool: &str, report: &serde_json::Value) -> String {
+    let text = || report_str(report, "text").map(str::to_string);
+    let fallback = || {
+        serde_json::to_string_pretty(report)
+            .unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}"))
+    };
+
+    match tool {
+        // Codetools reports embed pre-rendered text: show it as-is.
+        "zoom" | "inspect" | "callgraph" | "conflicts" | "astgrep" | "repomap" => {
+            text().unwrap_or_else(fallback)
+        }
+        "outline" => {
+            let mut out = text().unwrap_or_else(fallback);
+            if report.get("truncated").and_then(serde_json::Value::as_bool) == Some(true) {
+                out.push_str(
+                    "\n\n(outline truncated at the 30 KB cap — narrow the path to see more)",
+                );
+            }
+            out
+        }
+        // Content reads: the raw markdown is the whole result.
+        "get_skill" | "read_memory" | "read_document" => report_str(report, "content")
+            .map(str::to_string)
+            .unwrap_or_else(fallback),
+        "promote" => {
+            let Some(drafted) = report_str(report, "drafted") else {
+                return fallback();
+            };
+            let mut out = format!(
+                "promoted to {} (a {})\n\n{drafted}",
+                report_str(report, "new_uri").unwrap_or("<missing uri>"),
+                report_str(report, "target").unwrap_or("document"),
+            );
+            if report.get("indexed").and_then(serde_json::Value::as_bool) != Some(true) {
+                if let Some(err) = report_str(report, "index_error") {
+                    out.push_str(&format!("\n\nwarning: not indexed: {err}"));
+                }
+            }
+            out
+        }
+        "search" | "search_rules" => render_hits(report).unwrap_or_else(fallback),
+        "ask" => {
+            let mut out = format!("question: {}", report_str(report, "query").unwrap_or(""));
+            match report_str(report, "mode") {
+                Some("selected") => {
+                    out.push_str("\nmode: selected");
+                    if let Some(selected) = report.get("selected") {
+                        out.push_str(&format!(
+                            "\nanswer: {}",
+                            report_str(selected, "label").unwrap_or(""),
+                        ));
+                    }
+                }
+                mode => {
+                    out.push_str(&format!("\nmode: {}", mode.unwrap_or("search")));
+                    if let Some(note) = report_str(report, "note") {
+                        out.push_str(&format!("\n{note}"));
+                    }
+                }
+            }
+            if let Some(candidates) =
+                render_hits(&serde_json::json!({ "hits": report.get("candidates") }))
+            {
+                out.push_str("\n\ncandidates:\n");
+                out.push_str(&candidates);
+            }
+            out
+        }
+        "list_skills" => {
+            let Some(skills) = report.get("skills").and_then(serde_json::Value::as_array) else {
+                return fallback();
+            };
+            if skills.is_empty() {
+                return "no skills".to_string();
+            }
+            let rows: Vec<String> = skills
+                .iter()
+                .map(|skill| {
+                    let name = report_str(skill, "name").unwrap_or("<missing>");
+                    let desc = report_str(skill, "description").unwrap_or("");
+                    let verified = report_str(skill, "verified").unwrap_or("unverified");
+                    let mut extra = report_str(skill, "argosy").unwrap_or_default().to_string();
+                    if skill.get("shadowed").and_then(serde_json::Value::as_bool) == Some(true) {
+                        extra.push_str(" (shadowed)");
+                    }
+                    format!("{name} — {desc} [{verified}, {extra}]")
+                })
+                .collect();
+            rows.join("\n")
+        }
+        // Mutating reports (`WriteReport`): the machine summary is one row.
+        "write_memory" | "write_rule" | "write_document" | "delete_memory" | "delete_rule"
+        | "delete_document" => {
+            let action = report_str(report, "action").unwrap_or("written");
+            let uri = report_str(report, "uri").unwrap_or("<missing uri>");
+            let mut out = match report.get("bytes").and_then(serde_json::Value::as_u64) {
+                Some(bytes) => format!("{action} {uri} ({bytes} bytes)"),
+                None => format!("{action} {uri}"),
+            };
+            if report.get("indexed").and_then(serde_json::Value::as_bool) != Some(true) {
+                match report_str(report, "index_error") {
+                    Some(err) => out.push_str(&format!(" — not indexed: {err}")),
+                    None => out.push_str(" — not indexed"),
+                }
+            }
+            out
+        }
+        "start_review" => {
+            let mut out = format!(
+                "review {} over {}",
+                report_str(report, "review_id").unwrap_or(""),
+                report_str(report, "comparison").unwrap_or(""),
+            );
+            if let Some(files) = report
+                .get("changed_files")
+                .and_then(serde_json::Value::as_array)
+            {
+                out.push_str(&format!(
+                    ": {} changed file{}\n{}",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" },
+                    files
+                        .iter()
+                        .filter_map(|f| f.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+            out
+        }
+        "review_diff" => {
+            if let Some(diff) = report_str(report, "diff") {
+                return diff.to_string();
+            }
+            match report
+                .get("changed_files")
+                .and_then(serde_json::Value::as_array)
+            {
+                Some(files) => files
+                    .iter()
+                    .filter_map(|f| f.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                None => fallback(),
+            }
+        }
+        "report_finding" => {
+            let mut out = match report.get("created").and_then(serde_json::Value::as_bool) {
+                Some(true) => format!(
+                    "recorded finding {}",
+                    report_str(report, "finding_id").unwrap_or(""),
+                ),
+                _ => format!(
+                    "finding {} already recorded",
+                    report_str(report, "finding_id").unwrap_or(""),
+                ),
+            };
+            match report
+                .get("finding_count")
+                .and_then(serde_json::Value::as_u64)
+            {
+                Some(n) => out.push_str(&format!(" ({n} in review)")),
+                None => {}
+            }
+            out
+        }
+        "review_findings" => {
+            let Some(findings) = report.get("findings").and_then(serde_json::Value::as_array)
+            else {
+                return fallback();
+            };
+            if findings.is_empty() {
+                return "no findings recorded".to_string();
+            }
+            let mut out = format!(
+                "review {} — {} findings:\n",
+                report_str(report, "review_id").unwrap_or(""),
+                findings.len()
+            );
+            let rows: Vec<String> = findings
+                .iter()
+                .map(|f| {
+                    let mut row = format!(
+                        "[{}] {} ({})",
+                        report_str(f, "priority").unwrap_or("?"),
+                        report_str(f, "title").unwrap_or(""),
+                        format!(
+                            "{}:{}",
+                            report_str(f, "path").unwrap_or(""),
+                            f.get("line_start")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0),
+                        ),
+                    );
+                    if let Some(body) = report_str(f, "body") {
+                        row.push_str("\n");
+                        row.push_str(body);
+                    }
+                    if let Some(suggestion) = report_str(f, "suggestion") {
+                        row.push_str(&format!("\nsuggestion: {suggestion}"));
+                    }
+                    row
+                })
+                .collect();
+            out.push_str(&rows.join("\n\n"));
+            out
+        }
+        _ => fallback(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn tool_names_match_the_crate_definitions() {
@@ -583,5 +846,70 @@ mod tests {
         assert!(first.exists());
         let again = install_reviewer_definition(dir.path(), false).unwrap();
         assert_eq!(first, again);
+    }
+
+    #[test]
+    fn content_reports_render_the_embedded_markdown() {
+        let report = json!({
+            "uri": "argosy://local/memories/x",
+            "content": "# Title\n\nbody",
+        });
+        let text = render_report_text("read_memory", &report);
+        assert_eq!(text, "# Title\n\nbody");
+    }
+
+    #[test]
+    fn text_reports_render_pre_rendered_bodies() {
+        let report = json!({ "path": "a.rs", "text": "a\nb", "truncated": true });
+        let text = render_report_text("outline", &report);
+        assert!(text.starts_with("a\nb"));
+        assert!(text.contains("truncated at the 30 KB cap"));
+    }
+
+    #[test]
+    fn search_reports_render_hit_rows() {
+        let report = json!({
+            "hits": [
+                {
+                    "uri": "argosy://local/rules/naming",
+                    "score": 0.91,
+                    "description": "names things",
+                    "tags": ["rust"],
+                }
+            ]
+        });
+        let text = render_report_text("search", &report);
+        assert!(
+            text.contains("argosy://local/rules/naming (score 0.91)"),
+            "{text}"
+        );
+        assert!(text.contains("names things"));
+        assert!(text.contains("tags: rust"));
+        assert_eq!(
+            render_report_text("search", &json!({"hits": []})),
+            "no hits"
+        );
+    }
+
+    #[test]
+    fn write_reports_render_one_summary_row() {
+        let report = json!({
+            "action": "created",
+            "uri": "argosy://local/memories/x",
+            "bytes": 12,
+            "indexed": false,
+            "index_error": "busy",
+        });
+        let text = render_report_text("write_memory", &report);
+        assert_eq!(
+            text,
+            "created argosy://local/memories/x (12 bytes) — not indexed: busy"
+        );
+    }
+
+    #[test]
+    fn unknown_shapes_fall_back_to_pretty_json() {
+        let text = render_report_text("nope", &json!({"a": 1}));
+        assert_eq!(text, "{\n  \"a\": 1\n}");
     }
 }

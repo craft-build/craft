@@ -112,10 +112,14 @@ impl TurnRenderer {
                     });
                 }
                 let done = cards::tool_done(id, &name, &arguments, &result);
-                if let Some((path, status)) = done.touched {
+                if !done.touched.is_empty() {
                     // Poison-tolerant: a poisoned mutex must not leave
                     // the UI stuck "Running".
-                    lock_sink(&self.files).insert(path, status);
+                    let mut sink = lock_sink(&self.files);
+                    for (path, status) in &done.touched {
+                        sink.insert(path.clone(), *status);
+                    }
+                    drop(sink);
                     let _ = self
                         .tx
                         .send(AgentEvent::FilesSet(cards::touched_files(&self.files)));

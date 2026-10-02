@@ -21,7 +21,7 @@ pub(super) const EDIT_TOOLS: [&str; 6] = [
 ];
 
 /// What an edit-family tool did to a file, for the sidebar badge.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FileStatus {
     Modified,
     Created,
@@ -134,17 +134,79 @@ pub(super) fn tool_head(name: &str, arguments: &serde_json::Value) -> ToolKind {
             path: detail,
             summary: String::new(),
         },
+        // `apply_patch`'s only string argument is the whole patch text;
+        // label the card with the paths its directives touch instead.
+        "apply_patch" => ToolKind::Edit {
+            path: apply_patch_paths(arguments),
+            summary: String::new(),
+        },
+        // Argosy builtins render as collapsible generic cards: their
+        // bodies are typically large rendered text (repo maps, skill
+        // bodies, outlines) that would otherwise flood the scrollback.
+        name if crate::knowledge::is_argosy_tool(name) => card_kind(name, &detail),
         other => ToolKind::Bash {
             cmd: format!("{other} {detail}").trim().to_string(),
         },
     }
 }
 
+fn card_kind(name: &str, detail: &str) -> ToolKind {
+    ToolKind::Card {
+        cmd: format!("{name} {detail}").trim().to_string(),
+        summary: String::new(),
+    }
+}
+
+/// Every file an `apply_patch` call's directives touch, comma-joined for
+/// the card label (the `patch_text` argument itself is too big to show).
+fn apply_patch_paths(arguments: &serde_json::Value) -> String {
+    let patch = arguments
+        .get("patch_text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    crate::tools::patch_paths(patch).join(", ")
+}
+
+/// Files-panel (path, status) pairs for an `apply_patch` call, one per
+/// `*** Add/Update/Delete File:` directive.
+fn apply_patch_touched(arguments: &serde_json::Value) -> Vec<(String, FileStatus)> {
+    let patch = arguments
+        .get("patch_text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    patch
+        .lines()
+        .filter_map(|line| {
+            let (path, status) = if let Some(p) = line.strip_prefix("*** Add File: ") {
+                (p, FileStatus::Created)
+            } else if let Some(p) = line.strip_prefix("*** Delete File: ") {
+                (p, FileStatus::Deleted)
+            } else if let Some(p) = line.strip_prefix("*** Update File: ") {
+                (p, FileStatus::Modified)
+            } else {
+                return None;
+            };
+            Some((path.trim().to_string(), status))
+        })
+        .collect()
+}
+
+/// Header annotation for a generic card body: `N lines` of content
+/// (`(no output)` when empty).
+fn card_line_summary(text: &str) -> String {
+    let shown = strip_untrusted_markers(text).count();
+    match shown {
+        0 => "(no output)".to_string(),
+        1 => "1 line".to_string(),
+        n => format!("{n} lines"),
+    }
+}
+
 /// The state produced by a completed tool call.
 pub(super) struct ToolDone {
     pub card: ToolCallData,
-    /// (path, status) when an edit-family tool succeeded.
-    pub touched: Option<(String, FileStatus)>,
+    /// (path, status) per file an edit-family tool changed on success.
+    pub touched: Vec<(String, FileStatus)>,
 }
 
 /// First image block of a tool result, for inline rendering (F.6).
@@ -180,7 +242,7 @@ pub(super) fn tool_done(
                     summary: read_annotation(&text),
                 },
                 lines,
-                None,
+                Vec::new(),
             )
         }
         "grep" => {
@@ -191,7 +253,7 @@ pub(super) fn tool_done(
                     summary: grep_annotation(&text),
                 },
                 lines,
-                None,
+                Vec::new(),
             )
         }
         "write" => {
@@ -203,9 +265,9 @@ pub(super) fn tool_done(
                 },
                 diff_lines(body),
                 if detail.is_empty() || result.is_error {
-                    None
+                    Vec::new()
                 } else {
-                    Some((detail, FileStatus::Created))
+                    vec![(detail, FileStatus::Created)]
                 },
             )
         }
@@ -223,10 +285,41 @@ pub(super) fn tool_done(
                 },
                 diff_lines(body),
                 if detail.is_empty() || result.is_error {
-                    None
+                    Vec::new()
                 } else {
-                    Some((detail, status))
+                    vec![(detail, status)]
                 },
+            )
+        }
+        // `apply_patch` results are per-file unified diffs: render as an
+        // Edit card, and feed the Files panel from the directives.
+        "apply_patch" => {
+            let (title, body) = edit_title_body(&text, result.is_error);
+            let touched = if result.is_error {
+                Vec::new()
+            } else {
+                apply_patch_touched(arguments)
+            };
+            (
+                ToolKind::Edit {
+                    path: apply_patch_paths(arguments),
+                    summary: title,
+                },
+                diff_lines(body),
+                touched,
+            )
+        }
+        // Argosy builtins: collapsible generic card with a body-summary
+        // header annotation, mirroring Read/Grep cards.
+        tool if crate::knowledge::is_argosy_tool(tool) => {
+            let lines = context_lines(&text);
+            (
+                ToolKind::Card {
+                    cmd: format!("{tool} {detail}").trim().to_string(),
+                    summary: card_line_summary(&text),
+                },
+                lines,
+                Vec::new(),
             )
         }
         other => (
@@ -234,7 +327,7 @@ pub(super) fn tool_done(
                 cmd: format!("{other} {detail}").trim().to_string(),
             },
             context_lines(&text),
-            None,
+            Vec::new(),
         ),
     };
     ToolDone {
@@ -620,7 +713,10 @@ mod tests {
             &result,
         );
         assert!(matches!(done.card.kind, ToolKind::Edit { ref path, .. } if path == "a.txt"));
-        assert_eq!(done.touched.map(|(p, _)| p).as_deref(), Some("a.txt"));
+        assert_eq!(
+            done.touched,
+            vec![("a.txt".to_string(), FileStatus::Created)]
+        );
     }
     #[test]
     fn diff_lines_parses_hunks_gaps_and_numbers() {
@@ -698,5 +794,123 @@ mod tests {
         );
         assert_eq!(done.card.image.as_deref(), Some("aGVsbG8="));
         assert!(done.card.lines.iter().any(|l| l.text.contains("shot.png")));
+    }
+
+    /// Argosy builtins render as collapsible generic cards, not Bash ones:
+    /// the head card shows the tool name and argument, the done card
+    /// annotates the body with its line count.
+    #[test]
+    fn argosy_tools_render_collapsible_cards() {
+        let head = tool_head("repomap", &serde_json::json!({"path": "."}));
+        assert!(
+            matches!(&head, ToolKind::Card { cmd, summary } if cmd == "repomap ." && summary.is_empty())
+        );
+        assert!(head.collapsible());
+
+        let result = history::ToolResult::text("t1", "repomap", "one\nmap row\n\nanother row");
+        let done = tool_done(
+            "t1".into(),
+            "repomap",
+            &serde_json::json!({"path": "."}),
+            &result,
+        );
+        assert!(matches!(&done.card.kind, ToolKind::Card { cmd, summary }
+                if cmd == "repomap ." && summary == "4 lines"));
+        let body: Vec<&str> = done.card.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(body, vec!["one", "map row", "", "another row"]);
+    }
+
+    #[test]
+    fn empty_argosy_output_annotation() {
+        let result = history::ToolResult::text("t1", "search", "");
+        let done = tool_done(
+            "t1".into(),
+            "search",
+            &serde_json::json!({"query": "x"}),
+            &result,
+        );
+        assert!(
+            matches!(&done.card.kind, ToolKind::Card { summary, .. } if summary == "(no output)")
+        );
+    }
+
+    #[test]
+    fn non_argosy_generic_tools_stay_bash_cards() {
+        let head = tool_head("bash", &serde_json::json!({"command": "ls"}));
+        assert!(matches!(&head, ToolKind::Bash { cmd } if cmd == "bash ls"));
+        assert!(!head.collapsible());
+    }
+
+    /// A call with no string argument still gets a bare-tool-name label.
+    #[test]
+    fn card_label_without_a_detail_argument() {
+        let head = tool_head("search", &serde_json::json!({"k": 5}));
+        assert!(matches!(&head, ToolKind::Card { cmd, .. } if cmd == "search"));
+        let result = history::ToolResult::text("t1", "search", "hit");
+        let done = tool_done("t1".into(), "search", &serde_json::json!({"k": 5}), &result);
+        assert!(matches!(&done.card.kind, ToolKind::Card { cmd, .. } if cmd == "search"));
+    }
+
+    /// Long card bodies truncate keeping the head, so a leading error or
+    /// summary row survives truncation (unlike Bash's tail keep).
+    #[test]
+    fn card_truncation_keeps_the_head() {
+        let head = tool_head("search", &serde_json::json!({"query": "x"}));
+        assert_eq!(head.body_hints(), (40, super::super::Keep::Head));
+
+        let text: String = std::iter::once("error: leading row".to_string())
+            .chain((0..60).map(|i| format!("row {i}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = history::ToolResult::text("t1", "search", text);
+        let done = tool_done(
+            "t1".into(),
+            "search",
+            &serde_json::json!({"query": "x"}),
+            &result,
+        );
+        assert_eq!(
+            done.card.lines.first().map(|l| l.text.as_str()),
+            Some("error: leading row")
+        );
+    }
+
+    /// `apply_patch` renders as a collapsible Edit card labeled with the
+    /// directive paths (never the patch text), and its first directive
+    /// feeds the Files panel.
+    #[test]
+    fn apply_patch_renders_an_edit_card() {
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@ -1 +1 @@\n- old\n+ new\n*** Delete File: b.txt\n*** End Patch";
+        let args = serde_json::json!({ "patch_text": patch });
+        let head = tool_head("apply_patch", &args);
+        assert!(
+            matches!(&head, ToolKind::Edit { path, summary } if path == "a.txt, b.txt" && summary.is_empty())
+        );
+        assert!(head.collapsible());
+
+        let result = history::ToolResult::text(
+            "t1",
+            "apply_patch",
+            "a.txt: modified (1 hunk)\n@@ -1 +1 @@\n- old\n+ new\nb.txt: deleted",
+        );
+        let done = tool_done("t1".into(), "apply_patch", &args, &result);
+        assert!(matches!(&done.card.kind, ToolKind::Edit { path, summary }
+                if path == "a.txt, b.txt" && summary == "a.txt: modified (1 hunk)"));
+        assert!(matches!(
+            done.touched.as_slice(),
+            [(p, FileStatus::Modified), (q, FileStatus::Deleted)] if p == "a.txt" && q == "b.txt"
+        ));
+        // A multi-file patch marks every directive, not just the first.
+        let patch = "*** Begin Patch\n*** Add File: c.txt\n+hi\n*** Update File: a.txt\n@@\n-c\n+d\n*** Delete File: b.txt\n*** End Patch";
+        let args = serde_json::json!({ "patch_text": patch });
+        let result = history::ToolResult::text("t2", "apply_patch", "done");
+        let done = tool_done("t2".into(), "apply_patch", &args, &result);
+        let paths: Vec<&str> = done.touched.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, vec!["c.txt", "a.txt", "b.txt"]);
+        assert_eq!(done.touched[0].1, FileStatus::Created);
+        assert_eq!(done.touched[1].1, FileStatus::Modified);
+        assert_eq!(done.touched[2].1, FileStatus::Deleted);
+        // The title line is not duplicated in the body.
+        assert!(!done.card.lines.iter().any(|l| l.text.contains("(1 hunk)")));
     }
 }

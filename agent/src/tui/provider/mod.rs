@@ -153,26 +153,49 @@ impl Default for ToolLine {
 
 #[derive(Clone, Debug)]
 pub enum ToolKind {
-    Read { path: String, summary: String },
-    Grep { pattern: String, summary: String },
-    Bash { cmd: String },
-    Edit { path: String, summary: String },
+    Read {
+        path: String,
+        summary: String,
+    },
+    Grep {
+        pattern: String,
+        summary: String,
+    },
+    Bash {
+        cmd: String,
+    },
+    Edit {
+        path: String,
+        summary: String,
+    },
+    /// A text-output builtin that is neither file, search, nor shell —
+    /// the argosy tools and other generic plugins. Rendered like a Bash
+    /// card but collapsible, so big bodies (repo maps, skill bodies,
+    /// fetched documents) collapse to their header like Read does.
+    Card {
+        cmd: String,
+        summary: String,
+    },
 }
 
 impl ToolKind {
-    /// Read/Grep/Edit blocks can be collapsed; Bash is always expanded.
+    /// Read/Grep/Edit/Card blocks can be collapsed; Bash is always expanded.
     pub fn collapsible(&self) -> bool {
         matches!(
             self,
-            ToolKind::Read { .. } | ToolKind::Grep { .. } | ToolKind::Edit { .. }
+            ToolKind::Read { .. }
+                | ToolKind::Grep { .. }
+                | ToolKind::Edit { .. }
+                | ToolKind::Card { .. }
         )
     }
 
     /// Body-truncation hints for the card, ported from the reference's
     /// `RenderHintsRegistry`: how many body lines an unexpanded card shows
-    /// and which end survives. Command-style outputs (Bash cards also cover
-    /// generic tools) keep the tail — the interesting part of a log is its
-    /// end; file-shaped tools keep the head.
+    /// and which end survives. Bash keeps the tail — the interesting part
+    /// of a log is its end. Everything else, generic Card tools included,
+    /// keeps the head: rendered reports lead with summary rows, error
+    /// lines, and ranked results.
     pub fn body_hints(&self) -> (usize, Keep) {
         const HEAD_CAP: usize = 40;
         const TAIL_CAP: usize = 30;

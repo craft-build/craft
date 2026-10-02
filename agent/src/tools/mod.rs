@@ -731,8 +731,10 @@ pub(crate) use impl_tool;
 
 /// The argosy knowledge tools (Phase 1 of the argosy integration): one
 /// portable tool per argosy definition under its native name, calling the
-/// in-process service on the blocking pool. The JSON report is returned as
-/// tool text, mirroring the MCP tool output path.
+/// in-process service on the blocking pool. The report renders to text via
+/// [`crate::knowledge::render_report_text`] — embedded bodies (`content`,
+/// pre-rendered `text`, `drafted`) surface directly instead of as pretty
+/// JSON.
 fn argosy_tools() -> Vec<(&'static str, PortableDynamicTool)> {
     crate::knowledge::tool_definitions()
         .iter()
@@ -747,11 +749,9 @@ fn argosy_tools() -> Vec<(&'static str, PortableDynamicTool)> {
                     move |arguments| {
                         let name = name.clone();
                         Box::pin(async move {
-                            match crate::knowledge::call_tool(name, arguments).await {
+                            match crate::knowledge::call_tool(name.clone(), arguments).await {
                                 Ok(report) => Ok(ToolOutput::text(
-                                    serde_json::to_string_pretty(&report).unwrap_or_else(|e| {
-                                        format!("{{\"error\":\"serialize: {e}\"}}")
-                                    }),
+                                    crate::knowledge::render_report_text(&name, &report),
                                 )),
                                 Err(e) => Err(failure(e)),
                             }
