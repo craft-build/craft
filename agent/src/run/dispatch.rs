@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::PortableDynamicTool;
@@ -69,17 +69,18 @@ pub trait AfterExecute: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ToolDispatch {
     tools: BTreeMap<String, PortableDynamicTool>,
-    before: Option<Arc<dyn BeforeExecute>>,
-    after: Option<Arc<dyn AfterExecute>>,
-    /// Shared across clones on purpose: the dedup cache is attached after the
-    /// dispatch table is built (the TUI/ACP flow), and the `batch` tool holds a
-    /// pre-attach clone of the table as its child dispatch. A plain field
-    /// would leave batch children cache-blind, bypassing invalidation.
-    dedup: Arc<OnceLock<SharedDedupCache>>,
+    // The hook/cache slots below are shared across clones on purpose. The
+    // `batch` tool holds a clone of the table taken during registration, before
+    // the caller attaches these with the `with_*` builders; a plain field would
+    // leave batch children blind to the approval gate, guardrails, after hook,
+    // and dedup cache. RwLock preserves the builders' last-write-wins behavior.
+    before: Arc<RwLock<Option<Arc<dyn BeforeExecute>>>>,
+    after: Arc<RwLock<Option<Arc<dyn AfterExecute>>>>,
+    dedup: Arc<RwLock<Option<SharedDedupCache>>>,
     write_root: Option<std::path::PathBuf>,
     compression_store: Option<SharedCompressionStore>,
     snapshots: Option<SnapshotManager>,
-    guardrails: Option<SharedGuardrails>,
+    guardrails: Arc<RwLock<Option<SharedGuardrails>>>,
     /// Frozen per dispatch table (one per turn): write-gating cannot change
     /// while tools execute. Batch children share it because the child table
     /// is built with the mode already baked in.
@@ -104,13 +105,13 @@ impl ToolDispatch {
                 .into_iter()
                 .map(|tool| (tool.name().to_owned(), tool))
                 .collect(),
-            before: None,
-            after: None,
-            dedup: Arc::new(OnceLock::new()),
+            before: Arc::new(RwLock::new(None)),
+            after: Arc::new(RwLock::new(None)),
+            dedup: Arc::new(RwLock::new(None)),
             write_root: std::env::current_dir().ok(),
             compression_store: None,
             snapshots: None,
-            guardrails: None,
+            guardrails: Arc::new(RwLock::new(None)),
             mode: AgentMode::Build,
         }
     }
@@ -120,13 +121,13 @@ impl ToolDispatch {
         self.tools.keys().cloned().collect()
     }
 
-    pub fn with_before(mut self, hook: Arc<dyn BeforeExecute>) -> Self {
-        self.before = Some(hook);
+    pub fn with_before(self, hook: Arc<dyn BeforeExecute>) -> Self {
+        *self.before.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
         self
     }
 
-    pub fn with_after(mut self, hook: Arc<dyn AfterExecute>) -> Self {
-        self.after = Some(hook);
+    pub fn with_after(self, hook: Arc<dyn AfterExecute>) -> Self {
+        *self.after.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
         self
     }
 
@@ -134,7 +135,7 @@ impl ToolDispatch {
     /// cache, writes invalidate the paths they touch. Set through a shared
     /// slot so the `batch` child table (cloned during registration) sees it.
     pub fn with_dedup(self, cache: SharedDedupCache) -> Self {
-        let _ = self.dedup.set(cache);
+        *self.dedup.write().unwrap_or_else(|e| e.into_inner()) = Some(cache);
         self
     }
 
@@ -177,8 +178,8 @@ impl ToolDispatch {
 
     /// Share the session's tool guardrails: repeat-failure and no-progress
     /// counters consulted around every execution.
-    pub fn with_guardrails(mut self, guardrails: SharedGuardrails) -> Self {
-        self.guardrails = Some(guardrails);
+    pub fn with_guardrails(self, guardrails: SharedGuardrails) -> Self {
+        *self.guardrails.write().unwrap_or_else(|e| e.into_inner()) = Some(guardrails);
         self
     }
 
@@ -211,7 +212,12 @@ impl ToolDispatch {
         let Some(tool) = self.tools.get(&call.function.name) else {
             return Err(format!("unknown tool: {}", call.function.name));
         };
-        if let Some(before) = &self.before {
+        let before = self
+            .before
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(before) = before {
             match before.decide(call.clone()).await {
                 Decision::Run => {}
                 Decision::Skip(reason) => {
@@ -241,7 +247,12 @@ impl ToolDispatch {
         // Guardrails are consulted after approval so a human-approved call
         // still cannot loop unproductively.
         let mut pre_warned = false;
-        if let Some(guardrails) = &self.guardrails
+        let guardrails = self
+            .guardrails
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(guardrails) = guardrails
             && let Ok(mut guard) = guardrails.lock()
         {
             match guard.check_before_call(&name, &call.function.arguments, read_only) {
@@ -258,7 +269,8 @@ impl ToolDispatch {
             }
         }
         let dedup_key = read_only.then(|| ToolDedupCache::key(&name, &call.function.arguments));
-        let cached = if let (Some(cache), Some(key)) = (self.dedup.get(), dedup_key) {
+        let cache = self.dedup.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let cached = if let (Some(cache), Some(key)) = (cache.as_ref(), dedup_key) {
             cache
                 .lock()
                 .ok()
@@ -270,7 +282,8 @@ impl ToolDispatch {
             // Replays re-run the after hook on the cached raw result: the
             // transform is per-call and must not be baked into the cache.
             let mut replayed = dedup::cached_result(&cached, &call.id);
-            if let Some(after) = &self.after {
+            let after = self.after.read().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(after) = after {
                 replayed = after.transform(call.clone(), replayed).await;
             }
             guardrail_note(
@@ -305,7 +318,7 @@ impl ToolDispatch {
         };
         // Cache bookkeeping runs on the raw, pre-transform result so a
         // call-specific AfterExecute hook cannot poison the cache.
-        if let Some(cache) = self.dedup.get()
+        if let Some(cache) = cache
             && let Ok(mut guard) = cache.lock()
         {
             if !result.is_error
@@ -352,7 +365,8 @@ impl ToolDispatch {
                 guard.clear();
             }
         }
-        if let Some(after) = &self.after {
+        let after = self.after.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(after) = after {
             result = after.transform(call.clone(), result).await;
         }
         let mut result = result;
@@ -418,7 +432,12 @@ fn guardrail_note(
     read_only: bool,
     pre_warned: bool,
 ) {
-    let Some(guardrails) = &dispatch.guardrails else {
+    let guardrails = dispatch
+        .guardrails
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(guardrails) = guardrails else {
         return;
     };
     let Ok(mut guard) = guardrails.lock() else {

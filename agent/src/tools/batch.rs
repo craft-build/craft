@@ -324,6 +324,24 @@ mod tests {
         assert!(output.text.contains("2 failed"));
     }
 
+    /// Run a `batch` call through the real dispatch table (not a hand-wired
+    /// `Batch`), returning the top-level result text. This is the path that
+    /// exposes post-registration hooks: the batch tool's child table is a clone
+    /// taken during registration, before callers attach hooks.
+    async fn run_batch(dispatch: &ToolDispatch, children: Vec<Map<String, Value>>) -> String {
+        let call = ToolCall::new("t1", "batch", json!({ "tool_calls": children }));
+        let result = match dispatch.execute(call).await.unwrap() {
+            DispatchOutcome::Ran(result) | DispatchOutcome::Skipped(result) => result,
+            DispatchOutcome::Stopped(reason) => panic!("stopped: {reason}"),
+        };
+        result
+            .content
+            .iter()
+            .map(ToolResultContent::to_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[tokio::test]
     async fn children_go_through_the_approval_gate() {
         use crate::run::{BeforeExecute, Decision};
@@ -331,25 +349,81 @@ mod tests {
         struct DenyAll;
         impl BeforeExecute for DenyAll {
             fn decide(&self, call: crate::history::ToolCall) -> crate::run::BoxFuture<Decision> {
-                Box::pin(std::future::ready(Decision::Skip(format!(
-                    "denied: {}",
-                    call.function.name
-                ))))
+                // Allow the outer batch so the test reaches the children.
+                let decision = if call.function.name == "batch" {
+                    Decision::Run
+                } else {
+                    Decision::Skip(format!("denied: {}", call.function.name))
+                };
+                Box::pin(std::future::ready(decision))
             }
         }
 
         let (_dir, workspace) = crate::tools::tests::workspace();
+        // Attach after registration, like the TUI/ACP flow: the gate must reach
+        // children through the dispatch's shared hook slot.
         let dispatch = workspace.register().with_before(Arc::new(DenyAll));
-        let batch = Batch(Arc::new(OnceLock::new()));
-        assert!(batch.0.set(dispatch).is_ok());
+        let text = run_batch(
+            &dispatch,
+            vec![entry(json!({"tool": "list", "parameters": {"path": "."}}))],
+        )
+        .await;
+        assert!(
+            text.contains("denied: list"),
+            "gate must reach children: {text}"
+        );
+    }
 
-        let output = batch
-            .call(BatchArgs {
-                tool_calls: vec![entry(json!({"tool": "list", "parameters": {"path": "."}}))],
-            })
-            .await
-            .unwrap();
-        assert!(output.text.contains("denied: list"));
+    #[tokio::test]
+    async fn children_feed_guardrail_counters() {
+        let (_dir, workspace) = crate::tools::tests::workspace();
+        fs::write(workspace.root().join("f"), "same\n").unwrap();
+        // Attached after registration; children must still be counted.
+        let dispatch = workspace
+            .register()
+            .with_guardrails(crate::run::shared_guardrails());
+        let read = || entry(json!({"tool": "read", "parameters": {"path": "f"}}));
+        // Three identical reads: the third result trips the no-progress warning.
+        let text = run_batch(&dispatch, vec![read(), read(), read()]).await;
+        assert!(
+            text.contains("guardrail"),
+            "guardrail counters must see batch children: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn children_go_through_the_after_hook() {
+        use crate::run::AfterExecute;
+
+        /// Tags child `list` results, leaving the outer `batch` result alone so
+        /// the marker only proves the hook reached the children.
+        struct TagList;
+        impl AfterExecute for TagList {
+            fn transform(
+                &self,
+                call: ToolCall,
+                mut result: crate::history::ToolResult,
+            ) -> crate::run::BoxFuture<crate::history::ToolResult> {
+                Box::pin(async move {
+                    if call.function.name == "list" {
+                        result.content.push(ToolResultContent::text("AFTER-CHILD"));
+                    }
+                    result
+                })
+            }
+        }
+
+        let (_dir, workspace) = crate::tools::tests::workspace();
+        let dispatch = workspace.register().with_after(Arc::new(TagList));
+        let text = run_batch(
+            &dispatch,
+            vec![entry(json!({"tool": "list", "parameters": {"path": "."}}))],
+        )
+        .await;
+        assert!(
+            text.contains("AFTER-CHILD"),
+            "after hook must reach children: {text}"
+        );
     }
 
     #[tokio::test]
