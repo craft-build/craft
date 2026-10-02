@@ -22,6 +22,7 @@ fn seed_models() -> Vec<ModelChoice> {
             model: label.to_string(),
             label: label.to_string(),
             provider_label: provider.to_string(),
+            thinking_choices: crate::thinking::ThinkingConfig::choices(),
         })
         .collect()
 }

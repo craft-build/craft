@@ -156,7 +156,17 @@ impl LoopCtx {
     /// Flat model menu rows across all usable providers, with the
     /// current selection's index.
     fn catalog_choices(&self, selection: &Selection) -> (Vec<ModelChoice>, usize) {
-        catalog_choices(&self.catalogs, selection)
+        let (mut choices, current) = catalog_choices(&self.catalogs, selection);
+        for choice in &mut choices {
+            if let Some(provider) = self.config.providers.get(&choice.provider) {
+                choice.thinking_choices = crate::thinking::choices_for(
+                    crate::thinking::ThinkingConfig::Off,
+                    provider,
+                    &choice.model,
+                );
+            }
+        }
+        (choices, current)
     }
 }
 

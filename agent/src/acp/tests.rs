@@ -62,7 +62,8 @@ fn config_options_expose_provider_model_and_thinking() {
         cancel: run::cancel_channel().0,
         turn: None,
     };
-    let options = session.config_options(&["openai".into(), "llamafile".into()]);
+    let options =
+        session.config_options(&Config::default(), &["openai".into(), "llamafile".into()]);
     assert_eq!(options.len(), 3);
     assert_eq!(options[0].id.0.as_ref(), "provider");
     assert_eq!(options[1].id.0.as_ref(), "model");
@@ -93,7 +94,12 @@ fn test_session() -> Session {
 
 #[test]
 fn thinking_options_include_current_budget() {
-    let option = thinking_option(crate::thinking::ThinkingConfig::Budget(4096));
+    let config = thinking_test_config();
+    let option = thinking_option(
+        crate::thinking::ThinkingConfig::Budget(4096),
+        config.providers.get("openai"),
+        "gpt-x",
+    );
     let json = serde_json::to_value(option).unwrap();
     let current = crate::thinking::ThinkingConfig::Budget(4096).to_string();
     assert_eq!(json["currentValue"], current);
@@ -103,12 +109,53 @@ fn thinking_options_include_current_budget() {
         .iter()
         .map(|option| option["value"].as_str().unwrap())
         .collect();
+    assert_eq!(values, ["off", "adaptive", "low", "high", &current]);
+}
+
+fn thinking_test_config() -> Config {
+    let mut config = Config::parse(
+        r#"
+        provider "openai" {
+            kind = "openai"
+            model "gpt-x" { supports_thinking = true }
+        }
+        "#,
+    )
+    .unwrap();
+    config
+        .providers
+        .get_mut("openai")
+        .unwrap()
+        .models
+        .get_mut("gpt-x")
+        .unwrap()
+        .reasoning_options = Some(vec![crate::thinking::ReasoningOption {
+        kind: "effort".into(),
+        values: vec!["low".into(), "high".into()],
+        ..Default::default()
+    }]);
+    config
+}
+
+#[test]
+fn thinking_options_filter_levels_without_restoring_unsupported_current_effort() {
+    let config = thinking_test_config();
+    let mut session = test_session();
+    session.thinking = crate::thinking::ThinkingConfig::Effort(crate::thinking::Effort::Max);
+    let options = session.config_options(&config, &["openai".into()]);
+    let json = serde_json::to_value(&options[2]).unwrap();
+    assert_eq!(json["currentValue"], "high");
     assert_eq!(
-        values,
-        [
-            "off", "adaptive", "minimal", "low", "medium", "high", "xhigh", "max", &current
-        ]
+        session.thinking,
+        crate::thinking::ThinkingConfig::Effort(crate::thinking::Effort::Max)
     );
+    let values: Vec<_> = json["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| option["value"].as_str().unwrap())
+        .collect();
+    assert_eq!(values, ["off", "adaptive", "low", "high"]);
 }
 
 #[test]

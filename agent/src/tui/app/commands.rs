@@ -330,18 +330,29 @@ impl App {
     }
 
     pub(crate) fn thinking_choices(&self) -> Vec<crate::thinking::ThinkingConfig> {
-        let mut choices = crate::thinking::ThinkingConfig::choices();
-        if !choices.contains(&self.session.thinking) {
+        let mut choices = self
+            .session
+            .models
+            .get(self.session.model_idx)
+            .map(|model| model.thinking_choices.clone())
+            .filter(|choices| !choices.is_empty())
+            .unwrap_or_else(|| vec![crate::thinking::ThinkingConfig::Off]);
+        if matches!(
+            self.session.thinking,
+            crate::thinking::ThinkingConfig::Budget(_)
+        ) && choices.iter().any(|choice| choice.is_enabled())
+        {
             choices.push(self.session.thinking);
         }
         choices
     }
 
     pub(crate) fn open_thinking_picker(&mut self) {
-        let selected = self
-            .thinking_choices()
+        let choices = self.thinking_choices();
+        let current = crate::thinking::selected_choice(self.session.thinking, &choices);
+        let selected = choices
             .iter()
-            .position(|choice| *choice == self.session.thinking)
+            .position(|choice| *choice == current)
             .unwrap_or(0);
         self.overlays.modal = Modal::ThinkingPicker { selected };
     }
@@ -793,6 +804,53 @@ mod tests {
                 tone: super::Tone::Warning,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn thinking_picker_handles_a_stale_model_index() {
+        let mut app = super::App::new();
+        app.session.model_idx = app.session.models.len();
+        assert_eq!(
+            app.thinking_choices(),
+            vec![crate::thinking::ThinkingConfig::Off]
+        );
+        app.open_thinking_picker();
+        assert!(matches!(
+            app.overlays.modal,
+            super::Modal::ThinkingPicker { selected: 0 }
+        ));
+    }
+
+    #[test]
+    fn thinking_picker_and_cycle_use_selected_model_levels() {
+        use crate::thinking::{Effort, ThinkingConfig};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = super::App::new();
+        let choices = vec![
+            ThinkingConfig::Off,
+            ThinkingConfig::Adaptive,
+            ThinkingConfig::Effort(Effort::Low),
+            ThinkingConfig::Effort(Effort::High),
+            ThinkingConfig::Effort(Effort::Max),
+        ];
+        app.session.models[0].thinking_choices = choices.clone();
+        app.session.thinking = ThinkingConfig::Effort(Effort::Medium);
+        assert_eq!(app.thinking_choices(), choices);
+        app.open_thinking_picker();
+        assert!(matches!(
+            app.overlays.modal,
+            super::Modal::ThinkingPicker { selected: 2 }
+        ));
+        app.overlays.modal = super::Modal::None;
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &tx);
+        assert_eq!(app.session.thinking, ThinkingConfig::Effort(Effort::High));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(super::Command::SetThinking(ThinkingConfig::Effort(
+                Effort::High
+            )))
         ));
     }
 

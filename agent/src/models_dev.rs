@@ -331,6 +331,75 @@ mod tests {
     static GLOBAL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
+    fn thinking_choices_use_synthetic_and_zai_endpoint_catalogs() {
+        use crate::thinking::{Effort, ThinkingConfig, choices_for};
+        let _guard = GLOBAL_LOCK.blocking_lock();
+        let index = serde_json::from_value(serde_json::json!({
+            "synthetic": {
+                "api": "https://api.synthetic.new/openai/v1",
+                "models": {
+                    "hf:zai-org/GLM-5.3": {
+                        "reasoning": true,
+                        "reasoning_options": [{"type": "effort", "values": ["low", "high", "max"]}]
+                    }
+                }
+            },
+            "zai-coding-plan": {
+                "api": "https://api.z.ai/api/coding/paas/v4",
+                "models": {
+                    "glm-5.2-highspeed": {
+                        "reasoning": true,
+                        "reasoning_options": [{"type": "effort", "values": ["high", "max"]}]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let previous = swap_catalog(flatten(index));
+        let config = crate::config::Config::parse(
+            r#"
+            provider "gateway" {
+                kind = "openai-compatible"
+                base_url = "https://api.synthetic.new/openai/v1"
+            }
+            provider "coding" {
+                kind = "zai"
+                base_url = "https://api.z.ai/api/coding/paas/v4"
+            }
+            "#,
+        )
+        .unwrap();
+        let synthetic = choices_for(
+            ThinkingConfig::Effort(Effort::Medium),
+            &config.providers["gateway"],
+            "hf:zai-org/GLM-5.3",
+        );
+        let zai = choices_for(
+            ThinkingConfig::Off,
+            &config.providers["coding"],
+            "glm-5.2-highspeed",
+        );
+        swap_catalog(previous.as_ref().clone());
+        assert_eq!(
+            synthetic,
+            vec![
+                ThinkingConfig::Adaptive,
+                ThinkingConfig::Effort(Effort::Low),
+                ThinkingConfig::Effort(Effort::High),
+                ThinkingConfig::Effort(Effort::Max),
+            ]
+        );
+        assert_eq!(
+            zai,
+            vec![
+                ThinkingConfig::Adaptive,
+                ThinkingConfig::Effort(Effort::High),
+                ThinkingConfig::Effort(Effort::Max),
+            ]
+        );
+    }
+
+    #[test]
     fn reasoning_metadata_survives_cache_serialization() {
         let model: CatalogModel = serde_json::from_value(serde_json::json!({
             "reasoning": true,

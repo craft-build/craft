@@ -164,7 +164,9 @@ macro_rules! providers {
 
             /// Build with explicit per-model overrides, preserving protocol kind.
             pub fn configured_model(&self, config: &ProviderConfig, model: &str) -> Result<DynamicModel> {
-                Ok(self.completion_model(model)?.with_settings(config.models.get(model)))
+                Ok(self.completion_model(model)?
+                    .with_settings(config.models.get(model))
+                    .with_discovery(config))
             }
 
             /// Providers without listing support return the configured models.

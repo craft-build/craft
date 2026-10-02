@@ -18,6 +18,8 @@ pub struct DynamicModel {
     inner: Arc<dyn ErasedModel>,
     kind: Option<super::ProviderKind>,
     settings: Option<crate::config::ModelConfig>,
+    catalog: Option<&'static str>,
+    endpoint: Option<String>,
 }
 
 type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CompletionError>> + Send + 'a>>;
@@ -47,6 +49,8 @@ impl DynamicModel {
             inner: Arc::new(model),
             kind: None,
             settings: None,
+            catalog: None,
+            endpoint: None,
         }
     }
 
@@ -57,6 +61,12 @@ impl DynamicModel {
 
     pub(crate) fn with_settings(mut self, settings: Option<&crate::config::ModelConfig>) -> Self {
         self.settings = settings.cloned();
+        self
+    }
+
+    pub(crate) fn with_discovery(mut self, config: &crate::config::ProviderConfig) -> Self {
+        self.catalog = Some(crate::thinking::provider_catalog_key(config));
+        self.endpoint = config.base_url.clone();
         self
     }
 
@@ -81,7 +91,13 @@ impl DynamicModel {
                     .as_deref()
                     .is_none_or(|id| Some(id) == self.label.as_deref())
             });
-            let info = crate::thinking::model_info(kind, id, settings);
+            let info = crate::thinking::model_info_for_endpoint(
+                self.catalog
+                    .unwrap_or_else(|| crate::thinking::catalog_key(kind)),
+                self.endpoint.as_deref(),
+                id,
+                settings,
+            );
             if request.max_tokens.is_none()
                 && (kind == super::ProviderKind::Anthropic
                     || (kind == super::ProviderKind::Bedrock && id.contains("claude")))

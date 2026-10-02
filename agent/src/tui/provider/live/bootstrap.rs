@@ -48,6 +48,7 @@ pub(super) fn catalog_choices(
                 model: model.id.clone(),
                 label: model.label().to_owned(),
                 provider_label: provider.clone(),
+                thinking_choices: crate::thinking::ThinkingConfig::choices(),
             });
         }
     }

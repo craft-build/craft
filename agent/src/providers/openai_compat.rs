@@ -75,10 +75,41 @@ pub(crate) async fn list_openai_compatible_models(
             model.max_output_tokens = number_field(entry, "max_output_tokens")
                 .or_else(|| number_field(entry, "max_output_length"))
                 .map(|value| value.min(u32::MAX as u64) as u32);
+            record_reasoning(base, id, entry, model.max_output_tokens);
             Some(model)
         })
         .collect();
     Ok(ModelList::new(models))
+}
+
+fn record_reasoning(base: &str, id: &str, entry: &serde_json::Value, max_output: Option<u32>) {
+    let Some(efforts) = entry
+        .pointer("/reasoning_parameters/efforts")
+        .and_then(|v| v.as_array())
+    else {
+        return;
+    };
+    let Some(values) = efforts
+        .iter()
+        .map(|v| v.as_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    crate::thinking::record_discovered(
+        base,
+        id,
+        crate::thinking::ModelThinking {
+            supports: Some(true),
+            options: vec![crate::thinking::ReasoningOption {
+                kind: "effort".into(),
+                values,
+                ..Default::default()
+            }],
+            max_output,
+            ..Default::default()
+        },
+    );
 }
 
 fn string_field(entry: &serde_json::Value, field: &str) -> Option<String> {
@@ -87,4 +118,92 @@ fn string_field(entry: &serde_json::Value, field: &str) -> Option<String> {
 
 fn number_field(entry: &serde_json::Value, field: &str) -> Option<u64> {
     entry.get(field)?.as_u64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thinking::{Effort, ThinkingConfig};
+
+    #[test]
+    fn discovered_efforts_filter_aliases_and_drive_requests() {
+        let config = crate::config::Config::parse(
+            r#"
+            provider "gateway" {
+                kind = "openai-compatible"
+                base_url = "https://discovery-efforts.test/v1/"
+            }
+            "#,
+        )
+        .unwrap();
+        let provider = &config.providers["gateway"];
+        for (id, efforts, levels) in [
+            (
+                "syn:large:text",
+                vec!["none", "low", "high", "xhigh", "max"],
+                vec![Effort::Low, Effort::High, Effort::XHigh, Effort::Max],
+            ),
+            (
+                "syn:large:vision",
+                vec!["low", "high", "max"],
+                vec![Effort::Low, Effort::High, Effort::Max],
+            ),
+            (
+                "hf:zai-org/GLM-4.7-Flash",
+                vec!["none", "low", "medium", "high"],
+                vec![Effort::Low, Effort::Medium, Effort::High],
+            ),
+        ] {
+            record_reasoning(
+                "https://discovery-efforts.test/v1",
+                id,
+                &serde_json::json!({"reasoning_parameters": {"efforts": efforts}}),
+                Some(32_768),
+            );
+            let choices = crate::thinking::choices_for(ThinkingConfig::Off, provider, id);
+            let mut expected = vec![];
+            if efforts.contains(&"none") {
+                expected.push(ThinkingConfig::Off);
+            }
+            expected.push(ThinkingConfig::Adaptive);
+            expected.extend(levels.into_iter().map(ThinkingConfig::Effort));
+            assert_eq!(choices, expected);
+            let info = crate::thinking::model_info_for(provider, id);
+            assert_eq!(info.max_output, Some(32_768));
+            let body = crate::thinking::wire(
+                ThinkingConfig::Effort(Effort::Medium),
+                provider.kind,
+                id,
+                &info,
+                None,
+            );
+            assert_eq!(
+                body["reasoning_effort"],
+                if id.contains("Flash") {
+                    "medium"
+                } else {
+                    "low"
+                }
+            );
+        }
+        let mut other_endpoint = provider.clone();
+        other_endpoint.base_url = Some("https://another-gateway.test/v1".into());
+        assert!(
+            crate::thinking::model_info_for(&other_endpoint, "syn:large:text")
+                .options
+                .is_empty()
+        );
+        let mut override_config = provider.clone();
+        override_config.models.insert(
+            "syn:large:text".into(),
+            crate::config::ModelConfig {
+                supports_thinking: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            crate::thinking::choices_for(ThinkingConfig::Off, &override_config, "syn:large:text"),
+            vec![ThinkingConfig::Off]
+        );
+    }
 }

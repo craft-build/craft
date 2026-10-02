@@ -103,7 +103,11 @@ impl Session {
         Ok(())
     }
 
-    fn config_options(&self, provider_names: &[String]) -> Vec<SessionConfigOption> {
+    fn config_options(
+        &self,
+        config: &Config,
+        provider_names: &[String],
+    ) -> Vec<SessionConfigOption> {
         vec![
             SessionConfigOption::select(
                 PROVIDER_OPTION_ID,
@@ -117,16 +121,24 @@ impl Session {
             .category(SessionConfigOptionCategory::ModelConfig)
             .description("Configured inference provider from ~/.config/craft.bml"),
             model_option(&self.models, &self.model),
-            thinking_option(self.thinking),
+            thinking_option(
+                self.thinking,
+                config.providers.get(&self.provider_name),
+                &self.model,
+            ),
         ]
     }
 }
 
-fn thinking_option(current: crate::thinking::ThinkingConfig) -> SessionConfigOption {
-    let mut choices = crate::thinking::ThinkingConfig::choices();
-    if !choices.contains(&current) {
-        choices.push(current);
-    }
+fn thinking_option(
+    current: crate::thinking::ThinkingConfig,
+    provider: Option<&crate::config::ProviderConfig>,
+    model: &str,
+) -> SessionConfigOption {
+    let choices = provider.map_or_else(crate::thinking::ThinkingConfig::choices, |provider| {
+        crate::thinking::choices_for(current, provider, model)
+    });
+    let current = crate::thinking::selected_choice(current, &choices);
     SessionConfigOption::select(
         THINKING_OPTION_ID,
         "Thinking",
@@ -426,7 +438,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                 };
                 // `mcp_servers` is ignored until the MCP client (task 94)
                 // is ported.
-                let options = session.config_options(&new_state.provider_names());
+                let options =
+                    session.config_options(&new_state.config, &new_state.provider_names());
                 let id = format!(
                     "{}-{}",
                     std::process::id(),
@@ -449,7 +462,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Ok(session) => session,
                     Err(message) => return respond_setup_error(responder, message),
                 };
-                let options = session.config_options(&load_state.provider_names());
+                let options =
+                    session.config_options(&load_state.config, &load_state.provider_names());
                 load_state.sessions.lock().await.insert(stored_id, session);
                 responder.respond(LoadSessionResponse::new().config_options(options))
             },
@@ -524,7 +538,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     store.set_thinking(session.thinking);
                     store.set_model(format!("{}/{}", session.provider_name, session.model));
                 }
-                let options = session.config_options(&set_state.provider_names());
+                let options =
+                    session.config_options(&set_state.config, &set_state.provider_names());
                 let notification = SessionNotification::new(
                     request.session_id.clone(),
                     SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options.clone())),

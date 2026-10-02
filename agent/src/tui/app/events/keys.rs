@@ -306,7 +306,13 @@ impl App {
             && !key.modifiers.contains(KeyModifiers::CONTROL)
         {
             if keybinds.matches(ActionId::CycleEffort, key) {
-                self.set_thinking(self.session.thinking.cycle(), tx);
+                let choices = self.thinking_choices();
+                let current = crate::thinking::selected_choice(self.session.thinking, &choices);
+                let next = choices
+                    .iter()
+                    .position(|choice| *choice == current)
+                    .map_or(0, |index| (index + 1) % choices.len());
+                self.set_thinking(choices[next], tx);
                 return true;
             }
             return match key.code {

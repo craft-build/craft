@@ -501,6 +501,7 @@ mod tests {
                 model: "claude-sonnet-5".into(),
                 label: "claude-sonnet-5".into(),
                 provider_label: "anthropic".into(),
+                thinking_choices: crate::thinking::ThinkingConfig::choices(),
             }],
             current: 0,
         });
@@ -767,6 +768,7 @@ mod tests {
                 model: format!("m{i:02}"),
                 label: format!("m{i:02}"),
                 provider_label: "p".into(),
+                thinking_choices: crate::thinking::ThinkingConfig::choices(),
             })
             .collect();
         app.handle_event(AgentEvent::CatalogSet {

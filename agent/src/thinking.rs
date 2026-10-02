@@ -236,7 +236,15 @@ pub fn model_info(
     id: &str,
     settings: Option<&crate::config::ModelConfig>,
 ) -> ModelThinking {
-    let meta = crate::models_dev::metadata_for(catalog_key(kind), id);
+    model_info_in_catalog(catalog_key(kind), id, settings)
+}
+
+pub(crate) fn model_info_in_catalog(
+    catalog: &str,
+    id: &str,
+    settings: Option<&crate::config::ModelConfig>,
+) -> ModelThinking {
+    let meta = crate::models_dev::metadata_for(catalog, id);
     ModelThinking {
         supports: settings
             .and_then(|s| s.supports_thinking)
@@ -256,6 +264,148 @@ pub fn model_info(
     }
 }
 
+/// Selectable policies for this model, using the same metadata and dialect as
+/// request generation. Saved cross-provider efforts must not expand this list.
+pub fn choices_for(
+    current: ThinkingConfig,
+    provider: &crate::config::ProviderConfig,
+    id: &str,
+) -> Vec<ThinkingConfig> {
+    let info = model_info_for(provider, id);
+    model_choices(current, provider.kind, id, &info)
+}
+
+// Rig's model-list DTO has no reasoning capabilities. Keep the richer live
+// discovery data by endpoint and exact model ID, never by provider alias.
+type DiscoveredThinking = BTreeMap<(String, String), ModelThinking>;
+static DISCOVERED: std::sync::LazyLock<std::sync::RwLock<DiscoveredThinking>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(BTreeMap::new()));
+
+pub(crate) fn record_discovered(endpoint: &str, id: &str, info: ModelThinking) {
+    DISCOVERED.write().unwrap().insert(
+        (endpoint.trim_end_matches('/').to_owned(), id.to_owned()),
+        info,
+    );
+}
+
+pub fn model_info_for(provider: &crate::config::ProviderConfig, id: &str) -> ModelThinking {
+    model_info_for_endpoint(
+        provider_catalog_key(provider),
+        provider.base_url.as_deref(),
+        id,
+        provider.models.get(id),
+    )
+}
+
+pub(crate) fn model_info_for_endpoint(
+    catalog: &str,
+    endpoint: Option<&str>,
+    id: &str,
+    settings: Option<&crate::config::ModelConfig>,
+) -> ModelThinking {
+    let mut info = model_info_in_catalog(catalog, id, settings);
+    let guard = DISCOVERED.read().unwrap();
+    let live = endpoint.and_then(|endpoint| {
+        guard.get(&(endpoint.trim_end_matches('/').to_owned(), id.to_owned()))
+    });
+    if let Some(live) = live {
+        if settings.and_then(|s| s.supports_thinking).is_none() {
+            info.supports = live.supports.or(info.supports);
+        }
+        if settings
+            .and_then(|s| s.reasoning_options.as_ref())
+            .is_none()
+        {
+            info.options = live.options.clone();
+        }
+        if settings.and_then(|s| s.max_output_tokens).is_none() {
+            info.max_output = live.max_output.or(info.max_output);
+        }
+    }
+    info
+}
+
+pub fn model_choices(
+    current: ThinkingConfig,
+    kind: ProviderKind,
+    id: &str,
+    info: &ModelThinking,
+) -> Vec<ThinkingConfig> {
+    use ThinkingConfig::*;
+    let required = requires_reasoning(kind, info);
+    if !required
+        && !info
+            .supports
+            .unwrap_or_else(|| info.fields.is_some() || known_support(kind, id))
+    {
+        return vec![Off];
+    }
+    let mut choices = Vec::new();
+    if !required {
+        choices.push(Off);
+    }
+    let levels = if let Some(fields) = &info.fields {
+        if fields.adaptive.is_some() {
+            choices.push(Adaptive);
+        }
+        fields.levels.keys().copied().collect()
+    } else {
+        choices.push(Adaptive);
+        if info.options.iter().any(|o| o.kind == "effort") {
+            dialect(kind, id, &info.options).levels
+        } else if info.options.iter().any(|o| o.kind == "budget_tokens")
+            || matches!(kind, ProviderKind::Llamafile)
+            || matches!(kind, ProviderKind::Anthropic | ProviderKind::Bedrock)
+                && !uses_adaptive_claude(id)
+        {
+            // These are budget presets, not discrete provider effort values.
+            crate::thinking::Effort::ALL.to_vec()
+        } else if !info.options.is_empty()
+            || matches!(kind, ProviderKind::Zai | ProviderKind::Ollama) && !id.contains("gpt-oss")
+        {
+            Vec::new()
+        } else {
+            dialect(kind, id, &info.options).levels
+        }
+    };
+    choices.extend(levels.into_iter().map(Effort));
+    if choices.is_empty() {
+        choices.push(Adaptive);
+    }
+    // An explicitly entered token budget remains editable, but an unsupported
+    // saved effort is never added back to the advertised model levels.
+    if matches!(current, Budget(_)) {
+        choices.push(current);
+    }
+    choices
+}
+
+/// Project a saved preference onto a filtered picker without changing the
+/// preference used by subagents or other providers.
+pub fn selected_choice(current: ThinkingConfig, choices: &[ThinkingConfig]) -> ThinkingConfig {
+    if choices.contains(&current) {
+        return current;
+    }
+    if let ThinkingConfig::Effort(effort) = current {
+        let levels: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| match choice {
+                ThinkingConfig::Effort(level) => Some(*level),
+                _ => None,
+            })
+            .collect();
+        if !levels.is_empty() {
+            return ThinkingConfig::Effort(effort.snap(&levels));
+        }
+    }
+    choices
+        .iter()
+        .copied()
+        .find(|choice| choice.is_enabled() == current.is_enabled())
+        .or_else(|| choices.first().copied())
+        .unwrap_or(ThinkingConfig::Off)
+}
+
 /// Capability reconciliation is also used by session surfaces so an
 /// unsupported model does not advertise an enabled thinking preference.
 /// Effort snapping stays at request time, never chained across providers.
@@ -265,7 +415,7 @@ pub fn reconcile(
     id: &str,
     info: &ModelThinking,
 ) -> ThinkingConfig {
-    if info.required {
+    if requires_reasoning(kind, info) {
         if config == ThinkingConfig::Off {
             ThinkingConfig::Effort(Effort::Minimal)
         } else {
@@ -281,17 +431,44 @@ pub fn reconcile(
     }
 }
 
+fn requires_reasoning(kind: ProviderKind, info: &ModelThinking) -> bool {
+    info.required
+        || info.supports != Some(false)
+            && info.fields.is_none()
+            && matches!(kind, ProviderKind::Zai | ProviderKind::OpenaiCompatible)
+            && info.options.iter().any(|option| {
+                option.kind == "effort" && !option.values.iter().any(|value| value == "none")
+            })
+}
+
 pub fn reconcile_for(
     config: ThinkingConfig,
     provider: &crate::config::ProviderConfig,
     id: &str,
 ) -> ThinkingConfig {
-    reconcile(
-        config,
-        provider.kind,
-        id,
-        &model_info(provider.kind, id, provider.models.get(id)),
-    )
+    reconcile(config, provider.kind, id, &model_info_for(provider, id))
+}
+
+/// Protocol kind alone cannot identify catalogs behind compatible gateways.
+pub(crate) fn provider_catalog_key(provider: &crate::config::ProviderConfig) -> &'static str {
+    if let Some(url) = provider
+        .base_url
+        .as_deref()
+        .and_then(|url| url::Url::parse(url).ok())
+    {
+        if provider.kind == ProviderKind::OpenaiCompatible
+            && url.host_str() == Some("api.synthetic.new")
+        {
+            return "synthetic";
+        }
+        if provider.kind == ProviderKind::Zai
+            && url.host_str() == Some("api.z.ai")
+            && url.path().starts_with("/api/coding/")
+        {
+            return "zai-coding-plan";
+        }
+    }
+    catalog_key(provider.kind)
 }
 
 pub fn catalog_key(kind: ProviderKind) -> &'static str {
@@ -427,7 +604,7 @@ pub fn wire(
     let supports = info
         .supports
         .unwrap_or_else(|| info.fields.is_some() || known_support(kind, id));
-    if !supports && !info.required {
+    if !supports && !requires_reasoning(kind, info) {
         return json!({});
     }
     let config = reconcile(config, kind, id, info);
@@ -655,6 +832,126 @@ pub fn take(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_catalogs_follow_endpoint_not_provider_alias() {
+        let config = crate::config::Config::parse(
+            r#"
+            provider "custom-name" {
+                kind = "openai-compatible"
+                base_url = "https://api.synthetic.new/openai/v1"
+            }
+            provider "coding" {
+                kind = "zai"
+                base_url = "https://api.z.ai/api/coding/paas/v4"
+            }
+            provider "standard" {
+                kind = "zai"
+                base_url = "https://api.z.ai/api/paas/v4"
+            }
+            provider "local" {
+                kind = "openai-compatible"
+                base_url = "http://localhost:8080/v1"
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            provider_catalog_key(&config.providers["custom-name"]),
+            "synthetic"
+        );
+        assert_eq!(
+            provider_catalog_key(&config.providers["coding"]),
+            "zai-coding-plan"
+        );
+        assert_eq!(provider_catalog_key(&config.providers["standard"]), "zai");
+        assert_eq!(
+            provider_catalog_key(&config.providers["local"]),
+            catalog_key(ProviderKind::OpenaiCompatible)
+        );
+    }
+
+    #[test]
+    fn model_choices_restrict_efforts_and_do_not_restore_saved_levels() {
+        use ThinkingConfig::*;
+        for kind in [ProviderKind::OpenaiCompatible, ProviderKind::Zai] {
+            let info = ModelThinking {
+                supports: Some(true),
+                options: vec![ReasoningOption {
+                    kind: "effort".into(),
+                    values: vec!["max".into(), "low".into(), "high".into(), "low".into()],
+                    min: None,
+                    max: None,
+                }],
+                ..Default::default()
+            };
+            assert_eq!(
+                model_choices(
+                    Effort(crate::thinking::Effort::Medium),
+                    kind,
+                    "glm-5.3",
+                    &info
+                ),
+                vec![
+                    Adaptive,
+                    Effort(crate::thinking::Effort::Low),
+                    Effort(crate::thinking::Effort::High),
+                    Effort(crate::thinking::Effort::Max),
+                ]
+            );
+            let mut required = info.clone();
+            required.required = true;
+            assert!(!model_choices(Off, kind, "glm-5.3", &required).contains(&Off));
+            let body = wire(Off, kind, "glm-5.3", &info, None);
+            if kind == ProviderKind::Zai {
+                assert_eq!(body["thinking"]["type"], "enabled");
+                assert_eq!(body["reasoning_effort"], "low");
+            }
+        }
+    }
+
+    #[test]
+    fn model_choices_respect_toggle_unsupported_and_local_fields() {
+        use ThinkingConfig::*;
+        let info = ModelThinking {
+            supports: Some(true),
+            options: vec![ReasoningOption {
+                kind: "toggle".into(),
+                values: vec![],
+                min: None,
+                max: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            model_choices(Off, ProviderKind::Zai, "glm-4.7", &info),
+            vec![Off, Adaptive]
+        );
+        assert_eq!(
+            model_choices(
+                Budget(4096),
+                ProviderKind::OpenaiCompatible,
+                "unsupported",
+                &ModelThinking {
+                    supports: Some(false),
+                    ..Default::default()
+                },
+            ),
+            vec![Off]
+        );
+        let info = ModelThinking {
+            fields: Some(ThinkingFields {
+                off: Some(json!({"think": false})),
+                levels: BTreeMap::from([(crate::thinking::Effort::High, json!({"think": true}))]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            model_choices(Off, ProviderKind::Ollama, "local", &info),
+            vec![Off, Effort(crate::thinking::Effort::High)]
+        );
+    }
 
     #[test]
     fn parse_cycle_and_serialization() {

@@ -239,6 +239,8 @@ pub struct ModelChoice {
     pub label: String,
     /// Display label of the owning provider.
     pub provider_label: String,
+    /// Supported thinking policies resolved by the backend from model metadata.
+    pub thinking_choices: Vec<crate::thinking::ThinkingConfig>,
 }
 
 #[derive(Clone, Debug)]
