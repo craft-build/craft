@@ -286,6 +286,20 @@ impl Workspace {
         &self.snapshots
     }
 
+    /// Reset the todo store for a fresh session (`/new`, `/clear`): the
+    /// workspace outlives sessions, but the previous session's plan must
+    /// not leak into the next one.
+    pub fn clear_todos(&self) {
+        self.todos.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// Test seam: observe the todo store, so tests can prove a session
+    /// reset actually dropped the previous plan.
+    #[cfg(test)]
+    pub(crate) fn todos(&self) -> Vec<Todo> {
+        self.todos.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Capture `path`'s pre-write contents for `/undo`. Write-family tools
     /// call this after resolving their target and before mutating.
     pub(crate) fn note_snapshot(&self, path: &Path) {

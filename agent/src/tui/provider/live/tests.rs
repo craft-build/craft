@@ -481,3 +481,61 @@ async fn clear_and_reset_zero_the_context_counter() {
         );
     }
 }
+
+/// `/clear` and `/new` drop the previous session's todo plan: the fresh
+/// session must not inherit the sidebar checklist or the workspace's todo
+/// store, or the old plan lingers until the next `todo_write` overwrites it.
+#[tokio::test]
+async fn clear_and_reset_drop_the_previous_todo_plan() {
+    use rig_core::tool::PortableTool;
+
+    for clear in [true, false] {
+        let state = Arc::new(Mutex::new(SessionState::linked()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let ctx = LoopCtx {
+            evt_tx: tx,
+            ..test_ctx(state)
+        };
+        // Seed the todo store the way a turn's `todo_write` call would.
+        crate::tools::TodoWrite(ctx.workspace.clone())
+            .call(crate::tools::TodoWriteArgs {
+                todos: vec![crate::tools::Todo {
+                    id: "T1".into(),
+                    parent: None,
+                    content: "stale plan".into(),
+                    status: "pending".into(),
+                    owner: None,
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(ctx.workspace.todos().len(), 1);
+
+        let selection = Selection {
+            provider: "mock".into(),
+            model: "model".into(),
+            context_length: None,
+        };
+        let mut current_turn = None;
+        if clear {
+            handle_clear(&ctx, &selection, &mut current_turn).await;
+        } else {
+            handle_reset(&ctx, &selection, &mut current_turn).await;
+        }
+
+        let mut plan_cleared = false;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::PlanSet(plan) = event {
+                plan_cleared = plan.is_empty();
+            }
+        }
+        assert!(
+            plan_cleared,
+            "clear={clear}: the reset must clear the plan panel"
+        );
+        assert!(
+            ctx.workspace.todos().is_empty(),
+            "clear={clear}: the reset must clear the todo store"
+        );
+    }
+}

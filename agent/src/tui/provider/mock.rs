@@ -370,7 +370,9 @@ impl Provider for MockProvider {
                         emit_initial_state(&evt_tx, &plan, &files);
                     }
                     Command::Clear => {
-                        // Context cleared conceptually; mock keeps its script state.
+                        // Context cleared conceptually; mock keeps its script
+                        // state, but no plan survives into the fresh session.
+                        let _ = evt_tx.send(AgentEvent::PlanSet(Vec::new()));
                     }
                     Command::Undo => {
                         // No filesystem writes happen under the mock provider.

@@ -36,6 +36,24 @@ async fn todo_write_replaces_renders_and_clears() {
 }
 
 #[tokio::test]
+async fn clear_todos_drops_the_previous_sessions_plan() {
+    let (_dir, workspace) = workspace();
+    let tool = TodoWrite(workspace.clone());
+    invoke(
+        &tool,
+        json!({"todos": [{"id": "T1", "content": "plan", "status": "pending"}]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(workspace.todos().len(), 1);
+    workspace.clear_todos();
+    assert!(
+        workspace.todos().is_empty(),
+        "the todo store must not survive a session reset"
+    );
+}
+
+#[tokio::test]
 async fn list_tools_lists_and_details_registered_tools() {
     let (_dir, workspace) = workspace();
     let dispatch = workspace.register();

@@ -638,9 +638,10 @@ pub(super) async fn handle_reset(
 }
 
 /// Shared teardown for `Clear` and `Reset`: interrupt any running turn, drop
-/// queued shell results, swap in a fresh linked session, and report an idle
-/// session with its context counter zeroed. `clear_files` additionally drops
-/// the tracked file set and clears its chrome (`Reset`).
+/// queued shell results, swap in a fresh linked session (clearing the todo
+/// plan with it), and report an idle session with its context counter zeroed.
+/// `clear_files` additionally drops the tracked file set and clears its
+/// chrome (`Reset`).
 async fn reset_session(
     ctx: &LoopCtx,
     selection: &Selection,
@@ -668,6 +669,10 @@ async fn reset_session(
     if clear_files {
         let _ = ctx.evt_tx.send(AgentEvent::FilesSet(Vec::new()));
     }
+    // The fresh session inherits no todo plan: drop the workspace's todo
+    // store and the sidebar checklist the previous session left behind.
+    ctx.workspace.clear_todos();
+    let _ = ctx.evt_tx.send(AgentEvent::PlanSet(Vec::new()));
     // Zero the composer's context counter: the fresh session holds no
     // context, so a stale label would misreport usage until the next turn.
     let _ = ctx.evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
