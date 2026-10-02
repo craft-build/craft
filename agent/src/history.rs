@@ -222,7 +222,15 @@ pub struct Reasoning {
 /// (encrypted/summary/redacted) that must be replayed verbatim.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ReasoningContent {
-    Text { text: String },
+    Text {
+        text: String,
+        /// Provider signature over the thinking block (Anthropic/Bedrock).
+        /// Adaptive-thinking blocks can carry a signature with no text at
+        /// all; the signature must be replayed verbatim on the next turn or
+        /// the provider rejects the history.
+        #[serde(default)]
+        signature: Option<String>,
+    },
     Opaque(String),
 }
 
@@ -270,7 +278,10 @@ mod tests {
             Message::user("hello"),
             Message::Assistant {
                 content: vec![AssistantContent::Reasoning(Reasoning {
-                    content: vec![ReasoningContent::Text { text: "hmm".into() }],
+                    content: vec![ReasoningContent::Text {
+                        text: "hmm".into(),
+                        signature: None,
+                    }],
                 })],
             },
             Message::User {
