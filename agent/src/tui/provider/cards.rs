@@ -181,10 +181,9 @@ fn apply_patch_touched(arguments: &serde_json::Value) -> Vec<(String, FileStatus
                 (p, FileStatus::Created)
             } else if let Some(p) = line.strip_prefix("*** Delete File: ") {
                 (p, FileStatus::Deleted)
-            } else if let Some(p) = line.strip_prefix("*** Update File: ") {
-                (p, FileStatus::Modified)
             } else {
-                return None;
+                let p = line.strip_prefix("*** Update File: ")?;
+                (p, FileStatus::Modified)
             };
             Some((path.trim().to_string(), status))
         })

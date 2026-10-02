@@ -50,7 +50,7 @@ pub async fn start_with_events(
     // The workspace root backs `roots/list`; callers that passed their own
     // keep theirs.
     let mut events = events;
-    events.root = events.root.or_else(|| Some(cwd));
+    events.root = events.root.or(Some(cwd));
     (start_with_config_events(config, events), config_errors)
 }
 
@@ -66,16 +66,15 @@ pub async fn start_connected(cwd: &Path) -> (Option<McpHandle>, McpConfigErrors)
     if let Some(handle) = &handle {
         handle.drop_server_requests();
     }
-    if let Some(handle) = &handle {
-        if tokio::time::timeout(CONNECTED_BUDGET, handle.ready())
+    if let Some(handle) = &handle
+        && tokio::time::timeout(CONNECTED_BUDGET, handle.ready())
             .await
             .is_err()
-        {
-            tracing::warn!(
-                budget = ?CONNECTED_BUDGET,
-                "MCP servers did not settle in time; continuing without the stragglers"
-            );
-        }
+    {
+        tracing::warn!(
+            budget = ?CONNECTED_BUDGET,
+            "MCP servers did not settle in time; continuing without the stragglers"
+        );
     }
     (handle, config_errors)
 }

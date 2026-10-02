@@ -455,8 +455,8 @@ impl Cli {
                     }
                 }),
             )
-        } else if let Some(value) = &self.max_thinking_tokens {
-            Some(
+        } else {
+            self.max_thinking_tokens.as_ref().map(|value| {
                 value
                     .parse::<u32>()
                     .map_err(|_| "expected a positive thinking token budget".to_owned())
@@ -466,10 +466,8 @@ impl Cli {
                         } else {
                             Ok(ThinkingConfig::Budget(budget))
                         }
-                    }),
-            )
-        } else {
-            None
+                    })
+            })
         };
         parsed
             .transpose()

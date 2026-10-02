@@ -657,17 +657,17 @@ async fn commit_turn(
     history: Vec<history::Message>,
 ) {
     let mut sessions = sessions.lock().await;
-    if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
-        if session.turn == Some(turn_id) {
-            session.history = history;
-            if let Some(store) = &mut session.store {
-                store.record_turn(
-                    &session.history,
-                    format!("{}/{}", session.provider_name, session.model),
-                );
-            }
-            session.turn = None;
+    if let Some(session) = sessions.get_mut(session_id.0.as_ref())
+        && session.turn == Some(turn_id)
+    {
+        session.history = history;
+        if let Some(store) = &mut session.store {
+            store.record_turn(
+                &session.history,
+                format!("{}/{}", session.provider_name, session.model),
+            );
         }
+        session.turn = None;
     }
 }
 
@@ -679,10 +679,10 @@ async fn clear_turn(
     turn_id: u64,
 ) {
     let mut sessions = sessions.lock().await;
-    if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
-        if session.turn == Some(turn_id) {
-            session.turn = None;
-        }
+    if let Some(session) = sessions.get_mut(session_id.0.as_ref())
+        && session.turn == Some(turn_id)
+    {
+        session.turn = None;
     }
 }
 

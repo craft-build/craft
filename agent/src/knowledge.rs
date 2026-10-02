@@ -623,10 +623,10 @@ pub fn render_report_text(tool: &str, report: &serde_json::Value) -> String {
                 report_str(report, "new_uri").unwrap_or("<missing uri>"),
                 report_str(report, "target").unwrap_or("document"),
             );
-            if report.get("indexed").and_then(serde_json::Value::as_bool) != Some(true) {
-                if let Some(err) = report_str(report, "index_error") {
-                    out.push_str(&format!("\n\nwarning: not indexed: {err}"));
-                }
+            if report.get("indexed").and_then(serde_json::Value::as_bool) != Some(true)
+                && let Some(err) = report_str(report, "index_error")
+            {
+                out.push_str(&format!("\n\nwarning: not indexed: {err}"));
             }
             out
         }
@@ -747,12 +747,11 @@ pub fn render_report_text(tool: &str, report: &serde_json::Value) -> String {
                     report_str(report, "finding_id").unwrap_or(""),
                 ),
             };
-            match report
+            if let Some(n) = report
                 .get("finding_count")
                 .and_then(serde_json::Value::as_u64)
             {
-                Some(n) => out.push_str(&format!(" ({n} in review)")),
-                None => {}
+                out.push_str(&format!(" ({n} in review)"))
             }
             out
         }
@@ -785,7 +784,7 @@ pub fn render_report_text(tool: &str, report: &serde_json::Value) -> String {
                         ),
                     );
                     if let Some(body) = report_str(f, "body") {
-                        row.push_str("\n");
+                        row.push('\n');
                         row.push_str(body);
                     }
                     if let Some(suggestion) = report_str(f, "suggestion") {

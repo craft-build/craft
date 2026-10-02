@@ -615,7 +615,7 @@ fn handle_interrupt(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
     ctx.cancel_flag.set(true);
     // Abort fallback: if the in-flight turn doesn't settle within the
     // grace window, some await isn't cancellation-aware — force it.
-    if let Some(handle) = current_turn.as_ref().map(AbortHandle::clone) {
+    if let Some(handle) = current_turn.clone() {
         tokio::spawn(async move {
             tokio::time::sleep(INTERRUPT_ABORT_GRACE).await;
             if !handle.is_finished() {

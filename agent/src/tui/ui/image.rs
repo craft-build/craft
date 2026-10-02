@@ -28,7 +28,7 @@ const MAX_IMAGE_ROWS: u16 = 30;
 /// in `w * h` — is refused before/after decode.
 fn exceeds_pixel_cap(w: u32, h: u32) -> bool {
     w.checked_mul(h)
-        .map_or(true, |p| p as usize > MAX_IMAGE_PIXELS)
+        .is_none_or(|p| p as usize > MAX_IMAGE_PIXELS)
 }
 
 /// The single probed `Picker`. `Picker::from_query_stdio` sends kitty/DA/DSR

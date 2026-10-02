@@ -326,7 +326,7 @@ fn spawn_line_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
                         let mut sink = Vec::new();
                         loop {
                             sink.clear();
-                            match (&mut reader).read_until(b'\n', &mut sink).await {
+                            match reader.read_until(b'\n', &mut sink).await {
                                 Ok(0) => break,
                                 Ok(_) if sink.ends_with(b"\n") => break,
                                 Ok(_) => {}

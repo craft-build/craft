@@ -252,10 +252,10 @@ async fn first_configured_model(config: &Config) -> Option<(String, String)> {
             continue;
         }
         let provider = Provider::from_config(provider_config).ok()?;
-        if let Ok(catalog) = provider.models(provider_config).await {
-            if let Some(model) = catalog.first() {
-                return Some((name.clone(), model.id.clone()));
-            }
+        if let Ok(catalog) = provider.models(provider_config).await
+            && let Some(model) = catalog.first()
+        {
+            return Some((name.clone(), model.id.clone()));
         }
     }
     None
