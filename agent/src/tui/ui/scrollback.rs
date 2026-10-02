@@ -7,6 +7,7 @@
 //! lines were wrapped for (and serves the several walks a frame makes).
 
 use std::cell::Cell;
+use std::sync::Arc;
 
 use ratatui::text::Line;
 
@@ -27,10 +28,114 @@ struct CachedHeight {
     height: u16,
 }
 
+/// Immutable line chunks shared by cached rendering and scrollback segments.
+#[derive(Clone, Debug, Default)]
+pub struct SharedLines {
+    stable: Arc<StableLines>,
+    tail: Option<Arc<[Line<'static>]>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StableLines {
+    chunks: Vec<IndexedChunk>,
+    len: usize,
+}
+
+#[derive(Clone, Debug)]
+struct IndexedChunk {
+    lines: Arc<[Line<'static>]>,
+    end: usize,
+}
+
+impl SharedLines {
+    pub fn from_chunks(chunks: Vec<Arc<[Line<'static>]>>) -> Self {
+        let mut lines = Self::default();
+        for chunk in chunks {
+            lines.push_chunk(chunk);
+        }
+        lines
+    }
+
+    /// Replace only the streaming tail, sharing the stable chunk index in O(1).
+    pub fn with_tail(&self, tail: Arc<[Line<'static>]>) -> Self {
+        Self {
+            stable: Arc::clone(&self.stable),
+            tail: Some(tail),
+        }
+    }
+
+    /// Append stable rows without copying lines. A shared index is copied only
+    /// when necessary to preserve an existing snapshot.
+    pub fn push_chunk(&mut self, chunk: Arc<[Line<'static>]>) {
+        if chunk.is_empty() {
+            return;
+        }
+        let stable = Arc::make_mut(&mut self.stable);
+        stable.len += chunk.len();
+        stable.chunks.push(IndexedChunk {
+            lines: chunk,
+            end: stable.len,
+        });
+    }
+
+    pub fn len(&self) -> usize {
+        self.stable.len + self.tail.as_ref().map_or(0, |tail| tail.len())
+    }
+
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[cfg(test)]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.stable, &other.stable)
+            && match (&self.tail, &other.tail) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Line<'static>> {
+        self.stable
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.lines.iter())
+            .chain(self.tail.iter().flat_map(|tail| tail.iter()))
+    }
+
+    /// Locate the first stable chunk by binary search, then walk only the
+    /// requested rows (including the tail). Out-of-bounds ranges stop at EOF.
+    pub fn range(&self, start: usize, count: usize) -> impl Iterator<Item = &Line<'static>> {
+        let chunks = &self.stable.chunks;
+        let first = chunks.partition_point(|chunk| chunk.end <= start);
+        let preceding = if first == 0 { 0 } else { chunks[first - 1].end };
+        chunks[first..]
+            .iter()
+            .flat_map(|chunk| chunk.lines.iter())
+            .chain(self.tail.iter().flat_map(|tail| tail.iter()))
+            .skip(start - preceding)
+            .take(count)
+    }
+}
+
+impl From<Vec<Line<'static>>> for SharedLines {
+    fn from(lines: Vec<Line<'static>>) -> Self {
+        Self::from_chunks(vec![lines.into()])
+    }
+}
+
+impl PartialEq for SharedLines {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
 /// One block of pre-wrapped lines (a message bubble, a tool card, a
 /// spacer). Lines are one display row each, so row slicing is line slicing.
 pub struct Segment {
-    lines: Vec<Line<'static>>,
+    lines: SharedLines,
     /// Inline image rendered below the lines (F.6): occupies `rows` extra
     /// display rows, tracked by the same height cache.
     pub image: Option<std::sync::Arc<crate::tui::ui::image::ImageRenderState>>,
@@ -39,6 +144,11 @@ pub struct Segment {
 
 impl Segment {
     pub fn with_lines(lines: Vec<Line<'static>>) -> Self {
+        Self::with_shared_lines(lines.into())
+    }
+
+    /// Reuse immutable pre-wrapped lines without cloning their spans or text.
+    pub fn with_shared_lines(lines: SharedLines) -> Self {
         Self {
             lines,
             image: None,
@@ -54,13 +164,13 @@ impl Segment {
         self.cached_height.set(None);
     }
 
-    pub fn lines(&self) -> &[Line<'static>] {
+    pub fn lines(&self) -> &SharedLines {
         &self.lines
     }
 
     #[cfg_attr(not(test), expect(dead_code))]
     pub fn set_lines(&mut self, lines: Vec<Line<'static>>) {
-        self.lines = lines;
+        self.lines = lines.into();
         self.cached_height.set(None);
     }
 
@@ -250,6 +360,135 @@ mod tests {
 
     fn pos(seg: usize, row: u16) -> ScrollPos {
         ScrollPos { seg, row }
+    }
+
+    #[test]
+    fn shared_lines_reuse_allocation_and_invalidate_height() {
+        use base64::Engine;
+
+        let lines: Arc<[Line<'static>]> =
+            vec![Line::raw(String::from("a")), Line::raw(String::from("b"))].into();
+        let shared = SharedLines::from_chunks(vec![Arc::clone(&lines)]);
+        let mut segment = Segment::with_shared_lines(shared.clone());
+        let other = Segment::with_shared_lines(shared);
+        assert!(Arc::ptr_eq(&lines, &segment.lines.stable.chunks[0].lines));
+        assert!(segment.lines.ptr_eq(&other.lines));
+        assert_eq!(segment.height(WIDTH), 2);
+        assert_eq!(segment.height(WIDTH / 2), 2);
+
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let source = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+        let image = Arc::new(
+            crate::tui::ui::image::ImagePicker::new()
+                .render_state(&source, WIDTH)
+                .unwrap(),
+        );
+        let image_rows = image.rows;
+        segment.set_image(Some(image));
+        assert!(segment.cached_height.get().is_none());
+        assert_eq!(segment.height(WIDTH), 2 + image_rows);
+        assert!(Arc::ptr_eq(&lines, &segment.lines.stable.chunks[0].lines));
+
+        segment.set_lines(vec![Line::raw("replacement")]);
+        assert!(segment.cached_height.get().is_none());
+        assert_eq!(segment.height(WIDTH), 1 + image_rows);
+        assert_eq!(other.height(WIDTH), 2);
+        assert!(Arc::ptr_eq(&lines, &other.lines.stable.chunks[0].lines));
+
+        segment.set_image(None);
+        assert!(segment.cached_height.get().is_none());
+        assert_eq!(segment.height(WIDTH), 1);
+    }
+
+    #[test]
+    fn shared_line_ranges_cross_chunks_and_skip_empty_chunks() {
+        let first: Arc<[Line<'static>]> = vec![Line::raw("a"), Line::raw("b")].into();
+        let last: Arc<[Line<'static>]> = vec![Line::raw("c"), Line::raw("d")].into();
+        let shared = SharedLines::from_chunks(vec![first.clone(), Arc::from([]), last.clone()]);
+        assert_eq!(shared.len(), 4);
+        assert_eq!(shared.iter().count(), 4);
+        let range: Vec<_> = shared.range(1, 2).collect();
+        assert!(std::ptr::eq(range[0], &first[1]));
+        assert!(std::ptr::eq(range[1], &last[0]));
+        assert_eq!(shared.range(3, usize::MAX).count(), 1);
+        assert_eq!(shared.range(4, 1).count(), 0);
+        assert_eq!(shared.range(usize::MAX, 1).count(), 0);
+        assert_eq!(shared.range(0, 0).count(), 0);
+        assert!(SharedLines::default().is_empty());
+        assert_eq!(
+            shared,
+            SharedLines::from(vec![
+                Line::raw("a"),
+                Line::raw("b"),
+                Line::raw("c"),
+                Line::raw("d"),
+            ])
+        );
+        assert_eq!(Segment::with_shared_lines(shared).height(WIDTH), 4);
+    }
+
+    #[test]
+    fn shared_tails_reuse_index_and_ranges_cross_into_tail() {
+        let stable = SharedLines::from(vec![Line::raw("a"), Line::raw("b")]);
+        let tail: Arc<[Line<'static>]> = vec![Line::raw("c"), Line::raw("d")].into();
+        let first = stable.with_tail(tail.clone());
+        let replacement = first.with_tail(vec![Line::raw("e")].into());
+        assert!(Arc::ptr_eq(&stable.stable, &first.stable));
+        assert!(Arc::ptr_eq(&first.stable, &replacement.stable));
+        assert!(first.ptr_eq(&first.clone()));
+        assert!(!first.ptr_eq(&replacement));
+        assert_eq!(first.len(), 4);
+        assert_eq!(replacement.len(), 3);
+        let range: Vec<_> = first.range(1, 3).collect();
+        assert!(std::ptr::eq(range[0], &stable.stable.chunks[0].lines[1]));
+        assert!(std::ptr::eq(range[1], &tail[0]));
+        assert!(std::ptr::eq(range[2], &tail[1]));
+        assert_eq!(first.range(3, usize::MAX).count(), 1);
+        assert_eq!(first.range(4, 1).count(), 0);
+        assert_eq!(first.range(usize::MAX, 1).count(), 0);
+        assert_eq!(first.range(0, 0).count(), 0);
+        assert_eq!(first.with_tail(Arc::from([])), stable);
+        let tail_only = SharedLines::default().with_tail(tail);
+        assert_eq!(tail_only.range(1, 3).count(), 1);
+        assert_eq!(
+            first,
+            SharedLines::from(vec![
+                Line::raw("a"),
+                Line::raw("b"),
+                Line::raw("c"),
+                Line::raw("d"),
+            ])
+        );
+    }
+
+    #[test]
+    fn shared_chunk_append_preserves_snapshots_and_reuses_unique_index() {
+        let mut stable = SharedLines::from(vec![Line::raw("a")]);
+        let index = Arc::as_ptr(&stable.stable);
+        stable.push_chunk(vec![Line::raw("b")].into());
+        assert_eq!(index, Arc::as_ptr(&stable.stable));
+        let snapshot = stable.with_tail(vec![Line::raw("tail")].into());
+        let chunk: Arc<[Line<'static>]> = vec![Line::raw("c")].into();
+        stable.push_chunk(chunk.clone());
+        assert!(!Arc::ptr_eq(&stable.stable, &snapshot.stable));
+        assert!(Arc::ptr_eq(&chunk, &stable.stable.chunks[2].lines));
+        assert_eq!(stable.len(), 3);
+        assert_eq!(
+            snapshot,
+            SharedLines::from(vec![Line::raw("a"), Line::raw("b"), Line::raw("tail"),])
+        );
+        assert_eq!(
+            stable
+                .stable
+                .chunks
+                .iter()
+                .map(|c| c.end)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]

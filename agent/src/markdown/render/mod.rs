@@ -16,9 +16,11 @@ use super::{
 };
 
 mod highlight_cache;
+mod streaming;
 mod table;
 
 use highlight_cache::{coalesce_adjacent_spans, wrap_code_lines};
+pub use streaming::{StreamingRenderCache, StreamingRenderUpdate};
 use table::render_table;
 
 /// Prefix for the first line of a code block.

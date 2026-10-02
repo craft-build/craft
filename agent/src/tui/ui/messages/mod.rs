@@ -111,7 +111,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 .push(Segment::with_lines(user_block(text, width))),
             Message::Assistant(text) => {
                 let text = app.conversation.visible_text(idx).unwrap_or(text);
-                app.view.segments.push(Segment::with_lines(
+                app.view.segments.push(Segment::with_shared_lines(
                     app.view.assistant_cache.render(idx, text, width),
                 ));
             }
@@ -244,11 +244,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         // start to the caption lines (height() counts image rows too).
         let take_lines = caption.saturating_sub(pos.row).min(capacity);
         let start = (pos.row as usize).min(seg.lines().len());
-        lines.extend(
-            seg.lines()[start..start + take_lines as usize]
-                .iter()
-                .cloned(),
-        );
+        lines.extend(seg.lines().range(start, take_lines as usize).cloned());
         let img_start = caption.max(pos.row);
         let img_end = (caption + img_rows).min(pos.row + capacity);
         for _ in img_start..img_end {
@@ -405,6 +401,36 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 mod tests {
     use crate::tui::provider::ToolLine;
     use ratatui::style::Modifier;
+
+    #[test]
+    fn streaming_frames_share_completed_transcript_lines() {
+        use crate::tui::app::App;
+        use crate::tui::provider::AgentEvent;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::time::{Duration, Instant};
+
+        let mut app = App::new();
+        for _ in 0..100 {
+            app.handle_event(AgentEvent::AssistantText(
+                "Completed **Markdown** paragraph with `inline code`.".into(),
+            ));
+        }
+        app.handle_event(AgentEvent::AssistantDelta("Streaming reply.".into()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| crate::tui::ui::draw(f, &mut app))
+            .unwrap();
+        let cached = app.view.segments.get(0).unwrap().lines().clone();
+        let now = Instant::now();
+        for elapsed in [16, 32, 48] {
+            app.tick_reveal(now + Duration::from_millis(elapsed));
+            terminal
+                .draw(|f| crate::tui::ui::draw(f, &mut app))
+                .unwrap();
+            assert!(cached.ptr_eq(app.view.segments.get(0).unwrap().lines()));
+        }
+    }
 
     /// Regions/links/images are placed at `(doc_row - top_row) as u16`;
     /// a document delta past 65535 must clamp to `u16::MAX` (offscreen
