@@ -152,7 +152,7 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                                 .content
                                 .iter()
                                 .filter_map(|c| match c {
-                                    ReasoningContent::Text { text } => Some(text.as_str()),
+                                    ReasoningContent::Text { text, .. } => Some(text.as_str()),
                                     _ => None,
                                 })
                                 .collect::<Vec<_>>()
