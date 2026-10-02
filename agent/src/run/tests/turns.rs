@@ -400,10 +400,11 @@ async fn guardrails_warn_then_block_repeated_failures() {
 }
 
 #[tokio::test]
-async fn failed_run_leaves_trailing_grace_prompt_intact() {
-    // A trailing grace prompt must not replay as user text, but a run
-    // that fails commits nothing: the caller's history stays
-    // byte-identical, and a retry strips it again identically.
+async fn failed_run_preserves_prior_history_and_commits_the_turn() {
+    // A failed run restores the caller's pristine bytes (the strip and
+    // any in-place compaction must not leak) but still commits the
+    // failed turn itself — sanitized, with a failure note — because tool
+    // calls that already ran have real workspace effects.
     let (model, _turns) = stream_turns(vec![vec![MockStreamEvent::Error(
         rig_core::test_utils::MockError::provider("boom"),
     )]]);
@@ -423,38 +424,22 @@ async fn failed_run_leaves_trailing_grace_prompt_intact() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::Failed(_)));
-    assert_eq!(history, before, "failed run must not drop the grace prompt");
-
-    // The retry strips it again: the request view omits it, and a
-    // successful run never commits it back.
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::text("hi"),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
-    let outcome = run(
-        &model,
-        &RunParams::default(),
-        &tools,
-        &mut history,
-        "go",
-        &cancel,
-        &|_| {},
-    )
-    .await;
-    assert!(matches!(outcome, RunOutcome::Done { .. }));
-    let requests = model.requests();
-    let replayed = crate::edge::rig_to_own(&requests[0].chat_history);
     assert_eq!(
-        replayed
-            .iter()
-            .filter(|m| m.text() == doom::GRACE_CALL_PROMPT)
-            .count(),
-        0,
-        "request must not carry the grace prompt"
+        &history[..before.len()],
+        &before[..],
+        "the prior history is restored byte-identically"
     );
+    // Grace prompt + failed-turn prompt + end marker + failure note.
+    assert_eq!(history.len(), 4);
+    assert_eq!(
+        history[1].text(),
+        "go",
+        "the failed turn's prompt is committed"
+    );
+    let note = history[3].text();
     assert!(
-        !history.iter().any(|m| m.text() == doom::GRACE_CALL_PROMPT),
-        "committed history drops the grace prompt"
+        note.starts_with("[Run failed: ") && note.contains("boom"),
+        "the turn and its failure mode are committed, got: {note}"
     );
 }
 
@@ -571,10 +556,9 @@ async fn doom_score_hard_stops_the_run() {
 
 #[tokio::test]
 async fn failed_run_emits_error_then_done_with_error_reason() {
-    let (model, _turns) = stream_turns(vec![vec![
-        tool_event("t1", "no_such_tool", serde_json::json!({})),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, _turns) = stream_turns(vec![vec![MockStreamEvent::Error(
+        rig_core::test_utils::MockError::provider("boom"),
+    )]]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = cancel_channel();
@@ -595,7 +579,7 @@ async fn failed_run_emits_error_then_done_with_error_reason() {
     assert!(
         guard
             .iter()
-            .any(|e| matches!(e, Event::Error(message) if message.contains("unknown tool")))
+            .any(|e| matches!(e, Event::Error(message) if message.contains("boom")))
     );
     assert!(matches!(
         guard.iter().last(),
@@ -704,6 +688,47 @@ async fn max_turns_bound_commits_sanitized_partial_history() {
         })
         .collect();
     assert!(calls.iter().all(|id| answered.contains(id)));
+}
+
+#[tokio::test]
+async fn failed_run_commits_sanitized_partial_history() {
+    // The turn that failed keeps what already happened: a resolved tool
+    // result survives, dangling calls are closed, and a failure note
+    // records why the run stopped — so the model (or a resumed session)
+    // starts from what actually happened.
+    let (model, _turns) = stream_turns(vec![
+        vec![
+            tool_event("t1", "read", serde_json::json!({"path": "f"})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![MockStreamEvent::Error(
+            rig_core::test_utils::MockError::provider("boom"),
+        )],
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "x\n").unwrap();
+    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+    let (_, cancel) = cancel_channel();
+    let mut history = vec![Message::user("earlier")];
+    let outcome = run(
+        &model,
+        &RunParams::default(),
+        &tools,
+        &mut history,
+        "go",
+        &cancel,
+        &|_| {},
+    )
+    .await;
+    assert!(matches!(outcome, RunOutcome::Failed(_)));
+    // earlier + prompt + assistant + result + end marker + failure note.
+    assert_eq!(history.len(), 6);
+    assert_eq!(history[4].text(), END_MARKER);
+    let note = history[5].text();
+    assert!(
+        note.starts_with("[Run failed: ") && note.contains("boom"),
+        "the failure note ends the committed turn, got: {note}"
+    );
 }
 
 #[tokio::test]

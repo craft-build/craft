@@ -44,7 +44,7 @@ pub use mode::{AgentMode, PLAN_WRITE_RESTRICTED};
 use overflow::{CANCEL_MARKER, END_MARKER};
 use overflow::{
     commit_cancelled, commit_partial, handle_terminal_reply, recover_from_overflow,
-    strip_trailing_grace_prompt,
+    sanitize_partial, strip_trailing_grace_prompt,
 };
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use retry::RetryCtx;
@@ -356,21 +356,25 @@ async fn run_inner<M: CompletionModel + Clone>(
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> (RunOutcome, RunStats) {
     // A trailing grace prompt from a previous run must not replay as if
-    // the user asked for it, but a failed run commits nothing — not even
-    // the overflow recovery's in-place compaction of the caller's history.
-    // Keep a pristine snapshot so history stays byte-identical when the run
-    // fails (commit points append their sanitized turns only on non-failed
-    // outcomes, so a failed run leaves exactly these bytes).
+    // the user asked for it, and a failed run must not keep the overflow
+    // recovery's in-place compaction: keep a pristine snapshot and restore
+    // it on failure. The failed turn itself is still committed, though —
+    // tool calls that already ran have real workspace effects, and
+    // dropping them desyncs both the model and any resumed session from
+    // what actually happened.
     let pristine = history.clone();
     let carry_anchor: Option<Option<usize>> = params
         .compaction
         .as_ref()
         .map(|ctx| ctx.state.lock().ok().and_then(|guard| guard.carry_from()));
     strip_trailing_grace_prompt(history);
-    let (outcome, stats) =
+    let (outcome, stats, mut leftover) =
         run_loop(model, params, tools, history, prompt, images, cancel, emit).await;
-    if matches!(outcome, RunOutcome::Failed(_)) {
+    if let RunOutcome::Failed(message) = &outcome {
         *history = pristine;
+        sanitize_partial(&mut leftover);
+        leftover.push(Message::user(format!("[Run failed: {message}]")));
+        history.append(&mut leftover);
         if let (Some(ctx), Some(anchor)) = (&params.compaction, carry_anchor)
             && let Ok(mut guard) = ctx.state.lock()
         {
@@ -408,7 +412,7 @@ async fn run_loop<M: CompletionModel + Clone>(
     images: &[crate::history::ImageBlock],
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
-) -> (RunOutcome, RunStats) {
+) -> (RunOutcome, RunStats, Vec<Message>) {
     let definitions = tools.definitions();
     // The prompt message carries any composer image attachments; later
     // grace/nudge prompts are plain text.
@@ -446,12 +450,13 @@ async fn run_loop<M: CompletionModel + Clone>(
     let mut advisor_continuations: u32 = 0;
     loop {
         if cancel.cancelled() {
-            return (commit_cancelled(history, &mut turn), stats);
+            return (commit_cancelled(history, &mut turn), stats, turn);
         }
         if doom.should_hard_stop() {
             return (
                 commit_partial(history, &mut turn, RunOutcome::DoomStop),
                 stats,
+                turn,
             );
         }
         if doom.should_grace() {
@@ -509,7 +514,7 @@ async fn run_loop<M: CompletionModel + Clone>(
         .await
         {
             turns::Streamed::Retry => continue,
-            turns::Streamed::Stop(outcome) => return (outcome, stats),
+            turns::Streamed::Stop(outcome) => return (outcome, stats, turn),
             turns::Streamed::Turn(output, served_spec) => {
                 match turns::finish_turn(
                     params,
@@ -553,7 +558,7 @@ async fn run_loop<M: CompletionModel + Clone>(
                                 None => advisor::review(model, state, history).await,
                             };
                             if cancel.cancelled() {
-                                return (commit_cancelled(history, &mut turn), stats);
+                                return (commit_cancelled(history, &mut turn), stats, turn);
                             }
                             if let Some(note) = note {
                                 emit(Event::AdvisorNote {
@@ -578,7 +583,7 @@ async fn run_loop<M: CompletionModel + Clone>(
                                 }
                             }
                         }
-                        return (outcome, stats);
+                        return (outcome, stats, turn);
                     }
                 }
             }

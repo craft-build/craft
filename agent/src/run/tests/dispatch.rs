@@ -24,15 +24,21 @@ fn collect_tool_text(history: &[Message]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn failed_dispatch_leaves_history_uncommitted() {
-    let (model, _turns) = stream_turns(vec![vec![
-        tool_event("t1", "no_such_tool", serde_json::json!({})),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+async fn unknown_tool_surfaces_error_and_run_continues() {
+    let (model, _turns) = stream_turns(vec![
+        vec![
+            tool_event("t1", "no_such_tool", serde_json::json!({})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::text("recovered"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+    ]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = cancel_channel();
-    let mut history = vec![Message::user("earlier")];
+    let mut history = Vec::new();
     let outcome = run(
         &model,
         &RunParams::default(),
@@ -43,8 +49,23 @@ async fn failed_dispatch_leaves_history_uncommitted() {
         &|_| {},
     )
     .await;
-    assert!(matches!(outcome, RunOutcome::Failed(message) if message.contains("unknown tool")));
-    assert_eq!(history.len(), 1, "failed run must not commit");
+    assert!(matches!(outcome, RunOutcome::Done { .. }));
+    assert_eq!(model.requests().len(), 2, "the model gets a second chance");
+    let errors = collect_tool_text(&history);
+    assert_eq!(errors.len(), 1);
+    assert!(
+        errors[0].contains("unknown tool: no_such_tool"),
+        "got: {errors:?}"
+    );
+    // The retried request carries the error result, so the model sees what
+    // went wrong and can correct the name.
+    let requests = model.requests();
+    let replayed = crate::edge::rig_to_own(&requests[1].chat_history);
+    let replayed_errors = collect_tool_text(&replayed);
+    assert!(
+        replayed_errors[0].contains("unknown tool: no_such_tool"),
+        "got: {replayed_errors:?}"
+    );
 }
 
 #[tokio::test]
@@ -746,21 +767,21 @@ async fn panicking_tool_becomes_error_result() {
     assert!(!results[1].is_error);
 }
 
-/// Unknown tools still fail the run with the same message as before.
+/// An unknown tool becomes a per-call error result; the run continues.
 #[tokio::test]
-async fn unknown_tool_still_fails_the_run() {
+async fn unknown_tool_becomes_recoverable_error_result() {
     let tools = ToolDispatch::new([tool("read", || {})]);
-    let (outcome, _, _) = dispatch(
+    let (outcome, turn, _) = dispatch(
         &tools,
         vec![call("t1", "nonexistent", serde_json::json!({}))],
     )
     .await;
-    match outcome {
-        Some(RunOutcome::Failed(msg)) => {
-            assert!(msg.contains("unknown tool"), "got: {msg}")
-        }
-        other => panic!("expected Failed, got {other:?}"),
-    }
+    assert!(outcome.is_none(), "an unknown tool must not stop the run");
+    let results = results_in_call_order(&turn);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_error);
+    let text = results[0].content[0].to_text();
+    assert!(text.contains("unknown tool: nonexistent"), "got: {text}");
 }
 
 #[test]

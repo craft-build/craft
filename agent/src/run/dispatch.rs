@@ -203,14 +203,23 @@ impl ToolDispatch {
     }
 
     /// Execute one tool call through the interception pipeline. An unknown
-    /// tool name fails the run, mirroring the previous loop's behavior of
-    /// surfacing `UnknownToolCall` and leaving history uncommitted.
+    /// tool name surfaces as a per-call error result so a wrong spelling
+    /// costs one call instead of the whole run — the model sees the error
+    /// and can correct itself.
     pub async fn execute(
         &self,
         call: history::ToolCall,
     ) -> std::result::Result<DispatchOutcome, String> {
         let Some(tool) = self.tools.get(&call.function.name) else {
-            return Err(format!("unknown tool: {}", call.function.name));
+            return Ok(DispatchOutcome::Skipped(history::ToolResult {
+                call: call.id,
+                name: call.function.name.clone(),
+                content: vec![history::ToolResultContent::text(format!(
+                    "unknown tool: {}. Call list_tools() to see available tools.",
+                    call.function.name
+                ))],
+                is_error: true,
+            }));
         };
         let before = self
             .before
@@ -682,7 +691,18 @@ async fn commit_wave(
                 result,
             ),
             Ok(Ok(DispatchOutcome::Stopped(_))) => return Some(RunOutcome::Cancelled),
-            Ok(Err(unknown)) => return Some(RunOutcome::Failed(unknown)),
+            // A dispatch-level failure is one call's error, not the run's:
+            // surface it as a result the model can adapt to instead of
+            // dropping the whole turn.
+            Ok(Err(e)) => (
+                false,
+                history::ToolResult {
+                    call: call.id.clone(),
+                    name: call.function.name.clone(),
+                    content: vec![history::ToolResultContent::text(e)],
+                    is_error: true,
+                },
+            ),
             // The task itself failed: a panic or cancellation inside the
             // tool future, reported as a per-call error result.
             Err(panic) => (

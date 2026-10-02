@@ -607,16 +607,22 @@ async fn declined_compaction_fails_without_a_blind_retry() {
         "no blind retry of the identical oversized prompt"
     );
     assert_eq!(
-        history, before,
-        "a declined compaction leaves the caller's history untouched"
+        &history[..before.len()],
+        &before[..],
+        "a declined compaction must not rewrite the caller's history"
+    );
+    assert!(
+        history.len() > before.len(),
+        "the failed turn itself is still committed"
     );
 }
 
 #[tokio::test]
-async fn failed_run_after_overflow_compaction_leaves_history_identical() {
+async fn failed_run_after_overflow_compaction_restores_prefix_and_commits_turn() {
     // Overflow → compact → retry overflows again → budget spent → the
-    // run fails. The compaction ran on the caller's history in place;
-    // a failed run must restore it byte-identically.
+    // run fails. The compaction ran on the caller's history in place; a
+    // failed run restores the prior bytes, then commits the failed turn:
+    // compaction must not leak, but what already happened stays.
     let (model, _turns) = stream_turns(vec![overflow_error_turn(), overflow_error_turn()]);
     let (params, shared) = recovery_setup();
     shared.lock().unwrap().protect_from(3);
@@ -642,13 +648,18 @@ async fn failed_run_after_overflow_compaction_leaves_history_identical() {
         "recovery compacted and retried once on the compacted history"
     );
     assert_eq!(
-        history, before,
-        "a failed run commits nothing: compaction must not leak into the caller's history"
+        &history[..before.len()],
+        &before[..],
+        "compaction must not leak into the caller's history"
     );
     assert_eq!(
         shared.lock().unwrap().carry_from(),
         Some(3),
         "the unanswered-input anchor must not follow the rolled-back history"
+    );
+    assert!(
+        history.len() > before.len(),
+        "the failed turn is committed, not dropped"
     );
 }
 
