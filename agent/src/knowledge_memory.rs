@@ -270,10 +270,7 @@ pub fn spawn_extraction(
             tracing::info!(count = facts.len(), "memory extraction stored facts");
         }
     });
-    PENDING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(task);
+    PENDING.lock().unwrap_or_else(|e| e.into_inner()).push(task);
     PENDING
         .lock()
         .unwrap_or_else(|e| e.into_inner())

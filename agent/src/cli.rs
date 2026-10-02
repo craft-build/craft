@@ -914,11 +914,15 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
                     .build()
                 })?,
         };
+    let provider = crate::providers::Provider::from_config(&provider_config)?;
+    // Discovery feeds selection (implicit path) and metadata lookup; the
+    // explicit `-m` id is never catalog-checked, so a discovery miss only
+    // drops the metadata, never the run.
+    let catalog = provider.models(&provider_config).await;
     let model_id = match &q.model {
         Some(spec) => spec.split_once('/').expect("validated above").1.to_string(),
         None => {
-            let provider = crate::providers::Provider::from_config(&provider_config)?;
-            let models = provider.models(&provider_config).await.map_err(|e| {
+            let models = catalog.as_ref().map_err(|e| {
                 InvalidSnafu {
                     reason: format!("discovering models for {provider_name:?}: {e}"),
                 }
@@ -936,8 +940,17 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
                 .clone()
         }
     };
-    let provider = crate::providers::Provider::from_config(&provider_config)?;
     let model = provider.completion_model(&model_id)?;
+    let (context_length, max_output_tokens) = catalog
+        .as_ref()
+        .map(|models| {
+            crate::runtime::catalog_metadata(
+                &std::collections::BTreeMap::from([(provider_name.clone(), models.clone())]),
+                &provider_name,
+                &model_id,
+            )
+        })
+        .unwrap_or((None, None));
 
     let cwd = std::env::current_dir().map_err(|e| {
         crate::error::InvalidSnafu {
@@ -946,14 +959,13 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
         .build()
     })?;
     let cwd_str = cwd.display().to_string();
-    let instructions = crate::instructions::load_instructions(&cwd_str);
-    let workspace = crate::tools::Workspace::new(&cwd)
-        .map_err(crate::error::client_error)?
-        .with_loaded_instructions(instructions.loaded.clone());
-    // MCP (B.11): print mode is headless, so connect up front; MCP tools join
-    // the dispatch table before the first prompt ships.
-    let (mcp_handle, _mcp_errors) = crate::mcp::start_connected(&cwd).await;
-    workspace.set_mcp(mcp_handle);
+    // Headless session environment: instructions + permissions + workspace
+    // + connected MCP, through the shared runtime setup contract. The
+    // permission engine is built here even though print mode consults
+    // nothing yet (the gate lands as its own task).
+    let env =
+        crate::runtime::workspace_env(&cwd, crate::runtime::McpStartup::Connected, false).await?;
+    let workspace = env.workspace;
     let state_dir = crate::storage::StateDir::resolve().ok();
 
     let mode = match q.mode {
@@ -966,33 +978,33 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
         _ => crate::run::AgentMode::Build,
     };
 
-    let params = crate::run::RunParams {
-        fast: false,
-        advisor: config.agent.advisor.clone(),
-        preamble: Some(crate::prompt::build_system_prompt(
-            &crate::prompt::Vars::new()
-                .set("{cwd}", &cwd_str)
-                .set("{platform}", std::env::consts::OS)
-                .set("{date}", crate::prompt::today_utc()),
-            &format!("{}{}", config.agent.preamble, instructions.text),
-            &crate::prompt::ResolvedSlots::default(),
-            mode.plan_path(),
-        )),
-        temperature: config.agent.temperature,
-        max_tokens: config.agent.max_tokens,
-        max_turns: config
-            .agent
-            .max_turns
-            .map(|n| n as usize)
-            .unwrap_or(crate::run::RunParams::UNBOUNDED),
-        recency: None,
-        compression: config.compression.clone(),
-        max_continuation_turns: crate::run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
-        compaction: None,
-        reauth: Some(crate::providers::reauth_hook(&provider_config, &model_id)),
-        model_spec: Some(format!("{provider_name}/{model_id}").into()),
-        retry: crate::run::RetryCtx::default(),
+    // Headless compaction (the print-mode fix): the session's shared state
+    // and the selected model's window make output caps window-clamped and
+    // give the run loop in-run overflow recovery. Without a window the
+    // stages simply never cross a threshold.
+    let compaction_state = crate::runtime::new_compaction_state(
+        crate::run::shared_cache(),
+        crate::run::shared_guardrails(),
+    );
+    let compaction_ctx = crate::runtime::compaction_ctx(compaction_state, &config, context_length);
+    let resolved = crate::runtime::ResolvedModel {
+        provider: provider_name.clone(),
+        model_id: model_id.clone(),
+        context_length,
+        max_output_tokens,
     };
+    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
+        config: &config,
+        cwd: &cwd_str,
+        instructions_text: &env.instructions.text,
+        mode: &mode,
+        model: &resolved,
+        compaction: Some(compaction_ctx),
+        recency: None,
+        retry: crate::run::RetryCtx::default(),
+        fast: false,
+        max_turns: crate::runtime::MaxTurns::FromConfig,
+    });
 
     let model_label = params
         .model_spec

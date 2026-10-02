@@ -29,6 +29,7 @@ pub mod prompt;
 pub mod providers;
 pub mod recipe;
 pub mod run;
+pub mod runtime;
 pub mod sandbox;
 pub mod setup;
 pub mod skills;

@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, Notify, mpsc};
 
-use crate::compaction::CompactionState;
 use crate::config::Config;
 use crate::permissions::PermissionManager;
 use crate::providers::CatalogModel;
@@ -84,11 +83,7 @@ impl SessionState {
         let dedup = crate::run::shared_cache();
         let guardrails = crate::run::shared_guardrails();
         Self {
-            compaction: std::sync::Arc::new(std::sync::Mutex::new(
-                CompactionState::default()
-                    .with_dedup(dedup.clone())
-                    .with_guardrails(guardrails.clone()),
-            )),
+            compaction: crate::runtime::new_compaction_state(dedup.clone(), guardrails.clone()),
             dedup,
             guardrails,
             usage: UsageLedger::open(),

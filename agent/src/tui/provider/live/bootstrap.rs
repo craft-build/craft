@@ -9,10 +9,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::error::{InvalidSnafu, Result, client_error};
-use crate::permissions::{PermissionManager, PermissionsConfig};
+use crate::error::{InvalidSnafu, Result};
 use crate::providers::{CatalogModel, Provider as ClientProvider, ProviderKind};
-use crate::tools::Workspace;
 
 use super::cards;
 use super::{AgentEvent, CraftProvider, ModelChoice, Selection, Tone, report};
@@ -57,28 +55,6 @@ pub(super) fn catalog_choices(
 }
 
 impl CraftProvider {
-    /// Discover instruction files and the permission rule engine for the
-    /// workspace at `cwd`, off the async worker.
-    async fn resolve_instructions(
-        cwd: &Path,
-    ) -> (crate::instructions::Instructions, PermissionManager) {
-        let instructions = tokio::task::spawn_blocking({
-            let cwd = cwd.display().to_string();
-            move || crate::instructions::load_instructions(&cwd)
-        })
-        .await
-        .unwrap_or_default();
-        let permissions = tokio::task::spawn_blocking({
-            let cwd = cwd.to_path_buf();
-            move || PermissionManager::new(crate::permissions::load_permissions(&cwd), cwd)
-        })
-        .await
-        .unwrap_or_else(|_| {
-            PermissionManager::new(PermissionsConfig::default(), cwd.to_path_buf())
-        });
-        (instructions, permissions)
-    }
-
     /// Validate the whole session up front, before the terminal UI starts:
     /// config, workspace, and at least one usable model catalog.
     pub async fn new(config: Config, cwd: impl AsRef<Path>) -> Result<Self> {
@@ -89,19 +65,6 @@ impl CraftProvider {
             .fail();
         }
         let cwd = cwd.as_ref();
-        let (instructions, permissions) = Self::resolve_instructions(cwd).await;
-        let workspace = Workspace::new(cwd)
-            .map_err(client_error)?
-            .with_loaded_instructions(instructions.loaded.clone());
-        // Phase 5 of the argosy integration: best-effort, idempotent install
-        // of the built-in reviewer agent definition into `.craft/agents/`.
-        {
-            let root = cwd.to_path_buf();
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::knowledge::install_reviewer_definition(&root, false)
-            })
-            .await;
-        }
         let mut catalogs: BTreeMap<String, Vec<CatalogModel>> = BTreeMap::new();
         let mut notes = Vec::new();
         // B.11: start the MCP client up front but never await `ready` here —
@@ -121,11 +84,18 @@ impl CraftProvider {
             })),
             ..Default::default()
         };
-        let (mcp, mcp_errors) = crate::mcp::start_with_events(cwd, mcp_events).await;
-        if !mcp_errors.is_empty() {
-            notes.push(format!("mcp: {mcp_errors}"));
+        let env = crate::runtime::workspace_env(
+            cwd,
+            crate::runtime::McpStartup::Background(mcp_events),
+            true,
+        )
+        .await?;
+        let (instructions, permissions, workspace) =
+            (env.instructions, env.permissions, env.workspace);
+        if !env.mcp_errors.is_empty() {
+            notes.push(format!("mcp: {}", env.mcp_errors));
         }
-        workspace.set_mcp(mcp.clone());
+        let mcp = workspace.mcp();
         for (name, provider_config) in &config.providers {
             if provider_config.kind == ProviderKind::Voyageai {
                 notes.push(format!("{name}: no completion models (non-chat provider)"));
@@ -215,7 +185,7 @@ impl CraftProvider {
             config: Arc::new(config),
             workspace,
             instructions,
-            permissions: Arc::new(permissions),
+            permissions,
             catalogs,
             notes,
             selection,

@@ -532,7 +532,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
             }
             run_id += 1;
         }
-    crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
+        crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
         // `guard` drops here, closing the stream.
     });
 

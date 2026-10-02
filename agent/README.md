@@ -59,6 +59,17 @@ Effectiveness gating skips a stage whose last run saved under 10% of estimated c
 
 When a request still overflows after compaction, an escalating ladder collapses tool results progressively (10%, 20%, 50%, 100%) before failing the turn.
 
+## Runtime setup contract
+
+Every execution surface (TUI, `--print` headless, ACP) obtains the shared pieces of a session from `agent/src/runtime.rs`, so equivalent sessions receive equivalent run policies:
+
+- `runtime::workspace_env(cwd, mcp, install_reviewer)` — instruction discovery, the workspace (MCP handle installed), and the permission engine. All surfaces construct the `PermissionManager`, even where nothing consults it yet.
+- `runtime::catalog_metadata` / `runtime::ResolvedModel` — a model choice plus its catalog metadata (`context_length`, `max_output_tokens`). Lookup only: it never enforces catalog membership, so `--model` ids the catalog does not list stay usable.
+- `runtime::new_compaction_state` / `runtime::compaction_ctx` — the session-shared compaction state (linked to the dedup cache and guardrail counters) and the per-run context (stages, buffer, window). Headless `--print` runs carry this too: output caps are clamped into the model's context window and in-run overflow recovery compacts and retries.
+- `runtime::run_policy` — the only `RunParams` constructor: system prompt, sampling, turn bound, continuation bound, compression, compaction, reauth hook, model spec, advisor.
+
+Deliberate surface differences, each pinned by a test: MCP startup waits for servers in headless/ACP (`Connected`) but not in the TUI (`Background`, first turn gates); the reviewer definition installs only in the TUI; model-selection preference stays per-surface; ACP is always unbounded-turns and Build-mode; TUI/headless thread plan mode into the prompt.
+
 ## Run loop
 
 Rig's runner owns model calls, streaming, and tool execution; craft layers on top:

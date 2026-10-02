@@ -260,7 +260,7 @@ impl CraftProvider {
         // window, so a keystroke from a second ago still reaches disk.
         persist_on_exit(&ctx, &selection).await;
         // Drain outstanding memory extractions before the loop task ends.
-    crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
+        crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
         // B.11: the UI dropped its command half, so no turn can follow; tear
         // the MCP servers down before the loop task ends (bounded by the
         // manager's own shutdown timeout).

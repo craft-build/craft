@@ -94,20 +94,14 @@ pub(super) async fn run_turn(
             .unwrap_or_else(|| {
                 let dedup = run::shared_cache();
                 (
-                    std::sync::Arc::new(std::sync::Mutex::new(
-                        crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
-                    )),
+                    crate::runtime::new_compaction_state(dedup.clone(), run::shared_guardrails()),
                     None,
                     dedup,
                 )
             })
     };
-    let compaction_ctx = run::CompactionCtx {
-        state: shared_compaction.clone(),
-        stages: state.config.compaction.clone(),
-        buffer: state.config.compaction_buffer,
-        context_length,
-    };
+    let compaction_ctx =
+        crate::runtime::compaction_ctx(shared_compaction.clone(), &state.config, context_length);
     if let Some(mut compaction_state) = shared_compaction.lock().ok().map(|g| g.clone()) {
         let engine = crate::compaction::CompactionEngine::new(state.config.compaction.clone())
             .with_buffer(state.config.compaction_buffer);
@@ -240,33 +234,31 @@ pub(super) async fn run_turn(
         permission_gate,
         dedup,
     );
-    let params = run::RunParams {
-        fast: false,
-        advisor: state.config.agent.advisor.clone(),
-        preamble: Some(crate::prompt::build_system_prompt(
-            &crate::prompt::Vars::new()
-                .set("{cwd}", &cwd)
-                .set("{platform}", std::env::consts::OS)
-                .set("{date}", crate::prompt::today_utc()),
-            &format!("{}{}", state.config.agent.preamble, instructions_text),
-            &crate::prompt::ResolvedSlots::default(),
-            None,
-        )),
-        temperature: state.config.agent.temperature,
-        max_tokens: state.config.agent.max_tokens,
-        max_turns: run::RunParams::UNBOUNDED,
-        recency: None,
-        compression: state.config.compression.clone(),
-        max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
-        compaction: Some(compaction_ctx),
-        reauth: state
-            .config
-            .providers
-            .get(&provider_name)
-            .map(|provider_config| crate::providers::reauth_hook(provider_config, &model_label)),
-        model_spec: Some(format!("{provider_name}/{model_label}").into()),
-        retry: run::RetryCtx::default(),
+    // ACP is always Build mode (plan mode is a TUI/headless concern), and
+    // its turn bound is unbounded: the client owns stop decisions through
+    // `session/cancel`.
+    let mode = run::AgentMode::Build;
+    let resolved = crate::runtime::ResolvedModel {
+        provider: provider_name.clone(),
+        model_id: model_label.clone(),
+        context_length,
+        max_output_tokens: _models
+            .iter()
+            .find(|entry| entry.id == model_label)
+            .and_then(|entry| entry.max_output_tokens),
     };
+    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
+        config: &state.config,
+        cwd: &cwd,
+        instructions_text: &instructions_text,
+        mode: &mode,
+        model: &resolved,
+        compaction: Some(compaction_ctx),
+        recency: None,
+        retry: run::RetryCtx::default(),
+        fast: false,
+        max_turns: crate::runtime::MaxTurns::Unbounded,
+    });
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {
         connection.send_notification(SessionNotification::new(session_id.clone(), update))

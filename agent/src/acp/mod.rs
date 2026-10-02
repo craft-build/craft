@@ -266,7 +266,8 @@ impl AppState {
     }
 
     /// Instructions discovery, workspace, and the permission engine —
-    /// shared by `session/new` and `session/load`.
+    /// shared by `session/new` and `session/load`, through the runtime
+    /// setup contract (headless `Connected` MCP, no reviewer install).
     async fn open_workspace(
         &self,
         cwd: &Path,
@@ -278,27 +279,10 @@ impl AppState {
         ),
         String,
     > {
-        let (instructions, permissions) = tokio::task::spawn_blocking({
-            let cwd = cwd.display().to_string();
-            move || {
-                let instructions = crate::instructions::load_instructions(&cwd);
-                let permissions = PermissionManager::new(
-                    crate::permissions::load_permissions(Path::new(&cwd)),
-                    cwd.into(),
-                );
-                (instructions, permissions)
-            }
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        let workspace = Workspace::new(cwd)
-            .map_err(|e| e.to_string())?
-            .with_loaded_instructions(instructions.loaded.clone());
-        // MCP (B.11): headless paths have no frame to protect, so connect up
-        // front — `start_connected` waits for every server to settle.
-        let (mcp_handle, _mcp_errors) = crate::mcp::start_connected(workspace.root()).await;
-        workspace.set_mcp(mcp_handle);
-        Ok((instructions, workspace, Arc::new(permissions)))
+        let env = crate::runtime::workspace_env(cwd, crate::runtime::McpStartup::Connected, false)
+            .await
+            .map_err(report)?;
+        Ok((env.instructions, env.workspace, env.permissions))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -323,9 +307,12 @@ impl AppState {
             models,
             model,
             context_length,
-            compaction: Arc::new(std::sync::Mutex::new(
-                crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
-            )),
+            // The ACP dispatcher does not consult guardrails yet; the link
+            // keeps the shared construction identical across surfaces.
+            compaction: crate::runtime::new_compaction_state(
+                dedup.clone(),
+                run::shared_guardrails(),
+            ),
             dedup,
             permissions,
             cancel,

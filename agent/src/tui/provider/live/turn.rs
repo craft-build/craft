@@ -596,12 +596,11 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         &tx,
     )
     .await;
-    let compaction_ctx = run::CompactionCtx {
-        state: state.lock().await.compaction.clone(),
-        stages: config.compaction.clone(),
-        buffer: config.compaction_buffer,
-        context_length: selection.context_length,
-    };
+    let compaction_ctx = crate::runtime::compaction_ctx(
+        state.lock().await.compaction.clone(),
+        &config,
+        selection.context_length,
+    );
 
     // The approval gate is shared by the dispatch table and every subagent,
     // so children cannot bypass approvals.
@@ -685,38 +684,26 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         .with_dedup(dedup)
         .with_guardrails(guardrails)
         .with_before(approval);
-    let params = run::RunParams {
-        preamble: Some(crate::prompt::build_system_prompt(
-            &crate::prompt::Vars::new()
-                .set("{cwd}", workspace.root().display().to_string())
-                .set("{platform}", std::env::consts::OS)
-                .set("{date}", crate::prompt::today_utc()),
-            &format!("{}{}", config.agent.preamble, instructions_text),
-            &crate::prompt::ResolvedSlots::default(),
-            mode.plan_path(),
-        )),
-        temperature: config.agent.temperature,
-        max_tokens: config.agent.max_tokens,
-        max_turns: config
-            .agent
-            .max_turns
-            .map(|n| n as usize)
-            .unwrap_or(run::RunParams::UNBOUNDED),
-        recency: None,
-        compression: config.compression.clone(),
-        max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
+    // The TUI's `Selection` carries the window but not the output cap;
+    // the catalog seam (runtime::ResolvedModel) is where it will land.
+    let resolved = crate::runtime::ResolvedModel {
+        provider: selection.provider.clone(),
+        model_id: selection.model.clone(),
+        context_length: selection.context_length,
+        max_output_tokens: None,
+    };
+    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
+        config: &config,
+        cwd: &workspace.root().display().to_string(),
+        instructions_text: &instructions_text,
+        mode: &mode,
+        model: &resolved,
         compaction: Some(compaction_ctx),
-        reauth: config
-            .providers
-            .get(&selection.provider)
-            .map(|provider_config| {
-                crate::providers::reauth_hook(provider_config, &selection.model)
-            }),
-        model_spec: Some(format!("{}/{}", selection.provider, selection.model).into()),
+        recency: None,
         retry: run::RetryCtx::default(),
         fast: false,
-        advisor: config.agent.advisor.clone(),
-    };
+        max_turns: crate::runtime::MaxTurns::FromConfig,
+    });
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
     let mut prompt = text;
