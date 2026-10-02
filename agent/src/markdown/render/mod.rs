@@ -167,6 +167,14 @@ impl Renderer {
         }
     }
 
+    /// Incremental prefixes with the same width-aware wrapping as `render`.
+    pub fn streaming_wrapped() -> Self {
+        Self {
+            incremental: true,
+            ..Self::default()
+        }
+    }
+
     pub fn render(&mut self, text: &str, width: u16) -> Vec<Line> {
         let theme_gen = super::highlight::theme_generation();
         if theme_gen != self.theme_gen {

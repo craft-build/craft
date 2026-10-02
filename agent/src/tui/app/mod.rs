@@ -427,10 +427,14 @@ impl App {
     // ------------------------------------------------------------------
 
     /// How soon the loop must wake for this app's screen, and whether the
-    /// clock alone owes a frame. Only the spinner statuses animate; every
-    /// other status paints pixels that a timeout cannot change.
+    /// clock alone owes a frame. Streaming text uses the smooth cadence
+    /// only while its visible prefix still has text to reveal.
     pub fn cadence(&self) -> repaint::Cadence {
         repaint::Cadence::any([
+            repaint::Cadence::when(
+                !self.interrupt_requested && self.conversation.reveal_pending(true),
+                repaint::Cadence::SMOOTH,
+            ),
             repaint::Cadence::when(
                 matches!(
                     self.status,
@@ -455,6 +459,21 @@ impl App {
         ])
     }
 
+    /// Call before drawing, including the final frame after an interrupt.
+    pub(crate) fn tick_reveal(&mut self, now: std::time::Instant) -> bool {
+        if self.interrupt_requested {
+            let changed = self.conversation.reveal_pending(true);
+            self.conversation.flush_reveal();
+            self.main_conversation_mut().flush_reveal();
+            for chat in &mut self.task_chats {
+                chat.conversation.flush_reveal();
+            }
+            changed
+        } else {
+            self.conversation.tick_reveal(now)
+        }
+    }
+
     pub fn handle_event(&mut self, ev: AgentEvent) {
         let was_following = self.view.follow;
         match ev {
@@ -473,6 +492,10 @@ impl App {
                 // working task chat (a late tool verdict can still refine
                 // the placeholder outcome) and drop a pending Esc-Esc.
                 if matches!(s, Status::Done | Status::Failed) {
+                    self.conversation.flush_reveal();
+                    for chat in &mut self.task_chats {
+                        chat.conversation.flush_reveal();
+                    }
                     self.terminalize_task_chats();
                     self.esc_pending = None;
                 }
@@ -943,6 +966,7 @@ impl App {
         // A session reset drops every task chat and returns to the main
         // transcript (which is cleared right after).
         self.clear_task_chats();
+        self.conversation.flush_reveal();
         self.conversation.messages.clear();
         self.conversation.collapsed.clear();
         self.conversation.expanded_bodies.clear();
@@ -1077,6 +1101,35 @@ mod tests {
             app.handle_event(AgentEvent::StatusChanged(status));
             assert_eq!(app.cadence(), Cadence::SPINNER, "{status:?} animates");
         }
+    }
+
+    #[test]
+    fn reveal_cadence_settles_and_interrupt_flushes() {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::AssistantDelta("hello 🌍".into()));
+        assert_eq!(app.cadence(), Cadence::SMOOTH);
+        app.tick_reveal(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        assert_eq!(app.conversation.visible_text(0), Some("hello 🌍"));
+        assert_eq!(app.cadence(), Cadence::IDLE);
+
+        app.handle_event(AgentEvent::AssistantDelta(" more".into()));
+        assert_eq!(app.cadence(), Cadence::SMOOTH);
+        app.interrupt_requested = true;
+        app.tick_reveal(std::time::Instant::now());
+        assert_eq!(app.conversation.visible_text(0), Some("hello 🌍 more"));
+        assert_eq!(app.cadence(), Cadence::IDLE);
+    }
+
+    #[test]
+    fn session_load_discards_pending_reveal() {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::AssistantDelta("old stream".into()));
+        app.handle_event(AgentEvent::SessionLoaded {
+            messages: vec![LoadedMessage::Assistant("loaded reply".into())],
+            draft: String::new(),
+        });
+        assert_eq!(app.conversation.visible_text(0), Some("loaded reply"));
+        assert!(!app.conversation.reveal_pending(true));
     }
 
     /// The status row gains the cwd (abbreviated to its last component) and

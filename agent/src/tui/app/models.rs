@@ -91,6 +91,8 @@ pub struct Conversation {
     pub(crate) assistant_open: bool,
     /// True while a streamed [`Message::Thinking`] is still being appended to.
     thinking_open: bool,
+    /// Only the active streamed paragraph needs a separate visible cursor.
+    reveal: Option<(usize, crate::tui::animation::Typewriter)>,
 }
 
 impl Conversation {
@@ -102,12 +104,107 @@ impl Conversation {
             focused: None,
             assistant_open: false,
             thinking_open: false,
+            reveal: None,
         }
+    }
+
+    /// Complete stored text for settled messages, visible prefix for the stream.
+    pub(crate) fn visible_text(&self, index: usize) -> Option<&str> {
+        let text = match self.messages.get(index)? {
+            Message::Assistant(text) | Message::Thinking(text) => text.as_str(),
+            _ => return None,
+        };
+        Some(match &self.reveal {
+            Some((active, cursor)) if *active == index => cursor.visible(text),
+            _ => text,
+        })
+    }
+
+    /// Advance before drawing; true only when the visible prefix changed.
+    pub(crate) fn tick_reveal(&mut self, now: std::time::Instant) -> bool {
+        let Some((index, cursor)) = &mut self.reveal else {
+            return false;
+        };
+        match self.messages.get(*index) {
+            Some(Message::Assistant(text) | Message::Thinking(text)) => cursor.tick(text, now),
+            _ => {
+                self.reveal = None;
+                false
+            }
+        }
+    }
+
+    pub(crate) fn reveal_pending(&self, show_thinking: bool) -> bool {
+        self.reveal.as_ref().is_some_and(|(index, cursor)| {
+            cursor.is_animating()
+                && match self.messages.get(*index) {
+                    Some(Message::Assistant(_)) => true,
+                    Some(Message::Thinking(_)) => show_thinking,
+                    _ => false,
+                }
+        })
+    }
+
+    /// Boundaries, completion and cancellation expose all received text.
+    pub(crate) fn flush_reveal(&mut self) {
+        self.reveal = None;
+        self.assistant_open = false;
+        self.thinking_open = false;
     }
 
     /// Merge a provider event into the message list. Non-message events
     /// (status, plan, catalog, ...) are ignored; App routes those itself.
     pub(crate) fn apply(&mut self, ev: AgentEvent) {
+        self.apply_at(ev, std::time::Instant::now());
+    }
+
+    fn apply_at(&mut self, ev: AgentEvent, now: std::time::Instant) {
+        let continues = match &ev {
+            AgentEvent::AssistantDelta(_) => {
+                self.assistant_open && matches!(self.messages.last(), Some(Message::Assistant(_)))
+            }
+            AgentEvent::ReasoningDelta(_) => {
+                self.thinking_open && matches!(self.messages.last(), Some(Message::Thinking(_)))
+            }
+            _ => false,
+        };
+        if matches!(
+            &ev,
+            AgentEvent::AssistantDelta(_) | AgentEvent::ReasoningDelta(_)
+        ) {
+            if !continues {
+                self.flush_reveal();
+                self.reveal = Some((
+                    self.messages.len(),
+                    crate::tui::animation::Typewriter::new(now),
+                ));
+            }
+            let delta = match &ev {
+                AgentEvent::AssistantDelta(text) | AgentEvent::ReasoningDelta(text) => text,
+                _ => unreachable!(),
+            };
+            if let Some((index, cursor)) = &mut self.reveal {
+                let existing = match self.messages.get(*index) {
+                    Some(Message::Assistant(text) | Message::Thinking(text)) => text.as_str(),
+                    _ => "",
+                };
+                // Tick against the old buffer before the append, preserving
+                // progress even when several deltas arrive between frames.
+                cursor.push(existing, delta, now);
+            }
+        } else if matches!(
+            &ev,
+            AgentEvent::AssistantText(_)
+                | AgentEvent::AssistantEnd
+                | AgentEvent::Notice { .. }
+                | AgentEvent::ToolCall(_)
+                | AgentEvent::StatusChanged(
+                    crate::tui::provider::Status::Done | crate::tui::provider::Status::Failed
+                )
+                | AgentEvent::SessionLoaded { .. }
+        ) {
+            self.flush_reveal();
+        }
         match ev {
             AgentEvent::AssistantText(text) => {
                 self.assistant_open = false;
@@ -216,6 +313,94 @@ impl Conversation {
     }
 }
 
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn stored_text_is_complete_while_visible_prefix_advances() {
+        let now = Instant::now();
+        let mut chat = Conversation::new();
+        chat.apply_at(AgentEvent::AssistantDelta("é中🦀a".into()), now);
+        assert!(matches!(&chat.messages[0], Message::Assistant(text) if text == "é中🦀a"));
+        assert_eq!(chat.visible_text(0), Some(""));
+        assert!(chat.tick_reveal(now + Duration::from_millis(15)));
+        assert_eq!(chat.visible_text(0), Some("é中"));
+        chat.apply_at(
+            AgentEvent::AssistantDelta("b".into()),
+            now + Duration::from_millis(15),
+        );
+        assert_eq!(chat.visible_text(0), Some("é中"));
+        assert!(chat.tick_reveal(now + Duration::from_millis(45)));
+        assert_eq!(chat.visible_text(0), Some("é中🦀ab"));
+        assert!(!chat.reveal_pending(true));
+        assert!(!chat.tick_reveal(now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn reasoning_transition_and_end_flush_received_text() {
+        let now = Instant::now();
+        let mut chat = Conversation::new();
+        chat.apply_at(AgentEvent::ReasoningDelta("thinking".into()), now);
+        assert!(
+            !chat.reveal_pending(false),
+            "hidden reasoning owes no frames"
+        );
+        assert!(chat.reveal_pending(true));
+        chat.apply_at(AgentEvent::AssistantDelta("answer".into()), now);
+        assert_eq!(chat.visible_text(0), Some("thinking"));
+        assert_eq!(chat.visible_text(1), Some(""));
+        chat.apply_at(AgentEvent::AssistantEnd, now);
+        assert_eq!(chat.visible_text(1), Some("answer"));
+        assert!(!chat.reveal_pending(true));
+        chat.apply_at(AgentEvent::AssistantDelta("next".into()), now);
+        assert_eq!(chat.messages.len(), 3);
+        chat.flush_reveal();
+        assert_eq!(chat.visible_text(2), Some("next"));
+    }
+
+    #[test]
+    fn completion_and_full_messages_are_immediately_visible() {
+        let now = Instant::now();
+        let mut chat = Conversation::new();
+        chat.apply_at(AgentEvent::AssistantDelta("partial".into()), now);
+        chat.apply_at(
+            AgentEvent::StatusChanged(crate::tui::provider::Status::Done),
+            now,
+        );
+        assert_eq!(chat.visible_text(0), Some("partial"));
+        chat.apply_at(AgentEvent::AssistantText("complete".into()), now);
+        assert_eq!(chat.visible_text(1), Some("complete"));
+        assert!(!chat.reveal_pending(true));
+        // Loaded messages are inserted directly; they never acquire a cursor.
+        chat.messages.push(Message::Assistant("loaded".into()));
+        assert_eq!(chat.visible_text(2), Some("loaded"));
+    }
+
+    #[test]
+    fn failure_and_notice_boundaries_flush() {
+        let now = Instant::now();
+        let mut chat = Conversation::new();
+        chat.apply_at(AgentEvent::ReasoningDelta("received reasoning".into()), now);
+        chat.apply_at(
+            AgentEvent::StatusChanged(crate::tui::provider::Status::Failed),
+            now,
+        );
+        assert_eq!(chat.visible_text(0), Some("received reasoning"));
+        chat.apply_at(AgentEvent::AssistantDelta("received reply".into()), now);
+        chat.apply_at(
+            AgentEvent::Notice {
+                tone: Tone::Info,
+                text: "boundary".into(),
+            },
+            now,
+        );
+        assert_eq!(chat.visible_text(1), Some("received reply"));
+        assert!(!chat.reveal_pending(true));
+    }
+}
+
 /// Viewport state: the scrollback document (segments + the viewport's
 /// position in it) plus the renderer-written frame snapshot (message
 /// doc-row anchors, per-row text, hit regions) and pointer state.
@@ -228,6 +413,7 @@ pub struct ViewModel {
     /// frame in deterministic message order, so stored positions survive
     /// refills and appends.
     pub segments: SegmentCache,
+    pub(crate) assistant_cache: crate::tui::ui::messages::AssistantCache,
     pub view_height: u16,
     pub view_width: u16,
     /// Doc row where each message starts (filled by the renderer).
@@ -268,6 +454,7 @@ impl ViewModel {
             scroll: ScrollPos::default(),
             follow: true,
             segments: SegmentCache::new(),
+            assistant_cache: crate::tui::ui::messages::AssistantCache::default(),
             view_height: 0,
             view_width: 0,
             msg_starts: Vec::new(),

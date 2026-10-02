@@ -1052,6 +1052,7 @@ fn ctrl_n_opens_the_task_chat_picker_modal() {
     app.handle_key(ctrl('n'), &tx);
     app.handle_key(key(KeyCode::Down), &tx);
     app.handle_key(key(KeyCode::Enter), &tx);
+    app.tick_reveal(std::time::Instant::now() + std::time::Duration::from_secs(1));
     let visible = super::super::testutil::screen_text(&mut app, 80, 24);
     assert!(
         visible.contains("one"),

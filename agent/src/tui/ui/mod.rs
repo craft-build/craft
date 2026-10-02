@@ -3,7 +3,7 @@
 
 mod composer;
 pub mod image;
-mod messages;
+pub(crate) mod messages;
 mod overlays;
 pub mod scrollback;
 mod sidebar;

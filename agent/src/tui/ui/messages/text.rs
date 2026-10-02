@@ -95,13 +95,98 @@ fn md_style(token: &StyleToken, emph: &Emphasis) -> Style {
     style
 }
 
-/// Agent text: parsed and rendered through the markdown engine (blocks,
-/// inline styles, highlighted code fences) at the wrap width. Code-block
-/// highlighting hits the global block cache, so re-rendering each frame
-/// stays cheap.
-pub(super) fn assistant_block(text: &str, width: usize) -> Vec<Line<'static>> {
-    let wrap_w = width.min(88) as u16;
-    render::render(text, wrap_w)
+/// View-local entries keyed by message position; each stores only the latest
+/// exact text and layout. Entries not visited in the current frame are dropped.
+#[derive(Default)]
+pub(crate) struct AssistantCache {
+    entries: std::collections::BTreeMap<usize, AssistantEntry>,
+}
+
+struct AssistantEntry {
+    text: String,
+    width: usize,
+    theme: (u64, u64),
+    renderer: render::Renderer,
+    lines: Vec<Line<'static>>,
+    initialized: bool,
+    seen: bool,
+    #[cfg(test)]
+    renders: usize,
+    #[cfg(test)]
+    resets: usize,
+}
+
+impl AssistantCache {
+    pub(crate) fn begin_frame(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.seen = false;
+        }
+    }
+
+    pub(crate) fn end_frame(&mut self) {
+        self.entries.retain(|_, entry| entry.seen);
+    }
+
+    pub(crate) fn render(&mut self, id: usize, text: &str, width: usize) -> Vec<Line<'static>> {
+        self.render_with_theme(
+            id,
+            text,
+            width,
+            (
+                theme::generation(),
+                crate::markdown::highlight::theme_generation(),
+            ),
+        )
+    }
+
+    fn render_with_theme(
+        &mut self,
+        id: usize,
+        text: &str,
+        width: usize,
+        theme: (u64, u64),
+    ) -> Vec<Line<'static>> {
+        let entry = self.entries.entry(id).or_insert_with(|| AssistantEntry {
+            text: String::new(),
+            width,
+            theme,
+            renderer: render::Renderer::streaming_wrapped(),
+            lines: Vec::new(),
+            initialized: false,
+            seen: false,
+            #[cfg(test)]
+            renders: 0,
+            #[cfg(test)]
+            resets: 0,
+        });
+        let invalid =
+            entry.width != width || entry.theme != theme || !text.starts_with(&entry.text);
+        if invalid {
+            entry.renderer = render::Renderer::streaming_wrapped();
+            #[cfg(test)]
+            {
+                entry.resets += 1;
+            }
+        }
+        if invalid || entry.text != text || !entry.initialized {
+            entry.lines = styled_markdown(entry.renderer.render(text, width.min(88) as u16));
+            entry.initialized = true;
+            entry.text.clear();
+            entry.text.push_str(text);
+            entry.width = width;
+            entry.theme = theme;
+            #[cfg(test)]
+            {
+                entry.renders += 1;
+            }
+        }
+        entry.seen = true;
+        entry.lines.clone()
+    }
+}
+
+fn styled_markdown(lines: Vec<render::Line>) -> Vec<Line<'static>> {
+    lines
         .into_iter()
         .map(|line| {
             Line::from(
@@ -149,6 +234,86 @@ pub(super) fn notice_block(tone: Tone, text: &str, width: usize) -> Vec<Line<'st
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn expected(text: &str, width: usize) -> Vec<Line<'static>> {
+        styled_markdown(render::render(text, width.min(88) as u16))
+    }
+
+    #[test]
+    fn assistant_cache_hits_and_retains_incremental_renderer() {
+        let mut cache = AssistantCache::default();
+        let text =
+            "A paragraph with **bold** words and enough text to wrap.\n\n```rust\nfn main() {\n";
+        let first = cache.render_with_theme(0, text, 18, (0, 0));
+        assert_eq!(first, expected(text, 18));
+        assert_eq!(cache.render_with_theme(0, text, 18, (0, 0)), first);
+        assert_eq!(cache.entries[&0].renders, 1);
+        let grown =
+            format!("{text}    println!(\"hello\");\n}}\n```\n\n| a | b |\n|---|---|\n| c | d |");
+        assert_eq!(
+            cache.render_with_theme(0, &grown, 18, (0, 0)),
+            expected(&grown, 18)
+        );
+        assert_eq!(cache.entries[&0].renders, 2);
+        assert_eq!(cache.entries[&0].resets, 0);
+    }
+
+    #[test]
+    fn assistant_cache_invalidates_replacement_resize_and_themes() {
+        let mut cache = AssistantCache::default();
+        cache.render_with_theme(0, "old message", 18, (0, 0));
+        for (text, width, theme) in [
+            (
+                "# replacement\n\nnew paragraph wraps across narrow rows",
+                18,
+                (0, 0),
+            ),
+            (
+                "# replacement\n\nnew paragraph wraps across narrow rows",
+                10,
+                (0, 0),
+            ),
+            (
+                "# replacement\n\nnew paragraph wraps across narrow rows",
+                10,
+                (1, 0),
+            ),
+            (
+                "# replacement\n\nnew paragraph wraps across narrow rows",
+                10,
+                (1, 1),
+            ),
+        ] {
+            assert_eq!(
+                cache.render_with_theme(0, text, width, theme),
+                expected(text, width)
+            );
+        }
+        assert_eq!(cache.entries[&0].resets, 4);
+        cache.render_with_theme(0, "", 10, (1, 1));
+        let renders = cache.entries[&0].renders;
+        cache.render_with_theme(0, "", 10, (1, 1));
+        assert_eq!(cache.entries[&0].renders, renders);
+    }
+
+    #[test]
+    fn assistant_cache_drops_entries_absent_from_current_session() {
+        let mut cache = AssistantCache::default();
+        cache.begin_frame();
+        cache.render_with_theme(0, "first", 80, (0, 0));
+        cache.render_with_theme(2, "second", 80, (0, 0));
+        cache.end_frame();
+        cache.begin_frame();
+        cache.render_with_theme(0, "replacement session", 80, (0, 0));
+        cache.end_frame();
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[&0].text, "replacement session");
+        cache.begin_frame();
+        cache.end_frame();
+        assert!(cache.entries.is_empty());
+    }
+
     /// W1: a notice is one muted line with a tone-colored prefix glyph.
     #[test]
     fn notice_renders_tone_glyph_and_muted_text() {

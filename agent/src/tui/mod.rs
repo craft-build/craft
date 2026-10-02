@@ -3,6 +3,7 @@
 //! The UI renders whatever a [`provider::Provider`] streams in; the live
 //! backend is [`provider::live::CraftProvider`].
 
+mod animation;
 mod app;
 mod composer;
 mod file_picker;
@@ -40,6 +41,8 @@ use app::App;
 use provider::{AgentEvent, Command, Provider, Status};
 use repaint::{Dirty, IDLE_POLL};
 use ui::theme;
+
+const EVENT_DRAIN_BUDGET: usize = 256;
 
 /// Run the terminal UI against `provider` until the user quits.
 pub async fn run<P: Provider>(provider: P) -> io::Result<()> {
@@ -447,8 +450,13 @@ async fn run_loop(
                 dirty = Dirty::YES;
             }
             ev = evt_rx.recv(), if provider_alive => {
-                match ev {
-                    Some(ev) => {
+                if let Some(first) = ev {
+                    // Consume a bounded burst before painting, without letting
+                    // a continuously ready provider starve terminal input.
+                    let pending = std::iter::once(first)
+                        .chain(std::iter::from_fn(|| evt_rx.try_recv().ok()))
+                        .take(EVENT_DRAIN_BUDGET);
+                    for ev in pending {
                         let was_busy = app.busy();
                         let was_waiting = app.status == Status::WaitingApproval;
                         if let AgentEvent::AssistantText(text) = &ev
@@ -484,7 +492,8 @@ async fn run_loop(
                         }
                         dirty = Dirty::YES;
                     }
-                    None => provider_alive = false,
+                } else {
+                    provider_alive = false;
                 }
             }
             _ = sleep => dirty |= Dirty::from(cadence.moves()),
@@ -493,6 +502,7 @@ async fn run_loop(
             bells.on_manual_exit();
             return Ok(());
         }
+        dirty |= Dirty::from(app.tick_reveal(std::time::Instant::now()));
         if dirty.take() {
             paint(app)?;
         }
@@ -597,6 +607,124 @@ mod tests {
             )
             .await
         })
+    }
+
+    #[tokio::test]
+    async fn provider_bursts_are_drained_in_bounded_ordered_frames() {
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = mpsc::unbounded_channel();
+        let deltas = EVENT_DRAIN_BUDGET * 2 + 3;
+        for _ in 0..deltas {
+            evt_tx.send(AgentEvent::AssistantDelta("x".into())).unwrap();
+        }
+        evt_tx.send(AgentEvent::AssistantEnd).unwrap();
+        evt_tx
+            .send(AgentEvent::StatusChanged(Status::Done))
+            .unwrap();
+        let mut app = App::new();
+        app.handle_event(AgentEvent::StatusChanged(Status::Running));
+        let mut frames = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            run_loop(
+                &mut app,
+                &cmd_tx,
+                input_rx,
+                evt_rx,
+                |app| {
+                    let Some(app::Message::Assistant(text)) = app.conversation.messages.last()
+                    else {
+                        panic!("assistant deltas must stay in one message");
+                    };
+                    frames.push(text.len());
+                    if app.status == Status::Done {
+                        app.should_quit = true;
+                        input_tx.send(Event::Resize(80, 24)).unwrap();
+                    }
+                    Ok(())
+                },
+                |_| Ok(()),
+                |_| Ok(()),
+                || Ok(()),
+                || (),
+                notify::Focus::default(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(frames, [EVENT_DRAIN_BUDGET, EVENT_DRAIN_BUDGET * 2, deltas]);
+        assert!(!app.conversation.assistant_open);
+        assert_eq!(app.status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn a_single_unicode_burst_reveals_across_clock_frames() {
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = mpsc::unbounded_channel();
+        let text = "🌸".repeat(40);
+        evt_tx
+            .send(AgentEvent::AssistantDelta(text.clone()))
+            .unwrap();
+        let mut app = App::new();
+        app.handle_event(AgentEvent::StatusChanged(Status::Running));
+        let mut visible_lengths = Vec::new();
+        let mut completion_sent = false;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            run_loop(
+                &mut app,
+                &cmd_tx,
+                input_rx,
+                evt_rx,
+                |app| {
+                    let visible = app.conversation.visible_text(0).unwrap_or(&text);
+                    assert!(text.starts_with(visible));
+                    visible_lengths.push(visible.len());
+                    let visible_chars = visible.chars().count();
+                    let fully_visible = visible == text;
+                    terminal.draw(|f| ui::draw(f, app)).unwrap();
+                    let painted_chars = terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .filter(|cell| cell.symbol() == "🌸")
+                        .count();
+                    assert_eq!(painted_chars, visible_chars);
+                    if fully_visible && !completion_sent {
+                        completion_sent = true;
+                        evt_tx.send(AgentEvent::AssistantEnd).unwrap();
+                        evt_tx
+                            .send(AgentEvent::StatusChanged(Status::Done))
+                            .unwrap();
+                    }
+                    if app.status == Status::Done {
+                        app.should_quit = true;
+                        input_tx.send(Event::Resize(80, 24)).unwrap();
+                    }
+                    Ok(())
+                },
+                |_| Ok(()),
+                |_| Ok(()),
+                || Ok(()),
+                || (),
+                notify::Focus::default(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            visible_lengths.len() > 2,
+            "text must animate without new deltas"
+        );
+        assert!(visible_lengths.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(visible_lengths.last(), Some(&text.len()));
+        assert_eq!(app.cadence(), repaint::Cadence::IDLE);
     }
 
     /// A settled session owes only the first frame: idle timeouts repaint

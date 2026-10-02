@@ -243,7 +243,14 @@ impl App {
             TaskOutcome::Done
         };
         match self.task_chat_index(tool_use_id) {
-            Some(idx) => self.task_chats[idx].finish(outcome),
+            Some(idx) => {
+                if self.active_task == Some(idx) {
+                    self.conversation.flush_reveal();
+                } else {
+                    self.task_chats[idx].conversation.flush_reveal();
+                }
+                self.task_chats[idx].finish(outcome)
+            }
             None => false,
         }
     }
@@ -258,6 +265,34 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_completion_flushes_only_its_transcript_in_either_mount_position() {
+        for mounted in [false, true] {
+            let mut app = App::new();
+            app.conversation
+                .apply(crate::tui::provider::AgentEvent::AssistantDelta(
+                    "main reply".into(),
+                ));
+            app.apply_subagent_event(
+                "t1",
+                "refactor",
+                crate::tui::provider::AgentEvent::AssistantDelta("child reply".into()),
+            );
+            if mounted {
+                app.focus_chat_position(1);
+            }
+            assert!(app.finish_task_chat("t1", false));
+            let child = if mounted {
+                &app.conversation
+            } else {
+                &app.task_chats[0].conversation
+            };
+            assert!(!child.reveal_pending(true));
+            assert_eq!(child.visible_text(0), Some("child reply"));
+            assert!(app.main_conversation_mut().reveal_pending(true));
+        }
+    }
 
     #[test]
     fn refines_only_upgrades_the_placeholder() {

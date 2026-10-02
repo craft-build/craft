@@ -16,10 +16,11 @@ mod text;
 mod tools;
 mod wrap;
 
+pub(crate) use self::text::AssistantCache;
 pub(crate) use self::wrap::wrap_rows;
 
 use self::cards::tool_block;
-use self::text::{assistant_block, notice_block, thinking_block, user_block, user_line};
+use self::text::{notice_block, thinking_block, user_block, user_line};
 
 const MARGIN: u16 = 2;
 
@@ -49,6 +50,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     // deterministic message order, so stored scroll positions survive the
     // refill and appended messages.
     app.view.segments.clear();
+    app.view.assistant_cache.begin_frame();
 
     // Blank spacer carrying the user-message accent bar, so the block's
     // left border reads as one continuous line.
@@ -107,14 +109,18 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 .view
                 .segments
                 .push(Segment::with_lines(user_block(text, width))),
-            Message::Assistant(text) => app
-                .view
-                .segments
-                .push(Segment::with_lines(assistant_block(text, width))),
-            Message::Thinking(text) => app
-                .view
-                .segments
-                .push(Segment::with_lines(thinking_block(text, width))),
+            Message::Assistant(text) => {
+                let text = app.conversation.visible_text(idx).unwrap_or(text);
+                app.view.segments.push(Segment::with_lines(
+                    app.view.assistant_cache.render(idx, text, width),
+                ));
+            }
+            Message::Thinking(text) => {
+                let text = app.conversation.visible_text(idx).unwrap_or(text);
+                app.view
+                    .segments
+                    .push(Segment::with_lines(thinking_block(text, width)));
+            }
             Message::Notice { tone, text } => app
                 .view
                 .segments
@@ -185,6 +191,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             .segments
             .push(Segment::with_lines(vec![Line::default()]));
     }
+    app.view.assistant_cache.end_frame();
 
     for (seg, id, data) in pending_images {
         let caption_rows = app
