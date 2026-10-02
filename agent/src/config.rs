@@ -18,7 +18,9 @@ use crate::providers::ProviderKind;
 pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     pub agent: AgentConfig,
-    /// Seed new sessions; saved session preferences win on resume.
+    /// Explicit thinking preference. When set, it overrides the level restored
+    /// from the last session on a clean launch, and it seeds new sessions;
+    /// saved session preferences win on resume.
     pub always_thinking: Option<crate::thinking::ThinkingConfig>,
     /// Compaction stages, ascending by context fill ratio.
     #[serde(default = "default_compaction")]

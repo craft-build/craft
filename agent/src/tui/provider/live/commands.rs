@@ -33,14 +33,24 @@ impl CraftProvider {
         let mut selection = self.selection;
         let cwd = self.workspace.root().display().to_string();
         let state_dir = crate::storage::StateDir::resolve().ok();
+        // Seed the fresh session with the level the user last chose, the way
+        // the model selection reuses the newest session's header. An explicit
+        // `always_thinking` (config or `--thinking`) still wins, then the
+        // agent default.
+        let last_thinking = state_dir.as_ref().and_then(|dir| {
+            crate::storage::sessions::latest_thinking(&cwd, dir)
+                .ok()
+                .flatten()
+        });
+        let seeded_thinking = self
+            .config
+            .always_thinking
+            .or(last_thinking)
+            .or(self.config.agent.thinking)
+            .unwrap_or_default();
         let state = Arc::new(Mutex::new(
             SessionState::linked()
-                .with_thinking(
-                    self.config
-                        .always_thinking
-                        .or(self.config.agent.thinking)
-                        .unwrap_or_default(),
-                )
+                .with_thinking(seeded_thinking)
                 .with_store(state_dir.as_ref(), &cwd, &LoopCtx::model_spec(&selection)),
         ));
         let files: Files = Files::default();
@@ -650,7 +660,9 @@ pub(super) async fn handle_reset(
 /// queued shell results, swap in a fresh linked session (clearing the todo
 /// plan with it), and report an idle session with its context counter zeroed.
 /// `clear_files` additionally drops the tracked file set and clears its
-/// chrome (`Reset`).
+/// chrome (`Reset`). Both carry the user's last thinking level into the fresh
+/// session, as `SelectModel` carries the model: a new session must not
+/// silently drop the reasoning effort the user chose.
 async fn reset_session(
     ctx: &LoopCtx,
     selection: &Selection,
@@ -666,14 +678,7 @@ async fn reset_session(
     // Reset through `linked` so the fresh session's compaction state keeps
     // working dedup/guardrails handles; a bare default would strand the
     // caches the dispatcher still points at.
-    let thinking = if clear_files {
-        ctx.config
-            .always_thinking
-            .or(ctx.config.agent.thinking)
-            .unwrap_or_default()
-    } else {
-        ctx.state.lock().await.thinking
-    };
+    let thinking = ctx.state.lock().await.thinking;
     let thinking = ctx
         .config
         .providers

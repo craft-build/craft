@@ -1,8 +1,8 @@
 use super::{
     ARCHIVE_DIR, ARCHIVE_KEEP, ARCHIVE_MAX_BYTES, CWD_INDEX_FILE, DEFAULT_TITLE, LOG_BLOATED,
     MAX_APPENDS, MAX_TITLE_LEN, MSG_PREFIX, SESSION_VERSION, StoredSubagent, generate_title,
-    json_path, jsonl_path, latest_model_in, load_cwd_index, next_epoch, remove_from_cwd_index,
-    update_cwd_index, write_full_session,
+    json_path, jsonl_path, latest_model_in, latest_thinking_in, load_cwd_index, next_epoch,
+    remove_from_cwd_index, update_cwd_index, write_full_session,
 };
 use super::{HistorySnapshot, Session, SessionError, SessionLog, StorageError, TitleSource};
 use crate::id::CraftId;
@@ -549,6 +549,43 @@ fn latest_model_reads_the_newest_session_header() {
     assert_eq!(
         latest_model_in("/project", dir).unwrap().as_deref(),
         Some("anthropic/claude-sonnet-4")
+    );
+}
+
+#[test]
+fn latest_thinking_reads_the_newest_session_meta() {
+    use crate::thinking::{Effort, ThinkingConfig};
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let mut older: TestSession = Session::new("m", "/project");
+    older.set_thinking(ThinkingConfig::Effort(Effort::Low));
+    save_with_time(&mut older, dir, 1000);
+    let mut newer: TestSession = Session::new("m", "/project");
+    newer.set_thinking(ThinkingConfig::Budget(4096));
+    save_with_time(&mut newer, dir, 2000);
+
+    assert_eq!(
+        latest_thinking_in("/project", dir).unwrap(),
+        Some(ThinkingConfig::Budget(4096))
+    );
+    // No session for this cwd: nothing to restore.
+    assert_eq!(latest_thinking_in("/elsewhere", dir).unwrap(), None);
+
+    // The newest session never recorded a preference: nothing to restore.
+    let mut plain: TestSession = Session::new("m", "/other");
+    save_with_time(&mut plain, dir, 3000);
+    assert_eq!(latest_thinking_in("/other", dir).unwrap(), None);
+
+    // A stale index entry falls back to scanning the headers on disk.
+    let stale: HashMap<String, String> = [("/project".into(), "deleted-id".into())].into();
+    fs::write(
+        dir.join(CWD_INDEX_FILE),
+        serde_json::to_vec(&stale).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        latest_thinking_in("/project", dir).unwrap(),
+        Some(ThinkingConfig::Budget(4096))
     );
 }
 

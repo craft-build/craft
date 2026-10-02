@@ -259,9 +259,10 @@ fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
     }
 }
 
-/// Thinking is session state: clear preserves it, new resets to the config default.
+/// Thinking is session state: both clear and a brand-new session carry the
+/// user's last level forward instead of dropping back to the config default.
 #[tokio::test]
-async fn thinking_changes_persist_and_clear_preserves_them() {
+async fn thinking_changes_persist_across_clear_and_new_session() {
     use crate::thinking::ThinkingConfig;
     let dir = tempfile::tempdir().unwrap();
     let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
@@ -297,7 +298,11 @@ async fn thinking_changes_persist_and_clear_preserves_them() {
         Some(ThinkingConfig::Budget(4096))
     );
     super::commands::handle_reset(&ctx, &selection, &mut current_turn).await;
-    assert_eq!(state.lock().await.thinking, ThinkingConfig::Off);
+    assert_eq!(state.lock().await.thinking, ThinkingConfig::Budget(4096));
+    assert_eq!(
+        state.lock().await.store.as_ref().unwrap().thinking(),
+        Some(ThinkingConfig::Budget(4096))
+    );
 }
 
 #[tokio::test]

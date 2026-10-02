@@ -53,7 +53,7 @@ use archive::ARCHIVE_DIR;
 use index::{load_cwd_index, remove_from_cwd_index};
 use legacy::{locate_session_file, remove_legacy_files, try_remove};
 use log::load_session_at;
-use scan::{read_header_model, scan_headers};
+use scan::{read_header_model, read_last_thinking, scan_headers};
 
 #[cfg(test)]
 use archive::{ARCHIVE_KEEP, ARCHIVE_MAX_BYTES, MSG_PREFIX};
@@ -742,4 +742,42 @@ pub fn latest_model_in(cwd: &str, dir: &Path) -> Result<Option<String>, SessionE
         return Ok(None);
     };
     Ok(locate_session_file(dir, summary.id.id()).and_then(|path| read_header_model(&path)))
+}
+
+/// The thinking preference recorded by the most recent session for `cwd`, if
+/// any.
+///
+/// Startup uses this to restore the level the user last selected without
+/// loading a whole session: the cwd index names the newest session and only
+/// its trailing meta record is read. `None` when there is no session, or the
+/// newest one predates the preference being recorded.
+pub fn latest_thinking(
+    cwd: &str,
+    dir: &StateDir,
+) -> Result<Option<crate::thinking::ThinkingConfig>, SessionError> {
+    let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
+    latest_thinking_in(cwd, &sessions_dir)
+}
+
+/// [`latest_thinking`] against an explicit sessions directory.
+pub fn latest_thinking_in(
+    cwd: &str,
+    dir: &Path,
+) -> Result<Option<crate::thinking::ThinkingConfig>, SessionError> {
+    if let Some(path) = load_cwd_index(dir)
+        .get(cwd)
+        .and_then(|id| id.parse::<CraftId>().ok())
+        .and_then(|id| locate_session_file(dir, id))
+    {
+        return Ok(read_last_thinking(&path));
+    }
+
+    // The index is missing or stale; fall back to scanning headers.
+    let Some(summary) = scan_headers(Some(cwd), dir)?
+        .into_iter()
+        .max_by_key(|s| s.updated_at)
+    else {
+        return Ok(None);
+    };
+    Ok(locate_session_file(dir, summary.id.id()).and_then(|path| read_last_thinking(&path)))
 }

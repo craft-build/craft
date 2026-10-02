@@ -35,6 +35,8 @@ enum ScanRecord {
     Meta {
         title: String,
         updated_at: u64,
+        #[serde(default)]
+        thinking: Option<crate::thinking::ThinkingConfig>,
     },
     #[serde(other)]
     Other,
@@ -166,7 +168,10 @@ fn read_last_meta(file: &mut File) -> Option<(String, u64)> {
 
     let text = String::from_utf8_lossy(&buf);
     for line in text.lines().rev() {
-        if let Ok(ScanRecord::Meta { title, updated_at }) = serde_json::from_str(line) {
+        if let Ok(ScanRecord::Meta {
+            title, updated_at, ..
+        }) = serde_json::from_str(line)
+        {
             return Some((title, updated_at));
         }
     }
@@ -188,6 +193,30 @@ pub(super) fn read_header_model(path: &Path) -> Option<String> {
     BufReader::new(&mut file).read_line(&mut first_line).ok()?;
     let header: JsonlModelOnly = serde_json::from_str(first_line.trim_end()).ok()?;
     header.model.filter(|model| !model.is_empty())
+}
+
+/// The `thinking` preference recorded in a session's last meta record, if any.
+/// Reads only the file tail, so restoring the last-used thinking stays cheap
+/// even when the newest session log is large.
+pub(super) fn read_last_thinking(path: &Path) -> Option<crate::thinking::ThinkingConfig> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+
+    let start = len.saturating_sub(TAIL_BUF);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.take(len - start).read_to_end(&mut buf).ok()?;
+
+    let text = String::from_utf8_lossy(&buf);
+    text.lines().rev().find_map(|line| {
+        match serde_json::from_str(line) {
+            Ok(ScanRecord::Meta { thinking, .. }) => thinking,
+            _ => None,
+        }
+    })
 }
 
 pub(super) fn session_entries(dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
