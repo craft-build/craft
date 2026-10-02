@@ -297,8 +297,10 @@ impl rmcp::ClientHandler for McpClientHandler {
     }
 
     /// Advertise what this handler actually answers: roots (when a root was
-    /// threaded in), sampling, and form-mode elicitation. The defaults rmcp
-    /// would send declare none of these, so servers never ask.
+    /// threaded in) and form-mode elicitation. The defaults rmcp
+    /// would send declare none of these, so servers never ask. Sampling is
+    /// deprecated by SEP-2577 and no longer supported; a stray
+    /// `sampling/createMessage` gets rmcp's default method-not-found.
     fn get_info(&self) -> rmcp::model::ClientConfig {
         let mut capabilities = rmcp::model::ClientCapabilities::default();
         if self.events.root.is_some() {
@@ -306,7 +308,6 @@ impl rmcp::ClientHandler for McpClientHandler {
             roots.list_changed = Some(false);
             capabilities.roots = Some(roots);
         }
-        capabilities.sampling = Some(rmcp::model::SamplingCapability::default());
         capabilities.elicitation = Some(
             rmcp::model::ElicitationCapability::default()
                 .with_form(rmcp::model::FormElicitationCapability::new()),
@@ -330,32 +331,6 @@ impl rmcp::ClientHandler for McpClientHandler {
             ]),
             None => rmcp::model::ListRootsResult::default(),
         })
-    }
-
-    async fn create_message(
-        &self,
-        params: rmcp::model::CreateMessageRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::RoleClient>,
-    ) -> Result<rmcp::model::CreateMessageResult, rmcp::model::ErrorData> {
-        let Some(tx) = self.events.server_requests.clone() else {
-            return Err(relay_unavailable("sampling"));
-        };
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if tx
-            .send(McpServerRequest::Sampling {
-                server: Arc::clone(&self.server),
-                request: params,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
-            return Err(relay_unavailable("sampling"));
-        }
-        match reply_rx.await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(message)) => Err(rmcp::model::ErrorData::internal_error(message, None)),
-            Err(_) => Err(relay_unavailable("sampling")),
-        }
     }
 
     /// `elicitation/create`: form requests relay to the frontend; URL-mode
@@ -1193,14 +1168,15 @@ mod tests {
         assert!(!truncated);
     }
 
-    /// Phase 4, end-to-end over stdio: the server issues `roots/list` and
+    /// End-to-end over stdio: the server issues `roots/list` and a stray
     /// `sampling/createMessage` back at the client. Roots answer straight
-    /// from the threaded workspace root; sampling (and elicitation, same
-    /// seam) deny cleanly when no frontend is attached — here the events
-    /// carry no `server_requests` sender, the headless shape.
+    /// from the threaded workspace root; sampling is deprecated (SEP-2577)
+    /// and no longer supported — not advertised, not relayed — so the stray
+    /// request gets rmcp's default method-not-found (`-32601`) and the
+    /// server can degrade.
     #[cfg(unix)]
     #[tokio::test]
-    async fn server_to_client_requests_roots_and_sampling() {
+    async fn server_to_client_requests_roots_and_stray_sampling() {
         if std::process::Command::new("python3")
             .arg("--version")
             .output()
@@ -1210,7 +1186,7 @@ mod tests {
         }
         const SCRIPT: &str = r#"
 import json, sys
-roots, sampling_error = None, None
+roots, sampling_error_code = None, None
 def send(msg): sys.stdout.write(json.dumps(msg) + "\n"); sys.stdout.flush()
 for line in sys.stdin:
     req = json.loads(line)
@@ -1226,11 +1202,11 @@ for line in sys.stdin:
     elif method == "prompts/list":
         send({"jsonrpc":"2.0","id":rid,"result":{"prompts":[]}})
     elif method == "tools/call":
-        send({"jsonrpc":"2.0","id":rid,"result":{"content":[{"type":"text","text":json.dumps({"roots": roots, "sampling_error": sampling_error})}],"isError":False}})
+        send({"jsonrpc":"2.0","id":rid,"result":{"content":[{"type":"text","text":json.dumps({"roots": roots, "sampling_error_code": sampling_error_code})}],"isError":False}})
     elif method is None and rid == "r1":
         roots = req.get("result", {}).get("roots")
     elif method is None and rid == "s1":
-        sampling_error = req.get("error", {}).get("message")
+        sampling_error_code = req.get("error", {}).get("code")
 "#;
         let config = ServerConfig {
             name: "asker".into(),
@@ -1256,10 +1232,9 @@ for line in sys.stdin:
             .joined_text();
         let value: serde_json::Value = serde_json::from_str(&reply).expect("tool echoes JSON");
         assert_eq!(
-            value["sampling_error"]
-                .as_str()
-                .expect("sampling denied with an error"),
-            "sampling denied: no frontend is attached"
+            value["sampling_error_code"],
+            serde_json::json!(-32601),
+            "stray sampling denied with method-not-found"
         );
         let roots = value["roots"].as_array().expect("roots answered");
         assert_eq!(roots.len(), 1);

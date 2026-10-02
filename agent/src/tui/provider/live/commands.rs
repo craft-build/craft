@@ -75,9 +75,9 @@ impl CraftProvider {
         // Messages submitted while a turn is still running queue here and
         // are sent, in order, when that turn settles (never aborting it).
         let mut pending_messages: VecDeque<PendingMessage> = VecDeque::new();
-        // Phase 4: server-initiated MCP requests (sampling, elicitation)
-        // arrive on their own channel; each is answered on its own task so a
-        // slow model call or a parked form never blocks the command loop.
+        // Phase 4: server-initiated MCP requests (elicitation) arrive on
+        // their own channel; each is answered on its own task so a parked
+        // form never blocks the command loop.
         let mut server_requests = ctx
             .workspace
             .mcp()
@@ -139,9 +139,6 @@ impl CraftProvider {
                                 mcp_request::ServerRequestCtx {
                                     state: ctx.state.clone(),
                                     evt_tx: ctx.evt_tx.clone(),
-                                    permissions: ctx.permissions.clone(),
-                                    config: ctx.config.clone(),
-                                    selection: selection.clone(),
                                 },
                                 request,
                             );

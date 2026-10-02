@@ -330,8 +330,8 @@ impl McpHandle {
         McpSnapshotReader(Arc::clone(&self.snapshot))
     }
 
-    /// Take the receiver for server-initiated requests (sampling,
-    /// elicitation). The TUI provider loop calls this once and drains it
+    /// Take the receiver for server-initiated requests (elicitation). The
+    /// TUI provider loop calls this once and drains it
     /// alongside its commands; a second take yields `None`.
     pub fn take_server_requests(&self) -> Option<mpsc::UnboundedReceiver<McpServerRequest>> {
         self.server_requests

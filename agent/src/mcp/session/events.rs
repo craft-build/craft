@@ -22,7 +22,7 @@ pub struct McpEvents {
     /// Keepalive ping failed: the session is unusable, the manager marks the
     /// entry Failed so the user is offered Reconnect.
     pub on_dead: Option<DeadCb>,
-    /// Where server-initiated requests (sampling, elicitation) are relayed.
+    /// Where server-initiated requests (elicitation) are relayed.
     /// `None` (or a dropped receiver) makes the handler deny them cleanly.
     pub server_requests: Option<mpsc::UnboundedSender<McpServerRequest>>,
     /// Workspace root advertised via `roots/list` and the `roots` capability.

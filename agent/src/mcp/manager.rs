@@ -107,7 +107,7 @@ pub fn start_with_config_events(config: McpConfig, events: McpEvents) -> Option<
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = watch::channel(false);
-    // Server-initiated requests (sampling, elicitation) ride their own
+    // Server-initiated requests (elicitation) ride their own
     // channel to whichever frontend takes the receiver. Headless callers
     // never take it; they drop it so the handler denies instead of parking.
     let (req_tx, req_rx) = mpsc::unbounded_channel::<McpServerRequest>();
