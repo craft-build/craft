@@ -178,7 +178,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         left.push(sep());
     }
     left.push(Span::styled(
-        app.effort(),
+        app.thinking_label(),
         Style::default().fg(t.warning).bg(t.bg_surface),
     ));
     let right = format!("{}  ", app.session.token_label);

@@ -25,6 +25,10 @@ pub enum Modal {
     },
     /// Model picker: selected row.
     ModelMenu(usize),
+    /// `/thinking`: reasoning settings, with the current custom budget included.
+    ThinkingPicker {
+        selected: usize,
+    },
     /// `/usage`: this session's per-model tokens and cost.
     Usage(Vec<crate::tui::provider::UsageRow>),
     /// `/stats`: cross-session totals from the cost ledger.
@@ -110,6 +114,37 @@ impl App {
         // 3. Model menu.
         if matches!(self.overlays.modal, Modal::ModelMenu(_)) {
             self.handle_model_menu_key(key, tx);
+            return;
+        }
+        if let Modal::ThinkingPicker { selected } = self.overlays.modal {
+            let choices = self.thinking_choices();
+            match key.code {
+                KeyCode::Up => {
+                    self.overlays.modal = Modal::ThinkingPicker {
+                        selected: selected.saturating_sub(1),
+                    };
+                }
+                KeyCode::Down => {
+                    self.overlays.modal = Modal::ThinkingPicker {
+                        selected: (selected + 1).min(choices.len().saturating_sub(1)),
+                    };
+                }
+                KeyCode::Enter => {
+                    if let Some(thinking) = choices.get(selected) {
+                        self.set_thinking(*thinking, tx);
+                    }
+                    self.overlays.modal = Modal::None;
+                }
+                KeyCode::Esc => self.overlays.modal = Modal::None,
+                _ if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('c') =>
+                {
+                    self.overlays.modal = Modal::None;
+                }
+                _ => {}
+            }
             return;
         }
 

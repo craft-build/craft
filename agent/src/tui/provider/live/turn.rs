@@ -330,7 +330,9 @@ pub(super) async fn resolve_model(
         return Err(format!("unknown provider {:?}", selection.provider));
     };
     let provider = ClientProvider::from_config(provider_config).map_err(report)?;
-    provider.completion_model(&selection.model).map_err(report)
+    provider
+        .configured_model(provider_config, &selection.model)
+        .map_err(report)
 }
 
 /// Run armed compaction stages whose threshold is crossed before the
@@ -580,7 +582,22 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         Err(message) => fail!(message),
     };
 
+    {
+        let mut session = state.lock().await;
+        if let Some(provider) = config.providers.get(&selection.provider) {
+            let effective =
+                crate::thinking::reconcile_for(session.thinking, provider, &selection.model);
+            if effective != session.thinking {
+                session.thinking = effective;
+                if let Some(store) = &mut session.store {
+                    store.set_thinking(effective);
+                }
+                let _ = tx.send(AgentEvent::ThinkingChanged(effective));
+            }
+        }
+    }
     let mut history = state.lock().await.history.clone();
+    let thinking = state.lock().await.thinking;
     let dedup = state.lock().await.dedup.clone();
     let guardrails = state.lock().await.guardrails.clone();
     // The plan file is the one write target allowed outside the workspace,
@@ -619,12 +636,14 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
     // subagent launcher is installed on the same clone, carrying the
     // turn's model, history snapshot, cancel token, and event channel.
     let subagent_emit_tx = tx.clone();
+    let mut agent = config.agent.clone();
+    agent.thinking = Some(thinking);
     let subagents = Arc::new(crate::subagent::SubagentLauncher {
         parent_model: model.clone(),
         parent_spec: format!("{}/{}", selection.provider, selection.model),
         provider: selection.provider.clone(),
         providers: config.providers.clone(),
-        agent: config.agent.clone(),
+        agent,
         compression: config.compression.clone(),
         base_prompt: format!("{}{}", config.agent.preamble, instructions_text),
         workspace: workspace.clone(),
@@ -706,6 +725,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         recency: None,
         retry: run::RetryCtx::default(),
         fast: false,
+        thinking: Some(thinking),
         max_turns: crate::runtime::MaxTurns::FromConfig,
     });
 

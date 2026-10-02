@@ -131,6 +131,7 @@ pub struct RunParams {
     pub preamble: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
+    pub thinking: crate::thinking::ThinkingConfig,
     /// Bound on model calls per run. Interactive runs use [`RunParams::UNBOUNDED`].
     pub max_turns: usize,
     /// Per-turn volatile facts, appended to the last user message of each
@@ -188,6 +189,7 @@ impl std::fmt::Debug for RunParams {
             .field("preamble", &self.preamble)
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
+            .field("thinking", &self.thinking)
             .field("max_turns", &self.max_turns)
             .field("recency", &self.recency.as_ref().map(|_| "<source>"))
             .field("compression", &self.compression)
@@ -212,6 +214,7 @@ impl RunParams {
             preamble,
             temperature: None,
             max_tokens: None,
+            thinking: Default::default(),
             max_turns: Self::UNBOUNDED,
             recency: None,
             compression: CompressionConfig::default(),
@@ -238,6 +241,7 @@ impl Default for RunParams {
             preamble: None,
             temperature: None,
             max_tokens: None,
+            thinking: Default::default(),
             max_turns: Self::UNBOUNDED,
             recency: None,
             compression: CompressionConfig::default(),
@@ -489,13 +493,14 @@ async fn run_loop<M: CompletionModel + Clone>(
         compress_request_view(&mut full, &params.compression);
         let prompt_tokens = crate::compaction::estimate_tokens(&full).max(measured_prompt_tokens);
         let window = params.compaction.as_ref().and_then(|c| c.context_length);
-        let request = edge::to_request(
+        let mut request = edge::to_request(
             &full,
             &definitions,
             params.preamble.as_deref(),
             params.temperature,
             clamped_max_tokens(window, prompt_tokens, params.max_tokens),
         );
+        crate::thinking::attach(&mut request, params.thinking);
         match turns::stream_turn(
             model,
             params,

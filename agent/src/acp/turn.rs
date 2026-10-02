@@ -70,7 +70,7 @@ pub(super) async fn run_turn(
         fail!("no model is selected; set the model session configuration option");
     }
     let model_label = model.clone();
-    let model = match provider.completion_model(&model) {
+    let model = match provider.configured_model(&state.config.providers[&provider_name], &model) {
         Ok(model) => model,
         Err(error) => fail!(report(error)),
     };
@@ -80,7 +80,7 @@ pub(super) async fn run_turn(
     // effectiveness state is persisted here; the compacted history is
     // committed by the run's success path, matching the loop's "failed runs
     // leave session history untouched" semantics.
-    let (shared_compaction, context_length, dedup) = {
+    let (shared_compaction, context_length, dedup, thinking) = {
         let sessions = state.sessions.lock().await;
         sessions
             .get(session_id.0.as_ref())
@@ -89,6 +89,7 @@ pub(super) async fn run_turn(
                     session.compaction.clone(),
                     session.context_length,
                     session.dedup.clone(),
+                    session.thinking,
                 )
             })
             .unwrap_or_else(|| {
@@ -97,6 +98,7 @@ pub(super) async fn run_turn(
                     crate::runtime::new_compaction_state(dedup.clone(), run::shared_guardrails()),
                     None,
                     dedup,
+                    state.config.always_thinking.unwrap_or_default(),
                 )
             })
     };
@@ -207,12 +209,14 @@ pub(super) async fn run_turn(
     // child events arrive wrapped in `Event::Subagent`, which has no ACP
     // translation yet (see the emit arm above), but the child's final
     // message still returns as the tool result.
+    let mut agent = state.config.agent.clone();
+    agent.thinking = Some(thinking);
     let subagents = Arc::new(crate::subagent::SubagentLauncher {
         parent_model: model.clone(),
         parent_spec: format!("{provider_name}/{model_label}"),
         provider: provider_name.clone(),
         providers: state.config.providers.clone(),
-        agent: state.config.agent.clone(),
+        agent,
         compression: state.config.compression.clone(),
         base_prompt: format!("{}{}", state.config.agent.preamble, instructions_text),
         workspace: workspace.clone(),
@@ -257,6 +261,7 @@ pub(super) async fn run_turn(
         recency: None,
         retry: run::RetryCtx::default(),
         fast: false,
+        thinking: Some(thinking),
         max_turns: crate::runtime::MaxTurns::Unbounded,
     });
 

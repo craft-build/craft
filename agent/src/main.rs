@@ -26,7 +26,8 @@ async fn main() -> Result<(), Error> {
             // The ACP client owns provider/model selection through session
             // config options; the config file supplies the provider catalog
             // and agent defaults.
-            let config = Config::load().await?;
+            let mut config = Config::load().await?;
+            cli.apply_thinking(&mut config)?;
             acp::serve(config).await.context(AcpConnectionSnafu)
         }
         Some(Commands::Models) => {
@@ -69,6 +70,7 @@ async fn main() -> Result<(), Error> {
         },
         None => {
             let mut config = Config::load().await?;
+            cli.apply_thinking(&mut config)?;
             // G.1 run overrides land in the config the TUI builds its run
             // parameters from.
             // G.6 first run: auto-detect providers from credential env

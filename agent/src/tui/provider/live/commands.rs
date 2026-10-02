@@ -33,11 +33,16 @@ impl CraftProvider {
         let mut selection = self.selection;
         let cwd = self.workspace.root().display().to_string();
         let state_dir = crate::storage::StateDir::resolve().ok();
-        let state = Arc::new(Mutex::new(SessionState::linked().with_store(
-            state_dir.as_ref(),
-            &cwd,
-            &LoopCtx::model_spec(&selection),
-        )));
+        let state = Arc::new(Mutex::new(
+            SessionState::linked()
+                .with_thinking(
+                    self.config
+                        .always_thinking
+                        .or(self.config.agent.thinking)
+                        .unwrap_or_default(),
+                )
+                .with_store(state_dir.as_ref(), &cwd, &LoopCtx::model_spec(&selection)),
+        ));
         let files: Files = Files::default();
         let (cancel_flag, _) = run::cancel_channel();
         let subagent_cancels = Arc::new(run::cancel::CancelMap::new());
@@ -92,6 +97,7 @@ impl CraftProvider {
         }
         let (models, current) = ctx.catalog_choices(&selection);
         let _ = evt_tx.send(AgentEvent::CatalogSet { models, current });
+        let _ = evt_tx.send(AgentEvent::ThinkingChanged(ctx.state.lock().await.thinking));
         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
         let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
 
@@ -117,6 +123,9 @@ impl CraftProvider {
             )
             .await;
         }
+
+        let thinking = ctx.state.lock().await.thinking;
+        handle_set_thinking(&ctx, &selection, thinking).await;
 
         loop {
             let cmd = tokio::select! {
@@ -156,6 +165,9 @@ impl CraftProvider {
             // send the next queued message if any.
             maybe_send_next(&ctx, &selection, &mut current_turn, &mut pending_messages).await;
             match cmd {
+                Command::SetThinking(thinking) => {
+                    handle_set_thinking(&ctx, &selection, thinking).await
+                }
                 Command::SendMessage(text, mode, images) => {
                     handle_send_message(
                         &ctx,
@@ -654,11 +666,26 @@ async fn reset_session(
     // Reset through `linked` so the fresh session's compaction state keeps
     // working dedup/guardrails handles; a bare default would strand the
     // caches the dispatcher still points at.
-    *ctx.state.lock().await = SessionState::linked().with_store(
+    let thinking = if clear_files {
+        ctx.config
+            .always_thinking
+            .or(ctx.config.agent.thinking)
+            .unwrap_or_default()
+    } else {
+        ctx.state.lock().await.thinking
+    };
+    let thinking = ctx
+        .config
+        .providers
+        .get(&selection.provider)
+        .map(|p| crate::thinking::reconcile_for(thinking, p, &selection.model))
+        .unwrap_or(thinking);
+    *ctx.state.lock().await = SessionState::linked().with_thinking(thinking).with_store(
         ctx.state_dir.as_ref(),
         &ctx.cwd,
         &LoopCtx::model_spec(selection),
     );
+    let _ = ctx.evt_tx.send(AgentEvent::ThinkingChanged(thinking));
     if clear_files {
         ctx.files.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
@@ -674,6 +701,34 @@ async fn reset_session(
     // context, so a stale label would misreport usage until the next turn.
     let _ = ctx.evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
     let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+}
+
+pub(super) async fn handle_set_thinking(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    thinking: crate::thinking::ThinkingConfig,
+) {
+    let effective = ctx
+        .config
+        .providers
+        .get(&selection.provider)
+        .map(|p| crate::thinking::reconcile_for(thinking, p, &selection.model))
+        .unwrap_or(thinking);
+    if thinking != effective {
+        let _ = ctx.evt_tx.send(AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: format!(
+                "{} requires thinking setting {effective}; requested {thinking}",
+                selection.model
+            ),
+        });
+    }
+    let mut guard = ctx.state.lock().await;
+    guard.thinking = effective;
+    if let Some(store) = &mut guard.store {
+        store.set_thinking(effective);
+    }
+    let _ = ctx.evt_tx.send(AgentEvent::ThinkingChanged(effective));
 }
 
 /// `Command::Undo`: refuse while a turn is running, then roll the
@@ -723,6 +778,8 @@ pub(super) async fn handle_select_model(
             drop(guard);
             let (models, current) = ctx.catalog_choices(selection);
             let _ = ctx.evt_tx.send(AgentEvent::CatalogSet { models, current });
+            let thinking = ctx.state.lock().await.thinking;
+            handle_set_thinking(ctx, selection, thinking).await;
         }
         None => {
             let _ = ctx.evt_tx.send(AgentEvent::AssistantText(format!(

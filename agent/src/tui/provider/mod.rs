@@ -17,6 +17,8 @@ use crate::run::AgentMode;
 /// Commands sent UI -> provider.
 #[derive(Clone, Debug)]
 pub enum Command {
+    /// Change reasoning for subsequent turns.
+    SetThinking(crate::thinking::ThinkingConfig),
     /// User submitted a message in the composer, in the given mode.
     /// Submit the composer text, with any image attachments (F.6).
     SendMessage(String, AgentMode, Vec<crate::history::ImageBlock>),
@@ -280,6 +282,8 @@ pub enum UsageFetchState {
 #[derive(Clone, Debug)]
 pub enum AgentEvent {
     StatusChanged(Status),
+    /// Effective session reasoning setting, including startup and resume.
+    ThinkingChanged(crate::thinking::ThinkingConfig),
     /// A complete assistant message (notes, errors, one-shot replies).
     AssistantText(String),
     /// Streamed chunk of the assistant reply currently being written.

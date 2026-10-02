@@ -18,6 +18,8 @@ use crate::providers::ProviderKind;
 pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     pub agent: AgentConfig,
+    /// Seed new sessions; saved session preferences win on resume.
+    pub always_thinking: Option<crate::thinking::ThinkingConfig>,
     /// Compaction stages, ascending by context fill ratio.
     #[serde(default = "default_compaction")]
     pub compaction: Vec<CompactionConfig>,
@@ -235,6 +237,8 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     /// Request-level output cap, not a model catalog metadata override.
     pub max_tokens: Option<u64>,
+    /// Run default and inherited subagent preference.
+    pub thinking: Option<crate::thinking::ThinkingConfig>,
     /// Bound on model calls per run. `None` keeps each surface's default
     /// (unbounded in the TUI, [`crate::run::RunParams`] defaults headless);
     /// set by `--max-turns` (G.1).
@@ -313,6 +317,10 @@ pub struct ModelConfig {
     pub description: Option<String>,
     pub context_length: Option<u32>,
     pub max_output_tokens: Option<u32>,
+    pub supports_thinking: Option<bool>,
+    pub requires_thinking: Option<bool>,
+    pub reasoning_options: Option<Vec<crate::thinking::ReasoningOption>>,
+    pub thinking_fields: Option<crate::thinking::ThinkingFields>,
 }
 
 impl Config {
@@ -373,6 +381,10 @@ impl Config {
         use serde_json::Value as Json;
         let mut map = serde_json::Map::new();
 
+        let root = crate::bml::container_json(doc);
+        if let Some(value) = root.get("always_thinking") {
+            map.insert("always_thinking".into(), value.clone());
+        }
         for section in ["agent", "compression"] {
             if let Some(child) = doc.get_child(section, &[]) {
                 map.insert(section.to_string(), crate::bml::container_json(child));
@@ -590,6 +602,29 @@ impl ProviderConfig {
                 }
                 .fail();
             }
+            if let Some(fields) = &model.thinking_fields
+                && fields
+                    .off
+                    .iter()
+                    .chain(fields.adaptive.iter())
+                    .chain(fields.levels.values())
+                    .any(|value| !value.is_object())
+            {
+                return InvalidSnafu {
+                    reason: format!("model {id:?}: thinking_fields modes must be request objects"),
+                }
+                .fail();
+            }
+            if let Some(options) = &model.reasoning_options
+                && options
+                    .iter()
+                    .any(|o| o.min.zip(o.max).is_some_and(|(min, max)| min > max))
+            {
+                return InvalidSnafu {
+                    reason: format!("model {id:?}: reasoning budget min exceeds max"),
+                }
+                .fail();
+            }
         }
         Ok(())
     }
@@ -598,6 +633,53 @@ impl ProviderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_defaults_and_model_overrides_parse() {
+        use crate::thinking::{Effort, ThinkingConfig};
+        let config = Config::parse(
+            r#"
+            always_thinking = "low"
+            agent { thinking = 4096 }
+            provider "local" {
+              kind = "openai-compatible"
+              model "custom" {
+                supports_thinking = true
+                requires_thinking = true
+                reasoning_options = [{ type = "effort", values = ["low", "high"] }]
+                thinking_fields {
+                  off { enable_thinking = false }
+                  high { enable_thinking = true }
+                }
+              }
+            }
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.always_thinking,
+            Some(ThinkingConfig::Effort(Effort::Low))
+        );
+        assert_eq!(config.agent.thinking, Some(ThinkingConfig::Budget(4096)));
+        let model = &config.providers["local"].models["custom"];
+        assert_eq!(
+            model.reasoning_options.as_ref().unwrap()[0].values,
+            ["low", "high"]
+        );
+        assert_eq!(
+            model
+                .thinking_fields
+                .as_ref()
+                .unwrap()
+                .off
+                .as_ref()
+                .unwrap()["enable_thinking"],
+            false
+        );
+        for value in ["0", "\"nonsense\""] {
+            assert!(Config::parse(&format!("always_thinking = {value}")).is_err());
+        }
+    }
 
     #[test]
     fn parses_example() {

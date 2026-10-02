@@ -112,6 +112,42 @@ Sessions are crash-safe append-only JSONL files with an index, archive, and usag
 
 ## CLI
 
+### Thinking controls
+
+`/thinking` opens the TUI selector; `/thinking low`, `/thinking adaptive`,
+`/thinking off`, or `/thinking 4096` apply directly. Alt+E cycles the same
+settings. The preference is persisted with the session, restored on resume,
+and inherited by subagents. ACP exposes a **Thinking** session option.
+
+For headless or startup overrides use one of `--thinking <setting>`,
+`--effort <level>`, or `--max-thinking-tokens <positive-count>`. They are
+mutually exclusive. Seed new sessions in `craft.bml`:
+
+```bml
+always_thinking = "low"
+```
+
+Modes are `off`, `adaptive`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+or a positive token count. An unset preference means **off**, matching the
+reference. Providers that cannot disable reasoning use their lowest supported
+mode; “off” is not a universal promise of zero reasoning.
+
+Per-model `models.dev` reasoning metadata resolves accepted effort levels.
+Requests snap to the closest lower supported level, or the minimum accepted
+level if none is lower. Effort-only and toggle-only APIs cannot enforce a
+thinking-token budget; numeric settings map to an effort/toggle there.
+Budget APIs clamp to their published limits and half the effective output
+window, reserving room for an answer. No wall-clock thinking cutoff is added:
+transport timeouts and cancellation remain separate.
+
+Manual model declarations can override `supports_thinking`,
+`requires_thinking`, and `reasoning_options` (e.g.
+`[{ type = "effort", values = ["low", "high"] }]`). Local backends can declare
+`thinking_fields` with JSON-shaped BML fragments keyed by `off`, `adaptive`,
+or effort level. Those fragments are deep-merged into the request. Unknown
+models fall back to provider/family dialects; discovery is advisory, not a
+reason to reject an otherwise usable model ID.
+
 `crafty` (binary) supports `--print` (headless, `--output-format text|stream-json`, Claude Code-compatible), `--image PATH`, `-m/--model provider/model`, `-c` continue, `-s/--session` resume, `--mode build|plan`, `--allowedTools` / `--disallowed-tools`, `--max-turns`, `--system-prompt` overrides, `--yolo` / `-A/--auto-review` (permission policy; enforced in headless runs too), and a set of accepted-but-ignored Claude Code SDK compatibility flags.
 
 Subcommands: `acp` (agent-client-protocol server on stdio), `completions <shell>`, `models`, `stats [--sessions]`, `doctor [--export]` (diagnose and self-heal provider config), `update [-y]` / `rollback` (digest-pinned self-update), `prompt [system|research|general] [--plan|--tools|--names]`, `term init|log|run|info` (shell integration), `recipe list|run`.

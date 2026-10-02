@@ -535,6 +535,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thinking_controls_reach_each_native_http_protocol() {
+        use crate::thinking::{Effort, ReasoningOption, ThinkingConfig};
+        use rig_core::completion::CompletionModel;
+        fn assert_fragment(body: &serde_json::Value, expected: &serde_json::Value) {
+            if let Some(object) = expected.as_object() {
+                for (key, value) in object {
+                    assert_fragment(&body[key], value);
+                }
+            } else {
+                assert_eq!(body, expected);
+            }
+        }
+        let cases = [
+            (
+                ProviderKind::OpenaiCompatible,
+                "manual",
+                ThinkingConfig::Effort(Effort::Low),
+                serde_json::json!({"reasoning_effort": "low"}),
+            ),
+            (
+                ProviderKind::Openai,
+                "gpt-5.2",
+                ThinkingConfig::Effort(Effort::High),
+                serde_json::json!({"reasoning": {"effort": "low"}}),
+            ),
+            (
+                ProviderKind::Xai,
+                "grok-4.6",
+                ThinkingConfig::Effort(Effort::Low),
+                serde_json::json!({"reasoning": {"effort": "low"}}),
+            ),
+            (
+                ProviderKind::Openrouter,
+                "manual",
+                ThinkingConfig::Effort(Effort::Low),
+                serde_json::json!({"reasoning": {"effort": "low"}}),
+            ),
+            (
+                ProviderKind::Anthropic,
+                "claude-sonnet-4-5",
+                ThinkingConfig::Budget(99_999),
+                serde_json::json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+            ),
+            (
+                ProviderKind::Anthropic,
+                "claude-opus-4-7",
+                ThinkingConfig::Effort(Effort::Low),
+                serde_json::json!({"thinking": {"type": "adaptive", "display": "summarized"},
+                    "output_config": {"effort": "low"}}),
+            ),
+            (
+                ProviderKind::Gemini,
+                "gemini-3-flash-preview",
+                ThinkingConfig::Effort(Effort::Low),
+                serde_json::json!({"generationConfig": {"thinkingConfig": {"thinkingLevel": "low", "includeThoughts": true}}}),
+            ),
+            (
+                ProviderKind::Ollama,
+                "qwen3",
+                ThinkingConfig::Off,
+                serde_json::json!({"think": false}),
+            ),
+            (
+                ProviderKind::Deepseek,
+                "manual",
+                ThinkingConfig::Off,
+                serde_json::json!({"thinking": {"type": "disabled"}}),
+            ),
+            (
+                ProviderKind::Zai,
+                "manual",
+                ThinkingConfig::Off,
+                serde_json::json!({"thinking": {"type": "disabled"}}),
+            ),
+        ];
+        for (kind, id, thinking, expected) in cases {
+            // A rejecting local endpoint is enough to capture the complete
+            // outbound body; these tests never spend tokens or use credentials.
+            let (base, server) =
+                server("400 Bad Request", r#"{"error":{"message":"capture only"}}"#);
+            let mut config = config(kind, &base);
+            config.models.insert(
+                id.into(),
+                crate::config::ModelConfig {
+                    supports_thinking: Some(true),
+                    reasoning_options: Some(vec![ReasoningOption {
+                        kind: "effort".into(),
+                        values: vec!["none".into(), "low".into(), "xhigh".into()],
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                },
+            );
+            let model = build(&config).configured_model(&config, id).unwrap();
+            let mut request = crate::edge::to_request(
+                &[crate::history::Message::user("hello")],
+                &[],
+                None,
+                Some(0.2),
+                Some(4096),
+            );
+            crate::thinking::attach(&mut request, thinking);
+            // Some rig providers create a lazy stream; drive it so the HTTP
+            // request is sent and the intentional rejection is observed.
+            if let Ok(mut stream) = model.stream(request).await {
+                use futures::StreamExt;
+                while let Some(item) = stream.next().await {
+                    if item.is_err() {
+                        break;
+                    }
+                }
+            }
+            let captured = server.join().unwrap();
+            let (_, body) = captured.split_once("\r\n\r\n").unwrap();
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert!(
+                !body.to_string().contains("__craft_thinking"),
+                "{kind:?}: {body}"
+            );
+            assert_fragment(&body, &expected);
+        }
+    }
+
+    #[tokio::test]
     async fn custom_openai_discovers_and_merges_models() {
         let (base, task) = server("200 OK", r#"{"data":[{"id":"discovered"}]}"#);
         let config = config(ProviderKind::OpenaiCompatible, &format!("{base}/custom/v1"));

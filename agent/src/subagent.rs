@@ -248,7 +248,7 @@ impl SubagentLauncher {
         let provider =
             crate::providers::Provider::from_config(provider_config).map_err(|e| e.to_string())?;
         let model = provider
-            .completion_model(&spec)
+            .configured_model(provider_config, &spec)
             .map_err(|e| e.to_string())?;
         Ok((model, spec.as_str().into()))
     }
@@ -326,6 +326,7 @@ impl SubagentLauncher {
             preamble: Some(preamble),
             temperature: self.agent.temperature,
             max_tokens: self.agent.max_tokens,
+            thinking: self.agent.thinking.unwrap_or_default(),
             max_turns: RunParams::UNBOUNDED,
             recency: None,
             compression: self.compression.clone(),

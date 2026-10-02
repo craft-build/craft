@@ -217,6 +217,7 @@ pub struct RunPolicyInputs<'a> {
     pub retry: RetryCtx,
     /// Price turns at the provider's fast tier.
     pub fast: bool,
+    pub thinking: Option<crate::thinking::ThinkingConfig>,
     pub max_turns: MaxTurns,
 }
 
@@ -234,6 +235,7 @@ pub fn run_policy(inputs: RunPolicyInputs<'_>) -> RunParams {
         recency,
         retry,
         fast,
+        thinking,
         max_turns,
     } = inputs;
     RunParams {
@@ -248,6 +250,10 @@ pub fn run_policy(inputs: RunPolicyInputs<'_>) -> RunParams {
         )),
         temperature: config.agent.temperature,
         max_tokens: config.agent.max_tokens,
+        thinking: thinking
+            .or(config.always_thinking)
+            .or(config.agent.thinking)
+            .unwrap_or_default(),
         max_turns: match max_turns {
             MaxTurns::FromConfig => config
                 .agent
@@ -317,6 +323,7 @@ mod tests {
             recency: None,
             retry: RetryCtx::default(),
             fast: false,
+            thinking: None,
             max_turns,
         }
     }
@@ -621,6 +628,7 @@ mod tests {
             recency: None,
             retry: RetryCtx::default(),
             fast: false,
+            thinking: None,
             max_turns: MaxTurns::FromConfig,
         });
         let window = params

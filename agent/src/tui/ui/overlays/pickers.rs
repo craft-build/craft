@@ -11,6 +11,77 @@ use super::{boxed, centered, dim, render_rows};
 use crate::tui::app::App;
 use crate::tui::modals::Modal;
 
+/// `/thinking`: choose a mode or effort; custom budgets use the slash command.
+pub fn render_thinking_picker(f: &mut Frame, app: &App, area: Rect) {
+    let Modal::ThinkingPicker { selected } = app.overlays.modal else {
+        return;
+    };
+    let t = theme::current();
+    let choices = app.thinking_choices();
+    dim(f, area);
+    let rect = centered(62, choices.len() as u16 + 5, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if inner.height < 5 || inner.width < 3 {
+        return;
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Thinking — enter to apply, esc to cancel",
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    let visible = choices.len().min(inner.height.saturating_sub(4) as usize);
+    let start = selected.saturating_sub(visible.saturating_sub(1));
+    let rows = choices
+        .iter()
+        .skip(start)
+        .take(visible)
+        .map(|choice| {
+            let marker = if *choice == app.session.thinking {
+                "●"
+            } else {
+                " "
+            };
+            vec![Span::styled(
+                format!(" {marker} {choice}"),
+                Style::default().fg(t.text_primary),
+            )]
+        })
+        .collect::<Vec<_>>();
+    render_rows(
+        f,
+        &rows,
+        selected.saturating_sub(start),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2,
+            width: inner.width.saturating_sub(2),
+            height: visible as u16,
+        },
+    );
+    f.render_widget(
+        Paragraph::new("Custom token budget: /thinking <tokens>")
+            .style(Style::default().fg(t.text_tertiary)),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2 + visible as u16,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+}
+
 /// `/sessions`: persisted-session picker; Enter loads, Esc closes.
 pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     let t = theme::current();

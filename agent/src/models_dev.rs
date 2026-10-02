@@ -31,7 +31,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result, client_error};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
-const CATALOG_CACHE_FILE: &str = "models-dev-catalog.json";
+// v1 cache serialization discarded reasoning fields; don't treat that reduced
+// payload as a fresh catalog after upgrading.
+const CATALOG_CACHE_FILE: &str = "models-dev-catalog-v2.json";
 const CATALOG_CACHE_TTL: Duration = Duration::from_secs(86_400);
 /// Fetch budget: the catalog is a nice-to-have, never worth hanging startup.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -68,6 +70,10 @@ struct CatalogModel {
     attachment: bool,
     #[serde(default)]
     modalities: Option<CatalogModalities>,
+    #[serde(default)]
+    reasoning: Option<bool>,
+    #[serde(default)]
+    reasoning_options: Vec<crate::thinking::ReasoningOption>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -107,11 +113,15 @@ pub struct ModelMeta {
     pub cache_read: f64,
     pub cache_write: f64,
     pub supports_vision: bool,
+    pub supports_thinking: Option<bool>,
+    pub reasoning_options: Vec<crate::thinking::ReasoningOption>,
 }
 
 impl ModelMeta {
     fn from_catalog(model: &CatalogModel) -> Self {
         Self {
+            supports_thinking: model.reasoning,
+            reasoning_options: model.reasoning_options.clone(),
             context: model
                 .limit
                 .as_ref()
@@ -255,6 +265,13 @@ pub fn context_for(provider: &str, model_id: &str) -> Option<(u32, u32)> {
 /// values win: discovery metadata is never overwritten, and models the
 /// catalog does not know keep whatever discovery gave them.
 pub fn enrich_catalog<M: crate::providers::CatalogEntry>(provider_kind: &str, models: &mut [M]) {
+    let provider_kind = match provider_kind {
+        "gemini" => "google",
+        "chatgpt" => "openai",
+        "copilot" => "github-copilot",
+        "moonshot" => "moonshotai",
+        other => other,
+    };
     for model in models {
         if let Some((context, output)) = context_for(provider_kind, model.id()) {
             model.context_length_mut().get_or_insert(context);
@@ -312,6 +329,25 @@ mod tests {
     /// The catalog global is process-wide; serialize the tests that touch it.
     /// Async so the guards may be held across `.await`s in tokio tests.
     static GLOBAL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn reasoning_metadata_survives_cache_serialization() {
+        let model: CatalogModel = serde_json::from_value(serde_json::json!({
+            "reasoning": true,
+            "reasoning_options": [
+                {"type": "effort", "values": ["none", "low", "xhigh"]},
+                {"type": "budget_tokens", "min": 1024, "max": 32768},
+                {"type": "future_knob"}
+            ]
+        }))
+        .unwrap();
+        let meta = ModelMeta::from_catalog(&model);
+        assert_eq!(meta.supports_thinking, Some(true));
+        assert_eq!(meta.reasoning_options[0].values, ["none", "low", "xhigh"]);
+        let cached: CatalogModel =
+            serde_json::from_str(&serde_json::to_string(&model).unwrap()).unwrap();
+        assert_eq!(ModelMeta::from_catalog(&cached), meta);
+    }
 
     fn sample_catalog_json() -> String {
         r#"{

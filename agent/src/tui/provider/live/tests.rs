@@ -259,6 +259,86 @@ fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
     }
 }
 
+/// Thinking is session state: clear preserves it, new resets to the config default.
+#[tokio::test]
+async fn thinking_changes_persist_and_clear_preserves_them() {
+    use crate::thinking::ThinkingConfig;
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+    let state = Arc::new(Mutex::new(SessionState::linked().with_store(
+        Some(&state_dir),
+        "/cwd",
+        "mock/model",
+    )));
+    let mut ctx = test_ctx(state.clone());
+    ctx.state_dir = Some(state_dir.clone());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    ctx.evt_tx = tx;
+    let selection = Selection {
+        provider: "mock".into(),
+        model: "model".into(),
+        context_length: None,
+    };
+    super::commands::handle_set_thinking(&ctx, &selection, ThinkingConfig::Budget(4096)).await;
+    assert_eq!(state.lock().await.thinking, ThinkingConfig::Budget(4096));
+    assert_eq!(
+        state.lock().await.store.as_ref().unwrap().thinking(),
+        Some(ThinkingConfig::Budget(4096))
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AgentEvent::ThinkingChanged(ThinkingConfig::Budget(4096)))
+    ));
+    let mut current_turn = None;
+    super::commands::handle_clear(&ctx, &selection, &mut current_turn).await;
+    assert_eq!(state.lock().await.thinking, ThinkingConfig::Budget(4096));
+    assert_eq!(
+        state.lock().await.store.as_ref().unwrap().thinking(),
+        Some(ThinkingConfig::Budget(4096))
+    );
+    super::commands::handle_reset(&ctx, &selection, &mut current_turn).await;
+    assert_eq!(state.lock().await.thinking, ThinkingConfig::Off);
+}
+
+#[tokio::test]
+async fn unsupported_thinking_is_reconciled_in_session_and_badge() {
+    use crate::thinking::{Effort, ThinkingConfig};
+    let state = Arc::new(Mutex::new(SessionState::linked()));
+    let mut ctx = test_ctx(state.clone());
+    ctx.config = Arc::new(
+        crate::config::Config::parse(
+            r#"
+        provider "mock" {
+          kind = "openai"
+          model "plain" { supports_thinking = false }
+        }
+    "#,
+        )
+        .unwrap(),
+    );
+    let selection = Selection {
+        provider: "mock".into(),
+        model: "plain".into(),
+        context_length: None,
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    ctx.evt_tx = tx;
+    super::commands::handle_set_thinking(&ctx, &selection, ThinkingConfig::Effort(Effort::High))
+        .await;
+    assert_eq!(state.lock().await.thinking, ThinkingConfig::Off);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AgentEvent::Notice {
+            tone: Tone::Warning,
+            ..
+        })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AgentEvent::ThinkingChanged(ThinkingConfig::Off))
+    ));
+}
+
 /// W10: a persisted session is listed by `/sessions`, and loading it
 /// repopulates the history plus the conversation view.
 #[tokio::test]
@@ -278,6 +358,7 @@ async fn loading_a_persisted_session_repopulates_history() {
         Message::user("hello there"),
         Message::assistant("hi — how can I help?"),
     ];
+    store.set_thinking(crate::thinking::ThinkingConfig::Budget(4096));
     store.checkpoint_draft("unsent draft");
     store.checkpoint_now();
     store.record_turn(&history, "mock/model".into());
@@ -302,6 +383,10 @@ async fn loading_a_persisted_session_repopulates_history() {
     .await;
 
     assert_eq!(state.lock().await.history, history);
+    assert_eq!(
+        state.lock().await.thinking,
+        crate::thinking::ThinkingConfig::Budget(4096)
+    );
     // The store rebinds to the loaded id so future turns resume it.
     assert!(state.lock().await.store.is_some());
     let mut loaded = None;

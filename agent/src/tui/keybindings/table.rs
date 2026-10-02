@@ -316,7 +316,7 @@ pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         action_id: Some(super::ActionId::CycleEffort),
         label: KeyLabel::Single(key::EFFORT_CYCLE.label),
-        description: "Cycle reasoning effort",
+        description: "Cycle thinking mode / effort",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

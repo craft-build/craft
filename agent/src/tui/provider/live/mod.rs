@@ -49,6 +49,7 @@ pub(super) fn report(error: crate::error::Error) -> String {
 /// Session shared between the command loop and the (single) running turn.
 #[derive(Default)]
 struct SessionState {
+    thinking: crate::thinking::ThinkingConfig,
     history: Vec<crate::history::Message>,
     /// Shared with the run loop for in-run overflow recovery.
     compaction: crate::run::SharedCompactionState,
@@ -105,6 +106,14 @@ impl SessionState {
         self.store = dir.and_then(|dir| {
             crate::headless::SessionStore::open_in(dir.clone(), session_ref, cwd, model_spec).ok()
         });
+        if let Some(store) = &mut self.store {
+            store.set_thinking(self.thinking);
+        }
+        self
+    }
+
+    fn with_thinking(mut self, thinking: crate::thinking::ThinkingConfig) -> Self {
+        self.thinking = thinking;
         self
     }
 }

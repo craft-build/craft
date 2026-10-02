@@ -275,6 +275,9 @@ impl Provider for MockProvider {
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
+                    Command::SetThinking(thinking) => {
+                        let _ = evt_tx.send(AgentEvent::ThinkingChanged(thinking));
+                    }
                     Command::SendMessage(_, _mode, _) => {
                         if let Some(h) = current.take() {
                             h.abort();

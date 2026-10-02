@@ -39,6 +39,7 @@ pub mod subagent;
 pub mod subcmd;
 pub mod template;
 pub mod term;
+pub mod thinking;
 pub mod tools;
 pub mod tui;
 pub mod update;

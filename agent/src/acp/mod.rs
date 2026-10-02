@@ -61,6 +61,7 @@ use crate::{
 
 pub const PROVIDER_OPTION_ID: &str = "provider";
 pub const MODEL_OPTION_ID: &str = "model";
+pub const THINKING_OPTION_ID: &str = "thinking";
 
 struct Session {
     workspace: Workspace,
@@ -71,6 +72,9 @@ struct Session {
     models: Vec<CatalogModel>,
     model: String,
     context_length: Option<u32>,
+    thinking: crate::thinking::ThinkingConfig,
+    /// Loaded sessions keep their persisted settings/history in sync.
+    store: Option<crate::headless::SessionStore>,
     /// Effectiveness state for the configured compaction stages, shared
     /// with the run loop for in-run overflow recovery.
     compaction: run::SharedCompactionState,
@@ -113,8 +117,30 @@ impl Session {
             .category(SessionConfigOptionCategory::ModelConfig)
             .description("Configured inference provider from ~/.config/craft.bml"),
             model_option(&self.models, &self.model),
+            thinking_option(self.thinking),
         ]
     }
+}
+
+fn thinking_option(current: crate::thinking::ThinkingConfig) -> SessionConfigOption {
+    let mut choices = crate::thinking::ThinkingConfig::choices();
+    if !choices.contains(&current) {
+        choices.push(current);
+    }
+    SessionConfigOption::select(
+        THINKING_OPTION_ID,
+        "Thinking",
+        current.to_string(),
+        choices
+            .into_iter()
+            .map(|thinking| {
+                let value = thinking.to_string();
+                SessionConfigSelectOption::new(value.clone(), value)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .category(SessionConfigOptionCategory::ModelConfig)
+    .description("Reasoning policy for this session and its subagents")
 }
 
 fn model_option(models: &[CatalogModel], current: &str) -> SessionConfigOption {
@@ -244,7 +270,7 @@ impl AppState {
             Some(r) => (r.model, r.context_length),
             None => (String::new(), None),
         };
-        Ok(self.build_session(
+        let mut session = self.build_session(
             workspace,
             instructions,
             permissions,
@@ -253,7 +279,20 @@ impl AppState {
             models,
             model,
             context_length,
-        ))
+        );
+        session.thinking = stored.meta.thinking.unwrap_or(session.thinking);
+        if let Some(provider) = self.config.providers.get(&session.provider_name) {
+            session.thinking =
+                crate::thinking::reconcile_for(session.thinking, provider, &session.model);
+        }
+        session.store = crate::headless::SessionStore::open_in(
+            dir,
+            session_ref,
+            &cwd.display().to_string(),
+            &stored_model,
+        )
+        .ok();
+        Ok(session)
     }
 
     fn default_provider(&self) -> std::result::Result<String, String> {
@@ -299,6 +338,17 @@ impl AppState {
     ) -> Session {
         let (cancel, _) = run::cancel_channel();
         let dedup = run::shared_cache();
+        let preference = self
+            .config
+            .always_thinking
+            .or(self.config.agent.thinking)
+            .unwrap_or_default();
+        let thinking = self
+            .config
+            .providers
+            .get(&provider_name)
+            .map(|p| crate::thinking::reconcile_for(preference, p, &model))
+            .unwrap_or(preference);
         Session {
             workspace,
             instructions,
@@ -307,6 +357,8 @@ impl AppState {
             models,
             model,
             context_length,
+            thinking,
+            store: None,
             // The ACP dispatcher does not consult guardrails yet; the link
             // keeps the shared construction identical across surfaces.
             compaction: crate::runtime::new_compaction_state(
@@ -323,6 +375,7 @@ impl AppState {
 
 /// Serve the Craft agent loop over ACP on stdin/stdout until the client disconnects.
 pub async fn serve(config: Config) -> std::result::Result<(), Error> {
+    let _ = tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
     let state = Arc::new(AppState::new(config));
 
     let init_state = state.clone();
@@ -402,7 +455,10 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         responder: Responder<SetSessionConfigOptionResponse>,
                         connection: ConnectionTo<AcpClient>| {
                 let Some(value) = request.value.as_value_id().map(|id| id.0.to_string()) else {
-                    return respond_setup_error(responder, "expected a provider/model id".into());
+                    return respond_setup_error(
+                        responder,
+                        "expected a configuration value id".into(),
+                    );
                 };
                 let mut sessions = set_state.sessions.lock().await;
                 let Some(session) = sessions.get_mut(request.session_id.0.as_ref()) else {
@@ -445,11 +501,23 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                             Err(format!("unknown model {value:?}"))
                         }
                     }
+                    THINKING_OPTION_ID => {
+                        crate::thinking::ThinkingConfig::parse(&value, session.thinking)
+                            .map(|thinking| session.thinking = thinking)
+                    }
                     other => Err(format!("unknown configuration option {other:?}")),
                 };
                 if let Err(message) = outcome {
                     drop(sessions);
                     return respond_setup_error(responder, message);
+                }
+                if let Some(provider) = set_state.config.providers.get(&session.provider_name) {
+                    session.thinking =
+                        crate::thinking::reconcile_for(session.thinking, provider, &session.model);
+                }
+                if let Some(store) = &mut session.store {
+                    store.set_thinking(session.thinking);
+                    store.set_model(format!("{}/{}", session.provider_name, session.model));
                 }
                 let options = session.config_options(&set_state.provider_names());
                 let notification = SessionNotification::new(
@@ -592,6 +660,12 @@ async fn commit_turn(
     if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
         if session.turn == Some(turn_id) {
             session.history = history;
+            if let Some(store) = &mut session.store {
+                store.record_turn(
+                    &session.history,
+                    format!("{}/{}", session.provider_name, session.model),
+                );
+            }
             session.turn = None;
         }
     }

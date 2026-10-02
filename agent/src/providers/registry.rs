@@ -152,13 +152,19 @@ macro_rules! providers {
                     .fail();
                 }
                 (|| -> Result<DynamicModel> {
-                    Ok(match self {
+                    let handle = match self {
                         $(Self::$variant(client) => completion_model!(client, model, $completion),)+
-                    })
+                    };
+                    Ok(handle.with_kind(self.kind()))
                 })().with_context(|_| SelectModelSnafu {
                     model: model.to_string(),
                     kind: self.kind().as_str(),
                 })
+            }
+
+            /// Build with explicit per-model overrides, preserving protocol kind.
+            pub fn configured_model(&self, config: &ProviderConfig, model: &str) -> Result<DynamicModel> {
+                Ok(self.completion_model(model)?.with_settings(config.models.get(model)))
             }
 
             /// Providers without listing support return the configured models.

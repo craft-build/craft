@@ -2,6 +2,10 @@
 # credentials in your environment. Provider block labels are your aliases,
 # not fixed Rig provider names.
 
+# New-session thinking default. Omitted means off; /thinking opens a picker.
+# Also accepts true/false, any effort level, or a positive token budget.
+# always_thinking = "low"
+
 agent {
   # Extra instructions appended to the assembled system prompt's instructions
   # slot. Empty keeps the built-in defaults.

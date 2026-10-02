@@ -475,7 +475,7 @@ impl ViewModel {
 pub struct Session {
     pub models: Vec<ModelChoice>,
     pub model_idx: usize,
-    pub effort_idx: usize,
+    pub thinking: crate::thinking::ThinkingConfig,
     pub cwd: String,
     pub branch: String,
     pub token_label: String,
@@ -487,7 +487,7 @@ impl Session {
         Session {
             models: seed_models(),
             model_idx: 0,
-            effort_idx: 2, // "high", the prototype default
+            thinking: crate::thinking::ThinkingConfig::default(),
             cwd: String::new(),
             branch: String::new(),
             token_label: "…".into(),

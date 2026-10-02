@@ -43,7 +43,7 @@ pub fn reauth_hook(config: &ProviderConfig, model: &str) -> crate::run::ReauthHo
                 if !current.trim().is_empty() && current != original {
                     let provider = Provider::from_config(&config).map_err(|e| e.to_string())?;
                     return provider
-                        .completion_model(&model)
+                        .configured_model(&config, &model)
                         .map(Some)
                         .map_err(|e| e.to_string());
                 }

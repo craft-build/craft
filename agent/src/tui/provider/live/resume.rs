@@ -81,6 +81,12 @@ pub(super) async fn load_session(
         guard.store =
             crate::headless::SessionStore::open_in(dir.clone(), loaded.id.clone(), cwd, model_spec)
                 .ok();
+        guard.thinking = guard
+            .store
+            .as_ref()
+            .and_then(|store| store.thinking())
+            .unwrap_or(guard.thinking);
+        let _ = tx.send(AgentEvent::ThinkingChanged(guard.thinking));
     }
     files.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let _ = tx.send(AgentEvent::FilesSet(Vec::new()));

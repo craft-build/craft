@@ -70,6 +70,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "Switch model",
     },
     CommandSpec {
+        id: "thinking",
+        slash: Some("/thinking"),
+        alias: None,
+        label: "Change thinking",
+        hint: "alt+e",
+        desc: "Set reasoning mode, effort, or token budget",
+    },
+    CommandSpec {
         id: "clear",
         slash: Some("/clear"),
         alias: None,
@@ -278,6 +286,7 @@ impl App {
             "theme" => self.open_theme_picker(),
             "toggle-sidebar" => self.session.sidebar_open = !self.session.sidebar_open,
             "model" => self.open_model_menu(),
+            "thinking" => self.open_thinking_picker(),
             "clear" => {
                 self.reset_conversation();
                 let _ = tx.send(Command::Clear);
@@ -318,6 +327,32 @@ impl App {
             "quit" => self.should_quit = true,
             _ => {}
         }
+    }
+
+    pub(crate) fn thinking_choices(&self) -> Vec<crate::thinking::ThinkingConfig> {
+        let mut choices = crate::thinking::ThinkingConfig::choices();
+        if !choices.contains(&self.session.thinking) {
+            choices.push(self.session.thinking);
+        }
+        choices
+    }
+
+    pub(crate) fn open_thinking_picker(&mut self) {
+        let selected = self
+            .thinking_choices()
+            .iter()
+            .position(|choice| *choice == self.session.thinking)
+            .unwrap_or(0);
+        self.overlays.modal = Modal::ThinkingPicker { selected };
+    }
+
+    pub(crate) fn set_thinking(
+        &mut self,
+        thinking: crate::thinking::ThinkingConfig,
+        tx: &mpsc::UnboundedSender<Command>,
+    ) {
+        self.session.thinking = thinking;
+        let _ = tx.send(Command::SetThinking(thinking));
     }
 
     /// `/theme`: open the picker with the cursor on the active theme.
@@ -576,6 +611,18 @@ impl App {
     }
 
     pub(crate) fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
+        if cmd.split_whitespace().next() == Some("/thinking") {
+            let spec = cmd.trim_start().strip_prefix("/thinking").unwrap().trim();
+            if spec.is_empty() {
+                self.open_thinking_picker();
+            } else {
+                match crate::thinking::ThinkingConfig::parse(spec, self.session.thinking) {
+                    Ok(thinking) => self.set_thinking(thinking, tx),
+                    Err(error) => self.push_notice(Tone::Warning, error),
+                }
+            }
+            return;
+        }
         if let Some(spec) = COMMANDS
             .iter()
             .find(|spec| spec.slash == Some(cmd) || spec.alias == Some(cmd))
@@ -717,6 +764,69 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thinking_slash_submits_settings_not_prompts() {
+        use crate::thinking::ThinkingConfig;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = super::App::new();
+        for (input, expected) in [
+            ("/thinking adaptive", ThinkingConfig::Adaptive),
+            ("/thinking 4096", ThinkingConfig::Budget(4096)),
+            ("/thinking off", ThinkingConfig::Off),
+        ] {
+            app.composer.set_text(input.into());
+            app.submit(&tx);
+            assert_eq!(app.session.thinking, expected);
+            assert!(app.composer.text.is_empty());
+            assert!(
+                matches!(rx.try_recv(), Ok(super::Command::SetThinking(value)) if value == expected)
+            );
+            assert!(rx.try_recv().is_err());
+        }
+        app.composer.set_text("/thinking nonsense".into());
+        app.submit(&tx);
+        assert_eq!(app.session.thinking, ThinkingConfig::Off);
+        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            app.conversation.messages.last(),
+            Some(super::Message::Notice {
+                tone: super::Tone::Warning,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn thinking_picker_applies_only_on_enter_and_retains_custom_budget() {
+        use crate::thinking::ThinkingConfig;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = super::App::new();
+        app.handle_event(super::AgentEvent::ThinkingChanged(ThinkingConfig::Budget(
+            4096,
+        )));
+        app.run_slash("/thinking", &tx);
+        let choices = app.thinking_choices();
+        let selected = choices.len() - 1;
+        assert_eq!(choices[selected], ThinkingConfig::Budget(4096));
+        assert!(
+            matches!(app.overlays.modal, super::Modal::ThinkingPicker { selected: row } if row == selected)
+        );
+        app.handle_modal_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.session.thinking, ThinkingConfig::Budget(4096));
+        assert!(rx.try_recv().is_err());
+        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert_eq!(app.session.thinking, ThinkingConfig::Budget(4096));
+        app.run_slash("/thinking", &tx);
+        app.handle_modal_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert_eq!(app.session.thinking, choices[selected - 1]);
+        assert!(
+            matches!(rx.try_recv(), Ok(super::Command::SetThinking(value)) if value == choices[selected - 1])
+        );
+        assert!(matches!(app.overlays.modal, super::Modal::None));
+    }
+
     use super::super::testutil::usage_rows;
     use super::*;
     use crate::tui::app::{App, Message, Modal};

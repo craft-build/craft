@@ -20,6 +20,7 @@ pub(super) use mcp::render_mcp;
 pub(super) use menus::{render_model_menu, render_palette, render_slash};
 pub(super) use pickers::{
     render_recipes, render_sessions, render_task_picker, render_theme_picker,
+    render_thinking_picker,
 };
 pub(super) use search_file::{render_file_picker, render_search};
 pub(super) use usage::{render_stats, render_usage};

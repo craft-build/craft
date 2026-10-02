@@ -177,6 +177,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     overlays::render_file_picker(f, app, area);
     overlays::render_slash(f, app, chat, bottom);
     overlays::render_model_menu(f, app, chat, bottom);
+    overlays::render_thinking_picker(f, app, chat);
     overlays::render_palette(f, app, area);
     overlays::render_usage(f, app, area);
     overlays::render_stats(f, app, area);
@@ -515,7 +516,7 @@ mod tests {
         assert!(info.contains("▎"), "accent bar on info line: {info:?}");
         assert!(info.contains("claude-sonnet-5"), "model: {info:?}");
         assert!(info.contains("anthropic"), "provider: {info:?}");
-        assert!(info.contains("high"), "thinking level: {info:?}");
+        assert!(info.contains("· off"), "thinking setting: {info:?}");
         assert!(info.contains("44.8K/1M (4%)"), "context usage: {info:?}");
         // Status row below keeps the active status indicator.
         let status = &bottom[2];
@@ -523,6 +524,33 @@ mod tests {
             status.contains("awaiting approval") && status.contains("esc interrupt"),
             "status row: {status:?}"
         );
+    }
+
+    #[test]
+    fn thinking_picker_renders_modes_and_current_budget() {
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let mut app = seeded_app();
+        app.session.thinking = crate::thinking::ThinkingConfig::Budget(4096);
+        app.open_thinking_picker();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for label in [
+            "Thinking", "off", "adaptive", "minimal", "low", "medium", "high", "xhigh", "max",
+            "● 4096",
+        ] {
+            assert!(text.contains(label), "missing {label:?} in:\n{text}");
+        }
+        assert!(text.contains("/thinking <tokens>"));
+        let mut small = Terminal::new(TestBackend::new(30, 12)).unwrap();
+        small.draw(|f| draw(f, &mut app)).unwrap();
     }
 
     #[test]

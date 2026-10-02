@@ -150,7 +150,7 @@ impl App {
         if self.handle_chord_key(key, tx) {
             return;
         }
-        if self.handle_editing_chord_key(key) {
+        if self.handle_editing_chord_key(key, tx) {
             return;
         }
         if self.handle_navigation_key(key, tx) {
@@ -253,7 +253,11 @@ impl App {
     /// ctrl motions and deletes plus Alt word motions. Effort cycling moved
     /// to Ctrl-F so Ctrl-E can be line-end; with an empty composer it jumps
     /// the scrollback to bottom.
-    fn handle_editing_chord_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_editing_chord_key(
+        &mut self,
+        key: KeyEvent,
+        tx: &mpsc::UnboundedSender<Command>,
+    ) -> bool {
         let key = crate::tui::keybindings::normalize_key(key);
         let keybinds = &self.overlays.keybinds;
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -302,7 +306,7 @@ impl App {
             && !key.modifiers.contains(KeyModifiers::CONTROL)
         {
             if keybinds.matches(ActionId::CycleEffort, key) {
-                self.session.effort_idx = (self.session.effort_idx + 1) % EFFORTS.len();
+                self.set_thinking(self.session.thinking.cycle(), tx);
                 return true;
             }
             return match key.code {

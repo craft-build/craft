@@ -36,7 +36,7 @@ fn prompt_text_rejects_unsupported_blocks() {
 }
 
 #[test]
-fn config_options_expose_provider_then_model() {
+fn config_options_expose_provider_model_and_thinking() {
     let session = Session {
         compaction: Default::default(),
         workspace: Workspace::new(std::env::temp_dir()).unwrap(),
@@ -52,6 +52,8 @@ fn config_options_expose_provider_then_model() {
         }],
         model: "gpt-x".into(),
         context_length: Some(128_000),
+        thinking: Default::default(),
+        store: None,
         dedup: run::shared_cache(),
         permissions: Arc::new(PermissionManager::new(
             crate::permissions::PermissionsConfig::default(),
@@ -61,9 +63,10 @@ fn config_options_expose_provider_then_model() {
         turn: None,
     };
     let options = session.config_options(&["openai".into(), "llamafile".into()]);
-    assert_eq!(options.len(), 2);
+    assert_eq!(options.len(), 3);
     assert_eq!(options[0].id.0.as_ref(), "provider");
     assert_eq!(options[1].id.0.as_ref(), "model");
+    assert_eq!(options[2].id.0.as_ref(), "thinking");
 }
 
 fn test_session() -> Session {
@@ -76,6 +79,8 @@ fn test_session() -> Session {
         models: Vec::new(),
         model: "gpt-x".into(),
         context_length: Some(128_000),
+        thinking: Default::default(),
+        store: None,
         dedup: run::shared_cache(),
         permissions: Arc::new(PermissionManager::new(
             crate::permissions::PermissionsConfig::default(),
@@ -84,6 +89,26 @@ fn test_session() -> Session {
         cancel: run::cancel_channel().0,
         turn: None,
     }
+}
+
+#[test]
+fn thinking_options_include_current_budget() {
+    let option = thinking_option(crate::thinking::ThinkingConfig::Budget(4096));
+    let json = serde_json::to_value(option).unwrap();
+    let current = crate::thinking::ThinkingConfig::Budget(4096).to_string();
+    assert_eq!(json["currentValue"], current);
+    let values: Vec<_> = json["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| option["value"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        values,
+        [
+            "off", "adaptive", "minimal", "low", "medium", "high", "xhigh", "max", &current
+        ]
+    );
 }
 
 #[test]

@@ -189,6 +189,8 @@ pub struct SessionMeta {
     /// `None` when the composer is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_draft: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<crate::thinking::ThinkingConfig>,
 }
 
 /// Messages plus the token of the run they belong to. Comparing tokens tells
@@ -547,6 +549,13 @@ where
         }
         self.meta.input_draft = draft;
         self.touch_soft();
+    }
+
+    pub fn set_thinking(&mut self, thinking: crate::thinking::ThinkingConfig) {
+        if self.meta.thinking != Some(thinking) {
+            self.meta.thinking = Some(thinking);
+            self.touch_soft();
+        }
     }
 
     pub fn set_title(&mut self, title: String) {

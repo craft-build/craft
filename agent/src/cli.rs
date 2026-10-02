@@ -200,15 +200,18 @@ pub struct Cli {
     pub tools: Option<String>,
     #[arg(long, hide = true)]
     pub betas: Option<String>,
-    #[arg(long, hide = true)]
+    /// Thinking-token budget where supported; maps to effort on effort-only APIs.
+    #[arg(long, conflicts_with_all = ["thinking", "effort"])]
     pub max_thinking_tokens: Option<String>,
-    #[arg(long, hide = true)]
+    /// Reasoning effort: minimal, low, medium, high, xhigh, or max.
+    #[arg(long, conflicts_with_all = ["thinking", "max_thinking_tokens"])]
     pub effort: Option<String>,
     #[arg(long, hide = true)]
     pub json_schema: Option<String>,
     #[arg(long, hide = true)]
     pub max_budget_usd: Option<String>,
-    #[arg(long, hide = true)]
+    /// Thinking policy: off, adaptive, an effort level, or a positive token budget.
+    #[arg(long, conflicts_with_all = ["effort", "max_thinking_tokens"])]
     pub thinking: Option<String>,
     #[arg(long, hide = true)]
     pub thinking_display: Option<String>,
@@ -348,11 +351,8 @@ impl Cli {
             ("mcp-config", self.mcp_config.is_some()),
             ("tools", self.tools.is_some()),
             ("betas", self.betas.is_some()),
-            ("max-thinking-tokens", self.max_thinking_tokens.is_some()),
-            ("effort", self.effort.is_some()),
             ("json-schema", self.json_schema.is_some()),
             ("max-budget-usd", self.max_budget_usd.is_some()),
-            ("thinking", self.thinking.is_some()),
             ("thinking-display", self.thinking_display.is_some()),
         ];
         for (flag, set) in &ignored {
@@ -377,6 +377,7 @@ impl Cli {
     /// handled by clap.
     pub fn validate(&self) -> Result<()> {
         self.permission_policy()?;
+        self.thinking_override()?;
         if matches!(self.mode, CliMode::Flow) {
             return InvalidSnafu {
                 reason: "--mode flow is not available yet (Flow mode is ported last)",
@@ -428,6 +429,61 @@ impl Cli {
         Ok(())
     }
 
+    /// Resolve the three mutually exclusive reasoning flags into one policy.
+    pub fn thinking_override(&self) -> Result<Option<crate::thinking::ThinkingConfig>> {
+        use crate::thinking::ThinkingConfig;
+        if [&self.thinking, &self.effort, &self.max_thinking_tokens]
+            .iter()
+            .filter(|value| value.is_some())
+            .count()
+            > 1
+        {
+            return InvalidSnafu {
+                reason: "--thinking, --effort, and --max-thinking-tokens are mutually exclusive",
+            }
+            .fail();
+        }
+        let parsed = if let Some(value) = &self.thinking {
+            Some(ThinkingConfig::parse(value, ThinkingConfig::default()))
+        } else if let Some(value) = &self.effort {
+            Some(
+                ThinkingConfig::parse(value, ThinkingConfig::default()).and_then(|thinking| {
+                    if matches!(thinking, ThinkingConfig::Effort(_)) {
+                        Ok(thinking)
+                    } else {
+                        Err("expected effort: minimal, low, medium, high, xhigh, or max".to_owned())
+                    }
+                }),
+            )
+        } else if let Some(value) = &self.max_thinking_tokens {
+            Some(
+                value
+                    .parse::<u32>()
+                    .map_err(|_| "expected a positive thinking token budget".to_owned())
+                    .and_then(|budget| {
+                        if budget == 0 {
+                            Err("expected a positive thinking token budget".to_owned())
+                        } else {
+                            Ok(ThinkingConfig::Budget(budget))
+                        }
+                    }),
+            )
+        } else {
+            None
+        };
+        parsed
+            .transpose()
+            .map_err(|reason| InvalidSnafu { reason }.build())
+    }
+
+    /// Apply CLI policy before dispatching to any interactive or headless surface.
+    pub fn apply_thinking(&self, config: &mut crate::config::Config) -> Result<()> {
+        if let Some(thinking) = self.thinking_override()? {
+            config.always_thinking = Some(thinking);
+        }
+        Ok(())
+    }
+
     /// The system-prompt text that replaces the config preamble:
     /// `--system-prompt` replaces it, `--append-system-prompt` appends to it,
     /// otherwise the config value passes through unchanged.
@@ -469,6 +525,47 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("craft").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn thinking_flags_resolve_and_validate() {
+        use crate::thinking::ThinkingConfig;
+        for (args, expected) in [
+            (vec!["--thinking", "off"], ThinkingConfig::Off),
+            (vec!["--thinking", "adaptive"], ThinkingConfig::Adaptive),
+            (
+                vec!["--max-thinking-tokens", "4096"],
+                ThinkingConfig::Budget(4096),
+            ),
+        ] {
+            let cli = parse(&args).unwrap();
+            assert_eq!(cli.thinking_override().unwrap(), Some(expected));
+        }
+        for value in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+            let cli = parse(&["--effort", value]).unwrap();
+            assert_eq!(cli.thinking_override().unwrap().unwrap().to_string(), value);
+        }
+        for args in [
+            vec!["--thinking", "bogus"],
+            vec!["--effort", "off"],
+            vec!["--max-thinking-tokens", "0"],
+            vec!["--max-thinking-tokens", "-1"],
+            vec!["--max-thinking-tokens", "4294967296"],
+        ] {
+            assert!(
+                parse(&args)
+                    .map(|cli| cli.validate().is_err())
+                    .unwrap_or(true)
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_flags_are_mutually_exclusive() {
+        assert!(parse(&["--thinking", "off", "--effort", "high"]).is_err());
+        assert!(parse(&["--thinking", "adaptive", "--max-thinking-tokens", "4096"]).is_err());
+        assert!(parse(&["--effort", "high", "--max-thinking-tokens", "4096"]).is_err());
+        assert_eq!(parse(&[]).unwrap().thinking_override().unwrap(), None);
     }
 
     #[test]
@@ -877,6 +974,7 @@ mod tests {
 /// stream-json`), or a verbose transcript (`--verbose`). SDK-mode
 /// stream-json input remains unported.
 pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<()> {
+    cli.apply_thinking(&mut config)?;
     // One warning per unimplemented option, in a stable order.
     for flag in [
         "--image",
@@ -977,6 +1075,7 @@ impl HeadlessQuery {
 }
 
 pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery) -> Result<()> {
+    let _ = tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
     let prompt = inject_context(&q.prompt, &q.context);
     // Fails fast: silently dropping an image the caller explicitly attached
     // would be worse than erroring.
@@ -1043,7 +1142,7 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
                 .clone()
         }
     };
-    let model = provider.completion_model(&model_id)?;
+    let model = provider.configured_model(&provider_config, &model_id)?;
     let (context_length, max_output_tokens) = catalog
         .as_ref()
         .map(|models| {
@@ -1124,6 +1223,7 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
         recency: None,
         retry: crate::run::RetryCtx::default(),
         fast: false,
+        thinking: None,
         max_turns: crate::runtime::MaxTurns::FromConfig,
     });
 

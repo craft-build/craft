@@ -4,7 +4,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use tokio::sync::mpsc;
 
 use super::{App, Message, Modal, PendingClick};
-use crate::tui::app::EFFORTS;
 use crate::tui::keybindings::ActionId;
 use crate::tui::provider::{AgentEvent, Command};
 use crate::tui::selection::{clamp_to, copy_to_clipboard, extract_selection_text, rect_contains};

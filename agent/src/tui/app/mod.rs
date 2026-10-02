@@ -37,8 +37,6 @@ pub(crate) use self::mode::Mode;
 /// `DEFAULT_FLASH_DURATION_MS`).
 pub(crate) const FLASH_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
 
-pub const EFFORTS: [&str; 3] = ["low", "medium", "high"];
-
 /// Plan-mode state: the allocated plan file, the "Plan complete" form,
 /// and the Ctrl-O editor request.
 pub struct PlanMode {
@@ -267,8 +265,8 @@ impl App {
             .unwrap_or(("no model", "no provider"))
     }
 
-    pub fn effort(&self) -> &'static str {
-        EFFORTS[self.session.effort_idx]
+    pub fn thinking_label(&self) -> String {
+        self.session.thinking.to_string()
     }
 
     pub fn busy(&self) -> bool {
@@ -504,6 +502,7 @@ impl App {
             AgentEvent::PlanSet(plan) => self.plan = plan,
             AgentEvent::FilesSet(files) => self.files = files,
             AgentEvent::TokenUsage(label) => self.session.token_label = label,
+            AgentEvent::ThinkingChanged(thinking) => self.session.thinking = thinking,
             AgentEvent::CatalogSet { models, current } => {
                 if !models.is_empty() {
                     self.session.models = models;
@@ -763,6 +762,14 @@ impl App {
     pub(crate) fn submit(&mut self, tx: &mpsc::UnboundedSender<Command>) {
         let text = self.composer.text.trim().to_string();
         if text.is_empty() {
+            return;
+        }
+        if text.split_whitespace().next() == Some("/thinking") {
+            self.composer.clear();
+            self.input_history.push(text.clone());
+            self.history_recall.history_index = None;
+            self.history_recall.history_draft.clear();
+            self.run_slash(&text, tx);
             return;
         }
         // Enter on an open slash menu executes the highlighted command.

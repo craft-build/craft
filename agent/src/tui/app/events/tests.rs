@@ -1,6 +1,5 @@
 use super::super::testutil::{app_with_collapsible_tool, draw_app, scrolled_app};
 use super::*;
-use crate::tui::app::EFFORTS;
 use crate::tui::provider::{AgentEvent, LineKind, Status, ToolCallData, ToolKind, ToolLine};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -795,19 +794,20 @@ fn submit_bang_cd_flashes() {
 /// moves to the end of the line.
 #[test]
 fn alt_e_cycles_effort_and_ctrl_e_moves_to_line_end() {
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     app.composer.set_text("hello".into());
     app.composer.cursor = 0;
-    let before = app.session.effort_idx;
+    let before = app.session.thinking;
     app.handle_key(
         KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
         &tx,
     );
-    assert_eq!(app.session.effort_idx, before, "ctrl-f opens search");
+    assert_eq!(app.session.thinking, before, "ctrl-f opens search");
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &tx);
-    assert_eq!(app.session.effort_idx, (before + 1) % EFFORTS.len());
+    assert_eq!(app.session.thinking, before.cycle());
+    assert!(matches!(rx.try_recv(), Ok(Command::SetThinking(value)) if value == before.cycle()));
     assert_eq!(app.composer.text, "hello", "alt-e does not type");
     app.handle_key(
         KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),

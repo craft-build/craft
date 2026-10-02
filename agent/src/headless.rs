@@ -163,6 +163,15 @@ impl SessionStore {
         self.save();
     }
 
+    pub fn thinking(&self) -> Option<crate::thinking::ThinkingConfig> {
+        self.session.meta.thinking
+    }
+
+    pub fn set_thinking(&mut self, thinking: crate::thinking::ThinkingConfig) {
+        self.session.set_thinking(thinking);
+        self.save();
+    }
+
     /// Fold a finished run's per-model usage into the session and append one
     /// cost-ledger record per model to `cost.jsonl`. Ledger failures are
     /// warnings, never fatal. A model whose cost could not be resolved records
@@ -416,6 +425,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             agent: crate::config::AgentConfig {
                 temperature: run_params.temperature,
                 max_tokens: run_params.max_tokens,
+                thinking: Some(run_params.thinking),
                 ..Default::default()
             },
             compression: run_params.compression.clone(),
@@ -433,6 +443,9 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             .register();
 
         let mut store = store;
+        if let Some(store) = &mut store {
+            store.set_thinking(run_params.thinking);
+        }
         // The terminal Done's per-model ledger, captured from the event
         // seam so the store can persist it after the run ends.
         let done_by_model = Arc::new(std::sync::Mutex::new(None));
@@ -550,6 +563,13 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         let mut run_params = params.run;
         let mut history = params.initial_history;
         let mut store = store;
+        if let Some(store) = &mut store {
+            if let Some(thinking) = store.thinking() {
+                run_params.thinking = thinking;
+            } else {
+                store.set_thinking(run_params.thinking);
+            }
+        }
         let mut input_rx = input_rx;
         let mut model_rx = model_rx;
         let mut run_id: u64 = 0;
@@ -600,6 +620,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 agent: crate::config::AgentConfig {
                     temperature: run_params.temperature,
                     max_tokens: run_params.max_tokens,
+                    thinking: Some(run_params.thinking),
                     ..Default::default()
                 },
                 compression: run_params.compression.clone(),
