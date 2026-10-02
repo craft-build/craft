@@ -164,6 +164,10 @@ pub struct Workspace {
     /// server to stop. Shared cell so every clone (batch, subagents) sees
     /// the per-turn set; `None` before a turn installs one.
     mcp_cancel: std::sync::Arc<std::sync::RwLock<Option<crate::run::CancelToken>>>,
+    /// Session sandbox policy (resolved from config/env at construction or
+    /// installed by the surface). Turn registrations snapshot or narrow it
+    /// into a frozen per-turn cell, like every other per-turn decision.
+    sandbox: crate::sandbox::SandboxPolicyCell,
 }
 
 impl Workspace {
@@ -190,6 +194,7 @@ impl Workspace {
             subagents: Arc::new(task::NoSubagents),
             mcp_cancel: Default::default(),
             before: None,
+            sandbox: Default::default(),
         })
     }
 
@@ -227,6 +232,55 @@ impl Workspace {
 
     pub fn mcp(&self) -> Option<crate::mcp::McpHandle> {
         self.mcp.read().expect("mcp cell poisoned").clone()
+    }
+
+    /// Install the session's resolved sandbox policy (from `[sandbox]`
+    /// config + yolo). Call before the first turn registers tools.
+    pub fn set_sandbox_policy(&self, policy: crate::sandbox::SandboxPolicy) {
+        let mut cell = self.sandbox.write().unwrap_or_else(|e| e.into_inner());
+        cell.policy = policy;
+    }
+
+    pub fn with_sandbox_policy(self, policy: crate::sandbox::SandboxPolicy) -> Self {
+        self.set_sandbox_policy(policy);
+        self
+    }
+
+    pub fn sandbox_policy(&self) -> crate::sandbox::SandboxPolicy {
+        self.sandbox
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .policy
+            .clone()
+    }
+
+    pub(crate) fn sandbox_cell(&self) -> crate::sandbox::SandboxPolicyCell {
+        self.sandbox.clone()
+    }
+
+    /// The per-turn sandbox cell baked into a tool table. Plan mode and
+    /// read-only workers get a frozen read-only policy (plan mode keeps the
+    /// allocated plan file writable); build/general turns share the session
+    /// cell so later policy installs are visible.
+    fn turn_sandbox_cell(
+        &self,
+        mode: &crate::run::AgentMode,
+        force_read_only: bool,
+    ) -> crate::sandbox::SandboxPolicyCell {
+        let read_only = force_read_only || matches!(mode, crate::run::AgentMode::Plan(_));
+        if !read_only {
+            return self.sandbox.clone();
+        }
+        let mut policy = self.sandbox_policy();
+        policy.mode = crate::sandbox::SandboxMode::ReadOnly;
+        policy.writable_roots = mode
+            .plan_path()
+            .map(|p| vec![p.to_path_buf()])
+            .unwrap_or_default();
+        std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::SandboxState {
+            policy,
+            note_shown: false,
+        }))
     }
 
     /// Share the session's instruction-dedupe set so instruction files are
@@ -334,13 +388,19 @@ impl Workspace {
     /// never registered, never rescued by a wildcard arm. The argosy
     /// knowledge tools register as first-class natives under their own
     /// names; both surfaces see them.
-    fn builtin_tool_table(&self) -> Vec<(&'static str, PortableDynamicTool)> {
-        let mut table = self.core_builtin_table();
+    fn builtin_tool_table(
+        &self,
+        sandbox: crate::sandbox::SandboxPolicyCell,
+    ) -> Vec<(&'static str, PortableDynamicTool)> {
+        let mut table = self.core_builtin_table(sandbox);
         table.extend(argosy_tools());
         table
     }
 
-    fn core_builtin_table(&self) -> Vec<(&'static str, PortableDynamicTool)> {
+    fn core_builtin_table(
+        &self,
+        sandbox: crate::sandbox::SandboxPolicyCell,
+    ) -> Vec<(&'static str, PortableDynamicTool)> {
         vec![
             ("read", dynamic(Read(self.clone()))),
             ("grep", dynamic(Grep(self.clone()))),
@@ -354,7 +414,7 @@ impl Workspace {
             ("write", dynamic(Write(self.clone()))),
             ("delete", dynamic(Delete(self.clone()))),
             ("move_file", dynamic(MoveFile(self.clone()))),
-            ("bash", dynamic(Bash(self.clone()))),
+            ("bash", dynamic(Bash(self.clone(), sandbox))),
             ("bash_status", dynamic(BashStatus(self.clone()))),
             ("bash_watch", dynamic(BashWatch(self.clone()))),
             ("bash_kill", dynamic(BashKill(self.clone()))),
@@ -384,9 +444,10 @@ impl Workspace {
     /// into the batch child table — so write-gating is a frozen snapshot for
     /// the whole turn.
     pub fn register_with_mode(&self, mode: crate::run::AgentMode) -> crate::run::ToolDispatch {
+        let sandbox = self.turn_sandbox_cell(&mode, false);
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
         let mut tools: Vec<PortableDynamicTool> = self
-            .builtin_tool_table()
+            .builtin_tool_table(sandbox)
             .into_iter()
             .map(|(_, tool)| tool)
             .collect();
@@ -427,10 +488,14 @@ impl Workspace {
             crate::subagent::RESEARCH_TOOLS
         };
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
+        // Read-only workers never inherit workspace-write, even though their
+        // budget has no bash today: the shared table must not leak it to
+        // future additions.
+        let sandbox = self.turn_sandbox_cell(&crate::run::AgentMode::Build, !general);
         // The restricted table is the shared builtin table filtered by the
         // subagent tool budget.
         let mut tools: Vec<PortableDynamicTool> = self
-            .builtin_tool_table()
+            .builtin_tool_table(sandbox)
             .into_iter()
             .filter(|(name, _)| allowed.contains(name))
             .map(|(_, tool)| tool)
@@ -468,8 +533,9 @@ impl Workspace {
     /// writes.
     pub fn register_reviewer(&self) -> crate::run::ToolDispatch {
         let allowed = crate::subagent::REVIEWER_TOOLS;
+        let sandbox = self.turn_sandbox_cell(&crate::run::AgentMode::Build, true);
         let mut tools: Vec<PortableDynamicTool> = self
-            .builtin_tool_table()
+            .builtin_tool_table(sandbox)
             .into_iter()
             .filter(|(name, _)| allowed.contains(name))
             .map(|(_, tool)| tool)

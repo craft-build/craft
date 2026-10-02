@@ -84,14 +84,19 @@ impl CraftProvider {
             })),
             ..Default::default()
         };
+        let sandbox = crate::sandbox::SandboxPolicy::resolve(&config, false);
         let env = crate::runtime::workspace_env(
             cwd,
             crate::runtime::McpStartup::Background(mcp_events),
             true,
+            sandbox,
         )
         .await?;
         let (instructions, permissions, workspace) =
             (env.instructions, env.permissions, env.workspace);
+        if let Some(note) = env.sandbox_note {
+            notes.push(note);
+        }
         if !env.mcp_errors.is_empty() {
             notes.push(format!("mcp: {}", env.mcp_errors));
         }

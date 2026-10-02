@@ -318,9 +318,14 @@ impl AppState {
         ),
         String,
     > {
-        let env = crate::runtime::workspace_env(cwd, crate::runtime::McpStartup::Connected, false)
-            .await
-            .map_err(report)?;
+        let env = crate::runtime::workspace_env(
+            cwd,
+            crate::runtime::McpStartup::Connected,
+            false,
+            crate::sandbox::SandboxPolicy::resolve(&self.config, false),
+        )
+        .await
+        .map_err(report)?;
         Ok((env.instructions, env.workspace, env.permissions))
     }
 

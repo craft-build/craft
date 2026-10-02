@@ -428,19 +428,59 @@ fn prepare(workspace: &Workspace, args: &BashArgs) -> Result<(String, std::path:
     Ok((command, cwd))
 }
 
-fn spawn(workspace_root: &Path, command: &str, cwd: &Path) -> Result<ChildGuard> {
+fn spawn(
+    workspace_root: &Path,
+    command: &str,
+    cwd: &Path,
+    sandbox: &crate::sandbox::SandboxPolicyCell,
+) -> Result<(ChildGuard, Option<String>)> {
     let mut cmd = std::process::Command::new("bash");
     cmd.arg("-c").arg(command);
+    let status = crate::sandbox::BackendStatus::detect();
     // Wrap before configuring: the sandbox rewrite replaces the Command, so
     // cwd/env/stdio must be applied to the wrapped invocation, not the inner one.
-    let sandboxed =
-        std::env::var_os("CRAFT_SANDBOX").is_none_or(|v| v != "off") && crate::sandbox::available();
-    if sandboxed {
-        let mut profile = crate::sandbox::SandboxProfile::workspace_write(workspace_root);
-        profile.writable_roots = crate::sandbox::default_writable_roots();
-        crate::sandbox::apply(&mut cmd, &profile)
-            .map_err(|error| failure(format!("sandbox setup failed: {error}")))?;
+    let outcome = {
+        let state = sandbox.read().unwrap_or_else(|e| e.into_inner());
+        let policy = &state.policy;
+        let mut profile = crate::sandbox::SandboxProfile {
+            mode: policy.mode,
+            network: policy.network,
+            workspace: workspace_root.to_path_buf(),
+            writable_roots: policy.writable_roots.clone(),
+        };
+        if policy.mode == crate::sandbox::SandboxMode::WorkspaceWrite
+            && profile.writable_roots.is_empty()
+        {
+            profile.writable_roots = crate::sandbox::default_writable_roots();
+        }
+        crate::sandbox::enforce(&mut cmd, &profile, &status)
     }
+    .map_err(|error| failure(format!("sandbox setup failed: {error}")))?;
+    // One-time-per-cell note when commands run unsandboxed; `Applied` stays
+    // silent, and a deliberate `Off` opt-out (yolo/config/env) is already
+    // documented and visible, so it gets no per-command noise.
+    let deliberate_off = sandbox
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .policy
+        .mode
+        == crate::sandbox::SandboxMode::Off;
+    let note = match &outcome {
+        crate::sandbox::SandboxOutcome::Applied => None,
+        crate::sandbox::SandboxOutcome::Disabled { .. } if deliberate_off => None,
+        crate::sandbox::SandboxOutcome::Disabled { reason }
+        | crate::sandbox::SandboxOutcome::Unavailable { reason } => {
+            let mut state = sandbox.write().unwrap_or_else(|e| e.into_inner());
+            if state.note_shown {
+                None
+            } else {
+                state.note_shown = true;
+                Some(format!(
+                    "note: sandbox unavailable: running unsandboxed ({reason})"
+                ))
+            }
+        }
+    };
     cmd.current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())
@@ -456,7 +496,7 @@ fn spawn(workspace_root: &Path, command: &str, cwd: &Path) -> Result<ChildGuard>
             workspace_root.display()
         ))
     })?;
-    Ok(ChildGuard::new(child))
+    Ok((ChildGuard::new(child), note))
 }
 
 // ---------------------------------------------------------------------------
@@ -494,10 +534,15 @@ impl IntoToolOutput for BashOutput {
 }
 
 #[derive(Clone)]
-pub struct Bash(pub Workspace);
+pub struct Bash(pub Workspace, pub(crate) crate::sandbox::SandboxPolicyCell);
 
 impl Bash {
-    async fn execute(workspace: &Workspace, args: BashArgs) -> Result<BashOutput> {
+    pub(crate) fn new(workspace: Workspace) -> Self {
+        Self(workspace.clone(), workspace.sandbox_cell())
+    }
+
+    async fn execute(&self, args: BashArgs) -> Result<BashOutput> {
+        let workspace = &self.0;
         let (command, cwd) = prepare(workspace, &args)?;
         // Snapshot files targeted by in-place edits (`sed -i` / `perl -i`)
         // before anything runs, so `/undo` can restore them. Detection fails
@@ -514,7 +559,7 @@ impl Bash {
             .timeout
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .max(MIN_TIMEOUT_SECS);
-        let mut guard = spawn(workspace.root(), &command, &cwd)?;
+        let (mut guard, note) = spawn(workspace.root(), &command, &cwd, &self.1)?;
         let output: OutputBuf = Arc::default();
 
         if args.background {
@@ -534,11 +579,12 @@ impl Bash {
             job.child.lock().unwrap().replace(held);
             spawn_waiter(&job);
             let id = workspace.bash_jobs.register(job);
+            let text = format!(
+                "Background task: {id}\nuse bash_status(task_id=\"{id}\") to check \
+                 output\nuse bash_kill(task_id=\"{id}\") to terminate"
+            );
             return Ok(BashOutput {
-                text: format!(
-                    "Background task: {id}\nuse bash_status(task_id=\"{id}\") to check \
-                     output\nuse bash_kill(task_id=\"{id}\") to terminate"
-                ),
+                text: prepend_note(text, note),
             });
         }
         let mut readers = spawn_readers(&mut guard, &output, None);
@@ -561,10 +607,10 @@ impl Bash {
                 let text = truncate_output(&compress_output(&output.lock().unwrap().snapshot()));
                 if code == 0 {
                     Ok(BashOutput {
-                        text: format_exit(&text, code),
+                        text: prepend_note(format_exit(&text, code), note),
                     })
                 } else {
-                    Err(failure(format_exit(&text, code)))
+                    Err(failure(prepend_note(format_exit(&text, code), note)))
                 }
             }
             Err(_) => {
@@ -636,7 +682,14 @@ impl PortableTool for Bash {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        Self::execute(&self.0, args).await
+        self.execute(args).await
+    }
+}
+
+fn prepend_note(text: String, note: Option<String>) -> String {
+    match note {
+        Some(note) => format!("{note}\n{text}"),
+        None => text,
     }
 }
 
@@ -719,7 +772,7 @@ impl PortableTool for BashStatus {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        let (text, is_error) = Bash(self.0.clone()).status_text(&args.task_id)?;
+        let (text, is_error) = Bash::new(self.0.clone()).status_text(&args.task_id)?;
         // The terminal report has been delivered; release the finished
         // job's retained output buffer.
         if self.0.bash_jobs.terminal(&args.task_id) {
@@ -951,7 +1004,7 @@ mod tests {
     #[tokio::test]
     async fn foreground_success_and_exit_codes() {
         let (_dir, workspace) = workspace();
-        let tool = Bash(workspace);
+        let tool = Bash::new(workspace);
         let out = invoke(&tool, json!({"command": "echo hello"}))
             .await
             .unwrap();
@@ -975,7 +1028,7 @@ mod tests {
     async fn workdir_and_cd_hint_are_honored() {
         let (dir, workspace) = workspace();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
-        let tool = Bash(workspace.clone());
+        let tool = Bash::new(workspace.clone());
         let out = invoke(&tool, json!({"command": "cd sub && pwd"}))
             .await
             .unwrap();
@@ -1007,7 +1060,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_and_returns_partial_output() {
         let (_dir, workspace) = workspace();
-        let tool = Bash(workspace);
+        let tool = Bash::new(workspace);
         let err = invoke(
             &tool,
             json!({"command": "echo partial; sleep 30", "timeout": 5}),
@@ -1022,7 +1075,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_kills_the_whole_process_group() {
         let (dir, workspace) = workspace();
-        let tool = Bash(workspace);
+        let tool = Bash::new(workspace);
         // Spawn a grandchild `sleep`, record its pid, then hang the
         // parent: the timeout must take down both via the process group.
         let err = invoke(
@@ -1071,7 +1124,7 @@ mod tests {
     async fn background_output_buffer_is_bounded() {
         let (_dir, workspace) = workspace();
         let out = invoke(
-            &Bash(workspace.clone()),
+            &Bash::new(workspace.clone()),
             json!({"command": "yes padded-output-line | head -c 500000", "background": true}),
         )
         .await
@@ -1118,7 +1171,7 @@ mod tests {
     async fn bash_status_releases_output_of_terminal_job() {
         let (_dir, workspace) = workspace();
         let out = invoke(
-            &Bash(workspace.clone()),
+            &Bash::new(workspace.clone()),
             json!({"command": "echo done", "background": true}),
         )
         .await
@@ -1166,7 +1219,7 @@ mod tests {
         // 4095 ASCII bytes then a 3-byte char straddles the 4 KiB read
         // chunk: naive lossy-per-chunk decoding would emit U+FFFD.
         let out = invoke(
-            &Bash(workspace.clone()),
+            &Bash::new(workspace.clone()),
             json!({"command": "printf '%4095s' ' ' | tr ' ' 'a'; printf '\\342\\202\\254'; printf 'xxxxxxxx'"}),
         )
         .await
@@ -1191,7 +1244,7 @@ mod tests {
         std::fs::write(dir.path().join("one.txt"), "a\n").unwrap();
         std::fs::write(dir.path().join("two.txt"), "c\n").unwrap();
 
-        let tool = Bash(workspace.clone());
+        let tool = Bash::new(workspace.clone());
         // perl is available on macOS/Linux CI; the snapshot is taken before
         // execution regardless of how the command itself fares.
         let _ = invoke(
@@ -1219,7 +1272,7 @@ mod tests {
     #[tokio::test]
     async fn denied_find_command_is_refused() {
         let (_dir, workspace) = workspace();
-        let err = invoke(&Bash(workspace), json!({"command": "find / -name x"}))
+        let err = invoke(&Bash::new(workspace), json!({"command": "find / -name x"}))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("refused"), "{}", err);
@@ -1228,7 +1281,7 @@ mod tests {
     #[tokio::test]
     async fn background_task_lifecycle() {
         let (_dir, workspace) = workspace();
-        let bash = Bash(workspace.clone());
+        let bash = Bash::new(workspace.clone());
         let out = invoke(
             &bash,
             json!({"command": "echo hi from bg", "background": true}),
@@ -1283,7 +1336,7 @@ mod tests {
     #[tokio::test]
     async fn bash_watch_waits_for_pattern() {
         let (_dir, workspace) = workspace();
-        let bash = Bash(workspace.clone());
+        let bash = Bash::new(workspace.clone());
         let out = invoke(
             &bash,
             json!({"command": "sleep 1; echo ready", "background": true}),
@@ -1323,7 +1376,7 @@ mod tests {
     #[tokio::test]
     async fn bash_kill_terminates_running_task() {
         let (_dir, workspace) = workspace();
-        let bash = Bash(workspace.clone());
+        let bash = Bash::new(workspace.clone());
         let out = invoke(&bash, json!({"command": "sleep 60", "background": true}))
             .await
             .unwrap();

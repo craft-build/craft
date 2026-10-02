@@ -48,6 +48,10 @@ pub struct WorkspaceEnv {
     /// MCP config problems (unreadable/unparseable server entries); the
     /// surface surfaces them as startup notes.
     pub mcp_errors: crate::mcp::config::McpConfigErrors,
+    /// Sandbox degradation warning (unsupported platform, or the required
+    /// backend missing while confinement is requested); surfaced like
+    /// `mcp_errors` at startup.
+    pub sandbox_note: Option<String>,
 }
 
 /// How MCP servers start for the session.
@@ -68,6 +72,7 @@ pub async fn workspace_env(
     cwd: &Path,
     mcp: McpStartup,
     install_reviewer: bool,
+    sandbox: crate::sandbox::SandboxPolicy,
 ) -> Result<WorkspaceEnv> {
     let (instructions, permissions) = tokio::task::spawn_blocking({
         let cwd = cwd.to_path_buf();
@@ -102,11 +107,28 @@ pub async fn workspace_env(
         McpStartup::Background(events) => crate::mcp::start_with_events(cwd, events).await,
     };
     workspace.set_mcp(mcp_handle);
+    workspace.set_sandbox_policy(sandbox.clone());
+    let sandbox_note = if !sandbox.enforced() {
+        None
+    } else {
+        match crate::sandbox::BackendStatus::detect() {
+            crate::sandbox::BackendStatus::Available => None,
+            crate::sandbox::BackendStatus::UnsupportedPlatform => Some(format!(
+                "sandbox: unsupported on {}; commands run unsandboxed",
+                std::env::consts::OS
+            )),
+            crate::sandbox::BackendStatus::BinaryMissing(binary) => Some(format!(
+                "sandbox: backend '{binary}' is not installed; bash commands will fail \
+                 until it is installed or sandbox.mode = \"off\" is set"
+            )),
+        }
+    };
     Ok(WorkspaceEnv {
         instructions,
         workspace,
         permissions: Arc::new(permissions),
         mcp_errors,
+        sandbox_note,
     })
 }
 
@@ -529,7 +551,14 @@ mod tests {
             } else {
                 McpStartup::Background(crate::mcp::McpEvents::default())
             };
-            let env = workspace_env(dir.path(), mode, false).await.unwrap();
+            let env = workspace_env(
+                dir.path(),
+                mode,
+                false,
+                crate::sandbox::SandboxPolicy::off(),
+            )
+            .await
+            .unwrap();
             assert!(
                 env.instructions
                     .text
@@ -550,17 +579,27 @@ mod tests {
     #[tokio::test]
     async fn workspace_env_installs_the_reviewer_definition_opt_in() {
         let dir = tempfile::tempdir().unwrap();
-        workspace_env(dir.path(), McpStartup::Connected, true)
-            .await
-            .unwrap();
+        workspace_env(
+            dir.path(),
+            McpStartup::Connected,
+            true,
+            crate::sandbox::SandboxPolicy::off(),
+        )
+        .await
+        .unwrap();
         assert!(
             dir.path().join(".craft/agents").exists(),
             "reviewer install is requested by the flag"
         );
         let bare = tempfile::tempdir().unwrap();
-        workspace_env(bare.path(), McpStartup::Connected, false)
-            .await
-            .unwrap();
+        workspace_env(
+            bare.path(),
+            McpStartup::Connected,
+            false,
+            crate::sandbox::SandboxPolicy::off(),
+        )
+        .await
+        .unwrap();
         assert!(!bare.path().join(".craft/agents").exists());
     }
 

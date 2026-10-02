@@ -223,9 +223,14 @@ impl CraftProvider {
 
     /// Apply G.1 permission flags before the session's first turn: `--yolo`
     /// bypasses every check, `-A/--auto-review` starts auto-review on.
+    /// `--yolo` also disables the command sandbox (predecessor parity).
     pub fn with_permission_flags(self, yolo: bool, auto_review: bool) -> Self {
         self.permissions.set_yolo(yolo);
         self.permissions.set_auto_review(auto_review);
+        if yolo {
+            self.workspace
+                .set_sandbox_policy(crate::sandbox::SandboxPolicy::off());
+        }
         self
     }
 }

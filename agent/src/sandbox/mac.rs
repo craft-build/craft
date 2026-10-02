@@ -41,8 +41,9 @@ pub fn apply(command: &mut Command, profile: &SandboxProfile) -> Result<(), Sand
 
 /// Builds the SBPL profile string. `WorkspaceWrite` denies all writes by default
 /// then re-allows the workspace and common writable roots; `ReadOnly` denies all
-/// writes. Network is gated by `profile.network`. `DangerFullAccess`/`Off` yield
-/// an empty string (no wrapping).
+/// writes except explicit `writable_roots` grants (exact path + anything under
+/// it — used for the plan file). Network is gated by `profile.network`.
+/// `DangerFullAccess`/`Off` yield an empty string (no wrapping).
 pub(crate) fn build_sbpl(profile: &SandboxProfile) -> String {
     if matches!(
         profile.mode,
@@ -76,6 +77,16 @@ pub(crate) fn build_sbpl(profile: &SandboxProfile) -> String {
                 "(allow file-write* (subpath \"{}\"))\n",
                 sbpl_escape(&r.to_string_lossy())
             ));
+        }
+    } else {
+        // ReadOnly: honor only the explicit grants. A file grant covers the
+        // exact literal; `subpath` additionally covers a directory tree (and
+        // matches nothing for a plain file).
+        for r in &profile.writable_roots {
+            let r = normalize(r);
+            let escaped = sbpl_escape(&r.to_string_lossy());
+            s.push_str(&format!("(allow file-write* (literal \"{escaped}\"))\n"));
+            s.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
         }
     }
 
@@ -198,6 +209,31 @@ mod tests {
         assert!(
             !sbpl.contains("(subpath \"/tmp\"))"),
             "default roots must not be granted when custom roots are set"
+        );
+    }
+
+    #[test]
+    fn read_only_grants_explicit_writable_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("plan.md");
+        std::fs::write(&plan, "").unwrap();
+        let mut profile = SandboxProfile::workspace_write("/Users/test/project");
+        profile.mode = SandboxMode::ReadOnly;
+        profile.writable_roots = vec![plan.clone()];
+        let sbpl = build_sbpl(&profile);
+        let root = normalize(&plan);
+        let p = root.display().to_string();
+        assert!(
+            sbpl.contains(&format!("(allow file-write* (literal \"{p}\"))")),
+            "read-only must grant the exact plan path: {sbpl}"
+        );
+        assert!(
+            sbpl.contains(&format!("(allow file-write* (subpath \"{p}\"))")),
+            "read-only must grant the plan path subpath: {sbpl}"
+        );
+        assert!(
+            !sbpl.contains("/Users/test/project"),
+            "read-only must not grant the workspace"
         );
     }
 

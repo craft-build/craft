@@ -1164,8 +1164,16 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
     // permission policy lands on the engine before the gate reads it, and
     // the gate below enforces it on every dispatch (batch children and
     // subagents included).
-    let env =
-        crate::runtime::workspace_env(&cwd, crate::runtime::McpStartup::Connected, false).await?;
+    let env = crate::runtime::workspace_env(
+        &cwd,
+        crate::runtime::McpStartup::Connected,
+        false,
+        crate::sandbox::SandboxPolicy::resolve(&config, q.policy == PermissionPolicy::Yolo),
+    )
+    .await?;
+    if let Some(note) = &env.sandbox_note {
+        eprintln!("{note}");
+    }
     match q.policy {
         PermissionPolicy::Standard => {}
         PermissionPolicy::Yolo => env.permissions.set_yolo(true),

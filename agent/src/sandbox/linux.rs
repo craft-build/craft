@@ -91,6 +91,15 @@ pub fn apply(command: &mut Command, profile: &SandboxProfile) -> Result<(), Sand
         }
     } else {
         wrapped.arg("--ro-bind").arg(&workspace).arg(&workspace);
+        // Explicit grants (the plan file) stay writable. bwrap requires the
+        // source path to exist, so a not-yet-allocated plan file is skipped —
+        // the write would fail on a missing file anyway.
+        for r in &profile.writable_roots {
+            let r = normalize(r);
+            if r.exists() {
+                wrapped.arg("--bind").arg(&r).arg(&r);
+            }
+        }
     }
 
     wrapped.arg("--");
@@ -150,6 +159,47 @@ mod tests {
             args.windows(2)
                 .any(|w| w[0] == "--ro-bind" && w[1] == "/tmp/craft-sandbox-ro-test"),
             "read-only mode must ro-bind the workspace"
+        );
+    }
+
+    #[test]
+    fn read_only_binds_existing_explicit_roots() {
+        if which(BWRAP).is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("plan.md");
+        std::fs::write(&plan, "").unwrap();
+        let mut cmd = Command::new("echo");
+        let mut profile = SandboxProfile::workspace_write("/tmp/craft-sandbox-ro-test");
+        profile.mode = SandboxMode::ReadOnly;
+        profile.network = NetworkPolicy::Denied;
+        profile.writable_roots = vec![
+            plan.clone(),
+            dir.path().join("not-yet-allocated.md"), // skipped: must exist
+        ];
+        apply(&mut cmd, &profile).unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--unshare-net".to_string()));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--bind" && w[1] == plan.display().to_string()),
+            "read-only must keep the existing plan file writable"
+        );
+        assert!(
+            !args.windows(2).any(|w| {
+                w[0] == "--bind"
+                    && w[1]
+                        == dir
+                            .path()
+                            .join("not-yet-allocated.md")
+                            .display()
+                            .to_string()
+            }),
+            "nonexistent roots must not be bound (bwrap would fail)"
         );
     }
 

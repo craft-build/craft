@@ -32,6 +32,32 @@ pub struct Config {
     /// An empty list disables the action; unknown ids are warned and dropped.
     #[serde(default)]
     pub keybindings: std::collections::BTreeMap<String, Vec<String>>,
+    /// OS command sandbox for `bash` (fail-closed when the backend is
+    /// required but missing). Defaults preserve the shipped behavior:
+    /// enabled, `workspace_write`, network allowed.
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+}
+
+/// `[sandbox]` section. Mirrors the predecessor `craft-config::SandboxConfig`;
+/// resolved into a [`crate::sandbox::SandboxPolicy`] at session start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxConfig {
+    pub enabled: bool,
+    /// `workspace_write` | `read_only` | `danger_full_access` | `off`.
+    pub mode: crate::sandbox::SandboxMode,
+    pub network: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: crate::sandbox::SandboxMode::WorkspaceWrite,
+            network: true,
+        }
+    }
 }
 
 /// Which compaction strategy runs when a stage's threshold is crossed.
