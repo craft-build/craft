@@ -117,6 +117,7 @@ fn assistant_content_chars(block: &AssistantContent) -> usize {
             .iter()
             .map(|item| match item {
                 ReasoningContent::Text { text, .. } => text_len(text),
+                ReasoningContent::Redacted { data } => text_len(data),
                 ReasoningContent::Opaque(data) => text_len(data),
             })
             .sum(),

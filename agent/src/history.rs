@@ -231,6 +231,11 @@ pub enum ReasoningContent {
         #[serde(default)]
         signature: Option<String>,
     },
+    /// Provider-redacted reasoning payload (base64). Bedrock and Anthropic
+    /// replay these verbatim as `redactedContent` / `redacted_thinking`.
+    Redacted {
+        data: String,
+    },
     Opaque(String),
 }
 

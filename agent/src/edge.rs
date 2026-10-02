@@ -155,6 +155,8 @@ fn own_assistant_block_to_rig(block: &history::AssistantContent) -> Option<Assis
                     rig_core::message::ReasoningContent::Text { text, signature } => {
                         !text.is_empty() || signature.is_some()
                     }
+                    rig_core::message::ReasoningContent::Encrypted(data)
+                    | rig_core::message::ReasoningContent::Redacted { data } => !data.is_empty(),
                     _ => true,
                 })
                 .collect();
@@ -193,6 +195,7 @@ fn own_reasoning_to_rig(
             signature: signature.clone(),
         },
         history::ReasoningContent::Opaque(data) => Rig::Encrypted(data.clone()),
+        history::ReasoningContent::Redacted { data } => Rig::Redacted { data: data.clone() },
     }
 }
 
@@ -208,7 +211,7 @@ fn rig_reasoning_to_own(
         Rig::Encrypted(data) | Rig::Summary(data) => {
             history::ReasoningContent::Opaque(data.clone())
         }
-        Rig::Redacted { data } => history::ReasoningContent::Opaque(data.clone()),
+        Rig::Redacted { data } => history::ReasoningContent::Redacted { data: data.clone() },
     }
 }
 
@@ -743,9 +746,61 @@ mod tests {
                 signature: Some("sig-3".into()),
             }
         );
+        // Bedrock-native redacted: kept as its own kind so replay can decode
+        // it back into a `redactedContent` blob instead of dropping it as
+        // foreign ciphertext.
         assert_eq!(
             reasoning.content[1],
-            history::ReasoningContent::Opaque("cmVkYWN0ZWQ=".into())
+            history::ReasoningContent::Redacted {
+                data: "cmVkYWN0ZWQ=".into()
+            }
+        );
+    }
+
+    #[test]
+    fn redacted_and_foreign_opaque_replay_distinctly() {
+        let own = vec![history::Message::Assistant {
+            content: vec![history::AssistantContent::Reasoning(history::Reasoning {
+                content: vec![
+                    history::ReasoningContent::Redacted {
+                        data: "YmVkcm9jay1ibG9i".into(),
+                    },
+                    history::ReasoningContent::Opaque("openai-encrypted".into()),
+                ],
+            })],
+        }];
+        let rig = own_to_rig(&own);
+        let RigMessage::Assistant { content, .. } = &rig[0] else {
+            panic!("assistant message");
+        };
+        let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
+            panic!("reasoning block");
+        };
+        // Bedrock decodes `Redacted` base64 back into `redactedContent`;
+        // `Encrypted` marks foreign ciphertext it will safely drop.
+        assert!(matches!(
+            reasoning.content[0],
+            rig_core::message::ReasoningContent::Redacted { ref data }
+                if data == "YmVkcm9jay1ibG9i"
+        ));
+        assert!(matches!(
+            reasoning.content[1],
+            rig_core::message::ReasoningContent::Encrypted(ref data)
+                if data == "openai-encrypted"
+        ));
+        // Inbound direction: a stream's redacted block persists as Redacted.
+        let back = rig_to_own(&rig);
+        let history::Message::Assistant { content } = &back[0] else {
+            panic!("assistant message");
+        };
+        let history::AssistantContent::Reasoning(reasoning) = &content[0] else {
+            panic!("reasoning block");
+        };
+        assert_eq!(
+            reasoning.content[0],
+            history::ReasoningContent::Redacted {
+                data: "YmVkcm9jay1ibG9i".into()
+            }
         );
     }
 
