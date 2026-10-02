@@ -522,28 +522,52 @@ fn parse_keys_wire_names_as_mcp_tools() {
     );
 }
 
-/// An MCP tool call keyed from its wire name must be promptable under the
-/// default config, not hard-denied: the mcp defaults/rules only apply when
-/// the gate keys the call as `McpTool`.
-/// Phase 5: the internal `mcp_read` tool scopes its call to
-/// `mcp:<server>:<uri>`, classifies read-only (allowed by default), and a
-/// deny rule on that scope still blocks it.
+/// The read tool's resource-URL mode (the `mcp_read` merge) scopes its
+/// call to the resource namespace — `argosy:<uri>`, `mcp:<server>:<uri>`
+/// for the qualified form, `mcp:*:<uri>` for a verbatim published URI —
+/// classifies read-only (allowed by default), and a deny rule on that
+/// scope still blocks it. Plain file reads keep the default scope.
 #[test]
-fn mcp_read_is_read_only_and_scoped_to_server_and_uri() {
-    let args = serde_json::json!({"server": "srv", "uri": "file:///notes.txt"});
-    let (scopes, force_prompt) = scope_for_call(Path::new("/w"), "mcp_read", &args);
+fn read_resource_urls_are_read_only_and_scoped_to_their_namespace() {
+    let args = serde_json::json!({"path": "mcp://srv/file:///notes.txt"});
+    let (scopes, force_prompt) = scope_for_call(Path::new("/w"), "read", &args);
     assert!(!force_prompt);
     assert_eq!(scopes, vec!["mcp:srv:file:///notes.txt".to_string()]);
 
+    let (scopes, _) = scope_for_call(
+        Path::new("/w"),
+        "read",
+        &serde_json::json!({"path": "argosy://catalog"}),
+    );
+    assert_eq!(scopes, vec!["argosy:catalog".to_string()]);
+
+    let (scopes, _) = scope_for_call(
+        Path::new("/w"),
+        "read",
+        &serde_json::json!({"path": "file:///notes.txt"}),
+    );
+    assert_eq!(scopes, vec!["mcp:*:file:///notes.txt".to_string()]);
+
+    let (scopes, _) = scope_for_call(
+        Path::new("/w"),
+        "read",
+        &serde_json::json!({"path": "src/lib.rs"}),
+    );
+    assert_eq!(scopes, vec!["*".to_string()]);
+
     let mgr = mgr_with(std::env::temp_dir().as_ref(), Vec::new());
-    let tool = ToolKey::native("mcp_read");
-    assert_eq!(mgr.check(&tool, &scopes), PermissionCheck::Allowed);
+    let tool = ToolKey::native("read");
+    let resource_scopes = vec!["mcp:srv:file:///notes.txt".to_string()];
+    assert_eq!(mgr.check(&tool, &resource_scopes), PermissionCheck::Allowed);
 
     let blocked = mgr_with(
         std::env::temp_dir().as_ref(),
-        vec![deny_rule("mcp_read", Some("mcp:srv:*"))],
+        vec![deny_rule("read", Some("mcp:srv:*"))],
     );
-    assert_eq!(blocked.check(&tool, &scopes), PermissionCheck::Denied);
+    assert_eq!(
+        blocked.check(&tool, &resource_scopes),
+        PermissionCheck::Denied
+    );
 }
 
 /// `task` is a builtin allow (subagent launches flow through this same gate),

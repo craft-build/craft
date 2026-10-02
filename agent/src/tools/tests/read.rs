@@ -155,3 +155,22 @@ async fn read_files_at_workspace_root_inject_nothing() {
     let page = invoke(&tool, json!({"path":"file.txt"})).await.unwrap();
     assert!(page.instructions.is_empty());
 }
+
+/// Live smoke test of the builtin `argosy://` namespace: requires argosy
+/// installed and configured locally, so it is ignored by default. Run with
+/// `cargo test -p craft --lib -- tools::tests::read::live -- --include-ignored`.
+/// Reads the global `catalog` pseudo-resource: unlike project-scoped URIs
+/// it needs no project argosy, so it works on any machine with argosy.
+#[tokio::test]
+#[ignore = "requires a local argosy installation"]
+async fn live_read_serves_the_builtin_argosy_namespace() {
+    let (_dir, workspace) = workspace();
+    let page = invoke(&Read(workspace.clone()), json!({"path":"argosy://catalog"}))
+        .await
+        .unwrap();
+    assert_eq!(page.path, "argosy://catalog");
+    assert!(
+        page.lines.iter().any(|l| l.text.contains("Argosy catalog")),
+        "expected the catalog markdown"
+    );
+}

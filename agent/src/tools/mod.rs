@@ -20,7 +20,7 @@ mod list_tools;
 pub(crate) mod move_file;
 mod multiedit;
 mod question;
-mod read;
+pub(crate) mod read;
 mod retrieve;
 mod review;
 mod sessions;
@@ -384,7 +384,6 @@ impl Workspace {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             tools.extend(mcp_tools(&handle, cancel));
-            tools.push(mcp_read_tool(&handle));
         }
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
@@ -427,7 +426,6 @@ impl Workspace {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             tools.extend(mcp_tools(&handle, cancel));
-            tools.push(mcp_read_tool(&handle));
         }
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
@@ -784,46 +782,6 @@ fn mcp_tools(
             )
         })
         .collect()
-}
-
-/// The internal `mcp_read` tool (Phase 5): lets the agent read one MCP
-/// resource by server + uri. Registered whenever an MCP handle is
-/// installed (the resource set can change at any moment via
-/// `resources/list_changed`); unknown pairs fail with `UnknownResource`.
-fn mcp_read_tool(handle: &crate::mcp::McpHandle) -> PortableDynamicTool {
-    let handle = handle.clone();
-    PortableDynamicTool::new(
-        "mcp_read",
-        "Read one MCP resource. `server` is the MCP server name and `uri` the          resource URI from the server's resource listing.",
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "server": {"type": "string", "description": "MCP server name"},
-                "uri": {"type": "string", "description": "Resource URI"}
-            },
-            "required": ["server", "uri"],
-            "additionalProperties": false
-        }),
-        move |arguments| {
-            let handle = handle.clone();
-            Box::pin(async move {
-                let server = arguments
-                    .get("server")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let uri = arguments
-                    .get("uri")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                match handle.read_resource(&server, &uri).await {
-                    Ok(text) => Ok(ToolOutput::text(text)),
-                    Err(e) => Err(failure(e.to_string())),
-                }
-            })
-        },
-    )
 }
 
 /// Map an MCP tool's output into a tool result, preserving the server's

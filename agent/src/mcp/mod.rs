@@ -229,7 +229,7 @@ pub struct McpPromptArg {
 }
 
 /// One published MCP resource, flattened with its owning server so the UI
-/// and the `mcp_read` registration check can consume it without a join.
+/// and the read tool's verbatim-URI lookup can consume it without a join.
 #[derive(Clone)]
 pub struct McpResourceInfo {
     pub server: String,
@@ -428,12 +428,6 @@ impl McpHandle {
             Arc::clone(&r.session)
         };
         session.read_resource(uri).await
-    }
-
-    /// Whether any server published resources — gates the internal
-    /// `mcp_read` tool's registration.
-    pub fn has_resources(&self) -> bool {
-        !self.snapshot.load().resources.is_empty()
     }
 
     /// Model-facing descriptors for every published MCP tool.

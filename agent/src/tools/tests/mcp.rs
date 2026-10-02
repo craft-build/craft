@@ -1,53 +1,59 @@
 use super::workspace;
 
-/// Phase 5: the internal `mcp_read` tool registers whenever an MCP handle
-/// is installed (resources can appear later via `resources/list_changed`),
-/// and a read of an unlisted pair fails with the UnknownResource error.
+/// MCP resource reads ride the `read` tool (the `mcp_read` merge): the
+/// `mcp://<server>/<uri>` form dispatches through MCP routing, verbatim
+/// published URIs resolve through the resource index, and unlisted
+/// targets fail with the index's UnknownResource error.
 #[tokio::test]
-async fn mcp_read_registers_with_any_handle_and_rejects_unknown_pairs() {
+async fn read_routes_mcp_resources_and_rejects_unknown_pairs() {
     let (_dir, workspace) = workspace();
-    workspace.set_mcp(Some(crate::mcp::test_support::stub_handle(&[(
-        "srv.echo",
-        "Echo through MCP",
-    )])));
-    assert!(
-        workspace
-            .register()
-            .definitions()
-            .iter()
-            .any(|d| d.name == "mcp_read"),
-        "an MCP handle is installed: mcp_read must register"
-    );
-
+    let published = crate::mcp::McpResourceInfo {
+        server: "srv".into(),
+        uri: "file:///notes.txt".into(),
+        name: "notes".into(),
+        description: String::new(),
+        mime: Some("text/plain".into()),
+        size: None,
+    };
     workspace.set_mcp(Some(crate::mcp::test_support::stub_handle_with_resources(
-        vec![crate::mcp::McpResourceInfo {
-            server: "srv".into(),
-            uri: "file:///notes.txt".into(),
-            name: "notes".into(),
-            description: String::new(),
-            mime: Some("text/plain".into()),
-            size: None,
-        }],
+        vec![published],
     )));
     let dispatch = workspace.register();
-    use crate::history::ToolCall;
-    let call = ToolCall::new(
-        "t1",
-        "mcp_read",
-        serde_json::json!({"server": "srv", "uri": "file:///missing"}),
+    assert!(
+        !dispatch.definitions().iter().any(|d| d.name == "mcp_read"),
+        "mcp_read is merged into read, not a separate tool"
     );
+
+    // Qualified form of an unlisted pair: the resource index refuses it.
+    let error = read_error(&dispatch, "mcp://srv/file:///missing").await;
+    assert!(error.contains("unknown MCP resource"), "got: {error}");
+
+    // Verbatim published URI resolves to its server, then hits the same
+    // index gate (the stub publishes no readable session).
+    let error = read_error(&dispatch, "file:///notes.txt").await;
+    assert!(error.contains("unknown MCP resource"), "got: {error}");
+
+    // An unlisted verbatim URI fails with the published-resource hint.
+    let error = read_error(&dispatch, "db://other").await;
+    assert!(error.contains("no MCP server publishes"), "got: {error}");
+    assert!(error.contains("file:///notes.txt"), "got: {error}");
+}
+
+/// Run `read {path}` through a dispatch and return the error text.
+async fn read_error(dispatch: &crate::run::ToolDispatch, path: &str) -> String {
+    use crate::history::{ToolCall, ToolResultContent};
+    let call = ToolCall::new("t1", "read", serde_json::json!({"path": path}));
     match dispatch.execute(call).await.expect("dispatch") {
         crate::run::DispatchOutcome::Ran(result) => {
-            assert!(result.is_error, "unlisted pair must fail");
-            let text: String = result
+            assert!(result.is_error, "expected an error for {path}");
+            result
                 .content
                 .iter()
                 .filter_map(|c| match c {
-                    crate::history::ToolResultContent::Text(t) => Some(t.text.clone().to_string()),
+                    ToolResultContent::Text(t) => Some(t.text.clone().to_string()),
                     _ => None,
                 })
-                .collect();
-            assert!(text.contains("unknown MCP resource"), "got: {text}");
+                .collect()
         }
         other => panic!("unexpected outcome: {other:?}"),
     }

@@ -307,7 +307,6 @@ async fn resources_flow_into_snapshot_and_reads_route() {
     assert_eq!(resources[0].server, "srv");
     assert_eq!(resources[0].uri, "file:///notes.txt");
     assert_eq!(resources[0].name, "notes");
-    assert!(handle.has_resources());
 
     let text = handle
         .read_resource("srv", "file:///notes.txt")

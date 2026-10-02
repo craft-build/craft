@@ -85,9 +85,6 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "view_image",
     "websearch",
     "webfetch",
-    // Phase 5: MCP resource reads — read-only against the remote server,
-    // deny rules can still block them.
-    "mcp_read",
 ];
 
 /// Builtins allowed without a decision, matching the reference's
@@ -831,13 +828,14 @@ impl PermissionManager {
 /// `force_prompt`: the scopes could not be derived confidently, so allow
 /// rules must not silence the prompt.
 pub fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec<String>, bool) {
-    if name == "mcp_read"
-        && let (Some(server), Some(uri)) = (
-            args.get("server").and_then(|v| v.as_str()),
-            args.get("uri").and_then(|v| v.as_str()),
-        )
+    // The read tool's resource-URL mode (the `mcp_read` merge): scope to
+    // the resource namespace — `argosy:<uri>`, `mcp:<server>:<uri>`, or
+    // `mcp:*:<uri>` — so deny rules can target a server or namespace.
+    if name == "read"
+        && let Some(path) = args.get("path").and_then(|v| v.as_str())
+        && let Some(scopes) = crate::tools::read::resource_scope(path)
     {
-        return (vec![format!("mcp:{server}:{uri}")], false);
+        return (scopes, false);
     }
     if name == "task" {
         let description = args

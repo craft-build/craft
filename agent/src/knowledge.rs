@@ -236,6 +236,26 @@ impl ArgosyService {
         self.init_error.as_deref()
     }
 
+    /// Read one `argosy://` resource of the project at `root` (the
+    /// builtin `argosy://` namespace of the read tool): any concept in
+    /// any active argosy, plus the pseudo-resources (`_argosys`, the
+    /// global `catalog`, `<name>/_index`). Blocking — run under
+    /// `spawn_blocking`. Unlike tool calls, resources carry no `cwd`, so
+    /// the read tool pins them to its workspace root rather than the
+    /// process working directory.
+    pub fn read_resource(&self, root: &Path, uri: &str) -> std::result::Result<String, String> {
+        self.with_store(|store| {
+            if uri == argosy::mcp::CATALOG_URI {
+                // The catalog is global: it needs no project session.
+                store.read_resource(uri)
+            } else {
+                store.session(root)?.read_resource(uri)
+            }
+        })
+        .map(|body| body.text)
+        .map_err(|error| format!("argosy: {error:#}"))
+    }
+
     /// Execute one argosy tool call. `tool` is the native name. Blocking by
     /// nature — callers run it under `spawn_blocking`. The report types serialize to JSON.
     pub fn execute(&self, tool: &str, args: Value) -> Result<Value, String> {
