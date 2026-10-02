@@ -6,6 +6,23 @@ use crate::history::UserContent;
 use crate::run::*;
 use rig_core::test_utils::MockStreamEvent;
 
+/// Collect every tool result's first text block, in call order.
+fn collect_tool_text(history: &[Message]) -> Vec<String> {
+    history
+        .iter()
+        .flat_map(|m| match m {
+            Message::User { content } => content
+                .iter()
+                .filter_map(|b| match b {
+                    UserContent::ToolResult(r) => Some(r.content[0].to_text()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn failed_dispatch_leaves_history_uncommitted() {
     let (model, _turns) = stream_turns(vec![vec![
@@ -245,6 +262,165 @@ async fn dedup_invalidated_by_write_to_same_path() {
     assert_eq!(
         results[2], "1: new",
         "post-write read must re-execute against fresh contents"
+    );
+}
+
+#[tokio::test]
+async fn dedup_invalidated_by_multiedit_top_level_path() {
+    // The multiedit schema carries one top-level `path`; a stale extractor that
+    // looked per-edit left the file's cached read in place.
+    let read = || tool_event("t", "read", serde_json::json!({"path": "f"}));
+    let multiedit = || {
+        tool_event(
+            "t",
+            "multiedit",
+            serde_json::json!({
+                "path": "f",
+                "edits": [{"old_string": "old", "new_string": "new"}]
+            }),
+        )
+    };
+    let (model, _turns) = stream_turns(vec![
+        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+        vec![
+            multiedit(),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+        vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "old\n").unwrap();
+    let tools = crate::tools::Workspace::new(dir.path())
+        .unwrap()
+        .register()
+        .with_dedup(crate::run::shared_cache());
+    let (_, cancel) = cancel_channel();
+    let mut history = Vec::new();
+    let _ = run(
+        &model,
+        &RunParams::default(),
+        &tools,
+        &mut history,
+        "go",
+        &cancel,
+        &|_| {},
+    )
+    .await;
+    let results = collect_tool_text(&history);
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0], "1: old");
+    assert_eq!(
+        results[2], "1: new",
+        "post-multiedit read must re-execute, not replay the stale entry"
+    );
+}
+
+#[tokio::test]
+async fn dedup_invalidated_by_batch_child_write() {
+    // A batch child runs through the same dispatch table, so its write must
+    // invalidate the read cache just like a top-level write.
+    let read = || tool_event("t", "read", serde_json::json!({"path": "f"}));
+    let batch = || {
+        tool_event(
+            "t",
+            "batch",
+            serde_json::json!({"tool_calls": [{"tool": "write", "parameters": {
+                "path": "f", "content": "new\n"
+            }}]}),
+        )
+    };
+    let (model, _turns) = stream_turns(vec![
+        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+        vec![
+            batch(),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+        vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "old\n").unwrap();
+    let tools = crate::tools::Workspace::new(dir.path())
+        .unwrap()
+        .register()
+        .with_dedup(crate::run::shared_cache());
+    let (_, cancel) = cancel_channel();
+    let mut history = Vec::new();
+    let _ = run(
+        &model,
+        &RunParams::default(),
+        &tools,
+        &mut history,
+        "go",
+        &cancel,
+        &|_| {},
+    )
+    .await;
+    let results = collect_tool_text(&history);
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0], "1: old");
+    assert_eq!(
+        results[2], "1: new",
+        "batch child write must invalidate the parent read cache"
+    );
+}
+
+#[tokio::test]
+async fn dedup_cleared_by_bash() {
+    // bash can rewrite arbitrary files without naming them, so the whole
+    // cache is cleared rather than a single path.
+    // SAFETY: disable the sandbox like tools/bash.rs tests do — hosts that
+    // already sandbox the test process deny nested sandbox-exec.
+    unsafe { std::env::set_var("CRAFT_SANDBOX", "off") };
+    let read = || tool_event("t", "read", serde_json::json!({"path": "f"}));
+    let bash = || {
+        tool_event(
+            "t",
+            "bash",
+            serde_json::json!({"command": "printf 'new\\n' > f"}),
+        )
+    };
+    let (model, _turns) = stream_turns(vec![
+        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+        vec![bash(), MockStreamEvent::final_response_with_total_tokens(1)],
+        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+        vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "old\n").unwrap();
+    let tools = crate::tools::Workspace::new(dir.path())
+        .unwrap()
+        .register()
+        .with_dedup(crate::run::shared_cache());
+    let (_, cancel) = cancel_channel();
+    let mut history = Vec::new();
+    let _ = run(
+        &model,
+        &RunParams::default(),
+        &tools,
+        &mut history,
+        "go",
+        &cancel,
+        &|_| {},
+    )
+    .await;
+    let results = collect_tool_text(&history);
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0], "1: old");
+    assert_eq!(
+        results[2], "1: new",
+        "bash write must clear the read cache; bash said: {:?}",
+        results[1]
     );
 }
 

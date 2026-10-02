@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::PortableDynamicTool;
@@ -71,7 +71,11 @@ pub struct ToolDispatch {
     tools: BTreeMap<String, PortableDynamicTool>,
     before: Option<Arc<dyn BeforeExecute>>,
     after: Option<Arc<dyn AfterExecute>>,
-    dedup: Option<SharedDedupCache>,
+    /// Shared across clones on purpose: the dedup cache is attached after the
+    /// dispatch table is built (the TUI/ACP flow), and the `batch` tool holds a
+    /// pre-attach clone of the table as its child dispatch. A plain field
+    /// would leave batch children cache-blind, bypassing invalidation.
+    dedup: Arc<OnceLock<SharedDedupCache>>,
     write_root: Option<std::path::PathBuf>,
     compression_store: Option<SharedCompressionStore>,
     snapshots: Option<SnapshotManager>,
@@ -102,7 +106,7 @@ impl ToolDispatch {
                 .collect(),
             before: None,
             after: None,
-            dedup: None,
+            dedup: Arc::new(OnceLock::new()),
             write_root: std::env::current_dir().ok(),
             compression_store: None,
             snapshots: None,
@@ -127,9 +131,10 @@ impl ToolDispatch {
     }
 
     /// Share the session's tool dedup cache: read-only hits replay from
-    /// cache, writes invalidate the paths they touch.
-    pub fn with_dedup(mut self, cache: SharedDedupCache) -> Self {
-        self.dedup = Some(cache);
+    /// cache, writes invalidate the paths they touch. Set through a shared
+    /// slot so the `batch` child table (cloned during registration) sees it.
+    pub fn with_dedup(self, cache: SharedDedupCache) -> Self {
+        let _ = self.dedup.set(cache);
         self
     }
 
@@ -253,7 +258,7 @@ impl ToolDispatch {
             }
         }
         let dedup_key = read_only.then(|| ToolDedupCache::key(&name, &call.function.arguments));
-        let cached = if let (Some(cache), Some(key)) = (&self.dedup, dedup_key) {
+        let cached = if let (Some(cache), Some(key)) = (self.dedup.get(), dedup_key) {
             cache
                 .lock()
                 .ok()
@@ -300,11 +305,11 @@ impl ToolDispatch {
         };
         // Cache bookkeeping runs on the raw, pre-transform result so a
         // call-specific AfterExecute hook cannot poison the cache.
-        if !result.is_error
-            && let Some(cache) = &self.dedup
+        if let Some(cache) = self.dedup.get()
             && let Ok(mut guard) = cache.lock()
         {
-            if let Some(key) = dedup_key
+            if !result.is_error
+                && let Some(key) = dedup_key
                 && !result
                     .content
                     .iter()
@@ -318,10 +323,15 @@ impl ToolDispatch {
                     &name,
                     &call.function.arguments,
                 );
-            } else if ToolDedupCache::is_write(&name) {
+            }
+            // Invalidation runs even on a failed result: apply_patch and
+            // delete apply hunks iteratively, so a call that errors midway may
+            // still have written. Clearing a cache entry that did not change
+            // only costs one re-read.
+            if ToolDedupCache::is_write(&name) {
                 let mut paths = dedup::extract_write_paths(&name, &call.function.arguments);
-                if name == "move" {
-                    // `move` also rewrites imports elsewhere; those files
+                if name == "move_file" {
+                    // `move_file` also rewrites imports elsewhere; those files
                     // appear only in the result text.
                     let text = result
                         .content
@@ -338,6 +348,8 @@ impl ToolDispatch {
                         guard.invalidate_path(&path);
                     }
                 }
+            } else if ToolDedupCache::clears_whole_cache(&name) {
+                guard.clear();
             }
         }
         if let Some(after) = &self.after {

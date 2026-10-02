@@ -1,7 +1,8 @@
 //! Tool dedup cache: a bounded FIFO cache keyed by (tool, arguments) that
 //! lets read-only tools answer identical repeat calls from cache instead of
-//! re-executing. Entries are invalidated per-path when a write tool touches
-//! the file, and the whole cache is cleared before compaction (compacted
+//! re-executing. Entries are invalidated per-path (and per-subtree) when a
+//! write tool touches the file; tools that can write without naming a path
+//! (`bash`, `task`, MCP) clear the whole cache, as does compaction (compacted
 //! history may describe a different world than the one the cache sampled).
 //!
 //! Paths are normalized structurally (root-joined, `.`/`..` collapsed,
@@ -31,8 +32,14 @@ const WRITE_TOOLS: &[&str] = &[
     "multiedit",
     "delete",
     "apply_patch",
-    "move",
+    "move_file",
 ];
+/// Tools that may mutate the workspace but name no path (or an arbitrary set
+/// of paths) in their arguments: a shell command can rewrite anything, and a
+/// `task` subagent writes through its own dispatch. For these the only safe
+/// invalidation is the whole cache. MCP tools (`server__tool`) are also in
+/// this category — their effects are opaque and they are never cacheable.
+const CACHE_CLEARING_TOOLS: &[&str] = &["bash", "task"];
 const CACHED_PREFIX: &str = "[cached] ";
 const MAX_CACHE_ENTRIES: usize = 64;
 
@@ -140,6 +147,12 @@ impl ToolDedupCache {
         WRITE_TOOLS.contains(&name)
     }
 
+    /// Whether a call can mutate the workspace without naming paths we can
+    /// invalidate individually; such a call must clear the whole cache.
+    pub fn clears_whole_cache(name: &str) -> bool {
+        CACHE_CLEARING_TOOLS.contains(&name) || name.contains("__")
+    }
+
     pub fn get(&self, key: u64, name: &str, input: &Value) -> Option<&ToolResult> {
         self.entries
             .get(&key)
@@ -179,13 +192,18 @@ impl ToolDedupCache {
         }
     }
 
-    /// Drop the entry for `path`, plus every pathless entry (grep/glob
-    /// sample the whole tree, so any write can change their answer — this
-    /// also serves as the symlink-alias mitigation; see the module doc).
+    /// Drop the entry for `path` (and every entry beneath it, so a recursive
+    /// directory delete drops the files it removed), plus every pathless entry
+    /// (grep/glob sample the whole tree, so any write can change their answer —
+    /// this also serves as the symlink-alias mitigation; see the module doc).
     pub fn invalidate_path(&mut self, path: &str) {
         let normalized = self.normalizer.normalize(path);
-        self.entries
-            .retain(|_, e| e.path.is_some() && e.path.as_deref() != Some(normalized.as_str()));
+        let descendant = format!("{normalized}/");
+        self.entries.retain(|_, e| {
+            e.path
+                .as_deref()
+                .is_some_and(|p| p != normalized.as_str() && !p.starts_with(descendant.as_str()))
+        });
         self.order.retain(|key| self.entries.contains_key(key));
     }
 
@@ -252,14 +270,25 @@ pub fn extract_write_paths(name: &str, input: &Value) -> Vec<String> {
     {
         return crate::tools::apply_patch::patch_paths(patch);
     }
-    if name == "multiedit"
-        && let Some(edits) = input.get("edits").and_then(Value::as_array)
-    {
-        return edits
-            .iter()
-            .filter_map(|edit| edit.get("path").and_then(Value::as_str))
-            .map(String::from)
-            .collect();
+    if name == "multiedit" {
+        // The current schema puts one `path` at the top level; older shapes
+        // carried a path per edit. Collect both so a schema change cannot
+        // silently stop invalidating the file's cached reads.
+        let mut paths: Vec<String> = input
+            .get("edits")
+            .and_then(Value::as_array)
+            .map(|edits| {
+                edits
+                    .iter()
+                    .filter_map(|edit| edit.get("path").and_then(Value::as_str))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(path) = extract_file_path(input) {
+            paths.push(path);
+        }
+        return paths;
     }
     if name == "delete"
         && let Some(files) = input.get("files").and_then(Value::as_array)
@@ -270,7 +299,7 @@ pub fn extract_write_paths(name: &str, input: &Value) -> Vec<String> {
             .map(String::from)
             .collect();
     }
-    if name == "move" {
+    if name == "move_file" {
         return ["source", "destination"]
             .iter()
             .filter_map(|key| input.get(key).and_then(Value::as_str))
@@ -637,15 +666,40 @@ mod tests {
             "insert_lines",
             "multiedit",
             "delete",
+            "apply_patch",
+            "move_file",
         ] {
             assert!(ToolDedupCache::is_write(name));
         }
         assert!(!ToolDedupCache::is_read_only("write"));
         assert!(!ToolDedupCache::is_write("read"));
+        // Arbitrary mutators clear the whole cache instead of a path.
+        assert!(ToolDedupCache::clears_whole_cache("bash"));
+        assert!(ToolDedupCache::clears_whole_cache("task"));
+        assert!(ToolDedupCache::clears_whole_cache("filesystem__write_file"));
+        assert!(!ToolDedupCache::clears_whole_cache("read"));
+        assert!(!ToolDedupCache::clears_whole_cache("write"));
+    }
+
+    #[test]
+    fn write_paths_cover_multiedit_top_level_path() {
+        // Current schema: one `path` on the call, edits carry only replacements.
+        let input = serde_json::json!({
+            "path": "/a.rs",
+            "edits": [
+                {"old_string": "x", "new_string": "y"},
+                {"old_string": "p", "new_string": "q"}
+            ]
+        });
+        assert_eq!(
+            extract_write_paths("multiedit", &input),
+            vec!["/a.rs".to_string()]
+        );
     }
 
     #[test]
     fn write_paths_cover_multiedit_edits() {
+        // Legacy schema carried a path per edit; both shapes must invalidate.
         let input = serde_json::json!({
             "edits": [
                 {"path": "/a.rs", "old_string": "x", "new_string": "y"},
@@ -677,7 +731,7 @@ mod tests {
     fn write_paths_cover_move_source_and_destination() {
         let input = serde_json::json!({"source": "/a.rs", "destination": "/b.rs"});
         assert_eq!(
-            extract_write_paths("move", &input),
+            extract_write_paths("move_file", &input),
             vec!["/a.rs".to_string(), "/b.rs".to_string()]
         );
     }
@@ -694,7 +748,7 @@ mod tests {
         let moved_output =
             "moved a.rs -> b.rs\nupdated imports in 1 file(s)\n  src/main.rs: 1 reference(s)";
         let mut paths = extract_write_paths(
-            "move",
+            "move_file",
             &serde_json::json!({"source": "a.rs", "destination": "b.rs"}),
         );
         paths.extend(crate::tools::move_file::rewritten_files(moved_output));
@@ -769,6 +823,40 @@ mod tests {
         cache.invalidate_path("../root/src/a.rs");
 
         assert!(cache.get(key, "read", &input).is_none());
+    }
+
+    #[test]
+    fn invalidate_path_drops_descendants_for_recursive_delete() {
+        let mut cache = rooted_cache();
+        let inside = serde_json::json!({"path": "src/nested/a.rs"});
+        let key = ToolDedupCache::key("read", &inside);
+        cache.insert(key, &result("a"), Some("src/nested/a.rs"), "read", &inside);
+        // A sibling whose name shares the directory prefix but is not inside it.
+        let sibling = serde_json::json!({"path": "src/nested.rs"});
+        let sibling_key = ToolDedupCache::key("read", &sibling);
+        cache.insert(
+            sibling_key,
+            &result("s"),
+            Some("src/nested.rs"),
+            "read",
+            &sibling,
+        );
+
+        cache.invalidate_path("src");
+
+        assert!(cache.get(key, "read", &inside).is_none());
+        assert!(cache.get(sibling_key, "read", &sibling).is_none());
+        let unrelated = serde_json::json!({"path": "other.rs"});
+        let unrelated_key = ToolDedupCache::key("read", &unrelated);
+        cache.insert(
+            unrelated_key,
+            &result("o"),
+            Some("other.rs"),
+            "read",
+            &unrelated,
+        );
+        cache.invalidate_path("src/nested");
+        assert!(cache.get(unrelated_key, "read", &unrelated).is_some());
     }
 
     #[test]
