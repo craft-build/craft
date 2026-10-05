@@ -45,7 +45,9 @@ use ui::theme;
 const EVENT_DRAIN_BUDGET: usize = 256;
 
 /// Run the terminal UI against `provider` until the user quits.
-pub async fn run<P: Provider>(provider: P) -> io::Result<()> {
+/// `startup_prompt` (the positional `PROMPT` / piped stdin) is submitted
+/// exactly once, after the provider has started up.
+pub async fn run<P: Provider>(provider: P, startup_prompt: Option<String>) -> io::Result<()> {
     enable_raw_mode()?;
     // Mouse capture: terminals then show the standard arrow pointer on hover
     // instead of the I-beam text cursor. Bracketed paste: multi-line pastes
@@ -65,7 +67,7 @@ pub async fn run<P: Provider>(provider: P) -> io::Result<()> {
         original_hook(info);
     }));
 
-    let result = drive(terminal, provider).await;
+    let result = drive(terminal, provider, startup_prompt).await;
 
     disable_raw_mode()?;
     io::stdout()
@@ -125,9 +127,25 @@ fn end_synchronized_output() {
     let _ = write_and_flush(SYNC_END);
 }
 
+/// Submit the pending startup prompt, if any: set the composer text and
+/// run the normal submit path, so slash commands and bang-mode route the
+/// same way a typed prompt would. The `Option::take` makes it fire at most
+/// once; `App::submit` no-ops on empty text.
+fn submit_startup_prompt(
+    app: &mut App,
+    cmd_tx: &mpsc::UnboundedSender<Command>,
+    pending: &mut Option<String>,
+) {
+    if let Some(prompt) = pending.take() {
+        app.composer.set_text(prompt);
+        app.submit(cmd_tx);
+    }
+}
+
 async fn drive<P: Provider>(
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     provider: P,
+    startup_prompt: Option<String>,
 ) -> io::Result<()> {
     // Probe the terminal's graphics protocol (kitty/sixel vs halfblocks)
     // before the input reader thread starts: the probe reads its replies
@@ -140,6 +158,9 @@ async fn drive<P: Provider>(
     let custom_commands = provider.custom_commands();
     // `--mode plan` / `--permission-mode plan`: same for the initial mode.
     let starts_in_plan_mode = provider.starts_in_plan_mode();
+    // Startup resume (`-s/--session`, `-c/--continue`): read before `start`
+    // consumes the provider; decides when the startup prompt submits.
+    let expects_startup_resume = provider.expects_startup_resume();
     let (cmd_tx, evt_rx): (mpsc::UnboundedSender<Command>, _) = provider.start();
 
     // Crossterm events are blocking reads -> pump them on a dedicated thread.
@@ -193,6 +214,8 @@ async fn drive<P: Provider>(
         &cmd_tx,
         input_rx,
         evt_rx,
+        startup_prompt,
+        expects_startup_resume,
         |app| {
             begin_synchronized_output();
             let draw = {
@@ -392,6 +415,8 @@ async fn run_loop(
     cmd_tx: &mpsc::UnboundedSender<Command>,
     mut input_rx: mpsc::UnboundedReceiver<Event>,
     mut evt_rx: mpsc::UnboundedReceiver<AgentEvent>,
+    mut startup_prompt: Option<String>,
+    expects_startup_resume: bool,
     mut paint: impl FnMut(&mut App) -> io::Result<()>,
     mut edit_composer: impl FnMut(&mut App) -> io::Result<()>,
     mut open_plan_file: impl FnMut(&std::path::Path) -> io::Result<()>,
@@ -406,6 +431,15 @@ async fn run_loop(
     // Bell bookkeeping: only rings when the user is not already watching.
     let mut focus = focus;
     let mut bells = notify::RunNotificationState::default();
+
+    // Startup prompt sequencing: without a startup resume it submits right
+    // away (`apply_initial_mode` has already seeded the mode). With one, it
+    // waits for the first `StatusChanged(Done)` — the provider's settle
+    // signal, which on a successful resume always follows `SessionLoaded`
+    // (and the mode it restores).
+    if !expects_startup_resume {
+        submit_startup_prompt(app, cmd_tx, &mut startup_prompt);
+    }
 
     loop {
         // The file picker's walker is the one change nothing else announces.
@@ -487,6 +521,8 @@ async fn run_loop(
                     for ev in pending {
                         let was_busy = app.busy();
                         let was_waiting = app.status == Status::WaitingApproval;
+                        let settled_done =
+                            matches!(&ev, AgentEvent::StatusChanged(Status::Done));
                         if let AgentEvent::AssistantText(text) = &ev
                             && was_busy
                         {
@@ -495,6 +531,12 @@ async fn run_loop(
                             bells.on_turn_complete(text);
                         }
                         app.handle_event(ev);
+                        if settled_done {
+                            // The provider settled (startup complete): a held
+                            // startup prompt is now safe to submit — after
+                            // any `SessionLoaded` the same burst carried.
+                            submit_startup_prompt(app, cmd_tx, &mut startup_prompt);
+                        }
                         if !was_busy && app.busy() {
                             bells.on_new_turn();
                         }
@@ -622,6 +664,8 @@ mod tests {
                 &cmd_tx,
                 input_rx,
                 evt_rx,
+                None,
+                false,
                 counting_paint(paints),
                 // The test editor stub: refuse to edit anything.
                 |_| Err(io::Error::other("no editor in tests")),
@@ -660,6 +704,8 @@ mod tests {
                 &cmd_tx,
                 input_rx,
                 evt_rx,
+                None,
+                false,
                 |app| {
                     let Some(app::Message::Assistant(text)) = app.conversation.messages.last()
                     else {
@@ -708,6 +754,8 @@ mod tests {
                 &cmd_tx,
                 input_rx,
                 evt_rx,
+                None,
+                false,
                 |app| {
                     let visible = app.conversation.visible_text(0).unwrap_or(&text);
                     assert!(text.starts_with(visible));
@@ -829,6 +877,8 @@ mod tests {
                 &cmd_tx,
                 input_rx,
                 evt_rx,
+                None,
+                false,
                 move |a| {
                     p.fetch_add(1, Ordering::SeqCst);
                     terminal
@@ -978,6 +1028,8 @@ mod tests {
                 &cmd_tx,
                 input_rx,
                 evt_rx,
+                None,
+                false,
                 move |a| {
                     terminal
                         .draw(|f| ui::draw(f, a))
@@ -1078,4 +1130,234 @@ fn initial_mode_seeds_the_app() {
     let mut app = App::new();
     apply_initial_mode(&mut app, false);
     assert!(app.mode == app::Mode::Build);
+}
+
+/// Collect the SendMessage commands a channel carries, dropping the other
+/// commands (SetDraft housekeeping and friends) the loop emits.
+#[cfg(test)]
+fn sent_messages(
+    rx: &mut mpsc::UnboundedReceiver<Command>,
+) -> Vec<(String, crate::run::AgentMode)> {
+    let mut sent = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        if let Command::SendMessage(text, mode, images) = cmd {
+            assert!(images.is_empty(), "a startup prompt carries no images");
+            sent.push((text, mode));
+        }
+    }
+    sent
+}
+
+/// A plan-seeded app submits the startup prompt in plan mode: exactly one
+/// SendMessage, carrying `AgentMode::Plan` with the app-allocated plan path
+/// (the no-accidental-Build-writes guard). A second submission never fires.
+#[test]
+fn startup_prompt_submits_in_plan_mode_exactly_once() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let mut app = App::new();
+    apply_initial_mode(&mut app, true);
+    let mut pending = Some("do x".to_string());
+    submit_startup_prompt(&mut app, &cmd_tx, &mut pending);
+    let sent = sent_messages(&mut cmd_rx);
+    assert_eq!(sent.len(), 1, "the startup prompt submits exactly once");
+    assert_eq!(sent[0].0, "do x");
+    assert!(
+        matches!(sent[0].1, crate::run::AgentMode::Plan(_)),
+        "a plan-seeded session's first turn must run in plan mode"
+    );
+    assert!(app.mode == app::Mode::Plan);
+    assert!(
+        app.composer.text.is_empty(),
+        "the submitted prompt leaves the composer empty"
+    );
+    // The pending option is consumed: a second settle submits nothing.
+    submit_startup_prompt(&mut app, &cmd_tx, &mut pending);
+    assert!(sent_messages(&mut cmd_rx).is_empty());
+}
+
+/// A build-mode app submits in build mode; a `None` startup prompt (no
+/// positional, interactive stdin) submits nothing at all.
+#[test]
+fn startup_prompt_submits_build_mode_and_none_submits_nothing() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let mut app = App::new();
+    let mut pending = Some("do x".to_string());
+    submit_startup_prompt(&mut app, &cmd_tx, &mut pending);
+    let sent = sent_messages(&mut cmd_rx);
+    assert_eq!(sent.len(), 1);
+    assert!(matches!(sent[0].1, crate::run::AgentMode::Build));
+
+    let mut pending: Option<String> = None;
+    submit_startup_prompt(&mut app, &cmd_tx, &mut pending);
+    assert!(sent_messages(&mut cmd_rx).is_empty());
+}
+
+/// Startup sequencing with a resume expected: the prompt waits for the
+/// provider's first `Done` — which a successful resume always sends after
+/// `SessionLoaded` — then submits exactly once, in the mode the session
+/// restored. A second `Done` in the same burst must not double-submit.
+#[tokio::test]
+async fn startup_prompt_waits_for_resume_then_submits_once_in_loaded_mode() {
+    use std::time::Duration;
+
+    use crate::tui::provider::LoadedMessage;
+
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let (evt_tx, evt_rx) = mpsc::unbounded_channel();
+    evt_tx
+        .send(AgentEvent::SessionLoaded {
+            messages: vec![LoadedMessage::User("earlier".into())],
+            draft: String::new(),
+            mode: Some(crate::tui::provider::SessionMode::Plan),
+        })
+        .unwrap();
+    evt_tx
+        .send(AgentEvent::StatusChanged(Status::Done))
+        .unwrap();
+    evt_tx
+        .send(AgentEvent::StatusChanged(Status::Done))
+        .unwrap();
+    let mut app = App::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        run_loop(
+            &mut app,
+            &cmd_tx,
+            input_rx,
+            evt_rx,
+            Some("do x".to_string()),
+            true,
+            |app| {
+                if app.status == Status::Done {
+                    app.should_quit = true;
+                    input_tx.send(Event::Resize(80, 24)).unwrap();
+                }
+                Ok(())
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+            || Ok(()),
+            || (),
+            notify::Focus::default(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        app.mode == app::Mode::Plan,
+        "the loaded session's mode wins over the CLI default"
+    );
+    let sent = sent_messages(&mut cmd_rx);
+    assert_eq!(sent.len(), 1, "one submission, two Dones notwithstanding");
+    assert!(
+        matches!(sent[0].1, crate::run::AgentMode::Plan(_)),
+        "the first turn after resume runs in the restored plan mode"
+    );
+}
+
+/// A failed resume (notices, no `SessionLoaded`) still settles with a
+/// `Done`: the held prompt submits exactly once, in the CLI-seeded mode.
+#[tokio::test]
+async fn startup_prompt_submits_once_after_failed_resume_with_cli_mode() {
+    use std::time::Duration;
+
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let (evt_tx, evt_rx) = mpsc::unbounded_channel();
+    evt_tx
+        .send(AgentEvent::Notice {
+            tone: provider::Tone::Warning,
+            text: "resume failed".into(),
+        })
+        .unwrap();
+    evt_tx
+        .send(AgentEvent::StatusChanged(Status::Done))
+        .unwrap();
+    let mut app = App::new();
+    apply_initial_mode(&mut app, true);
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        run_loop(
+            &mut app,
+            &cmd_tx,
+            input_rx,
+            evt_rx,
+            Some("do x".to_string()),
+            true,
+            |app| {
+                if app.status == Status::Done {
+                    app.should_quit = true;
+                    input_tx.send(Event::Resize(80, 24)).unwrap();
+                }
+                Ok(())
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+            || Ok(()),
+            || (),
+            notify::Focus::default(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        app.mode == app::Mode::Plan,
+        "no stored mode keeps the CLI seed"
+    );
+    let sent = sent_messages(&mut cmd_rx);
+    assert_eq!(sent.len(), 1);
+    assert!(
+        matches!(sent[0].1, crate::run::AgentMode::Plan(_)),
+        "the CLI-seeded plan mode carries the failed-resume first turn"
+    );
+}
+
+/// Without a startup resume the prompt submits before the loop even
+/// receives an event: the first turn is not gated on any provider burst.
+#[tokio::test]
+async fn startup_prompt_submits_before_the_loop_without_resume() {
+    use std::time::Duration;
+
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let (_evt_tx, evt_rx) = mpsc::unbounded_channel();
+    // Ctrl-C is a tri-state; press until the loop exits.
+    use crossterm::event::KeyEventState;
+    for _ in 0..3 {
+        input_tx
+            .send(Event::Key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }))
+            .unwrap();
+    }
+    let mut app = App::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        run_loop(
+            &mut app,
+            &cmd_tx,
+            input_rx,
+            evt_rx,
+            Some("do x".to_string()),
+            false,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_| Ok(()),
+            || Ok(()),
+            || (),
+            notify::Focus::default(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let sent = sent_messages(&mut cmd_rx);
+    assert_eq!(sent.len(), 1);
+    assert!(matches!(sent[0].1, crate::run::AgentMode::Build));
 }

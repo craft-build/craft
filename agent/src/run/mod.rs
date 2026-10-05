@@ -40,8 +40,9 @@ pub use events::{
 };
 pub use guardrails::{SharedGuardrails, shared_guardrails};
 pub use mode::{AgentMode, PLAN_WRITE_RESTRICTED};
+pub(crate) use overflow::CANCEL_MARKER;
 #[cfg(test)]
-use overflow::{CANCEL_MARKER, END_MARKER};
+use overflow::END_MARKER;
 use overflow::{
     commit_cancelled, commit_partial, handle_terminal_reply, recover_from_overflow,
     sanitize_partial, strip_trailing_grace_prompt,
@@ -391,7 +392,7 @@ async fn run_inner<M: CompletionModel + Clone>(
 
 /// The turn's first user message: the prompt text, with any composer image
 /// attachments as trailing vision blocks (F.6).
-fn prompt_message(prompt: &str, images: &[ImageBlock]) -> Message {
+pub(crate) fn prompt_message(prompt: &str, images: &[ImageBlock]) -> Message {
     if images.is_empty() {
         return Message::user(prompt);
     }

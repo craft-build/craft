@@ -15,8 +15,8 @@ use super::cards::Files;
 use super::mcp_request;
 use super::question::answer_question;
 use super::resume::{
-    handle_load_session, handle_resume_latest, handle_set_draft, load_session, persist_on_exit,
-    resume_latest,
+    handle_load_session, handle_resume_latest, handle_set_draft, handle_set_mode, load_session,
+    persist_on_exit, resume_latest,
 };
 use super::turn::{self, TurnCtx, run_turn};
 use super::{AgentEvent, Command, Provider, Status, Tone, UsageFetchState};
@@ -108,7 +108,6 @@ impl CraftProvider {
         let (models, current) = ctx.catalog_choices(&selection);
         let _ = evt_tx.send(AgentEvent::CatalogSet { models, current });
         let _ = evt_tx.send(AgentEvent::ThinkingChanged(ctx.state.lock().await.thinking));
-        let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
         let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
 
         if let Some(id) = &self.resume_session {
@@ -133,6 +132,12 @@ impl CraftProvider {
             )
             .await;
         }
+        // The settle signal lands after the resume block (not before it, as
+        // the chrome events do): the TUI holds a startup prompt back until
+        // the first `Done`, so on a successful resume it must arrive after
+        // `SessionLoaded` (and the mode the session restores). Every path —
+        // fresh session, resume success, resume failure — ends with it.
+        let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
 
         let thinking = ctx.state.lock().await.thinking;
         handle_set_thinking(&ctx, &selection, thinking).await;
@@ -250,6 +255,7 @@ impl CraftProvider {
                     handle_resume_latest(&ctx, &selection, &current_turn).await
                 }
                 Command::SetDraft(draft) => handle_set_draft(&ctx, draft).await,
+                Command::SetMode { plan } => handle_set_mode(&ctx, plan).await,
                 Command::Interrupt => {
                     handle_interrupt(&ctx, &current_turn);
                     pending_messages.clear();
@@ -607,34 +613,52 @@ fn interrupt(ctx: &LoopCtx, current_turn: &mut Option<AbortHandle>) {
     }
 }
 
-/// `Command::Interrupt`: signal cancellation and end the assistant bubble.
-/// The turn is left to settle on its own rather than hard-aborted: the run
-/// layer already keeps the partial history on cancel (`commit_cancelled`),
-/// and aborting the task would drop the user message and streamed reply
-/// from the session the next turn reads.
 /// Grace period after an Esc before a still-running turn is force-aborted
 /// (an await that never checks the cancel flag).
 const INTERRUPT_ABORT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// `Command::Interrupt`: signal cancellation and end the assistant bubble.
-/// The turn is left to settle on its own rather than hard-aborted: the run
-/// layer already keeps the partial history on cancel (`commit_cancelled`),
-/// and aborting the task would drop the user message and streamed reply
-/// from the session the next turn reads.
-fn handle_interrupt(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
+/// The turn settles on its own: the run layer commits the partial history
+/// on cancel (`commit_cancelled`), and the prompt is staged into the
+/// session at turn start, so the settle path cannot drop the user's
+/// message. The abort fallback below fires only on an await that never
+/// observes the cancel flag — and even then [`close_aborted_turn`] keeps
+/// what was staged instead of losing the turn outright.
+pub(super) fn handle_interrupt(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
     ctx.cancel_flag.set(true);
     // Abort fallback: if the in-flight turn doesn't settle within the
-    // grace window, some await isn't cancellation-aware — force it.
+    // grace window, some await isn't cancellation-aware — force it, then
+    // salvage the turn from the session's staged state.
     if let Some(handle) = current_turn.clone() {
+        let state = Arc::clone(&ctx.state);
         tokio::spawn(async move {
             tokio::time::sleep(INTERRUPT_ABORT_GRACE).await;
             if !handle.is_finished() {
                 handle.abort();
+                close_aborted_turn(&state).await;
             }
         });
     }
     let _ = ctx.evt_tx.send(AgentEvent::AssistantEnd);
     let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+}
+
+/// Close a turn killed by the interrupt abort fallback. The aborted task
+/// never reaches its commit points, so the prompt staged at turn start is
+/// the only record of it: append the same cancel marker a cooperative
+/// cancel would have (unless one is already there) so the next turn sees
+/// an explicitly interrupted turn instead of a silently vanished one.
+pub(super) async fn close_aborted_turn(state: &Arc<Mutex<SessionState>>) {
+    let mut session = state.lock().await;
+    let already_closed = session
+        .history
+        .last()
+        .is_some_and(|message| message.text() == crate::run::CANCEL_MARKER);
+    if !already_closed {
+        session
+            .history
+            .push(crate::history::Message::user(crate::run::CANCEL_MARKER));
+    }
 }
 
 /// `Command::Clear`: interrupt, drop queued shell results, and start a
@@ -797,7 +821,8 @@ pub(super) async fn handle_select_model(
 /// Move queued bang-mode visible-run results into the session history.
 /// Called at the next `SendMessage`: pushing them when they finish would
 /// race the running turn's whole-history commit (turn.rs replaces
-/// `session.history` only on success). Returns how many landed.
+/// `session.history` on every settled outcome, including cancellation).
+/// Returns how many landed.
 pub(super) async fn drain_shell_results(
     shell: &Arc<std::sync::Mutex<crate::tui::shell::ShellState>>,
     state: &Arc<Mutex<SessionState>>,
@@ -849,5 +874,9 @@ impl Provider for CraftProvider {
 
     fn starts_in_plan_mode(&self) -> bool {
         self.starts_in_plan_mode
+    }
+
+    fn expects_startup_resume(&self) -> bool {
+        self.resume_session.is_some() || self.resume_latest
     }
 }

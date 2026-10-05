@@ -344,6 +344,7 @@ async fn compact_history(
     history: &mut Vec<history::Message>,
     context_length: Option<u32>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
+    cancel: &CancelToken,
 ) {
     let shared = state.lock().await.compaction.clone();
     if let Some(mut compaction) = shared.lock().ok().map(|guard| guard.clone()) {
@@ -354,10 +355,19 @@ async fn compact_history(
                 .scale(crate::compaction::estimate_tokens(h).saturating_add(c.request_overhead()))
         };
         let before = history_tokens(&compaction, history);
-        let ran = CompactionEngine::new(config.compaction.clone())
-            .with_buffer(config.compaction_buffer)
-            .maybe_compact(&mut compaction, model, history, context_length)
-            .await;
+        // Esc during the summary call must settle the turn instead of
+        // hanging past the interrupt grace abort; on cancel the history
+        // and shared compaction state stay untouched and the run's own
+        // cancel path commits the staged prompt.
+        let engine =
+            CompactionEngine::new(config.compaction.clone()).with_buffer(config.compaction_buffer);
+        let ran = match cancel
+            .race(engine.maybe_compact(&mut compaction, model, history, context_length))
+            .await
+        {
+            Ok(ran) => ran,
+            Err(_) => return,
+        };
         if let Ok(mut guard) = shared.lock() {
             *guard = compaction;
         }
@@ -491,6 +501,11 @@ async fn handle_outcome(
             TurnFlow::Commit
         }
         RunOutcome::Failed(message) => {
+            // No state write: the run committed nothing, and the prompt
+            // staged at turn start already keeps the user's message in
+            // the session the next turn reads (Abort, not Commit — a
+            // Commit here would overwrite the staged prompt with the
+            // pre-turn clone that lacks it).
             if renderer.streamed() {
                 let _ = tx.send(AgentEvent::AssistantEnd);
             }
@@ -597,7 +612,19 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
             }
         }
     }
-    let mut history = state.lock().await.history.clone();
+    // Abort safety: stage the user's message into the shared session before
+    // the run owns it. Every commit path replaces `session.history`
+    // wholesale with the run's copy (prompt included exactly once), so the
+    // staged copy only survives when this task dies without committing —
+    // the interrupt grace abort on a stuck await — and the next turn still
+    // sees the prompt instead of silently losing it.
+    let mut history = {
+        let mut session = state.lock().await;
+        session
+            .history
+            .push(crate::run::prompt_message(&text, &images));
+        session.history.clone()
+    };
     let thinking = state.lock().await.thinking;
     let dedup = state.lock().await.dedup.clone();
     let guardrails = state.lock().await.guardrails.clone();
@@ -641,20 +668,20 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
 
     // B.11: the first prompt must not ship without MCP tools, but a hung
     // server cannot block forever — the gate times out and the turn
-    // proceeds with whatever has landed.
-    if let Some(mcp) = workspace.mcp()
-        && tokio::time::timeout(MCP_READY_TIMEOUT, mcp.ready())
-            .await
-            .is_err()
-    {
-        tracing::warn!("MCP servers not ready after {MCP_READY_TIMEOUT:?}");
-        let _ = tx.send(AgentEvent::Notice {
-            tone: Tone::Warning,
-            text: format!(
-                "MCP servers still connecting after {MCP_READY_TIMEOUT:?}; \
-                 continuing without their tools"
-            ),
-        });
+    // proceeds with whatever has landed. Esc skips the wait (and the
+    // warning): the run's own cancel check commits the turn immediately.
+    if let Some(mcp) = workspace.mcp() {
+        let gate = tokio::time::timeout(MCP_READY_TIMEOUT, mcp.ready());
+        if let Ok(Err(_)) = cancel.race(gate).await {
+            tracing::warn!("MCP servers not ready after {MCP_READY_TIMEOUT:?}");
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: format!(
+                    "MCP servers still connecting after {MCP_READY_TIMEOUT:?}; \
+                     continuing without their tools"
+                ),
+            });
+        }
     }
     // Phase 3: feed MCP tool annotations to the permission engine before
     // the tool table is built; sync is generation-keyed, so steady state
@@ -683,6 +710,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         &mut history,
         selection.context_length,
         &tx,
+        &cancel,
     )
     .await;
 

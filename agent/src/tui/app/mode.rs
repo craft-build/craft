@@ -47,7 +47,10 @@ impl App {
         }
     }
 
-    fn enter_plan(&mut self) {
+    /// Enter plan mode, allocating the session's plan path on first entry.
+    /// Also the resume path: a session persisted in plan mode comes back
+    /// in plan mode, exactly as a Tab toggle would leave it.
+    pub(crate) fn enter_plan(&mut self) {
         if self.plan_mode.plan_path.is_none() {
             self.plan_mode.plan_path = Some(Self::allocate_plan_path(
                 crate::storage::StateDir::resolve().ok().as_ref(),
@@ -168,6 +171,9 @@ impl App {
         self.plan_mode.plan_form.reset();
         self.plan_mode.plan_ready = false;
         self.mode = Mode::Build;
+        // The mode change is user-initiated: persist it so a resume lands
+        // in Build, not back in Plan.
+        let _ = tx.send(Command::SetMode { plan: false });
 
         if clear_context {
             let _ = tx.send(Command::Reset);
@@ -318,6 +324,11 @@ mod tests {
         assert_eq!(app.mode, Mode::Build);
         assert!(!app.plan_mode.plan_form.is_visible());
         assert!(app.composer.text.is_empty());
+        // The mode change persists first, then the implement turn submits.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::SetMode { plan: false })
+        ));
         let sent = match rx.try_recv() {
             Ok(Command::SendMessage(text, AgentMode::Build, _)) => text,
             other => panic!("expected SendMessage(Build), got {other:?}"),
@@ -351,6 +362,11 @@ mod tests {
         );
         // The provider clears the session (and zeroes the context counter)
         // only via `Reset`; `Clear` is the weaker sibling that keeps files.
+        // The mode persist lands first, then the reset.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::SetMode { plan: false })
+        ));
         assert!(
             matches!(rx.try_recv(), Ok(Command::Reset)),
             "clear-and-implement resets the session through the provider"

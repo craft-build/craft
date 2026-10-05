@@ -8,6 +8,7 @@ use craft::{
     tui::{self, provider::live::CraftProvider},
 };
 use snafu::ResultExt;
+use std::io::IsTerminal;
 
 #[tokio::main]
 #[snafu::report]
@@ -89,6 +90,14 @@ async fn main() -> Result<(), Error> {
             let cwd = std::env::current_dir().context(TuiSnafu {
                 context: "resolving the current directory",
             })?;
+            // The startup prompt (positional `PROMPT` / piped stdin) is
+            // resolved before the provider and the terminal: a read failure
+            // must surface as a plain error, not inside the TUI.
+            let startup_prompt = craft::cli::resolve_prompt_input(
+                cli.initial_prompt.clone(),
+                &mut std::io::stdin(),
+                std::io::stdin().is_terminal(),
+            )?;
             let mut provider = CraftProvider::new(config, cwd).await?;
             if let Some(spec) = &cli.model {
                 provider = provider.with_model_spec(spec)?;
@@ -104,7 +113,7 @@ async fn main() -> Result<(), Error> {
                 .with_cli_tool_rules(cli.tool_policy()?)
                 .with_custom_commands(!cli.no_commands)
                 .with_initial_mode(cli.run_mode());
-            tui::run(provider).await.context(TuiSnafu {
+            tui::run(provider, startup_prompt).await.context(TuiSnafu {
                 context: "running the terminal UI",
             })
         }

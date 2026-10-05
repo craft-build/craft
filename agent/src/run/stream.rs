@@ -195,10 +195,19 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> std::result::Result<TurnOutput, StreamFailure> {
-    let mut stream = model
-        .stream(request)
-        .await
-        .map_err(|e| failure_from_error(&e))?;
+    // The establishment await predates the cancel subscription below, so
+    // race it: an Esc during a slow handshake must settle as a normal
+    // cancellation (committing the partial turn), not hang until the
+    // interrupt grace abort drops the whole turn.
+    let mut stream = match cancel.race(model.stream(request)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => return Err(failure_from_error(&e)),
+        Err(_) => {
+            return Err(StreamFailure::Cancelled {
+                streamed: String::new(),
+            });
+        }
+    };
     // The reply text streamed so far; carried out on cancellation so the
     // committed history keeps what the user already saw.
     let mut streamed = String::new();
@@ -208,6 +217,13 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
     let mut usage: Option<history::Usage> = None;
     let mut finish_reason: Option<FinishReason> = None;
     let mut cancel_rx = cancel.subscribe();
+    // `subscribe` snapshots the current generation as seen, so a cancel
+    // that fired between the establishment race and here would be
+    // invisible to `changed()`; check the epoch directly so it cannot be
+    // missed.
+    if cancel.cancelled() {
+        return Err(StreamFailure::Cancelled { streamed });
+    }
     // A dropped CancelFlag makes `changed()` ready (with Err) on every poll;
     // polling it forever would busy-loop, so disable the branch once that
     // happens and let the stream drive the loop.
@@ -500,5 +516,60 @@ mod tests {
             .unwrap();
         assert_eq!(output.assistant.text(), "hi");
         assert_eq!(output.usage.total_tokens, 0);
+    }
+
+    /// A model whose requests never resolve: the establishment await is
+    /// the window an Esc lands in during a slow provider handshake.
+    #[derive(Clone)]
+    struct HangingModel;
+
+    impl CompletionModel for HangingModel {
+        async fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<rig_core::completion::CompletionResponse, rig_core::completion::CompletionError>
+        {
+            std::future::pending().await
+        }
+
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<
+            rig_core::streaming::StreamingCompletionResponse,
+            rig_core::completion::CompletionError,
+        > {
+            std::future::pending().await
+        }
+    }
+
+    /// An Esc that lands while the stream is still being established must
+    /// settle the turn as a normal cancellation (partial history commit)
+    /// instead of hanging until the interrupt grace abort drops the turn.
+    #[tokio::test]
+    async fn cancel_during_stream_establishment_settles_immediately() {
+        let (flag, cancel) = crate::run::cancel_channel();
+        let task = tokio::spawn(async move {
+            run_model_stream(&HangingModel, request(), &cancel, &|_| {}).await
+        });
+        // Let the task park inside the establishment await, then interrupt.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        flag.set(true);
+        match task.await.unwrap() {
+            Err(StreamFailure::Cancelled { .. }) => {}
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+    }
+
+    /// A token already cancelled before the call must not slip past the
+    /// establishment race either.
+    #[tokio::test]
+    async fn pre_cancelled_token_cancels_before_establishment() {
+        let (flag, cancel) = crate::run::cancel_channel();
+        flag.set(true);
+        match run_model_stream(&HangingModel, request(), &cancel, &|_| {}).await {
+            Err(StreamFailure::Cancelled { .. }) => {}
+            other => panic!("expected cancellation, got {other:?}"),
+        }
     }
 }

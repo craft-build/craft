@@ -12,6 +12,7 @@ use super::commands::drain_shell_results;
 use super::usage_recorder::UsageLedger;
 use super::{AgentEvent, LoadedMessage, Status, Tone};
 use super::{LoopCtx, Selection, SessionState};
+use crate::tui::provider::SessionMode;
 
 /// `/sessions` load: replace the session with a persisted one and push the
 /// rebuilt transcript plus fresh chrome back to the UI. Load failures only
@@ -67,6 +68,13 @@ pub(super) async fn load_session(
     };
     let title = loaded.title.clone();
     let draft = loaded.meta.input_draft.clone().unwrap_or_default();
+    // Stored mode wins on resume; anything the file does not spell out
+    // (legacy sessions) keeps the CLI-seeded mode.
+    let mode = match loaded.meta.mode.as_deref() {
+        Some("plan") => Some(SessionMode::Plan),
+        Some("build") => Some(SessionMode::Build),
+        _ => None,
+    };
     let messages = loaded.messages().to_vec();
     let rendered = transcript(&messages);
     {
@@ -94,6 +102,7 @@ pub(super) async fn load_session(
     let _ = tx.send(AgentEvent::SessionLoaded {
         messages: rendered,
         draft,
+        mode,
     });
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
     let _ = tx.send(AgentEvent::Notice {
@@ -245,6 +254,15 @@ pub(super) async fn handle_set_draft(ctx: &LoopCtx, draft: String) {
     }
 }
 
+/// `Command::SetMode`: persist the session's mode (Tab toggle, plan
+/// implementation) so a resume restores it.
+pub(super) async fn handle_set_mode(ctx: &LoopCtx, plan: bool) {
+    let mut guard = ctx.state.lock().await;
+    if let Some(store) = &mut guard.store {
+        store.set_mode(plan);
+    }
+}
+
 /// Command-loop exit: fold queued bang-mode results into the history and
 /// persist them (no next turn exists to carry them), then flush any soft
 /// checkpointed draft.
@@ -255,10 +273,13 @@ pub(super) async fn persist_on_exit(ctx: &LoopCtx, selection: &Selection) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .cancel_all();
-    let drained = drain_shell_results(&ctx.shell, &ctx.state).await;
+    drain_shell_results(&ctx.shell, &ctx.state).await;
     let mut guard = ctx.state.lock().await;
     let history = guard.history.clone();
-    if drained > 0
+    // Always record (not only when shell results drained): a turn killed by
+    // the interrupt abort fallback leaves its staged prompt and cancel
+    // marker only in memory, and no later turn exists to carry them out.
+    if !history.is_empty()
         && let Some(store) = &mut guard.store
     {
         store.record_turn(&history, LoopCtx::model_spec(selection));

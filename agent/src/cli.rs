@@ -712,6 +712,57 @@ mod tests {
         Cli::try_parse_from(std::iter::once("craft").chain(args.iter().copied()))
     }
 
+    /// The positional prompt wins over piped stdin; piped stdin is read and
+    /// trimmed; whitespace-only input collapses to `None` so the TUI starts
+    /// normally; an attached terminal yields `None`.
+    #[test]
+    fn resolve_prompt_input_precedence_and_piping() {
+        // Positional beats piped stdin.
+        let piped = &mut "from stdin\n".as_bytes();
+        assert_eq!(
+            resolve_prompt_input(Some("from cli".into()), piped, false).unwrap(),
+            Some("from cli".to_string())
+        );
+        // Piped stdin is the prompt when no positional was given.
+        assert_eq!(
+            resolve_prompt_input(None, &mut "  piped prompt \n".as_bytes(), false).unwrap(),
+            Some("piped prompt".to_string())
+        );
+        // Whitespace-only piped input starts the TUI normally.
+        assert_eq!(
+            resolve_prompt_input(None, &mut " \n\t".as_bytes(), false).unwrap(),
+            None
+        );
+        // An attached (interactive) terminal is never read.
+        assert_eq!(
+            resolve_prompt_input(None, &mut "".as_bytes(), true).unwrap(),
+            None
+        );
+        // Whitespace-only positional collapses the same way.
+        assert_eq!(
+            resolve_prompt_input(Some("   ".into()), &mut "".as_bytes(), true).unwrap(),
+            None
+        );
+    }
+
+    /// `--print` without a positional and without piped stdin still errors
+    /// (the unchanged run_print contract).
+    #[tokio::test]
+    async fn run_print_without_any_prompt_errors() {
+        use std::io::IsTerminal;
+        let cli = parse(&["--print"]).unwrap();
+        if std::io::stdin().is_terminal() {
+            assert!(
+                run_print(&cli, crate::config::Config::default())
+                    .await
+                    .is_err()
+            );
+        } else {
+            // Piped stdin the test harness controls is not portable across
+            // runners; the terminal-attached branch above pins the contract.
+        }
+    }
+
     #[test]
     fn thinking_flags_resolve_and_validate() {
         use crate::thinking::ThinkingConfig;
@@ -1329,6 +1380,34 @@ mod tests {
     }
 }
 
+/// Resolve the initial prompt for a run: the positional `PROMPT` wins; else
+/// piped stdin (when `stdin_attached` is false) is read to a string; a
+/// terminal stdin yields `None`. The result is trimmed; whitespace-only
+/// input collapses to `None` so the TUI starts normally. Shared by
+/// `--print` (which still errors on `None`) and the interactive TUI.
+pub fn resolve_prompt_input(
+    cli_prompt: Option<String>,
+    stdin: &mut impl std::io::Read,
+    stdin_attached: bool,
+) -> Result<Option<String>> {
+    let raw = match cli_prompt {
+        Some(prompt) => prompt,
+        None if !stdin_attached => {
+            let mut buf = String::new();
+            stdin.read_to_string(&mut buf).map_err(|e| {
+                InvalidSnafu {
+                    reason: format!("reading the prompt from stdin: {e}"),
+                }
+                .build()
+            })?;
+            buf
+        }
+        None => return Ok(None),
+    };
+    let trimmed = raw.trim().to_string();
+    Ok((!trimmed.is_empty()).then_some(trimmed))
+}
+
 /// `craft --print` (G.3): run one prompt to completion against the
 /// configured providers and emit text, JSONL (`--output-format
 /// stream-json`), or a verbose transcript (`--verbose`). SDK-mode
@@ -1353,18 +1432,12 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         }
     }
 
-    let prompt = match &cli.initial_prompt {
-        Some(prompt) => prompt.clone(),
-        None if !std::io::stdin().is_terminal() => {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).map_err(|e| {
-                crate::error::InvalidSnafu {
-                    reason: format!("reading the prompt from stdin: {e}"),
-                }
-                .build()
-            })?;
-            buf.trim().to_string()
-        }
+    let prompt = match resolve_prompt_input(
+        cli.initial_prompt.clone(),
+        &mut std::io::stdin(),
+        std::io::stdin().is_terminal(),
+    )? {
+        Some(prompt) => prompt,
         None => {
             return InvalidSnafu {
                 reason: "--print needs a prompt argument or a piped stdin prompt".to_string(),

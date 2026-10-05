@@ -172,6 +172,17 @@ impl SessionStore {
         self.save();
     }
 
+    /// Persist the session mode so a resume restores it (`build`/`plan`).
+    /// Mode changes are user-initiated and rare, so they write immediately.
+    pub fn set_mode(&mut self, plan: bool) {
+        let mode = if plan { "plan" } else { "build" };
+        if self.session.meta.mode.as_deref() == Some(mode) {
+            return;
+        }
+        self.session.set_mode(Some(mode.to_string()));
+        self.save();
+    }
+
     /// Fold a finished run's per-model usage into the session and append one
     /// cost-ledger record per model to `cost.jsonl`. Ledger failures are
     /// warnings, never fatal. A model whose cost could not be resolved records

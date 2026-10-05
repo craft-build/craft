@@ -191,6 +191,10 @@ pub struct SessionMeta {
     pub input_draft: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<crate::thinking::ThinkingConfig>,
+    /// Session mode (`"build"` / `"plan"`) persisted so a resume restores
+    /// it; `None` for legacy sessions predating mode persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// Messages plus the token of the run they belong to. Comparing tokens tells
@@ -556,6 +560,16 @@ where
             self.meta.thinking = Some(thinking);
             self.touch_soft();
         }
+    }
+
+    /// Mode-only change: meta record, no content to flush (mirrors
+    /// [`Self::set_input_draft`]).
+    pub fn set_mode(&mut self, mode: Option<String>) {
+        if self.meta.mode == mode {
+            return;
+        }
+        self.meta.mode = mode;
+        self.touch_soft();
     }
 
     pub fn set_title(&mut self, title: String) {

@@ -1303,3 +1303,36 @@ fn unknown_record_type_is_skipped() {
     let loaded = TestSession::load_from(session.id.id(), dir).unwrap();
     assert_eq!(loaded.messages().len(), 2);
 }
+
+/// Mode persistence round-trip: a session stored with `set_mode` reads its
+/// mode back after save/load, in both spellings a writer can produce.
+#[test]
+fn set_mode_round_trips_through_save_and_load() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let mut session: TestSession = Session::new("m", "/project");
+    session.set_mode(Some("plan".into()));
+    session.save_to(dir).unwrap();
+    let mut loaded = TestSession::load_from(session.id.id(), dir).unwrap();
+    assert_eq!(loaded.meta.mode.as_deref(), Some("plan"));
+
+    loaded.set_mode(Some("build".into()));
+    loaded.save_to(dir).unwrap();
+    let reloaded = TestSession::load_from(session.id.id(), dir).unwrap();
+    assert_eq!(reloaded.meta.mode.as_deref(), Some("build"));
+}
+
+/// A meta record without `mode` (sessions predating persistence) loads as
+/// `None`, so resume falls back to the CLI-seeded mode.
+#[test]
+fn legacy_meta_without_mode_loads_as_none() {
+    let id: CraftId = LEGACY_HEX_ID.parse().unwrap();
+    let json = format!(
+        r#"{{"t":"header","v":{SESSION_VERSION},"id":"{LEGACY_HEX_ID}","model":"m","cwd":"/","created_at":0}}
+{{"t":"meta","title":"t","token_usage":null,"updated_at":0}}"#
+    );
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join(format!("{LEGACY_HEX_ID}.jsonl")), json).unwrap();
+    let loaded = TestSession::load_from(id, tmp.path()).unwrap();
+    assert_eq!(loaded.meta.mode, None);
+}

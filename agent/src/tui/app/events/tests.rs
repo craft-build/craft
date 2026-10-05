@@ -1153,3 +1153,35 @@ fn reset_clears_task_chat_state() {
     assert_eq!(app.active_task, None);
     assert!(app.conversation.messages.is_empty());
 }
+
+/// SessionLoaded mode handling: a stored plan restores plan mode, a stored
+/// build restores build, and `None` (legacy sessions predating persistence)
+/// keeps the current — CLI-seeded — mode.
+#[test]
+fn session_loaded_mode_restores_or_keeps_the_current_mode() {
+    use crate::tui::provider::{LoadedMessage, SessionMode};
+    let mut app = App::new();
+
+    let load = |mode: Option<SessionMode>| AgentEvent::SessionLoaded {
+        messages: vec![LoadedMessage::User("earlier".into())],
+        draft: String::new(),
+        mode,
+    };
+
+    app.handle_event(load(Some(SessionMode::Plan)));
+    assert!(app.mode == Mode::Plan, "a stored plan restores plan mode");
+
+    app.handle_event(load(Some(SessionMode::Build)));
+    assert!(
+        app.mode == Mode::Build,
+        "a stored build restores build mode"
+    );
+
+    // A legacy session with no stored mode keeps the CLI-seeded mode.
+    app.enter_plan();
+    app.handle_event(load(None));
+    assert!(
+        app.mode == Mode::Plan,
+        "no stored mode keeps the current mode"
+    );
+}

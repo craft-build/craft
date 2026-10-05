@@ -87,6 +87,13 @@ pub enum Command {
     /// checkpoints it into the session file at most once per soft-save
     /// delay; empty text clears the stored draft.
     SetDraft(String),
+    /// The session mode changed through a user action (Tab toggle, plan
+    /// implementation). The provider persists it into the session meta so
+    /// a resume restores it.
+    SetMode {
+        /// Whether the session is now in plan mode.
+        plan: bool,
+    },
 }
 
 /// Agent lifecycle status, mirrors the prototype's STATUS_MAP.
@@ -335,11 +342,13 @@ pub enum AgentEvent {
         text: String,
     },
     /// The session was replaced by a persisted one (`/sessions`, resume);
-    /// carries the user/assistant text transcript for display rebuild plus
-    /// the composer draft preserved across checkpoints.
+    /// carries the user/assistant text transcript for display rebuild,
+    /// the composer draft preserved across checkpoints, and the session's
+    /// stored mode (`None` for legacy sessions predating persistence).
     SessionLoaded {
         messages: Vec<LoadedMessage>,
         draft: String,
+        mode: Option<SessionMode>,
     },
     /// A gated tool call is parked on the user's decision: opens the
     /// permission-prompt overlay (F.5). `files`/`commands` are display
@@ -390,6 +399,15 @@ pub enum LoadedMessage {
     Assistant(String),
 }
 
+/// Mode a persisted session restores. Sent with [`AgentEvent::SessionLoaded`];
+/// `None` (the Option, not a variant) means the session predates mode
+/// persistence and the CLI-seeded mode stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionMode {
+    Build,
+    Plan,
+}
+
 /// An agent backend. `start` consumes the provider and returns the two halves
 /// of the UI <-> provider channel pair.
 pub trait Provider {
@@ -418,6 +436,15 @@ pub trait Provider {
     /// `--permission-mode plan`). Read before [`Provider::start`]
     /// consumes the provider.
     fn starts_in_plan_mode(&self) -> bool {
+        false
+    }
+
+    /// Whether the provider will attempt a session resume at startup
+    /// (`-s/--session`, `-c/--continue`). Read before [`Provider::start`]
+    /// consumes the provider: the TUI holds a startup prompt back until the
+    /// first `StatusChanged(Done)` so it submits after the resume (and the
+    /// mode it restores) lands.
+    fn expects_startup_resume(&self) -> bool {
         false
     }
 }

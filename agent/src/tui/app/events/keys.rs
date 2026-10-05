@@ -378,9 +378,13 @@ impl App {
                 true
             }
             // Tab cycles Build/Plan (F.2); focus cycling stays on
-            // BackTab so block navigation remains reachable.
+            // BackTab so block navigation remains reachable. The change is
+            // user-initiated, so it persists into the session meta.
             KeyCode::Tab => {
                 self.toggle_mode();
+                let _ = tx.send(Command::SetMode {
+                    plan: self.mode == Mode::Plan,
+                });
                 true
             }
             KeyCode::BackTab => {

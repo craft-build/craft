@@ -6,10 +6,10 @@ use std::collections::VecDeque;
 
 use super::bootstrap::selection_for_spec;
 use super::commands::{
-    PendingMessage, drain_shell_results, handle_clear, handle_reset, handle_select_model,
-    handle_send_message, maybe_send_next,
+    PendingMessage, close_aborted_turn, drain_shell_results, handle_clear, handle_interrupt,
+    handle_reset, handle_select_model, handle_send_message, maybe_send_next,
 };
-use super::resume::{load_session, persist_on_exit, resume_latest, transcript};
+use super::resume::{handle_set_mode, load_session, persist_on_exit, resume_latest, transcript};
 use super::*;
 use crate::history::Message;
 use crate::permissions::PermissionsConfig;
@@ -365,6 +365,7 @@ async fn loading_a_persisted_session_repopulates_history() {
     ];
     store.set_thinking(crate::thinking::ThinkingConfig::Budget(4096));
     store.checkpoint_draft("unsent draft");
+    store.set_mode(true);
     store.checkpoint_now();
     store.record_turn(&history, "mock/model".into());
 
@@ -396,12 +397,18 @@ async fn loading_a_persisted_session_repopulates_history() {
     assert!(state.lock().await.store.is_some());
     let mut loaded = None;
     let mut loaded_draft = String::new();
+    let mut loaded_mode = None;
     let mut resumed = false;
     while let Ok(event) = rx.try_recv() {
         match event {
-            AgentEvent::SessionLoaded { messages, draft } => {
+            AgentEvent::SessionLoaded {
+                messages,
+                draft,
+                mode,
+            } => {
                 loaded = Some(messages);
                 loaded_draft = draft;
+                loaded_mode = mode;
             }
             AgentEvent::Notice { tone, text } => {
                 assert_eq!(tone, Tone::Success);
@@ -417,6 +424,7 @@ async fn loading_a_persisted_session_repopulates_history() {
         loaded_draft, "unsent draft",
         "the preserved draft rides the load"
     );
+    assert_eq!(loaded_mode, Some(crate::tui::provider::SessionMode::Plan));
     assert!(resumed);
 }
 
@@ -628,4 +636,84 @@ async fn clear_and_reset_drop_the_previous_todo_plan() {
             "clear={clear}: the reset must clear the todo store"
         );
     }
+}
+
+/// `Command::SetMode` checkpoints the session mode into the session file,
+/// so a later load (resume) restores it — mirroring the draft checkpoint.
+#[tokio::test]
+async fn set_mode_checkpoints_the_session_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+    let state = Arc::new(Mutex::new(SessionState::linked().with_store(
+        Some(&state_dir),
+        "/cwd",
+        "mock/model",
+    )));
+    let ctx = test_ctx(state);
+
+    handle_set_mode(&ctx, true).await;
+    let id = crate::headless::StoredSession::list(Some("/cwd"), &state_dir)
+        .unwrap()
+        .pop()
+        .expect("set_mode wrote a session record")
+        .id
+        .id();
+    let loaded = crate::headless::StoredSession::load(id, &state_dir).unwrap();
+    assert_eq!(loaded.meta.mode.as_deref(), Some("plan"));
+
+    // Flipping back writes build, not a cleared field.
+    handle_set_mode(&ctx, false).await;
+    let loaded = crate::headless::StoredSession::load(id, &state_dir).unwrap();
+    assert_eq!(loaded.meta.mode.as_deref(), Some("build"));
+}
+
+/// The interrupt abort fallback must not lose the turn: the prompt staged
+/// at turn start stays in the session, and the aborted turn is closed with
+/// the same cancel marker a cooperative cancel would have added — exactly
+/// once.
+#[tokio::test(start_paused = true)]
+async fn interrupt_grace_abort_keeps_the_staged_prompt() {
+    let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::linked()));
+    let ctx = test_ctx(state.clone());
+    // A turn stuck on an await that never observes the cancel flag.
+    let stuck = tokio::spawn(std::future::pending::<()>());
+    let current_turn = Some(stuck.abort_handle());
+    // The prompt `run_turn` stages before the run owns it.
+    state
+        .lock()
+        .await
+        .history
+        .push(crate::run::prompt_message("keep me", &[]));
+
+    handle_interrupt(&ctx, &current_turn);
+    // Paused time jumps to the grace deadline; the fallback aborts the
+    // stuck task and salvages the session.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(stuck.is_finished());
+    let history = state.lock().await.history.clone();
+    assert_eq!(history.len(), 2, "prompt + cancel marker, nothing dropped");
+    assert_eq!(history[0].text(), "keep me");
+    assert_eq!(history[1].text(), crate::run::CANCEL_MARKER);
+
+    // Interrupting again on the already-closed turn adds no second marker.
+    handle_interrupt(&ctx, &current_turn);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(state.lock().await.history.len(), 2);
+}
+
+/// `close_aborted_turn` is idempotent at the history tail: an interrupted
+/// session never accumulates marker spam.
+#[tokio::test]
+async fn close_aborted_turn_appends_one_marker() {
+    let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::linked()));
+    state
+        .lock()
+        .await
+        .history
+        .push(crate::run::prompt_message("q", &[]));
+    close_aborted_turn(&state).await;
+    close_aborted_turn(&state).await;
+    let history = state.lock().await.history.clone();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].text(), crate::run::CANCEL_MARKER);
 }

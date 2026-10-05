@@ -12,7 +12,13 @@ use super::{
     ToolLine, TouchedFile, UsageFetchState,
 };
 
-pub struct MockProvider;
+#[derive(Default)]
+pub struct MockProvider {
+    /// Test seam for [`Provider::expects_startup_resume`]: a scripted
+    /// startup resume flips it so sequencing tests can drive the held
+    /// startup prompt.
+    pub expects_startup_resume: bool,
+}
 
 const FILE: &str = "src/auth/refresh.ts";
 
@@ -255,6 +261,10 @@ fn emit_initial_state(
 }
 
 impl Provider for MockProvider {
+    fn expects_startup_resume(&self) -> bool {
+        self.expects_startup_resume
+    }
+
     fn start(
         self,
     ) -> (
@@ -424,6 +434,9 @@ impl Provider for MockProvider {
                     Command::SetDraft(_) => {
                         // No persistence behind the scripted demo.
                     }
+                    Command::SetMode { .. } => {
+                        // No persistence behind the scripted demo.
+                    }
                     Command::RunMcpPrompt { .. } => {
                         let _ = evt_tx.send(AgentEvent::Notice {
                             tone: Tone::Neutral,
@@ -458,7 +471,7 @@ mod tests {
     /// flips the linked plan step and marks files approved.
     #[tokio::test]
     async fn scripted_turn_then_approve() {
-        let (tx, mut rx) = MockProvider.start();
+        let (tx, mut rx) = MockProvider::default().start();
 
         // Initial state arrives immediately.
         let ev = rx.recv().await.unwrap();
@@ -514,7 +527,7 @@ mod tests {
     /// Interrupt stops the scripted turn and returns status to done.
     #[tokio::test]
     async fn interrupt_stops_turn() {
-        let (tx, mut rx) = MockProvider.start();
+        let (tx, mut rx) = MockProvider::default().start();
         // Drain initial state.
         for _ in 0..4 {
             rx.recv().await.unwrap();
@@ -541,7 +554,7 @@ mod tests {
     /// status surface shows an indicator while it works.
     #[tokio::test]
     async fn compact_announces_the_run_before_the_result() {
-        let (tx, mut rx) = MockProvider.start();
+        let (tx, mut rx) = MockProvider::default().start();
         // Drain initial state.
         for _ in 0..4 {
             rx.recv().await.unwrap();

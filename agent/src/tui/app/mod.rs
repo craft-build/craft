@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use crate::tui::composer::Composer;
 use crate::tui::modals::Modal;
 use crate::tui::provider::{
-    AgentEvent, Command, LoadedMessage, PlanItem, Status, TouchedFile, UsageRow,
+    AgentEvent, Command, LoadedMessage, PlanItem, SessionMode, Status, TouchedFile, UsageRow,
 };
 use crate::tui::repaint;
 use crate::tui::shell;
@@ -521,7 +521,11 @@ impl App {
                 }
             }
             AgentEvent::UsageQuota(state) => self.overlays.usage_quota = state,
-            AgentEvent::SessionLoaded { messages, draft } => {
+            AgentEvent::SessionLoaded {
+                messages,
+                draft,
+                mode,
+            } => {
                 self.reset_conversation();
                 for msg in messages {
                     let msg = match msg {
@@ -535,6 +539,14 @@ impl App {
                 if !draft.is_empty() {
                     self.composer.set_text(draft);
                     self.sent_draft = self.composer.text.clone();
+                }
+                // Mode precedence on resume: the stored mode wins; `None`
+                // (legacy sessions predating persistence) keeps the
+                // mode the CLI seeded (`--mode` / `--permission-mode`).
+                match mode {
+                    Some(SessionMode::Plan) => self.enter_plan(),
+                    Some(SessionMode::Build) => self.mode = Mode::Build,
+                    None => {}
                 }
             }
             // Subagent events (task 96): inner events fill the task
@@ -1134,6 +1146,7 @@ mod tests {
         app.handle_event(AgentEvent::SessionLoaded {
             messages: vec![LoadedMessage::Assistant("loaded reply".into())],
             draft: String::new(),
+            mode: None,
         });
         assert_eq!(app.conversation.visible_text(0), Some("loaded reply"));
         assert!(!app.conversation.reveal_pending(true));
@@ -1167,6 +1180,7 @@ mod tests {
         app.handle_event(AgentEvent::SessionLoaded {
             messages: vec![crate::tui::provider::LoadedMessage::User("earlier".into())],
             draft: "unsent words".into(),
+            mode: None,
         });
         assert_eq!(app.composer.text, "unsent words");
 
