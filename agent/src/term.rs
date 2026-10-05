@@ -154,6 +154,9 @@ async fn run_query(
             mode: crate::cli::CliMode::default(),
             session_id: None,
             policy,
+            // term run does not expose the tool flags; the top-level CLI
+            // policy never reaches this surface (same as the reference).
+            tool_policy: Vec::new(),
         },
     )
     .await

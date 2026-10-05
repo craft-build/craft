@@ -206,6 +206,13 @@ pub struct CraftProvider {
     /// Receiver for events the MCP manager emits through `McpEvents`
     /// (log-notification notices); drained by `start`'s provider loop.
     mcp_evt_rx: mpsc::UnboundedReceiver<AgentEvent>,
+    /// Whether the session discovers custom slash commands (`--no-commands`
+    /// clears it); read by the TUI through the `Provider` trait.
+    custom_commands: bool,
+    /// Whether the session starts in plan mode (`--mode plan`,
+    /// `--permission-mode plan`); read by the TUI through the `Provider`
+    /// trait.
+    starts_in_plan_mode: bool,
 }
 
 impl CraftProvider {
@@ -241,6 +248,28 @@ impl CraftProvider {
             self.workspace
                 .set_sandbox_policy(crate::sandbox::SandboxPolicy::off());
         }
+        self
+    }
+
+    /// Install the CLI tool policy (`--allowed-tools` preapprovals,
+    /// `--disallowed-tools` denies) before the session's first turn. The
+    /// rules are process-lifetime: they never persist into the session or
+    /// `permissions.bml`.
+    pub fn with_cli_tool_rules(self, rules: Vec<crate::permissions::PermissionRule>) -> Self {
+        self.permissions.add_cli_rules(rules);
+        self
+    }
+
+    /// Toggle custom slash-command discovery (`--no-commands`); default on.
+    pub fn with_custom_commands(mut self, yes: bool) -> Self {
+        self.custom_commands = yes;
+        self
+    }
+
+    /// Set the session's initial mode from the CLI (`--mode`, or
+    /// `--permission-mode plan`); plan starts the TUI in plan mode.
+    pub fn with_initial_mode(mut self, mode: crate::cli::CliMode) -> Self {
+        self.starts_in_plan_mode = matches!(mode, crate::cli::CliMode::Plan);
         self
     }
 }

@@ -406,4 +406,18 @@ pub trait Provider {
     fn mcp(&self) -> Option<crate::mcp::McpHandle> {
         None
     }
+
+    /// Whether custom slash commands should be discovered for this
+    /// session; the live provider turns this off for `--no-commands`.
+    /// Read before [`Provider::start`] consumes the provider.
+    fn custom_commands(&self) -> bool {
+        true
+    }
+
+    /// Whether the session starts in plan mode (`--mode plan` /
+    /// `--permission-mode plan`). Read before [`Provider::start`]
+    /// consumes the provider.
+    fn starts_in_plan_mode(&self) -> bool {
+        false
+    }
 }

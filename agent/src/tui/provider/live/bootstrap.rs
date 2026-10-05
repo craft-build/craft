@@ -201,6 +201,8 @@ impl CraftProvider {
             resume_session: None,
             mcp,
             mcp_evt_rx,
+            custom_commands: true,
+            starts_in_plan_mode: false,
         })
     }
 

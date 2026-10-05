@@ -575,6 +575,8 @@ pub async fn recipe_run(
             mode: crate::cli::CliMode::Build,
             session_id: None,
             policy,
+            // recipe run does not expose the tool flags.
+            tool_policy: Vec::new(),
         },
     )
     .await

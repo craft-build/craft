@@ -126,6 +126,21 @@ pub fn is_builtin_tool(name: &str) -> bool {
     BUILTIN_TOOL_NAMES.contains(&name) || crate::knowledge::is_argosy_tool(name)
 }
 
+/// Every native tool name the registry can serve: the builtin table plus
+/// the argosy natives. The CLI's tool-name validation checks against this
+/// so the valid-name list cannot drift from the registry.
+pub fn native_tool_names() -> Vec<&'static str> {
+    let mut names = BUILTIN_TOOL_NAMES.to_vec();
+    names.extend(
+        crate::knowledge::tool_definitions()
+            .iter()
+            .map(|def| def.native),
+    );
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 /// One fixed root shared by all tools in an agent. Calls are serialized on a
 /// blocking worker, so filesystem I/O does not block Tokio's executor and two
 /// edits from the same tool set cannot overwrite one another.

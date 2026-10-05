@@ -958,3 +958,93 @@ fn explicit_tool_default_allow_outranks_read_only_hint() {
         PermissionCheck::Allowed
     );
 }
+
+// --- CLI rules (--allowed-tools / --disallowed-tools) ----------------------
+
+#[test]
+fn cli_allow_rule_preapproves_a_prompting_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(tmp.path(), Vec::new());
+    let tool = ToolKey::native("bash");
+    assert!(needs_prompt(&mgr.check(&tool, &["cargo build".into()])));
+    mgr.add_cli_rules(vec![PermissionRule {
+        tool: tool.clone(),
+        scope: None,
+        effect: Effect::Allow,
+    }]);
+    assert_eq!(
+        mgr.check(&tool, &["cargo build".into()]),
+        PermissionCheck::Allowed
+    );
+}
+
+#[test]
+fn cli_deny_wins_over_a_cli_allow_and_a_config_allow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(
+        tmp.path(),
+        vec![
+            allow_rule("write", None),
+            PermissionRule {
+                tool: ToolKey::native("write"),
+                scope: None,
+                effect: Effect::Allow,
+            },
+        ],
+    );
+    mgr.add_cli_rules(vec![
+        PermissionRule {
+            tool: ToolKey::native("write"),
+            scope: None,
+            effect: Effect::Allow,
+        },
+        PermissionRule {
+            tool: ToolKey::native("write"),
+            scope: None,
+            effect: Effect::Deny,
+        },
+    ]);
+    assert_eq!(
+        mgr.check(&ToolKey::native("write"), &["/tmp/x".into()]),
+        PermissionCheck::Denied
+    );
+}
+
+#[test]
+fn cli_mcp_server_deny_covers_server_tool_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(tmp.path(), Vec::new());
+    mgr.add_cli_rules(vec![PermissionRule {
+        tool: ToolKey::McpServer {
+            server: "github".into(),
+        },
+        scope: None,
+        effect: Effect::Deny,
+    }]);
+    for key in [
+        mcp_tool("github", "create_issue"),
+        mcp_tool("github", "star"),
+    ] {
+        assert_eq!(
+            mgr.check(&key, &["{}".into()]),
+            PermissionCheck::Denied,
+            "{} must be covered by the server-wide deny",
+            key
+        );
+    }
+}
+
+#[test]
+fn cli_rules_do_not_leak_into_session_rules() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(tmp.path(), Vec::new());
+    mgr.add_cli_rules(vec![PermissionRule {
+        tool: ToolKey::native("bash"),
+        scope: None,
+        effect: Effect::Allow,
+    }]);
+    assert!(
+        mgr.session_rules_snapshot().is_empty(),
+        "CLI policy must die with the process, never persist as session grants"
+    );
+}

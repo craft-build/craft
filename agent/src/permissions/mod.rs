@@ -409,6 +409,11 @@ struct McpAnnotationTable {
 
 pub struct PermissionManager {
     session_rules: Mutex<Vec<PermissionRule>>,
+    /// CLI policy (`--allowed-tools` / `--disallowed-tools`): process-
+    /// lifetime rules that must never leak into a saved session, so they
+    /// live apart from `session_rules`. Checked between session and
+    /// config rules; deny-wins holds for any position.
+    cli_rules: Mutex<Vec<PermissionRule>>,
     config_rules: Vec<PermissionRule>,
     /// Reference-style builtin allows (in-project file writes). Checked with
     /// the other rules, before defaults, so a deny still wins.
@@ -476,6 +481,7 @@ impl PermissionManager {
 
         Self {
             session_rules: Mutex::new(Vec::new()),
+            cli_rules: Mutex::new(Vec::new()),
             config_rules: config.rules,
             builtin_rules,
             default: config.default,
@@ -499,6 +505,12 @@ impl PermissionManager {
     pub(crate) fn fork(&self) -> Self {
         Self {
             session_rules: Mutex::new(Vec::new()),
+            cli_rules: Mutex::new(
+                self.cli_rules
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
             config_rules: self.config_rules.clone(),
             builtin_rules: self.builtin_rules.clone(),
             default: self.default,
@@ -539,6 +551,21 @@ impl PermissionManager {
         })
     }
 
+    fn cli_rules_guard(&self) -> std::sync::MutexGuard<'_, Vec<PermissionRule>> {
+        self.cli_rules.lock().unwrap_or_else(|e| {
+            eprintln!("permissions: mutex was poisoned, recovering");
+            e.into_inner()
+        })
+    }
+
+    /// Install the CLI tool policy (`--allowed-tools` preapprovals and
+    /// `--disallowed-tools` denies) as scope-universal rules. Call once,
+    /// before the first turn; unlike session grants these die with the
+    /// process and are never written back to `permissions.bml`.
+    pub fn add_cli_rules(&self, rules: Vec<PermissionRule>) {
+        self.cli_rules_guard().extend(rules);
+    }
+
     /// The order of the checks below is the policy itself, not an accident of
     /// how it was written: denies first, then explicit allows, then the
     /// defaults. Moving one moves the rules.
@@ -566,6 +593,7 @@ impl PermissionManager {
         };
         let force_prompt = force_prompt || matches!(destructive_hint, Some(true));
         let session = self.session_rules();
+        let cli = self.cli_rules_guard();
 
         // Any matching deny wins, however broadly it was aimed. Only allows
         // are outranked by `force_prompt`.
@@ -575,6 +603,7 @@ impl PermissionManager {
             let mut has_allow = false;
             for r in session
                 .iter()
+                .chain(cli.iter())
                 .chain(&self.config_rules)
                 .chain(&self.builtin_rules)
             {

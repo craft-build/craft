@@ -4,6 +4,7 @@
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 mod advisor;
+mod cli_policy;
 mod compression;
 mod dispatch;
 mod overflow;

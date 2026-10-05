@@ -97,7 +97,13 @@ async fn main() -> Result<(), Error> {
                 .with_startup_notes(setup_notes)
                 .with_resume_latest(cli.continue_session)
                 .with_session(cli.session.clone())
-                .with_permission_flags(cli.yolo, cli.auto_review);
+                .with_permission_flags(
+                    matches!(cli.permission_policy()?, craft::cli::PermissionPolicy::Yolo),
+                    cli.auto_review,
+                )
+                .with_cli_tool_rules(cli.tool_policy()?)
+                .with_custom_commands(!cli.no_commands)
+                .with_initial_mode(cli.run_mode());
             tui::run(provider).await.context(TuiSnafu {
                 context: "running the terminal UI",
             })

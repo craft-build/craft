@@ -91,6 +91,28 @@ fn write_and_flush(bytes: &str) -> io::Result<()> {
     out.flush()
 }
 
+/// Custom slash commands for the app, honoring the provider's `--no-commands`
+/// gate: a disabled session gets an empty list without touching the
+/// filesystem. Extracted from `drive` so the gate is testable without
+/// booting the full TUI loop.
+fn discover_custom_commands(cwd: &Path, enabled: bool) -> Vec<crate::command::CustomCommand> {
+    if enabled {
+        crate::command::discover_commands(cwd)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Seed the app's initial mode from the provider (`--mode plan` /
+/// `--permission-mode plan`): plan enters with an allocated plan path,
+/// exactly as a Tab toggle would. Extracted from `drive` so the wiring is
+/// testable without booting the full TUI loop.
+fn apply_initial_mode(app: &mut App, starts_in_plan_mode: bool) {
+    if starts_in_plan_mode {
+        app.toggle_mode();
+    }
+}
+
 /// Emits the synchronized-output begin sequence and flushes, so the terminal
 /// enters batched-update mode before the next frame diff.
 fn begin_synchronized_output() {
@@ -114,6 +136,10 @@ async fn drive<P: Provider>(
 
     // B.11: grab the MCP handle before `start` consumes the provider.
     let mcp = provider.mcp();
+    // `--no-commands`: read the gate before `start` consumes the provider.
+    let custom_commands = provider.custom_commands();
+    // `--mode plan` / `--permission-mode plan`: same for the initial mode.
+    let starts_in_plan_mode = provider.starts_in_plan_mode();
     let (cmd_tx, evt_rx): (mpsc::UnboundedSender<Command>, _) = provider.start();
 
     // Crossterm events are blocking reads -> pump them on a dedicated thread.
@@ -131,10 +157,12 @@ async fn drive<P: Provider>(
     // commands from the `/mcp` screen). Providers without one leave it None.
     app.mcp = mcp;
     // Custom slash commands (J.5): discovered from the working directory's
-    // project ancestors and the user's global config dirs.
+    // project ancestors and the user's global config dirs. `--no-commands`
+    // (via the provider gate) skips discovery entirely.
     if let Ok(cwd) = std::env::current_dir() {
-        app.custom_commands = crate::command::discover_commands(&cwd);
+        app.custom_commands = discover_custom_commands(&cwd, custom_commands);
     }
+    apply_initial_mode(&mut app, starts_in_plan_mode);
     // Data-driven keybindings (F.1): apply the user's config overlay on top
     // of the compile-time defaults; surface the first problem as a flash.
     if let Ok(config) = crate::config::Config::load().await {
@@ -1017,4 +1045,37 @@ mod tests {
         let count = bells_for(notify::Focus::Unfocused, script).await;
         assert_eq!(count, 2, "each completed turn rings once");
     }
+}
+
+/// `--no-commands`: the discovery gate yields zero custom commands without
+/// touching the filesystem, even with commands installed on disk.
+#[test]
+fn no_commands_gate_yields_zero_discovered_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let cmd_dir = dir.path().join(".craft/commands");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(cmd_dir.join("ship.md"), "Ship it: $ARGUMENTS").unwrap();
+    assert!(
+        !discover_custom_commands(dir.path(), true).is_empty(),
+        "the fixture command is discovered when enabled"
+    );
+    assert!(
+        discover_custom_commands(dir.path(), false).is_empty(),
+        "--no-commands must yield an empty command list"
+    );
+}
+
+/// `--mode plan` / `--permission-mode plan` seed the app's initial mode:
+/// plan enters with an allocated plan path (as Tab would), build stays put.
+#[test]
+fn initial_mode_seeds_the_app() {
+    let mut app = App::new();
+    apply_initial_mode(&mut app, true);
+    assert!(
+        app.mode == app::Mode::Plan,
+        "plan flag starts the TUI in plan mode"
+    );
+    let mut app = App::new();
+    apply_initial_mode(&mut app, false);
+    assert!(app.mode == app::Mode::Build);
 }

@@ -10,6 +10,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::error::{InvalidSnafu, Result};
 use crate::id::SessionRef;
+use crate::permissions::{
+    Effect, PermissionRule, ToolKey, is_valid_server_name, is_valid_wire_name,
+};
 use crate::run::BeforeExecute;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -59,6 +62,8 @@ pub enum PermissionPolicy {
 impl PermissionPolicy {
     /// Map the parsed flags, rejecting the impossible combination up front
     /// so every surface (print, term, recipe, TUI) enforces the same rule.
+    /// `--permission-mode bypassPermissions` is the same posture as
+    /// `--yolo`, so it feeds the same exclusivity check.
     pub fn from_flags(yolo: bool, auto_review: bool) -> Result<Self> {
         match (yolo, auto_review) {
             (true, true) => InvalidSnafu {
@@ -70,6 +75,23 @@ impl PermissionPolicy {
             (false, false) => Ok(Self::Standard),
         }
     }
+}
+
+/// `--permission-mode` (Claude Code SDK spellings preserved). `default` is
+/// the standard posture; `bypassPermissions` matches `--yolo`; `plan` maps
+/// to plan mode; `acceptEdits` parses but is rejected by [`Cli::validate`]
+/// until it is implemented.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum CliPermissionMode {
+    #[default]
+    #[value(name = "default")]
+    Default,
+    #[value(name = "acceptEdits")]
+    AcceptEdits,
+    #[value(name = "bypassPermissions")]
+    BypassPermissions,
+    #[value(name = "plan")]
+    Plan,
 }
 
 #[derive(Debug, Parser)]
@@ -115,16 +137,18 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
 
-    /// Initial mode (build, plan, flow).
-    #[arg(long, value_enum, default_value_t = CliMode::Build)]
-    pub mode: CliMode,
+    /// Initial mode (build, plan, flow). Defaults to build; kept optional
+    /// so an explicit `--mode` stays distinguishable from the default when
+    /// `--permission-mode plan` asks for plan mode.
+    #[arg(long, value_enum)]
+    pub mode: Option<CliMode>,
 
     /// Input format (text or stream-json for SDK mode; task 84).
     #[arg(long, value_enum, default_value_t = InputFormat::Text)]
     pub input_format: InputFormat,
 
-    /// Skip loading custom commands (accepted for compatibility; the
-    /// custom-command subsystem is task 91).
+    /// Skip discovering custom slash commands (`.craft/commands`,
+    /// `.claude/commands`) in the interactive TUI.
     #[arg(long)]
     pub no_commands: bool,
 
@@ -140,12 +164,16 @@ pub struct Cli {
     #[arg(long)]
     pub exit_on_done: bool,
 
-    /// Pre-approve tools (comma-separated). Accepts PascalCase (Claude Code)
-    /// or snake_case.
+    /// Pre-approve tools (comma-separated): adds scope-universal allow
+    /// rules so the named tools run without a permission prompt. This does
+    /// NOT restrict the advertised tool set — every tool stays available.
+    /// Accepts PascalCase (Claude Code) or snake_case.
     #[arg(long, value_delimiter = ',', visible_alias = "allowedTools")]
     pub allowed_tools: Vec<String>,
 
-    /// Disallowed tools (comma-separated).
+    /// Deny tools at the permission gate (comma-separated): calls to the
+    /// named tools fail with a permission-denied message; they stay
+    /// advertised. Accepts PascalCase or snake_case.
     #[arg(long, value_delimiter = ',', visible_alias = "disallowedTools")]
     pub disallowed_tools: Vec<String>,
 
@@ -169,9 +197,11 @@ pub struct Cli {
     #[arg(long)]
     pub append_system_prompt: Option<String>,
 
-    /// Permission mode for SDK (accepted, used in task 84).
-    #[arg(long)]
-    pub permission_mode: Option<String>,
+    /// Permission posture: `default`, `plan` (plan mode), or
+    /// `bypassPermissions` (same as `--yolo`). `acceptEdits` is rejected
+    /// as not supported yet.
+    #[arg(long, value_enum)]
+    pub permission_mode: Option<CliPermissionMode>,
 
     /// Include partial streaming messages in SDK output (task 84).
     #[arg(long)]
@@ -366,19 +396,176 @@ impl Cli {
         self.print && matches!(self.input_format, InputFormat::StreamJson)
     }
 
-    /// The run's permission policy from `--yolo` / `-A`; the exclusive
-    /// pair is rejected here (via [`Cli::validate`]) for every surface.
+    /// The run's permission policy from `--yolo` / `-A` (with
+    /// `--permission-mode bypassPermissions` counting as `--yolo`); the
+    /// exclusive pair is rejected here (via [`Cli::validate`]) for every
+    /// surface.
     pub fn permission_policy(&self) -> Result<PermissionPolicy> {
-        PermissionPolicy::from_flags(self.yolo, self.auto_review)
+        let yolo = self.yolo || self.permission_mode == Some(CliPermissionMode::BypassPermissions);
+        PermissionPolicy::from_flags(yolo, self.auto_review)
+    }
+
+    /// The effective initial mode: an explicit `--mode` wins, else
+    /// `--permission-mode plan` upgrades the default to plan mode.
+    pub fn run_mode(&self) -> CliMode {
+        match (&self.permission_mode, self.mode.as_ref()) {
+            (Some(CliPermissionMode::Plan), None) => CliMode::Plan,
+            (_, Some(mode)) => mode.clone(),
+            _ => CliMode::Build,
+        }
+    }
+
+    /// Normalize one `--allowed-tools` / `--disallowed-tools` entry to a
+    /// [`ToolKey`]. PascalCase native names (`Read`) become their snake
+    /// registry names (`read`); snake names pass through. MCP tools accept
+    /// the wire form `server__tool`, the Claude-Code spellings
+    /// `mcp__server__tool` / `mcp__server` (server-wide); MCP entries are
+    /// syntax-validated only, since they cannot be checked against a fixed
+    /// registry.
+    pub fn normalize_tool_spec(spec: &str) -> Result<ToolKey> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return InvalidSnafu {
+                reason: "empty tool name in --allowed-tools/--disallowed-tools".to_string(),
+            }
+            .fail();
+        }
+        if spec == "*" {
+            return InvalidSnafu {
+                reason: "wildcard tool rules are not supported on the CLI; \
+                         use a `*` rule in permissions.bml instead"
+                    .to_string(),
+            }
+            .fail();
+        }
+        let body = spec.strip_prefix("mcp__").unwrap_or(spec);
+        if body != spec || body.contains("__") {
+            return match body.split_once("__") {
+                Some((server, tool))
+                    if is_valid_server_name(server) && is_valid_wire_name(tool) =>
+                {
+                    Ok(ToolKey::McpTool {
+                        server: server.into(),
+                        tool: tool.into(),
+                    })
+                }
+                None if is_valid_server_name(body) => Ok(ToolKey::McpServer {
+                    server: body.into(),
+                }),
+                _ => InvalidSnafu {
+                    reason: format!(
+                        "invalid MCP tool spec {spec:?}: expected mcp__server__tool, \
+                         mcp__server, or the wire form server__tool"
+                    ),
+                }
+                .fail(),
+            };
+        }
+        let normalized = pascal_to_snake(spec);
+        let names = crate::tools::native_tool_names();
+        // Some registry names are concatenated (`webfetch`, `multiedit`),
+        // so `WebFetch`/`web_fetch` both resolve after the snake pass.
+        let hit = if names.contains(&normalized.as_str()) {
+            normalized
+        } else {
+            let concatenated = normalized.replace('_', "");
+            if names.contains(&concatenated.as_str()) {
+                concatenated
+            } else {
+                return InvalidSnafu {
+                    reason: format!("unknown tool '{spec}'. Valid tools: {}", names.join(", ")),
+                }
+                .fail();
+            }
+        };
+        Ok(ToolKey::native(&hit))
+    }
+
+    /// The CLI tool policy as scope-universal permission rules: one `Allow`
+    /// per `--allowed-tools` entry, one `Deny` per `--disallowed-tools`
+    /// entry. Overlapping names are rejected by [`Cli::validate`].
+    pub fn tool_policy(&self) -> Result<Vec<PermissionRule>> {
+        let mut allow = Vec::new();
+        for spec in &self.allowed_tools {
+            let key = Self::normalize_tool_spec(spec)?;
+            if !allow.contains(&key) {
+                allow.push(key);
+            }
+        }
+        let mut deny = Vec::new();
+        for spec in &self.disallowed_tools {
+            let key = Self::normalize_tool_spec(spec)?;
+            if !deny.contains(&key) {
+                deny.push(key);
+            }
+        }
+        if let Some(conflict) = allow.iter().find(|key| deny.contains(key)) {
+            return InvalidSnafu {
+                reason: format!(
+                    "--allowed-tools and --disallowed-tools both name `{conflict}`; pick one"
+                ),
+            }
+            .fail();
+        }
+        let rules = allow
+            .into_iter()
+            .map(|tool| PermissionRule {
+                tool,
+                scope: None,
+                effect: Effect::Allow,
+            })
+            .chain(deny.into_iter().map(|tool| PermissionRule {
+                tool,
+                scope: None,
+                effect: Effect::Deny,
+            }))
+            .collect();
+        Ok(rules)
     }
 
     /// Cross-flag validation the reference performs before dispatch.
     /// Parse-level mistakes (bad enum values, unknown flags) are already
     /// handled by clap.
     pub fn validate(&self) -> Result<()> {
+        if let Some(mode) = self.permission_mode {
+            match mode {
+                CliPermissionMode::Default => {}
+                CliPermissionMode::AcceptEdits => {
+                    return InvalidSnafu {
+                        reason: "--permission-mode acceptEdits is not supported yet".to_string(),
+                    }
+                    .fail();
+                }
+                CliPermissionMode::BypassPermissions => {
+                    if self.auto_review {
+                        return InvalidSnafu {
+                            reason: "--permission-mode bypassPermissions cannot be combined \
+                                     with -A/--auto-review"
+                                .to_string(),
+                        }
+                        .fail();
+                    }
+                }
+                CliPermissionMode::Plan => {
+                    if self
+                        .mode
+                        .as_ref()
+                        .is_some_and(|mode| mode != &CliMode::Plan)
+                    {
+                        return InvalidSnafu {
+                            reason: "--permission-mode plan cannot be combined with \
+                                     an explicit --mode build"
+                                .to_string(),
+                        }
+                        .fail();
+                    }
+                }
+            }
+        }
         self.permission_policy()?;
+        self.tool_policy()?;
         self.thinking_override()?;
-        if matches!(self.mode, CliMode::Flow) {
+        if matches!(self.run_mode(), CliMode::Flow) {
             return InvalidSnafu {
                 reason: "--mode flow is not available yet (Flow mode is ported last)",
             }
@@ -656,7 +843,7 @@ mod tests {
     fn defaults_match_the_reference() {
         let cli = parse(&["hi"]).unwrap();
         assert!(!cli.print);
-        assert_eq!(cli.mode, CliMode::Build);
+        assert_eq!(cli.run_mode(), CliMode::Build);
         assert_eq!(cli.output_format, OutputFormat::Text);
         assert_eq!(cli.input_format, InputFormat::Text);
         assert!(cli.images.is_empty());
@@ -965,6 +1152,181 @@ mod tests {
         assert!(parse(&["prompt", "--names"]).is_err());
         assert!(parse(&["prompt", "--tools", "--names"]).is_ok());
     }
+
+    #[test]
+    fn tool_specs_normalize_pascal_snake_and_mcp_forms() {
+        use crate::permissions::ToolKey;
+        assert_eq!(
+            Cli::normalize_tool_spec("Read").unwrap(),
+            ToolKey::native("read")
+        );
+        assert_eq!(
+            Cli::normalize_tool_spec("ViewImage").unwrap(),
+            ToolKey::native("view_image")
+        );
+        assert_eq!(
+            Cli::normalize_tool_spec("bash").unwrap(),
+            ToolKey::native("bash")
+        );
+        // Concatenated registry names: the snake pass, then the joined form.
+        assert_eq!(
+            Cli::normalize_tool_spec("WebFetch").unwrap(),
+            ToolKey::native("webfetch")
+        );
+        assert_eq!(
+            Cli::normalize_tool_spec("web_fetch").unwrap(),
+            ToolKey::native("webfetch")
+        );
+        assert_eq!(
+            Cli::normalize_tool_spec("MultiEdit").unwrap(),
+            ToolKey::native("multiedit")
+        );
+        assert_eq!(
+            Cli::normalize_tool_spec("github__create_issue").unwrap(),
+            ToolKey::McpTool {
+                server: "github".into(),
+                tool: "create_issue".into()
+            }
+        );
+        assert_eq!(
+            Cli::normalize_tool_spec("mcp__github__create_issue").unwrap(),
+            ToolKey::McpTool {
+                server: "github".into(),
+                tool: "create_issue".into()
+            }
+        );
+        assert_eq!(
+            Cli::normalize_tool_spec("mcp__github").unwrap(),
+            ToolKey::McpServer {
+                server: "github".into()
+            }
+        );
+    }
+
+    #[test]
+    fn bad_tool_specs_error_with_guidance() {
+        for bad in ["*", "NotATool", "", "mcp__", "my_server__tool"] {
+            assert!(Cli::normalize_tool_spec(bad).is_err(), "{bad:?}");
+        }
+        let wildcard = Cli::normalize_tool_spec("*").unwrap_err().to_string();
+        assert!(wildcard.contains("permissions.bml"), "{wildcard}");
+        let unknown = Cli::normalize_tool_spec("NotATool")
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("unknown tool"), "{unknown}");
+        assert!(unknown.contains("Valid tools"), "{unknown}");
+        assert!(unknown.contains("read"), "names the valid tools: {unknown}");
+    }
+
+    #[test]
+    fn tool_policy_produces_scope_universal_rules() {
+        use crate::permissions::Effect;
+        let cli = parse(&[
+            "--allowed-tools",
+            "Read,read,Bash",
+            "--disallowed-tools",
+            "mcp__github",
+        ])
+        .unwrap();
+        let rules = cli.tool_policy().unwrap();
+        // `Read` and `read` collapse to one rule; effects are as flagged.
+        assert_eq!(rules.len(), 3);
+        assert!(rules.iter().all(|r| r.scope.is_none()));
+        let bash = rules
+            .iter()
+            .find(|r| r.tool == crate::permissions::ToolKey::native("bash"))
+            .expect("bash allow rule");
+        assert_eq!(bash.effect, Effect::Allow);
+        let github = rules
+            .iter()
+            .find(|r| matches!(r.tool, crate::permissions::ToolKey::McpServer { .. }))
+            .expect("github deny rule");
+        assert_eq!(github.effect, Effect::Deny);
+        assert!(
+            parse(&["-p", "hi"])
+                .unwrap()
+                .tool_policy()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn overlapping_allow_and_deny_lists_error_naming_the_tool() {
+        let cli = parse(&[
+            "--allowedTools",
+            "Read,bash",
+            "--disallowed-tools",
+            "Bash",
+            "-p",
+            "hi",
+        ])
+        .unwrap();
+        let err = cli.validate().unwrap_err().to_string();
+        assert!(err.contains("bash"), "{err}");
+    }
+
+    #[test]
+    fn permission_mode_maps_postures_and_rejects_unsupported() {
+        assert_eq!(
+            parse(&["--permission-mode", "default", "-p", "hi"])
+                .unwrap()
+                .permission_policy()
+                .unwrap(),
+            PermissionPolicy::Standard
+        );
+        assert_eq!(
+            parse(&["--permission-mode", "bypassPermissions", "-p", "hi"])
+                .unwrap()
+                .permission_policy()
+                .unwrap(),
+            PermissionPolicy::Yolo
+        );
+        let err = parse(&["--permission-mode", "acceptEdits", "hi"])
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("acceptEdits"), "{err}");
+        let err = parse(&["--permission-mode", "bypassPermissions", "-A", "hi"])
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auto-review"), "{err}");
+    }
+
+    #[test]
+    fn permission_mode_plan_maps_to_plan_mode() {
+        let cli = parse(&["--permission-mode", "plan", "-p", "hi"]).unwrap();
+        assert!(cli.validate().is_ok());
+        assert_eq!(cli.run_mode(), CliMode::Plan);
+        assert_eq!(
+            parse(&["--mode", "plan", "--permission-mode", "plan", "-p", "hi"])
+                .unwrap()
+                .run_mode(),
+            CliMode::Plan
+        );
+        let err = parse(&["--mode", "build", "--permission-mode", "plan", "-p", "hi"])
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--mode build"), "{err}");
+        // Without the flag the mode still defaults to build.
+        assert_eq!(parse(&["-p", "hi"]).unwrap().run_mode(), CliMode::Build);
+    }
+
+    #[test]
+    fn print_maps_the_cli_tool_policy_onto_the_query() {
+        let cli = parse(&["-p", "--disallowed-tools", "bash", "hi"]).unwrap();
+        let query = HeadlessQuery::for_print(&cli, "hi".into(), None).unwrap();
+        assert_eq!(query.tool_policy.len(), 1);
+        assert_eq!(
+            query.tool_policy[0].tool,
+            crate::permissions::ToolKey::native("bash")
+        );
+    }
 }
 
 /// `craft --print` (G.3): run one prompt to completion against the
@@ -1036,6 +1398,23 @@ fn inject_context(prompt: &str, context: &[String]) -> String {
     out
 }
 
+/// PascalCase → snake_case (`Read`→`read`, `ViewImage`→`view_image`);
+/// already-snake names pass through unchanged.
+fn pascal_to_snake(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// One headless agent query in print mode. Both `--print` and
 /// `craft term run` funnel through here; `config.agent.preamble` must
 /// already be the effective preamble.
@@ -1051,6 +1430,11 @@ pub struct HeadlessQuery {
     pub session_id: Option<SessionRef>,
     /// Whether `--yolo` / `-A` bypass the permission gate.
     pub policy: PermissionPolicy,
+    /// CLI tool policy (`--allowed-tools` / `--disallowed-tools`) as
+    /// permission rules, applied to the run's permission engine before
+    /// the first turn. Empty for surfaces that do not expose the flags
+    /// (`term run`, `recipe run`).
+    pub tool_policy: Vec<PermissionRule>,
 }
 
 impl HeadlessQuery {
@@ -1065,9 +1449,10 @@ impl HeadlessQuery {
             model: cli.model.clone(),
             output_format: cli.output_format.clone(),
             verbose: cli.verbose,
-            mode: cli.mode.clone(),
+            mode: cli.run_mode(),
             session_id,
             policy: cli.permission_policy()?,
+            tool_policy: cli.tool_policy()?,
         })
     }
 }
@@ -1179,6 +1564,7 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
         PermissionPolicy::Yolo => env.permissions.set_yolo(true),
         PermissionPolicy::AutoReview => env.permissions.set_auto_review(true),
     }
+    env.permissions.add_cli_rules(q.tool_policy);
     // Destructive-hinted MCP tools must force a decision even under an
     // allow rule, exactly like the TUI/ACP gates: feed the engine the
     // published annotations before the gate reads it.

@@ -842,4 +842,12 @@ impl Provider for CraftProvider {
     fn mcp(&self) -> Option<crate::mcp::McpHandle> {
         self.mcp.clone()
     }
+
+    fn custom_commands(&self) -> bool {
+        self.custom_commands
+    }
+
+    fn starts_in_plan_mode(&self) -> bool {
+        self.starts_in_plan_mode
+    }
 }
