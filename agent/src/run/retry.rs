@@ -136,6 +136,23 @@ async fn wait_cancellable(delay: Duration, cancel: &CancelToken) -> Result<(), S
     }
 }
 
+/// Rebudge the request's output cap for a fallback hop: never above the
+/// hop's own `max_output` or what remains of its window, floored at
+/// [`super::MIN_OUTPUT_TOKENS`] exactly like the primary clamp. `None`
+/// limits everywhere leave the request untouched.
+pub(crate) fn hop_max_tokens(
+    request_max_tokens: Option<u64>,
+    hop: &crate::providers::DynamicModel,
+    prompt_tokens: u64,
+) -> Option<u64> {
+    let max_output = hop.max_output().map(u64::from);
+    let configured = match (request_max_tokens, max_output) {
+        (Some(request), Some(hop_cap)) => Some(request.min(hop_cap)),
+        (request, hop_cap) => request.or(hop_cap),
+    };
+    super::clamped_max_tokens(hop.context_length(), prompt_tokens, configured)
+}
+
 /// Run one model stream under the retry machine. The primary model is tried
 /// first; `fallbacks` are advanced to in order when key rotation fails or is
 /// unavailable, and once the chain is spent the last hop keeps retrying.
@@ -147,6 +164,7 @@ pub(crate) async fn stream_with_retry<'a, M>(
     rotate: Option<&RotateKey>,
     budget: &TransientBudget,
     request: &CompletionRequest,
+    prompt_tokens: u64,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> Result<(TurnOutput, Option<&'a str>), StreamFailure>
@@ -163,10 +181,27 @@ where
                 streamed: String::new(),
             });
         }
+        // Fresh clone per attempt: the pristine `request` is never mutated,
+        // so a later hop (or the primary) never inherits another model's
+        // rebudgeted cap. Only fallback hops are rebudgeted; the primary
+        // keeps the cap the run loop already clamped for it.
+        let mut dispatch_request = request.clone();
+        if next_fallback > 0 {
+            let hop = &fallbacks[next_fallback - 1];
+            if let Some(cap) = hop_max_tokens(request.max_tokens, hop, prompt_tokens) {
+                dispatch_request.max_tokens = Some(cap);
+            }
+        }
         let result = if next_fallback == 0 {
-            run_model_stream(primary, request.clone(), cancel, emit).await
+            run_model_stream(primary, dispatch_request, cancel, emit).await
         } else {
-            run_model_stream(&fallbacks[next_fallback - 1], request.clone(), cancel, emit).await
+            run_model_stream(
+                &fallbacks[next_fallback - 1],
+                dispatch_request,
+                cancel,
+                emit,
+            )
+            .await
         };
         let failure = match result {
             Ok(output) => {
@@ -211,18 +246,42 @@ where
                 // Even a successful rotation waits briefly: a hook that
                 // returns true without changing the key must not hot-loop.
                 wait_cancellable(ROTATION_DELAY, cancel).await?;
-            } else if let Some(hop) = fallbacks.get(next_fallback) {
-                next_fallback += 1;
-                retry = RetryState::new();
-                advanced = true;
-                emit(Event::Retry {
-                    attempt: 1,
-                    message: format!(
-                        "key rotation exhausted; failing over to {}",
-                        hop.label().unwrap_or("fallback model")
-                    ),
-                    delay_ms: 0,
-                });
+            } else {
+                // Advance past hops whose window the prompt cannot fit
+                // (bounded by the chain's length), then fail over to the
+                // first fitting one. A fully skipped chain leaves
+                // `advanced` unset, so the current model keeps its bounded
+                // backoff instead of calling a hop that cannot fit.
+                let mut cursor = next_fallback;
+                while let Some(hop) = fallbacks.get(cursor) {
+                    cursor += 1;
+                    if let Some(window) = hop
+                        .context_length()
+                        .filter(|w| prompt_tokens >= u64::from(*w))
+                    {
+                        emit(Event::Retry {
+                            attempt: 1,
+                            message: format!(
+                                "skipping {}: prompt (~{prompt_tokens} tokens) exceeds its context window ({window})",
+                                hop.label().unwrap_or("fallback model"),
+                            ),
+                            delay_ms: 0,
+                        });
+                        continue;
+                    }
+                    next_fallback = cursor;
+                    retry = RetryState::new();
+                    advanced = true;
+                    emit(Event::Retry {
+                        attempt: 1,
+                        message: format!(
+                            "key rotation exhausted; failing over to {}",
+                            hop.label().unwrap_or("fallback model")
+                        ),
+                        delay_ms: 0,
+                    });
+                    break;
+                }
             }
         }
         if !advanced {
@@ -314,6 +373,7 @@ mod tests {
             None,
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|e| events.lock().unwrap().push(e),
         )
@@ -340,6 +400,7 @@ mod tests {
             None,
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|e| events.lock().unwrap().push(e),
         )
@@ -367,6 +428,7 @@ mod tests {
             None,
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|e| events.lock().unwrap().push(e),
         )
@@ -401,6 +463,7 @@ mod tests {
             Some(&rotate),
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|e| events.lock().unwrap().push(e),
         )
@@ -432,6 +495,7 @@ mod tests {
             None,
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|e| events.lock().unwrap().push(e),
         )
@@ -466,6 +530,7 @@ mod tests {
             None,
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|e| events.lock().unwrap().push(e),
         )
@@ -487,6 +552,7 @@ mod tests {
             None,
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|e| events.lock().unwrap().push(e),
         )
@@ -516,6 +582,7 @@ mod tests {
             None,
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|_| {},
         )
@@ -544,6 +611,7 @@ mod tests {
             Some(&rotate),
             &TransientBudget::default(),
             &request(),
+            0,
             &cancel,
             &|e| events.lock().unwrap().push(e),
         )
@@ -563,7 +631,7 @@ mod tests {
             MockCompletionModel::from_stream_turns(vec![rate_limit_turn(), done_turn("never")]);
         let (_flag, cancel) = crate::run::cancel_channel();
         let events = std::sync::Mutex::new(Vec::new());
-        let failure = stream_with_retry(&model, &[], None, &budget, &request(), &cancel, &|e| {
+        let failure = stream_with_retry(&model, &[], None, &budget, &request(), 0, &cancel, &|e| {
             events.lock().unwrap().push(e)
         })
         .await
@@ -592,6 +660,7 @@ mod tests {
                 None,
                 &TransientBudget::default(),
                 &request(),
+                0,
                 &cancel,
                 &|_| {},
             )
@@ -604,5 +673,352 @@ mod tests {
             StreamFailure::Cancelled { streamed } => assert!(streamed.is_empty()),
             other => panic!("expected cancellation, got {other:?}"),
         }
+    }
+
+    // --- fallback-hop rebudgeting ---
+
+    /// Records the outgoing request before delegating to rig's mock;
+    /// `DynamicModel::wrap` erases rig's own recorder, so hop bodies whose
+    /// requests we must inspect wrap this instead.
+    struct RecordingModel {
+        mock: MockCompletionModel,
+        requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl RecordingModel {
+        fn from_turns(
+            turns: Vec<Vec<MockStreamEvent>>,
+        ) -> (Self, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    mock: MockCompletionModel::from_stream_turns(turns),
+                    requests: requests.clone(),
+                },
+                requests,
+            )
+        }
+    }
+
+    impl CompletionModel for RecordingModel {
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<rig_core::completion::CompletionResponse, rig_core::completion::CompletionError>
+        {
+            self.requests.lock().unwrap().push(request.clone());
+            self.mock.completion(request).await
+        }
+
+        async fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<
+            rig_core::streaming::StreamingCompletionResponse,
+            rig_core::completion::CompletionError,
+        > {
+            self.requests.lock().unwrap().push(request.clone());
+            self.mock.stream(request).await
+        }
+    }
+
+    /// A fallback hop wrapping a `RecordingModel`, with optional kind,
+    /// settings (for `max_output`), and context window.
+    fn hop(
+        label: &str,
+        turns: Vec<Vec<MockStreamEvent>>,
+        kind: Option<crate::providers::ProviderKind>,
+        settings: Option<&crate::config::ModelConfig>,
+        context_length: Option<u32>,
+    ) -> (
+        crate::providers::DynamicModel,
+        Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    ) {
+        let (recording, requests) = RecordingModel::from_turns(turns);
+        let mut model = crate::providers::DynamicModel::wrap(Some(label), recording)
+            .with_limits(context_length);
+        if let Some(kind) = kind {
+            model = model.with_kind(kind);
+        }
+        if let Some(settings) = settings {
+            model = model.with_settings(Some(settings));
+        }
+        (model, requests)
+    }
+
+    #[tokio::test]
+    async fn hop_never_receives_more_than_its_own_output_limit() {
+        let primary =
+            MockCompletionModel::from_stream_turns(vec![rate_limit_turn(), done_turn("late")]);
+        let settings = crate::config::ModelConfig {
+            max_output_tokens: Some(3_000),
+            ..Default::default()
+        };
+        let (fallback, requests) = hop(
+            "capped-hop",
+            vec![done_turn("fallback")],
+            Some(crate::providers::ProviderKind::Openai),
+            Some(&settings),
+            None,
+        );
+        let (_, cancel) = crate::run::cancel_channel();
+        let events = std::sync::Mutex::new(Vec::new());
+        let request = crate::edge::to_request(&[], &[], None, None, Some(8_192));
+        let chain = [fallback];
+        let (output, served) = stream_with_retry(
+            &primary,
+            &chain,
+            None,
+            &TransientBudget::default(),
+            &request,
+            1,
+            &cancel,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(served, Some("capped-hop"));
+        assert_eq!(
+            requests.lock().unwrap()[0].max_tokens,
+            Some(3_000),
+            "hop gets min(primary cap, hop max_output)"
+        );
+    }
+
+    #[tokio::test]
+    async fn hop_output_limit_fills_an_unset_request_cap() {
+        let primary =
+            MockCompletionModel::from_stream_turns(vec![rate_limit_turn(), done_turn("late")]);
+        let settings = crate::config::ModelConfig {
+            max_output_tokens: Some(3_000),
+            ..Default::default()
+        };
+        let (fallback, requests) = hop(
+            "capped-hop",
+            vec![done_turn("fallback")],
+            Some(crate::providers::ProviderKind::Openai),
+            Some(&settings),
+            None,
+        );
+        let (_, cancel) = crate::run::cancel_channel();
+        let events = std::sync::Mutex::new(Vec::new());
+        let request = request(); // no configured cap
+        let (output, _) = stream_with_retry(
+            &primary,
+            &[fallback],
+            None,
+            &TransientBudget::default(),
+            &request,
+            1,
+            &cancel,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(
+            requests.lock().unwrap()[0].max_tokens,
+            Some(3_000),
+            "an unset cap is filled from the hop's own limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn hop_window_clamps_the_output_budget() {
+        let primary =
+            MockCompletionModel::from_stream_turns(vec![rate_limit_turn(), done_turn("late")]);
+        let (fallback, requests) = hop(
+            "window-hop",
+            vec![done_turn("fallback")],
+            Some(crate::providers::ProviderKind::Openai),
+            None,
+            Some(20_000),
+        );
+        let (_, cancel) = crate::run::cancel_channel();
+        let events = std::sync::Mutex::new(Vec::new());
+        let request = crate::edge::to_request(&[], &[], None, None, Some(16_000));
+        let (output, _) = stream_with_retry(
+            &primary,
+            &[fallback],
+            None,
+            &TransientBudget::default(),
+            &request,
+            10_000,
+            &cancel,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(
+            requests.lock().unwrap()[0].max_tokens,
+            Some(10_000),
+            "cap shrinks to the remaining window"
+        );
+    }
+
+    #[tokio::test]
+    async fn hop_window_clamp_floors_at_min_output_tokens() {
+        let primary =
+            MockCompletionModel::from_stream_turns(vec![rate_limit_turn(), done_turn("late")]);
+        let (fallback, requests) = hop(
+            "tight-hop",
+            vec![done_turn("fallback")],
+            Some(crate::providers::ProviderKind::Openai),
+            None,
+            Some(12_000),
+        );
+        let (_, cancel) = crate::run::cancel_channel();
+        let events = std::sync::Mutex::new(Vec::new());
+        let request = crate::edge::to_request(&[], &[], None, None, Some(16_000));
+        let (output, _) = stream_with_retry(
+            &primary,
+            &[fallback],
+            None,
+            &TransientBudget::default(),
+            &request,
+            11_000, // leaves 1000 — below the floor
+            &cancel,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(
+            requests.lock().unwrap()[0].max_tokens,
+            Some(crate::run::MIN_OUTPUT_TOKENS),
+            "the clamp floors exactly like the primary's"
+        );
+    }
+
+    #[tokio::test]
+    async fn unfit_hop_is_skipped_without_being_called() {
+        let primary = MockCompletionModel::from_stream_turns(vec![rate_limit_turn()]);
+        let (unfit, unfit_requests) = hop(
+            "unfit-hop",
+            vec![done_turn("never")],
+            None,
+            None,
+            Some(8_000),
+        );
+        let (fit, fit_requests) = hop("fit-hop", vec![done_turn("fit")], None, None, None);
+        let (_, cancel) = crate::run::cancel_channel();
+        let events = std::sync::Mutex::new(Vec::new());
+        let request = request();
+        let chain = [unfit, fit];
+        let (output, served) = stream_with_retry(
+            &primary,
+            &chain,
+            None,
+            &TransientBudget::default(),
+            &request,
+            9_000,
+            &cancel,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.assistant.text(), "fit");
+        assert_eq!(served, Some("fit-hop"));
+        assert!(
+            unfit_requests.lock().unwrap().is_empty(),
+            "the unfit hop is never called"
+        );
+        assert_eq!(fit_requests.lock().unwrap().len(), 1);
+        let guard = events.lock().unwrap();
+        let messages: Vec<&str> = guard
+            .iter()
+            .filter_map(|e| match e {
+                Event::Retry { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(messages.contains(
+            &"skipping unfit-hop: prompt (~9000 tokens) exceeds its context window (8000)"
+        ));
+    }
+
+    #[tokio::test]
+    async fn all_unfit_hops_end_in_bounded_backoff_on_current_model() {
+        let turns = std::iter::repeat_with(rate_limit_turn)
+            .take(12)
+            .collect::<Vec<_>>();
+        let primary = MockCompletionModel::from_stream_turns(turns);
+        let (small_a, a_requests) = hop("small-a", vec![done_turn("a")], None, None, Some(4_000));
+        let (small_b, b_requests) = hop("small-b", vec![done_turn("b")], None, None, Some(5_000));
+        let (_, cancel) = crate::run::cancel_channel();
+        let events = std::sync::Mutex::new(Vec::new());
+        let request = request();
+        let failure = stream_with_retry(
+            &primary,
+            &[small_a, small_b],
+            None,
+            &TransientBudget::default(),
+            &request,
+            9_000,
+            &cancel,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(failure, StreamFailure::Error { .. }),
+            "bounded primary backoff, got {failure:?}"
+        );
+        assert!(a_requests.lock().unwrap().is_empty());
+        assert!(b_requests.lock().unwrap().is_empty());
+        let guard = events.lock().unwrap();
+        let skips = guard
+            .iter()
+            .filter(
+                |e| matches!(e, Event::Retry { message, .. } if message.starts_with("skipping ")),
+            )
+            .count();
+        assert!(skips > 0, "skip events are emitted");
+        assert!(
+            guard.len() < 60,
+            "event stream stays bounded, got {}",
+            guard.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_are_rederived_from_the_pristine_request_per_attempt() {
+        let primary = MockCompletionModel::from_stream_turns(vec![rate_limit_turn()]);
+        let settings = crate::config::ModelConfig {
+            max_output_tokens: Some(2_000),
+            ..Default::default()
+        };
+        let (hop_a, a_requests) = hop(
+            "hop-a",
+            vec![rate_limit_turn()],
+            Some(crate::providers::ProviderKind::Openai),
+            Some(&settings),
+            None,
+        );
+        let (hop_b, b_requests) = hop("hop-b", vec![done_turn("b")], None, None, None);
+        let (_, cancel) = crate::run::cancel_channel();
+        let events = std::sync::Mutex::new(Vec::new());
+        let request = crate::edge::to_request(&[], &[], None, None, Some(8_192));
+        let (output, _) = stream_with_retry(
+            &primary,
+            &[hop_a, hop_b],
+            None,
+            &TransientBudget::default(),
+            &request,
+            1,
+            &cancel,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.assistant.text(), "b");
+        assert_eq!(a_requests.lock().unwrap()[0].max_tokens, Some(2_000));
+        assert_eq!(
+            b_requests.lock().unwrap()[0].max_tokens,
+            Some(8_192),
+            "hop B sees the original cap, not hop A's rebudget"
+        );
     }
 }

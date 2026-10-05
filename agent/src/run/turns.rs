@@ -48,6 +48,7 @@ pub(super) async fn stream_turn<M: CompletionModel + Clone>(
     measured_prompt_tokens: &mut u64,
     transient_budget: &retry::TransientBudget,
     request: &CompletionRequest,
+    prompt_tokens: u64,
 ) -> Streamed {
     match match refreshed_model.as_ref() {
         Some(refreshed) => {
@@ -57,6 +58,7 @@ pub(super) async fn stream_turn<M: CompletionModel + Clone>(
                 params.retry.rotate.as_ref(),
                 transient_budget,
                 request,
+                prompt_tokens,
                 cancel,
                 emit,
             )
@@ -69,6 +71,7 @@ pub(super) async fn stream_turn<M: CompletionModel + Clone>(
                 params.retry.rotate.as_ref(),
                 transient_budget,
                 request,
+                prompt_tokens,
                 cancel,
                 emit,
             )

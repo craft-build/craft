@@ -63,8 +63,6 @@ use crate::history::{ImageBlock, Message};
 // Module names for the test tree: `run/tests/*` qualifies `history::` and
 // `compression::` through this scope.
 #[cfg(test)]
-use crate::compression;
-#[cfg(test)]
 use crate::history;
 
 /// How many times a run recovers from a context-overflow stream error by
@@ -530,6 +528,7 @@ async fn run_loop<M: CompletionModel + Clone>(
             &mut measured_prompt_tokens,
             &transient_budget,
             &request,
+            prompt_tokens,
         )
         .await
         {

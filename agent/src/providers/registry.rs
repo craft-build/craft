@@ -164,8 +164,19 @@ macro_rules! providers {
 
             /// Build with explicit per-model overrides, preserving protocol kind.
             pub fn configured_model(&self, config: &ProviderConfig, model: &str) -> Result<DynamicModel> {
+                let settings = config.models.get(model);
+                let context_length = settings
+                    .and_then(|s| s.context_length)
+                    .or_else(|| {
+                        crate::models_dev::metadata_for(
+                            crate::thinking::provider_catalog_key(config),
+                            model,
+                        )
+                        .map(|meta| meta.context)
+                    });
                 Ok(self.completion_model(model)?
-                    .with_settings(config.models.get(model))
+                    .with_settings(settings)
+                    .with_limits(context_length)
                     .with_discovery(config))
             }
 

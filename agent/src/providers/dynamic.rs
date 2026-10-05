@@ -20,6 +20,7 @@ pub struct DynamicModel {
     settings: Option<crate::config::ModelConfig>,
     catalog: Option<&'static str>,
     endpoint: Option<String>,
+    context_length: Option<u32>,
 }
 
 type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CompletionError>> + Send + 'a>>;
@@ -51,7 +52,16 @@ impl DynamicModel {
             settings: None,
             catalog: None,
             endpoint: None,
+            context_length: None,
         }
+    }
+
+    /// Context window for this handle, when known (config override or the
+    /// models.dev catalog); fallback-hop budgeting consults it, `None`
+    /// leaves requests untouched.
+    pub(crate) fn with_limits(mut self, context_length: Option<u32>) -> Self {
+        self.context_length = context_length;
+        self
     }
 
     pub(crate) fn with_kind(mut self, kind: super::ProviderKind) -> Self {
@@ -143,6 +153,25 @@ impl DynamicModel {
     /// The model/deployment ID this handle was built for, when known.
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
+    }
+
+    pub fn context_length(&self) -> Option<u32> {
+        self.context_length
+    }
+
+    /// Output-token ceiling via the same metadata lookup `prepare` uses
+    /// (settings override → discovered → catalog).
+    pub fn max_output(&self) -> Option<u32> {
+        let kind = self.kind?;
+        let id = self.label.as_deref().unwrap_or("");
+        crate::thinking::model_info_for_endpoint(
+            self.catalog
+                .unwrap_or_else(|| crate::thinking::catalog_key(kind)),
+            self.endpoint.as_deref(),
+            id,
+            self.settings.as_ref(),
+        )
+        .max_output
     }
 }
 
