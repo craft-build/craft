@@ -21,7 +21,6 @@ use super::vcc::vcc_compact;
 /// A stage whose last run saved less than this fraction is disarmed until
 /// another stage compacts effectively (ported from Craft's threshold).
 pub const INEFFECTIVE_SAVINGS: f32 = 0.1;
-
 /// Ordered stage list (ascending by context ratio).
 #[derive(Debug, Clone)]
 pub struct CompactionEngine {
@@ -48,6 +47,12 @@ pub struct CompactionState {
     /// `carry_from`). `None` (the default) protects nothing, which is the
     /// correct state between turns.
     carry_from: Option<usize>,
+    /// Tokens the request carries besides its messages (system preamble +
+    /// serialized tool schemas), refreshed by the surfaces each turn and by
+    /// the run loop each run. Fill and overflow checks run against
+    /// `estimate_tokens(history) + request_overhead` so a large preamble or
+    /// MCP schema set triggers compaction before the provider overflows.
+    request_overhead: u64,
 }
 
 impl CompactionState {
@@ -80,6 +85,23 @@ impl CompactionState {
         self.carry_from
     }
 
+    /// Record the current request overhead (preamble + tool schema tokens);
+    /// call whenever the tool set or preamble may have changed.
+    pub fn set_request_overhead(&mut self, tokens: u64) {
+        self.request_overhead = tokens;
+    }
+
+    /// The request overhead the fill/overflow checks currently account for.
+    pub fn request_overhead(&self) -> u64 {
+        self.request_overhead
+    }
+
+    /// The overhead-inclusive estimate the engine's thresholds run against.
+    fn scaled_estimate(&self, history: &[Message]) -> u64 {
+        self.estimator
+            .scale(estimate_tokens(history).saturating_add(self.request_overhead))
+    }
+
     /// Recalibrate the estimator after an overflow: `actual` is the
     /// provider-reported prompt size for a request estimated at
     /// `estimated` tokens.
@@ -94,6 +116,9 @@ impl CompactionState {
     pub(crate) fn absorb_run(&mut self, run: &Self) {
         self.disarmed = run.disarmed.clone();
         self.carry_from = run.carry_from;
+        // `request_overhead` is deliberately NOT copied back: the live state
+        // may have been refreshed with a newer tool set (MCP connect between
+        // turns) while the clone was out, and a run never changes it.
     }
 }
 
@@ -163,8 +188,12 @@ impl CompactionEngine {
         };
         // The buffer is headroom the model needs for its reply, so the fill
         // checks run against the window minus the buffer (Craft's
-        // `is_overflow`: `usage >= window - buffer`).
-        let usable = u64::from(context_length.saturating_sub(self.buffer.resolve(context_length)));
+        // `is_overflow`: `usage >= window - buffer`) — never less than
+        // `MIN_OUTPUT_TOKENS`, so the output-cap floor and the compaction
+        // threshold agree on the same reservation.
+        let reserved =
+            u64::from(self.buffer.resolve(context_length)).max(crate::run::MIN_OUTPUT_TOKENS);
+        let usable = u64::from(context_length).saturating_sub(reserved);
         let mut ran = false;
         // Overflow forcing cascades: a VCC pass that leaves the history over
         // its limit forces the next (heavier) stage even below its threshold.
@@ -174,7 +203,7 @@ impl CompactionEngine {
             if threshold == 0 {
                 continue;
             }
-            let before = state.estimator.scale(estimate_tokens(history));
+            let before = state.scaled_estimate(history);
             let overflow = forced || before >= usable;
             if !overflow && before < threshold {
                 continue;
@@ -182,6 +211,10 @@ impl CompactionEngine {
             if state.disarmed.contains(&stage.kind) {
                 continue;
             }
+            // Compaction can only shrink history: the stage's budget must
+            // leave room for the overhead the request still carries, so the
+            // summary coexists with it inside the stage's threshold.
+            let stage_target = threshold.saturating_sub(state.request_overhead);
             // Unanswered input is held out of the summary and re-appended
             // verbatim; `carry_len == 0` between turns.
             let carry_len = history
@@ -189,8 +222,10 @@ impl CompactionEngine {
                 .saturating_sub(state.carry_from.unwrap_or(history.len()));
             let before_len = history.len();
             let under_limit = match stage.kind {
-                CompactionKind::Vcc => vcc_compact(history, threshold, estimate_tokens, carry_len),
-                CompactionKind::Llm => llm_compact(model, history, threshold, carry_len, None)
+                CompactionKind::Vcc => {
+                    vcc_compact(history, stage_target, estimate_tokens, carry_len)
+                }
+                CompactionKind::Llm => llm_compact(model, history, stage_target, carry_len, None)
                     .await
                     .unwrap_or(false),
             };
@@ -198,9 +233,7 @@ impl CompactionEngine {
             // leaves the history untouched; that is not an ineffective run,
             // so the stage stays armed — and the dedup cache and guardrails,
             // which describe the pre-compaction history, stay intact too.
-            if history.len() == before_len
-                && state.estimator.scale(estimate_tokens(history)) == before
-            {
+            if history.len() == before_len && state.scaled_estimate(history) == before {
                 continue;
             }
             if let Some(cache) = &state.dedup
@@ -220,7 +253,7 @@ impl CompactionEngine {
             if carry_len > 0 {
                 state.carry_from = Some(history.len().saturating_sub(carry_len));
             }
-            let after = state.estimator.scale(estimate_tokens(history));
+            let after = state.scaled_estimate(history);
             let savings = if before > 0 {
                 1.0 - (after as f32 / before as f32)
             } else {
@@ -461,31 +494,41 @@ mod tests {
     async fn calibrated_multiplier_tightens_thresholds() {
         // The raw estimate sits under the threshold, but a multiplier
         // recalibrated after an overflow pushes it over: the stage runs.
+        // The history is repeated so the 20% buffer clears the
+        // MIN_OUTPUT_TOKENS floor while the (5x-capped) multiplier can
+        // still carry the scaled estimate past the usable window.
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
         let mut state = CompactionState::default();
-        let mut history = long_history();
+        let mut history: Vec<Message> = std::iter::repeat_with(long_history)
+            .take(8)
+            .flatten()
+            .collect();
         let tokens = estimate_tokens(&history);
-        let context_length = ((tokens as f64 / 0.5) as u32).max(1);
+        // Fill ≈ 0.35: under the 0.6 threshold, under the usable window.
+        let context_length = ((tokens as f64 / 0.35) as u32).max(1);
         assert!(
             !engine
                 .maybe_compact(
                     &mut state,
                     &MockCompletionModel::text("x"),
                     &mut history,
-                    Some(context_length)
+                    Some(context_length),
                 )
                 .await,
             "raw estimate sits under the threshold"
         );
         state.recalibrate(context_length as u64 * 2, tokens);
-        let mut history = long_history();
+        let mut history: Vec<Message> = std::iter::repeat_with(long_history)
+            .take(8)
+            .flatten()
+            .collect();
         assert!(
             engine
                 .maybe_compact(
                     &mut state,
                     &MockCompletionModel::text("x"),
                     &mut history,
-                    Some(context_length)
+                    Some(context_length),
                 )
                 .await
         );
@@ -857,6 +900,161 @@ mod tests {
         assert!(
             cache.lock().unwrap().get(key, "read", &input).is_some(),
             "a declined compaction must not clear the dedup cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn large_request_overhead_triggers_compaction_history_alone_would_not() {
+        // A large preamble/MCP schema set counts against the fill: a history
+        // far under the threshold crosses it once the overhead rides along.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)])
+            .with_buffer(crate::config::CompactionBuffer::Percent(20));
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        // Window with plenty of headroom for the history alone (fill ≈ 0.01,
+        // buffer comfortably above the MIN_OUTPUT_TOKENS floor).
+        let context_length = (tokens * 100).max(1) as u32;
+        assert!(
+            !engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length),
+                )
+                .await,
+            "history alone sits under the threshold"
+        );
+        // A schema set 70x the history pushes the fill over 0.6 (and still
+        // under the usable window, so the proactive threshold — not the
+        // overflow path — is what fires).
+        state.set_request_overhead(tokens * 70);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length),
+                )
+                .await,
+            "history + request overhead must cross the threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_overhead_moves_the_trigger() {
+        // Tool-set change between turns: the same history/window that did not
+        // compact under a small overhead compacts after the tool set grows.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)])
+            .with_buffer(crate::config::CompactionBuffer::Percent(20));
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        let context_length = (tokens * 100).max(1) as u32;
+        state.set_request_overhead(tokens / 10);
+        assert!(
+            !engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length),
+                )
+                .await
+        );
+        state.set_request_overhead(tokens * 70);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length),
+                )
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_boundary_is_the_usable_window() {
+        // `before == usable` overflows (forces the stage); `usable - 1` with
+        // the fill under the proactive threshold does not.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.99)])
+            .with_buffer(crate::config::CompactionBuffer::Tokens(0));
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        // `usable = window - max(0, MIN_OUTPUT_TOKENS)`; sit exactly on it.
+        let usable = tokens.max(crate::run::MIN_OUTPUT_TOKENS);
+        let window = (usable + crate::run::MIN_OUTPUT_TOKENS).max(1) as u32;
+        let mut state = CompactionState::default();
+        // Scale the overhead so the scaled estimate lands exactly on usable.
+        state.set_request_overhead(usable - tokens);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(window),
+                )
+                .await,
+            "an estimate equal to the usable window is an overflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn below_usable_window_does_not_overflow_force() {
+        // One token under the usable window, fill under the proactive
+        // threshold: nothing forces the stage to run.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.99)])
+            .with_buffer(crate::config::CompactionBuffer::Tokens(0));
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        let usable = tokens.max(crate::run::MIN_OUTPUT_TOKENS);
+        // Window so `usable - 1` remains below MIN_OUTPUT_TOKENS-free space.
+        let window = (usable + crate::run::MIN_OUTPUT_TOKENS + 1) as u32;
+        let mut state = CompactionState::default();
+        state.set_request_overhead(usable - tokens - 1);
+        assert!(
+            !engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(window),
+                )
+                .await,
+            "one token under the usable window must not force compaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn small_window_reserves_the_min_output_floor() {
+        // Buffer below MIN_OUTPUT_TOKENS on a small window: the reservation
+        // is the floor, so usable = window - MIN_OUTPUT_TOKENS. An estimate
+        // in (usable, window) must force compaction even though the 1%-style
+        // buffer would have left room.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.99)])
+            .with_buffer(crate::config::CompactionBuffer::Tokens(0));
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        // Window big enough that usable > 0 but estimate sits above it.
+        let window = (tokens + crate::run::MIN_OUTPUT_TOKENS / 2) as u32;
+        let usable = u64::from(window).saturating_sub(crate::run::MIN_OUTPUT_TOKENS);
+        assert!(tokens > usable, "test premise: estimate over usable");
+        let mut state = CompactionState::default();
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(window),
+                )
+                .await,
+            "the MIN_OUTPUT_TOKENS floor must be reserved below the threshold"
         );
     }
 }

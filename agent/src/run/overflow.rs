@@ -30,7 +30,15 @@ pub(super) async fn recover_from_overflow<M: CompletionModel + Clone>(
     let Some(ctx) = &params.compaction else {
         return false;
     };
-    let estimated = crate::compaction::estimate_tokens(history);
+    // Include the request overhead (preamble + tool schemas) the run loop
+    // published on the shared state: the provider's actual prompt size
+    // counts it, so the recalibration below must compare like with like.
+    let request_overhead = ctx
+        .state
+        .lock()
+        .map(|guard| guard.request_overhead())
+        .unwrap_or(0);
+    let estimated = crate::compaction::estimate_tokens(history).saturating_add(request_overhead);
     // A failed request reports no usage, but overflow error bodies commonly
     // name the real prompt size ("...you requested 8192 tokens"). Calibrate
     // the estimator from it against the LIVE state: `absorb_run` below only
@@ -61,9 +69,9 @@ pub(super) async fn recover_from_overflow<M: CompletionModel + Clone>(
         .with_buffer(ctx.buffer)
         .force_compact(&mut state, model, history, ctx.context_length)
         .await;
-    let after = state
-        .estimator
-        .scale(crate::compaction::estimate_tokens(history));
+    let after = state.estimator.scale(
+        crate::compaction::estimate_tokens(history).saturating_add(state.request_overhead()),
+    );
     // Compaction that barely shrank the context is itself a doom signal;
     // one that paid off earns a decay.
     let savings = if before > 0 {

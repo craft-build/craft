@@ -418,6 +418,19 @@ async fn run_loop<M: CompletionModel + Clone>(
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> (RunOutcome, RunStats, Vec<Message>) {
     let definitions = tools.definitions();
+    // Request overhead (preamble + tool schemas) is fixed per run: compute
+    // once, publish to the shared compaction state (so in-run overflow
+    // recovery and the surfaces' pre-turn checks see the same currency),
+    // and fold into the output-token clamp below.
+    let overhead = crate::compaction::estimate::RequestOverhead::from_parts(
+        params.preamble.as_deref(),
+        &definitions,
+    );
+    if let Some(ctx) = &params.compaction
+        && let Ok(mut guard) = ctx.state.lock()
+    {
+        guard.set_request_overhead(overhead.tokens());
+    }
     // The prompt message carries any composer image attachments; later
     // grace/nudge prompts are plain text.
     let mut turn = vec![prompt_message(prompt, images)];
@@ -491,7 +504,9 @@ async fn run_loop<M: CompletionModel + Clone>(
             write_root.as_deref(),
         );
         compress_request_view(&mut full, &params.compression);
-        let prompt_tokens = crate::compaction::estimate_tokens(&full).max(measured_prompt_tokens);
+        let prompt_tokens = crate::compaction::estimate_tokens(&full)
+            .saturating_add(overhead.tokens())
+            .max(measured_prompt_tokens);
         let window = params.compaction.as_ref().and_then(|c| c.context_length);
         let mut request = edge::to_request(
             &full,

@@ -118,3 +118,118 @@ mod served_spec_tests {
         );
     }
 }
+
+/// The output-cap clamp runs on the overhead-inclusive estimate: with the
+/// tool schemas riding along, the window must reserve room for them, not
+/// just the messages.
+#[tokio::test]
+async fn output_cap_clamp_counts_request_overhead() {
+    let (model, _turns) = stream_turns(vec![vec![
+        MockStreamEvent::text("ok"),
+        MockStreamEvent::final_response_with_total_tokens(1),
+    ]]);
+    let dir = tempfile::tempdir().unwrap();
+    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+    let overhead =
+        crate::compaction::RequestOverhead::from_parts(None, &tools.definitions()).tokens();
+    assert!(overhead > 0, "the builtin tool table carries schemas");
+    let shared: SharedCompactionState = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::compaction::CompactionState::default(),
+    ));
+    let params = |context_length: Option<u32>| {
+        RunParams {
+            max_tokens: Some(100_000),
+            model_spec: Some("mock/x".into()),
+            ..RunParams::default()
+        }
+        .with_compaction(CompactionCtx {
+            state: shared.clone(),
+            stages: Vec::new(),
+            buffer: crate::config::CompactionBuffer::Percent(20),
+            context_length,
+        })
+    };
+    let (_, cancel) = cancel_channel();
+    // The prompt is the only history: its estimate is the message-structure
+    // cost alone, far under the overhead.
+    let prompt_tokens = crate::compaction::estimate_tokens(&[Message::user("hi")]);
+    let margin: u64 = 50_000;
+    let window = (prompt_tokens + overhead + margin) as u32;
+    // A history-only estimate would leave margin + overhead of window;
+    // counting the overhead must clamp to exactly `margin`.
+    let mut history = Vec::new();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&events);
+    run(
+        &model,
+        &params(Some(window)),
+        &tools,
+        &mut history,
+        "hi",
+        &cancel,
+        &|event| sink.lock().unwrap().push(event),
+    )
+    .await;
+    assert_eq!(model.requests().len(), 1);
+    assert_eq!(
+        model.requests()[0].max_tokens,
+        Some(margin),
+        "the clamp reserves the window for history + request overhead"
+    );
+}
+
+/// Without a window the configured cap stands untouched and compaction
+/// never triggers (pre-change behavior preserved).
+#[tokio::test]
+async fn unknown_window_leaves_the_cap_and_skips_compaction() {
+    let (model, _turns) = stream_turns(vec![vec![
+        MockStreamEvent::text("ok"),
+        MockStreamEvent::final_response_with_total_tokens(1),
+    ]]);
+    let dir = tempfile::tempdir().unwrap();
+    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+    let shared: SharedCompactionState = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::compaction::CompactionState::default(),
+    ));
+    let params = RunParams {
+        max_tokens: Some(100_000),
+        model_spec: Some("mock/x".into()),
+        ..RunParams::default()
+    }
+    .with_compaction(CompactionCtx {
+        state: shared.clone(),
+        stages: vec![crate::config::CompactionConfig {
+            kind: crate::config::CompactionKind::Vcc,
+            context: 0.1,
+        }],
+        buffer: crate::config::CompactionBuffer::Percent(20),
+        context_length: None,
+    });
+    let (_, cancel) = cancel_channel();
+    let mut history = Vec::new();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&events);
+    run(
+        &model,
+        &params,
+        &tools,
+        &mut history,
+        "hi",
+        &cancel,
+        &|event| sink.lock().unwrap().push(event),
+    )
+    .await;
+    assert_eq!(
+        model.requests()[0].max_tokens,
+        Some(100_000),
+        "no window: the configured cap is untouched"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::AutoCompacting { .. })),
+        "no window: compaction never triggers"
+    );
+}

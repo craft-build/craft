@@ -78,6 +78,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use rig_core::completion::ToolDefinition;
 use rig_core::completion::message::{ImageMediaType, ToolResultContent as RigToolResultContent};
 use rig_core::tool::{
     PortableDynamicTool, PortableTool, ToolErrorKind, ToolExecutionError, ToolOutput,
@@ -444,22 +445,8 @@ impl Workspace {
     /// into the batch child table — so write-gating is a frozen snapshot for
     /// the whole turn.
     pub fn register_with_mode(&self, mode: crate::run::AgentMode) -> crate::run::ToolDispatch {
-        let sandbox = self.turn_sandbox_cell(&mode, false);
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
-        let mut tools: Vec<PortableDynamicTool> = self
-            .builtin_tool_table(sandbox)
-            .into_iter()
-            .map(|(_, tool)| tool)
-            .collect();
-        tools.push(dynamic(batch.clone()));
-        if let Some(handle) = self.mcp() {
-            let cancel = self
-                .mcp_cancel
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            tools.extend(mcp_tools(&handle, cancel));
-        }
+        let mut tools = self.mode_tool_set(&mode, batch.clone());
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
         let dispatch = crate::run::ToolDispatch::new(tools)
@@ -474,6 +461,45 @@ impl Workspace {
         };
         let _ = batch.0.set(dispatch.clone());
         dispatch
+    }
+
+    /// The provider-facing tool definitions a turn in `mode` would register
+    /// (including MCP tools and the self-describing `list_tools` entry):
+    /// exactly what [`Self::register_with_mode`] sends, so surfaces
+    /// computing request overhead cannot drift from the run's own table.
+    pub fn tool_definitions(&self, mode: &crate::run::AgentMode) -> Vec<ToolDefinition> {
+        let mut tools =
+            self.mode_tool_set(mode, Batch(std::sync::Arc::new(std::sync::OnceLock::new())));
+        let mut definitions: Vec<ToolDefinition> =
+            tools.iter().map(PortableDynamicTool::definition).collect();
+        tools.push(dynamic(ListTools(Arc::new(definitions.clone()))));
+        definitions.push(tools.last().expect("list_tools just pushed").definition());
+        definitions
+    }
+
+    /// The mode's full tool set (builtins + batch + MCP), before the
+    /// self-describing `list_tools` entry is appended at registration.
+    fn mode_tool_set(
+        &self,
+        mode: &crate::run::AgentMode,
+        batch: Batch,
+    ) -> Vec<PortableDynamicTool> {
+        let sandbox = self.turn_sandbox_cell(mode, false);
+        let mut tools: Vec<PortableDynamicTool> = self
+            .builtin_tool_table(sandbox)
+            .into_iter()
+            .map(|(_, tool)| tool)
+            .collect();
+        tools.push(dynamic(batch));
+        if let Some(handle) = self.mcp() {
+            let cancel = self
+                .mcp_cancel
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            tools.extend(mcp_tools(&handle, cancel));
+        }
+        tools
     }
 
     /// The restricted tool table for a `task`-spawned subagent (A.5):

@@ -17,7 +17,7 @@ pub(crate) const RECENT_TOOL_RESULT_BUDGET: usize = 64 * 1024;
 pub(crate) const PROGRESSIVE_TOOL_REMOVAL_RATIOS: &[f32] = &[0.10, 0.20, 0.50, 1.00];
 
 pub use engine::{CompactionEngine, CompactionState};
-pub use estimate::{TokenEstimator, estimate_prompt_tokens, estimate_tokens};
+pub use estimate::{RequestOverhead, TokenEstimator, estimate_prompt_tokens, estimate_tokens};
 
 /// Constructors shared by compaction tests (history has no struct-literal
 /// sugar for the rich shapes these tests need).

@@ -7,9 +7,11 @@ use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 // --- Context-overflow recovery (C.5) ---
 fn overflow_error_turn() -> Vec<MockStreamEvent> {
+    // The requested size must exceed the run's overhead-inclusive estimate
+    // (history + tool schemas) for recalibration to trigger.
     vec![MockStreamEvent::Error(
         rig_core::test_utils::MockError::provider(
-            "This model's maximum context length is 4096 tokens. However, you requested 8192 tokens.",
+            "This model's maximum context length is 131072 tokens. However, you requested 131072 tokens.",
         ),
     )]
 }
@@ -29,8 +31,12 @@ fn done_turn(text: &str) -> Vec<MockStreamEvent> {
 
 fn overflow_history() -> Vec<Message> {
     use crate::compaction::test_support as ts;
+    // Repeated 50x so the history dwarfs the fixed tool-schema overhead
+    // (~14k tokens): these tests exercise a *history*-driven overflow that
+    // compaction can actually cure, matching the production premise.
     let mut messages = Vec::new();
-    for i in 0..8 {
+    for round in 0..8 * 50 {
+        let i = round % 8;
         messages.push(ts::user(&format!(
             "do task {i} with a fairly long instruction"
         )));
@@ -49,8 +55,9 @@ fn recovery_setup() -> (RunParams, SharedCompactionState) {
         crate::compaction::CompactionState::default(),
     ));
     let tokens = crate::compaction::estimate_tokens(&overflow_history());
-    // Window sized like the engine tests so the estimate overflows the
-    // buffer-subtracted window and the VCC stage is forced to run.
+    // Window sized like the engine tests so the estimate (history + the
+    // overhead the run loop publishes) overflows the buffer-subtracted
+    // window and the VCC stage is forced to run.
     let context_length = ((tokens as f64 / 0.9) as u32).max(1);
     let params = RunParams::new(None).with_compaction(CompactionCtx {
         state: shared.clone(),

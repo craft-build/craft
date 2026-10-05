@@ -104,6 +104,61 @@ pub(super) async fn run_turn(
     };
     let compaction_ctx =
         crate::runtime::compaction_ctx(shared_compaction.clone(), &state.config, context_length);
+    // The run params depend only on config/cwd/instructions/mode/model —
+    // not on the emit closure or dispatcher — so they are built up here
+    // where the pre-turn compaction check can read the same preamble.
+    let (cwd, instructions_text) = {
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get(session_id.0.as_ref());
+        (
+            session
+                .map(|session| session.workspace.root().display().to_string())
+                .unwrap_or_default(),
+            session
+                .map(|session| session.instructions.text.clone())
+                .unwrap_or_default(),
+        )
+    };
+    // ACP is always Build mode (plan mode is a TUI/headless concern), and
+    // its turn bound is unbounded: the client owns stop decisions through
+    // `session/cancel`.
+    let mode = run::AgentMode::Build;
+    let resolved = crate::runtime::ResolvedModel {
+        provider: provider_name.clone(),
+        model_id: model_label.clone(),
+        context_length,
+        max_output_tokens: _models
+            .iter()
+            .find(|entry| entry.id == model_label)
+            .and_then(|entry| entry.max_output_tokens),
+    };
+    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
+        config: &state.config,
+        cwd: &cwd,
+        instructions_text: &instructions_text,
+        mode: &mode,
+        model: &resolved,
+        compaction: Some(compaction_ctx),
+        recency: None,
+        retry: run::RetryCtx::default(),
+        fast: false,
+        thinking: Some(thinking),
+        max_turns: crate::runtime::MaxTurns::Unbounded,
+    });
+    // The pre-turn compaction check must see the full request budget:
+    // refresh the shared state's overhead (preamble + tool schemas the
+    // workspace would register in this mode) before any threshold is
+    // consulted. Tool-set changes between turns land here (E).
+    {
+        let definitions = workspace.tool_definitions(&mode);
+        let overhead = crate::compaction::RequestOverhead::from_parts(
+            params.preamble.as_deref(),
+            &definitions,
+        );
+        if let Ok(mut guard) = shared_compaction.lock() {
+            guard.set_request_overhead(overhead.tokens());
+        }
+    }
     if let Some(mut compaction_state) = shared_compaction.lock().ok().map(|g| g.clone()) {
         let engine = crate::compaction::CompactionEngine::new(state.config.compaction.clone())
             .with_buffer(state.config.compaction_buffer);
@@ -120,18 +175,6 @@ pub(super) async fn run_turn(
     if let Some(mcp) = workspace.mcp() {
         permissions.sync_mcp_annotations(&mcp);
     }
-    let (cwd, instructions_text) = {
-        let sessions = state.sessions.lock().await;
-        let session = sessions.get(session_id.0.as_ref());
-        (
-            session
-                .map(|session| session.workspace.root().display().to_string())
-                .unwrap_or_default(),
-            session
-                .map(|session| session.instructions.text.clone())
-                .unwrap_or_default(),
-        )
-    };
     let emitted_text = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let emit: Arc<dyn Fn(run::Event) + Send + Sync> = {
         let connection = connection.clone();
@@ -238,32 +281,6 @@ pub(super) async fn run_turn(
         permission_gate,
         dedup,
     );
-    // ACP is always Build mode (plan mode is a TUI/headless concern), and
-    // its turn bound is unbounded: the client owns stop decisions through
-    // `session/cancel`.
-    let mode = run::AgentMode::Build;
-    let resolved = crate::runtime::ResolvedModel {
-        provider: provider_name.clone(),
-        model_id: model_label.clone(),
-        context_length,
-        max_output_tokens: _models
-            .iter()
-            .find(|entry| entry.id == model_label)
-            .and_then(|entry| entry.max_output_tokens),
-    };
-    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
-        config: &state.config,
-        cwd: &cwd,
-        instructions_text: &instructions_text,
-        mode: &mode,
-        model: &resolved,
-        compaction: Some(compaction_ctx),
-        recency: None,
-        retry: run::RetryCtx::default(),
-        fast: false,
-        thinking: Some(thinking),
-        max_turns: crate::runtime::MaxTurns::Unbounded,
-    });
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {
         connection.send_notification(SessionNotification::new(session_id.clone(), update))

@@ -347,9 +347,13 @@ async fn compact_history(
 ) {
     let shared = state.lock().await.compaction.clone();
     if let Some(mut compaction) = shared.lock().ok().map(|guard| guard.clone()) {
-        let before = compaction
-            .estimator
-            .scale(crate::compaction::estimate_tokens(history));
+        // before/after speak the engine's currency: history + the request
+        // overhead the surfaces refreshed onto the shared state.
+        let history_tokens = |c: &crate::compaction::CompactionState, h: &[history::Message]| {
+            c.estimator
+                .scale(crate::compaction::estimate_tokens(h).saturating_add(c.request_overhead()))
+        };
+        let before = history_tokens(&compaction, history);
         let ran = CompactionEngine::new(config.compaction.clone())
             .with_buffer(config.compaction_buffer)
             .maybe_compact(&mut compaction, model, history, context_length)
@@ -360,11 +364,7 @@ async fn compact_history(
         if ran {
             let after = shared
                 .lock()
-                .map(|guard| {
-                    guard
-                        .estimator
-                        .scale(crate::compaction::estimate_tokens(history))
-                })
+                .map(|guard| history_tokens(&guard, history))
                 .unwrap_or_default();
             let _ = tx.send(AgentEvent::Notice {
                 tone: Tone::Info,
@@ -403,9 +403,12 @@ pub(super) async fn compact_now(
         return;
     };
     let mut session = state.lock().await;
-    let before = compaction
-        .estimator
-        .scale(crate::compaction::estimate_tokens(&session.history));
+    // The same overhead-inclusive currency as `compact_history` (E).
+    let history_tokens = |c: &crate::compaction::CompactionState, h: &[history::Message]| {
+        c.estimator
+            .scale(crate::compaction::estimate_tokens(h).saturating_add(c.request_overhead()))
+    };
+    let before = history_tokens(&compaction, &session.history);
     // `force_compact` can await an LLM summary; announce the run so the
     // pause is not mistaken for a lost command.
     let _ = tx.send(AgentEvent::Notice {
@@ -424,9 +427,7 @@ pub(super) async fn compact_now(
             selection.context_length,
         )
         .await;
-    let after = compaction
-        .estimator
-        .scale(crate::compaction::estimate_tokens(&session.history));
+    let after = history_tokens(&compaction, &session.history);
     if ran {
         let messages = session.history.clone();
         if let Some(store) = &mut session.store {
@@ -607,7 +608,74 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
     if let Some(plan) = mode.plan_path() {
         workspace.set_plan_path(Some(plan.to_path_buf()));
     }
+    // The compaction context and run params depend only on config/cwd/
+    // instructions/mode/model selection — not on the approval gate or the
+    // dispatcher — so they are built up here where the pre-turn compaction
+    // check can read the same preamble.
+    let compaction_ctx = crate::runtime::compaction_ctx(
+        state.lock().await.compaction.clone(),
+        &config,
+        selection.context_length,
+    );
+    // The TUI's `Selection` carries the window but not the output cap;
+    // the catalog seam (runtime::ResolvedModel) is where it will land.
+    let resolved = crate::runtime::ResolvedModel {
+        provider: selection.provider.clone(),
+        model_id: selection.model.clone(),
+        context_length: selection.context_length,
+        max_output_tokens: None,
+    };
+    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
+        config: &config,
+        cwd: &workspace.root().display().to_string(),
+        instructions_text: &instructions_text,
+        mode: &mode,
+        model: &resolved,
+        compaction: Some(compaction_ctx),
+        recency: None,
+        retry: run::RetryCtx::default(),
+        fast: false,
+        thinking: Some(thinking),
+        max_turns: crate::runtime::MaxTurns::FromConfig,
+    });
 
+    // B.11: the first prompt must not ship without MCP tools, but a hung
+    // server cannot block forever — the gate times out and the turn
+    // proceeds with whatever has landed.
+    if let Some(mcp) = workspace.mcp()
+        && tokio::time::timeout(MCP_READY_TIMEOUT, mcp.ready())
+            .await
+            .is_err()
+    {
+        tracing::warn!("MCP servers not ready after {MCP_READY_TIMEOUT:?}");
+        let _ = tx.send(AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: format!(
+                "MCP servers still connecting after {MCP_READY_TIMEOUT:?}; \
+                 continuing without their tools"
+            ),
+        });
+    }
+    // Phase 3: feed MCP tool annotations to the permission engine before
+    // the tool table is built; sync is generation-keyed, so steady state
+    // is a no-op.
+    if let Some(mcp) = workspace.mcp() {
+        permissions.sync_mcp_annotations(&mcp);
+    }
+    // The pre-turn compaction check must see the full request budget:
+    // refresh the shared state's overhead (preamble + the tool schemas the
+    // settled MCP set contributes) before any threshold is consulted.
+    {
+        let definitions = workspace.tool_definitions(&mode);
+        let overhead = crate::compaction::RequestOverhead::from_parts(
+            params.preamble.as_deref(),
+            &definitions,
+        );
+        let shared = state.lock().await.compaction.clone();
+        if let Ok(mut guard) = shared.lock() {
+            guard.set_request_overhead(overhead.tokens());
+        }
+    }
     compact_history(
         &state,
         &config,
@@ -617,11 +685,6 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         &tx,
     )
     .await;
-    let compaction_ctx = crate::runtime::compaction_ctx(
-        state.lock().await.compaction.clone(),
-        &config,
-        selection.context_length,
-    );
 
     // The approval gate is shared by the dispatch table and every subagent,
     // so children cannot bypass approvals.
@@ -679,55 +742,11 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         )))
         .with_subagents(subagents)
         .with_cancel(cancel.clone());
-    // B.11: the first prompt must not ship without MCP tools, but a hung
-    // server cannot block forever — the gate times out and the turn
-    // proceeds with whatever has landed.
-    if let Some(mcp) = workspace.mcp()
-        && tokio::time::timeout(MCP_READY_TIMEOUT, mcp.ready())
-            .await
-            .is_err()
-    {
-        tracing::warn!("MCP servers not ready after {MCP_READY_TIMEOUT:?}");
-        let _ = tx.send(AgentEvent::Notice {
-            tone: Tone::Warning,
-            text: format!(
-                "MCP servers still connecting after {MCP_READY_TIMEOUT:?}; \
-                 continuing without their tools"
-            ),
-        });
-    }
-    // Phase 3: feed MCP tool annotations to the permission engine before
-    // the tool table is built; sync is generation-keyed, so steady state
-    // is a no-op.
-    if let Some(mcp) = workspace.mcp() {
-        permissions.sync_mcp_annotations(&mcp);
-    }
     let tools = workspace
         .register_with_mode(mode.clone())
         .with_dedup(dedup)
         .with_guardrails(guardrails)
         .with_before(approval);
-    // The TUI's `Selection` carries the window but not the output cap;
-    // the catalog seam (runtime::ResolvedModel) is where it will land.
-    let resolved = crate::runtime::ResolvedModel {
-        provider: selection.provider.clone(),
-        model_id: selection.model.clone(),
-        context_length: selection.context_length,
-        max_output_tokens: None,
-    };
-    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
-        config: &config,
-        cwd: &workspace.root().display().to_string(),
-        instructions_text: &instructions_text,
-        mode: &mode,
-        model: &resolved,
-        compaction: Some(compaction_ctx),
-        recency: None,
-        retry: run::RetryCtx::default(),
-        fast: false,
-        thinking: Some(thinking),
-        max_turns: crate::runtime::MaxTurns::FromConfig,
-    });
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
     let mut prompt = text;

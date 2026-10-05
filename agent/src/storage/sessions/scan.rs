@@ -211,12 +211,12 @@ pub(super) fn read_last_thinking(path: &Path) -> Option<crate::thinking::Thinkin
     file.take(len - start).read_to_end(&mut buf).ok()?;
 
     let text = String::from_utf8_lossy(&buf);
-    text.lines().rev().find_map(|line| {
-        match serde_json::from_str(line) {
+    text.lines()
+        .rev()
+        .find_map(|line| match serde_json::from_str(line) {
             Ok(ScanRecord::Meta { thinking, .. }) => thinking,
             _ => None,
-        }
-    })
+        })
 }
 
 pub(super) fn session_entries(dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
