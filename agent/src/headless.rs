@@ -147,6 +147,13 @@ impl SessionStore {
             .then(|| SOFT_SAVE_DELAY.saturating_sub(self.last_save.elapsed()))
     }
 
+    /// The loaded session's persisted messages, so a resumed run seeds its
+    /// history from the store instead of starting empty — the first save
+    /// would otherwise wipe every prior turn.
+    pub fn messages(&self) -> &[Message] {
+        self.session.messages()
+    }
+
     /// Persist the post-turn history and the model that served it, deriving
     /// the title from the first user message when it is still the default.
     pub fn record_turn(&mut self, messages: &[Message], model_spec: String) {
@@ -408,7 +415,12 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     let store = opened.ok().flatten();
 
     let task = tokio::spawn(async move {
-        let mut history = Vec::new();
+        // A resumed session continues from its stored turns; a fresh one
+        // starts empty (H.9: `record_turn` persists old + new alike).
+        let mut history = store
+            .as_ref()
+            .map(|s| s.messages().to_vec())
+            .unwrap_or_default();
         let (_flag, cancel) = cancel_channel();
         let mut run_params = params.run;
         run_params.model_spec = params.model_spec.clone();
@@ -919,6 +931,36 @@ mod tests {
         // User prompt + assistant reply.
         assert_eq!(loaded.messages().len(), 2);
         assert!(loaded.messages()[1].text().contains("all done"));
+    }
+
+    /// H.9 regression: a resumed run seeds its history from the loaded
+    /// store, so the persisted session keeps the prior turns plus the new
+    /// one (`spawn` used to start empty and wipe the log on first save).
+    #[tokio::test]
+    async fn spawn_resume_preserves_prior_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let mut store = store_in(&tmp);
+            store.record_turn(&[Message::user("earlier turn")], MODEL_SPEC.into());
+        }
+        let model = mock(vec![vec![
+            MockStreamEvent::text("fresh reply"),
+            MockStreamEvent::final_response_with_total_tokens(2),
+        ]]);
+        let mut handle = spawn(HeadlessParams {
+            session_id: Some(session_ref()),
+            ..params(model, "hello", Some(state_dir(&tmp)))
+        });
+
+        let events = drain_until_done(&mut handle.events).await;
+        assert!(events.iter().any(|e| matches!(e, Event::Done { .. })));
+        let _ = handle.task.await;
+
+        let loaded = StoredSession::load(handle.session_id.id(), &state_dir(&tmp)).unwrap();
+        // The earlier turn survives, then this run's user prompt and reply.
+        assert_eq!(loaded.messages().len(), 3);
+        assert_eq!(loaded.messages()[0].text(), "earlier turn");
+        assert!(loaded.messages()[2].text().contains("fresh reply"));
     }
 
     #[tokio::test]

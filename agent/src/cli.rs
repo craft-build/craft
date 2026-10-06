@@ -14,6 +14,7 @@ use crate::permissions::{
     Effect, PermissionRule, ToolKey, is_valid_server_name, is_valid_wire_name,
 };
 use crate::run::BeforeExecute;
+use crate::storage::StateDir;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -124,8 +125,9 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
-    /// Resume the most recent session in this directory
-    /// (F.3 resume-latest-by-cwd).
+    /// Resume the most recent session in this directory (TUI and --print;
+    /// F.3 resume-latest-by-cwd). With no prior session, --print starts a
+    /// fresh one after a stderr warning.
     #[arg(short = 'c', long = "continue")]
     pub continue_session: bool,
 
@@ -177,11 +179,13 @@ pub struct Cli {
     #[arg(long, value_delimiter = ',', visible_alias = "disallowedTools")]
     pub disallowed_tools: Vec<String>,
 
-    /// Session ID for SDK mode (task 84).
+    /// Persistence ID for a NEW session (SDK compat); never resumes one.
+    /// Combining it with --session/--continue requires --fork-session.
     #[arg(long)]
     pub session_id: Option<String>,
 
-    /// Fork the loaded session under a new ID (task 84).
+    /// Copy the resumed session (--session or --continue) under a new ID,
+    /// leaving the source file unchanged (--print only).
     #[arg(long)]
     pub fork_session: bool,
 
@@ -597,13 +601,19 @@ impl Cli {
                 }
             }
         }
-        if self.fork_session
-            && self.session.is_none()
-            && self.session_id.is_none()
-            && !self.continue_session
+        if self.fork_session && self.session.is_none() && !self.continue_session {
+            return InvalidSnafu {
+                reason: "--fork-session requires --session or --continue",
+            }
+            .fail();
+        }
+        if self.session_id.is_some()
+            && (self.session.is_some() || self.continue_session)
+            && !self.fork_session
         {
             return InvalidSnafu {
-                reason: "--fork-session requires --session, --session-id, or --continue",
+                reason: "--session-id names a new session and never resumes; \
+                         combine it with --session/--continue only via --fork-session",
             }
             .fail();
         }
@@ -685,23 +695,189 @@ impl Cli {
         }
     }
 
-    /// The session to resume, from `-s/--session` (alias `--resume`) or
-    /// `--session-id` (SDK compat). `--fork-session` semantics are task 84.
+    /// The session to resume, from `-s/--session` (alias `--resume`).
+    /// `--session-id` and `--continue` are resolved separately by
+    /// [`Self::resolve_session_plan`].
     pub fn resume_session(&self) -> Result<Option<SessionRef>> {
-        let raw = self.session.as_ref().or(self.session_id.as_ref());
-        match raw {
-            Some(raw) => raw.parse::<SessionRef>().map(Some).map_err(|_| {
-                InvalidSnafu {
-                    reason: format!(
-                        "{raw:?} is not a valid session id \
-                         (expected the id shown by `craft --continue` or /sessions)"
-                    ),
-                }
-                .build()
-            }),
+        match &self.session {
+            Some(raw) => parse_session_ref(raw).map(Some),
             None => Ok(None),
         }
     }
+
+    /// Resolve `--session` / `--continue` / `--session-id` /
+    /// `--fork-session` into what a print-mode run should do (H.9).
+    /// Malformed ids and missing/corrupt records on an explicit resume or
+    /// fork are hard errors before any model work; `--continue` with no
+    /// session for the cwd starts fresh with a stderr warning (TUI parity).
+    pub fn resolve_session_plan(&self, dir: &StateDir, cwd: &str) -> Result<ResumePlan> {
+        let source = self.resume_source(dir, cwd)?;
+        if self.fork_session {
+            let source = source.ok_or_else(|| {
+                InvalidSnafu {
+                    reason: format!(
+                        "--fork-session has no source: no previous session in {cwd} \
+                         (--continue found nothing)"
+                    ),
+                }
+                .build()
+            })?;
+            return self.fork_source(dir, &source.id.clone());
+        }
+        if let Some(session) = source {
+            return Ok(ResumePlan::Resume {
+                id: session.id.clone(),
+                model: stored_model_spec(&session),
+            });
+        }
+        if self.continue_session {
+            eprintln!("warning: no previous session in {cwd}; starting a new one");
+        }
+        // `--session-id` alone names the new session (SDK compat).
+        Ok(ResumePlan::Fresh {
+            id: self
+                .session_id
+                .as_deref()
+                .map(parse_session_ref)
+                .transpose()?,
+        })
+    }
+
+    /// The session a resume/fork loads: the explicit `--session` target, or
+    /// the `--continue` latest for `cwd`. `Ok(None)` means genuinely no
+    /// session; an unreadable newest record is a hard error, not a silent
+    /// downgrade ("fail fast with actionable errors", H.9).
+    fn resume_source(
+        &self,
+        dir: &StateDir,
+        cwd: &str,
+    ) -> Result<Option<crate::headless::StoredSession>> {
+        if let Some(raw) = &self.session {
+            let id = parse_session_ref(raw)?;
+            return load_or_invalid(raw, id.id(), dir).map(Some);
+        }
+        if !self.continue_session {
+            return Ok(None);
+        }
+        // The cwd index names the newest session for `cwd`. When the record
+        // it names is unreadable, `latest` degrades to an older sibling
+        // (warn → rescan → silently resume it); an explicit `--continue`
+        // must hard-error on the corrupt newest record instead. A stale
+        // entry for a deleted session just falls through to the scan.
+        if let Some(raw) = crate::storage::sessions::indexed_latest(cwd, dir)
+            && let Ok(id) = raw.parse::<SessionRef>()
+        {
+            match crate::headless::StoredSession::load(id.id(), dir) {
+                Ok(session) => return Ok(Some(session)),
+                // A record deleted behind our back (stale index) is not
+                // corruption; fall through to the scan. A file that exists
+                // on disk but yields no readable record is a hard error.
+                Err(crate::storage::sessions::SessionError::Storage {
+                    source: crate::storage::StorageError::NotFound { .. },
+                }) if !session_file_exists(dir, id.id()) => {}
+                Err(e) => {
+                    return Err(InvalidSnafu {
+                        reason: format!(
+                            "the latest session for {cwd} ({raw}) could not be loaded: {e}"
+                        ),
+                    }
+                    .build());
+                }
+            }
+        }
+        crate::headless::StoredSession::latest(cwd, dir).map_err(|e| {
+            InvalidSnafu {
+                reason: format!("finding the latest session for {cwd}: {e}"),
+            }
+            .build()
+        })
+    }
+
+    /// Copy the source session under a fresh (or `--session-id`) id and
+    /// hand the run the copy; the source file is never modified.
+    fn fork_source(&self, dir: &StateDir, source_id: &SessionRef) -> Result<ResumePlan> {
+        let source = load_or_invalid(source_id.as_str(), source_id.id(), dir)?;
+        let new_id = match &self.session_id {
+            Some(raw) => parse_session_ref(raw)?,
+            None => SessionRef::generate(),
+        };
+        let model = stored_model_spec(&source);
+        let mut forked = source;
+        forked.id = new_id.clone();
+        forked.meta.input_draft = None;
+        forked.save(dir).map_err(|e| {
+            InvalidSnafu {
+                reason: format!("forking session {source_id} under {new_id}: {e}"),
+            }
+            .build()
+        })?;
+        Ok(ResumePlan::Fork { new_id, model })
+    }
+}
+
+/// What a print-mode run should do with sessions (H.9): start fresh
+/// (optionally under a caller-supplied id), resume a stored session, or run
+/// on a copy that was already written under a new id.
+#[derive(Debug, PartialEq)]
+pub enum ResumePlan {
+    /// Start a new session; `--session-id X` names it, else one is generated.
+    Fresh { id: Option<SessionRef> },
+    /// Continue this stored session; its history loads from the store.
+    Resume {
+        id: SessionRef,
+        model: Option<String>,
+    },
+    /// The source was already copied under `new_id`; the run continues the copy.
+    Fork {
+        new_id: SessionRef,
+        model: Option<String>,
+    },
+}
+
+/// Parse a session id with the shared, actionable error shape (H.9).
+fn parse_session_ref(raw: &str) -> Result<SessionRef> {
+    raw.parse::<SessionRef>().map_err(|_| {
+        InvalidSnafu {
+            reason: format!(
+                "{raw:?} is not a valid session id \
+                 (expected the id shown by `craft --continue` or /sessions)"
+            ),
+        }
+        .build()
+    })
+}
+
+/// Load a stored session or turn the storage error into an actionable CLI
+/// error naming the requested id — explicit resume intent never degrades to
+/// an unpersisted run (H.9).
+fn load_or_invalid(
+    raw: &str,
+    id: crate::id::CraftId,
+    dir: &StateDir,
+) -> Result<crate::headless::StoredSession> {
+    crate::headless::StoredSession::load(id, dir).map_err(|e| {
+        InvalidSnafu {
+            reason: format!("session {raw} could not be loaded: {e}"),
+        }
+        .build()
+    })
+}
+
+/// Whether the session's JSONL file exists on disk — distinguishes a
+/// genuinely deleted record (stale index) from one that exists but has no
+/// readable header (both load as `NotFound`).
+fn session_file_exists(dir: &StateDir, id: crate::id::CraftId) -> bool {
+    dir.ensure_subdir(crate::storage::sessions::SESSIONS_DIR)
+        .ok()
+        .map(|sessions| sessions.join(format!("{id}.jsonl")).exists())
+        .unwrap_or(true)
+}
+
+/// The stored `provider/model` a resume/fork restores when `--model` is
+/// absent; `unknown` and legacy records without a spec carry no model.
+fn stored_model_spec(session: &crate::headless::StoredSession) -> Option<String> {
+    let model = session.model.trim();
+    (!model.is_empty() && model != "unknown" && model.contains('/')).then(|| model.to_string())
 }
 
 #[cfg(test)]
@@ -1059,6 +1235,239 @@ mod tests {
         );
     }
 
+    // -- H.9 session resolution: real temp state dirs, no network --
+
+    fn plan_for(args: &[&str], tmp: &tempfile::TempDir, cwd: &str) -> Result<ResumePlan> {
+        let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+        parse(args).unwrap().resolve_session_plan(&dir, cwd)
+    }
+
+    fn seed_session(tmp: &tempfile::TempDir, cwd: &str, model: &str, turns: &[&str]) -> SessionRef {
+        use crate::headless::StoredSession;
+        let mut session = StoredSession::new(model, cwd);
+        session.title = "seeded".into();
+        session.usage_by_model_mut().insert(
+            model.to_string(),
+            crate::storage::sessions::StoredTokenUsage {
+                input: 11,
+                output: 7,
+                ..Default::default()
+            },
+        );
+        session.replace_messages(
+            turns
+                .iter()
+                .map(|turn| crate::history::Message::user(*turn))
+                .collect(),
+        );
+        let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+        session.save(&dir).unwrap();
+        session.id.clone()
+    }
+
+    fn session_path(tmp: &tempfile::TempDir, id: &SessionRef) -> std::path::PathBuf {
+        tmp.path()
+            .join("sessions")
+            .join(format!("{}.jsonl", id.id()))
+    }
+
+    /// `--continue` picks the newest session for the cwd; sessions from
+    /// other cwds never bleed in (H.9 acceptance).
+    #[test]
+    fn continue_resolves_the_newest_session_for_the_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = "/project";
+        let older = seed_session(&tmp, cwd, "anthropic/a", &["older"]);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let newer = seed_session(&tmp, cwd, "anthropic/b", &["newer"]);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        seed_session(&tmp, "/elsewhere", "anthropic/c", &["other cwd"]);
+        let plan = plan_for(&["-p", "-c", "hi"], &tmp, cwd).unwrap();
+        match plan {
+            ResumePlan::Resume { id, model } => {
+                assert_eq!(id, newer);
+                assert_ne!(id, older);
+                assert_eq!(model.as_deref(), Some("anthropic/b"));
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_without_sessions_starts_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            plan_for(&["-p", "-c", "hi"], &tmp, "/project").unwrap(),
+            ResumePlan::Fresh { id: None }
+        );
+    }
+
+    #[test]
+    fn malformed_and_missing_session_ids_fail_fast() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(plan_for(&["-p", "-s", "not-a-craft-id", "hi"], &tmp, "/p").is_err());
+        // A well-formed id with no record behind it is a hard error too:
+        // silent degradation would discard the explicit resume intent.
+        let id = "01965087-4c71-7f00-8000-000000000000";
+        let err = plan_for(&["-p", "-s", id, "hi"], &tmp, "/p").unwrap_err();
+        assert!(err.to_string().contains("could not be loaded"));
+    }
+
+    /// A corrupt source record fails the run up front — both for an explicit
+    /// `--session` and for the `--continue` latest, even when an older
+    /// sibling session could have been silently downgraded to (H.9).
+    #[test]
+    fn corrupt_records_fail_explicit_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = "/project";
+        let id = seed_session(&tmp, cwd, "anthropic/a", &["turn one"]);
+        std::fs::write(session_path(&tmp, &id), b"{\"t\":\"header\"}\n").unwrap();
+        assert!(
+            plan_for(&["-p", "-s", &id.to_string(), "hi"], &tmp, cwd)
+                .unwrap_err()
+                .to_string()
+                .contains("could not be loaded")
+        );
+        assert!(plan_for(&["-p", "-c", "hi"], &tmp, cwd).is_err());
+    }
+
+    /// A corrupt NEWEST session must not silently downgrade `--continue` to
+    /// an older sibling for the same cwd (the index names the newest).
+    #[test]
+    fn continue_hard_errors_on_a_corrupt_newest_with_older_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = "/project";
+        seed_session(&tmp, cwd, "anthropic/a", &["older"]);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let newest = seed_session(&tmp, cwd, "anthropic/b", &["newest"]);
+        std::fs::write(session_path(&tmp, &newest), b"garbage\n").unwrap();
+        let err = plan_for(&["-p", "-c", "hi"], &tmp, cwd).unwrap_err();
+        assert!(err.to_string().contains("could not be loaded"));
+    }
+
+    /// A stale cwd-index entry for a deleted session is not corruption:
+    /// `--continue` falls back to the scan, and with nothing left it starts
+    /// fresh instead of erroring forever (H.9).
+    #[test]
+    fn continue_survives_a_stale_index_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = "/project";
+        let id = seed_session(&tmp, cwd, "anthropic/a", &["gone"]);
+        std::fs::remove_file(session_path(&tmp, &id)).unwrap();
+        assert_eq!(
+            plan_for(&["-p", "-c", "hi"], &tmp, cwd).unwrap(),
+            ResumePlan::Fresh { id: None }
+        );
+    }
+
+    /// Fork copies the source under a new id (or `--session-id`) without
+    /// touching the source file (H.9 acceptance).
+    #[test]
+    fn fork_copies_the_source_without_modifying_it() {
+        use crate::headless::StoredSession;
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = "/project";
+        let source_id = seed_session(&tmp, cwd, "anthropic/a", &["first", "second"]);
+        let before = std::fs::read(session_path(&tmp, &source_id)).unwrap();
+
+        let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+        let cli = parse(&["-p", "-s", &source_id.to_string(), "--fork-session", "hi"]).unwrap();
+        let new_id = match cli.resolve_session_plan(&dir, cwd).unwrap() {
+            ResumePlan::Fork { new_id, model } => {
+                assert_eq!(model.as_deref(), Some("anthropic/a"));
+                new_id
+            }
+            other => panic!("expected Fork, got {other:?}"),
+        };
+        assert_ne!(new_id, source_id);
+        // The source is byte-identical and the copy carries everything over.
+        assert_eq!(
+            std::fs::read(session_path(&tmp, &source_id)).unwrap(),
+            before
+        );
+        let forked = StoredSession::load(new_id.id(), &dir).unwrap();
+        assert_eq!(forked.messages().len(), 2);
+        assert_eq!(forked.title, "seeded");
+        assert_eq!(forked.model, "anthropic/a");
+        assert_eq!(
+            forked
+                .usage_by_model()
+                .get("anthropic/a")
+                .map(|u| u.total()),
+            Some(18)
+        );
+
+        // fork + --session-id persists the copy under the supplied id.
+        let named = "01965087-4c71-7f00-8000-00000000000f";
+        let cli = parse(&[
+            "-p",
+            "-s",
+            &source_id.to_string(),
+            "--fork-session",
+            "--session-id",
+            named,
+            "hi",
+        ])
+        .unwrap();
+        match cli.resolve_session_plan(&dir, cwd).unwrap() {
+            ResumePlan::Fork { new_id, .. } => assert_eq!(new_id, named.parse().unwrap()),
+            other => panic!("expected Fork, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(session_path(&tmp, &source_id)).unwrap(),
+            before
+        );
+    }
+
+    /// Stored model restores when `--model` is absent; the explicit flag
+    /// wins; `--session-id` rides through as the new persistence id (H.9).
+    #[test]
+    fn apply_resume_plan_restores_the_stored_model() {
+        let id: SessionRef = "01965087-4c71-7f00-8000-000000000000".parse().unwrap();
+        let stored = ResumePlan::Resume {
+            id: id.clone(),
+            model: Some("anthropic/stored".into()),
+        };
+
+        let cli = parse(&["-p", "-c", "hi"]).unwrap();
+        let mut query = HeadlessQuery::for_print(&cli, "hi".into(), None).unwrap();
+        assert_eq!(query.model, None);
+        apply_resume_plan(&cli, &mut query, stored);
+        assert_eq!(query.session_id.as_ref(), Some(&id));
+        assert_eq!(query.model.as_deref(), Some("anthropic/stored"));
+
+        // Explicit --model overrides the stored spec.
+        let cli = parse(&["-p", "-c", "-m", "openai/explicit", "hi"]).unwrap();
+        let mut query = HeadlessQuery::for_print(&cli, "hi".into(), None).unwrap();
+        apply_resume_plan(
+            &cli,
+            &mut query,
+            ResumePlan::Fork {
+                new_id: id.clone(),
+                model: Some("anthropic/stored".into()),
+            },
+        );
+        assert_eq!(query.model.as_deref(), Some("openai/explicit"));
+
+        // Fresh keeps passing --session-id through as the persistence id.
+        let named = "01965087-4c71-7f00-8000-00000000000f";
+        let cli = parse(&["-p", "--session-id", named, "hi"]).unwrap();
+        let mut query = HeadlessQuery::for_print(&cli, "hi".into(), None).unwrap();
+        apply_resume_plan(&cli, &mut query, ResumePlan::Fresh { id: None });
+        assert_eq!(query.session_id, None);
+        assert_eq!(
+            plan_for(
+                &["-p", "--session-id", named, "hi"],
+                &tempfile::tempdir().unwrap(),
+                "/p"
+            )
+            .unwrap(),
+            ResumePlan::Fresh {
+                id: Some(named.parse().unwrap())
+            }
+        );
+    }
+
     #[test]
     fn fork_session_needs_a_session_to_load() {
         assert!(parse(&["--fork-session"]).unwrap().validate().is_err());
@@ -1073,10 +1482,37 @@ mod tests {
         assert!(cli.validate().is_ok());
     }
 
+    /// H.9: `--session-id` names a NEW session; without `--fork-session` it
+    /// cannot be combined with the resume flags.
+    #[test]
+    fn session_id_needs_fork_to_combine_with_resume_flags() {
+        let id = "01965087-4c71-7f00-8000-000000000000";
+        for args in [
+            vec!["-p", "--session-id", id, "-s", id, "hi"],
+            vec!["-p", "--session-id", id, "-c", "hi"],
+        ] {
+            let cli = parse(&args).unwrap();
+            assert!(
+                cli.validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("--session-id"),
+                "{args:?}"
+            );
+        }
+        for args in [
+            vec!["-p", "--session-id", id, "-s", id, "--fork-session", "hi"],
+            vec!["-p", "--session-id", id, "-c", "--fork-session", "hi"],
+        ] {
+            assert!(parse(&args).unwrap().validate().is_ok(), "{args:?}");
+        }
+    }
+
     #[test]
     fn bad_session_ids_are_rejected() {
         let cli = parse(&["-s", "not-a-craft-id"]).unwrap();
         assert!(cli.resume_session().is_err());
+        assert!(parse_session_ref("not-a-craft-id").is_err());
     }
 
     #[test]
@@ -1415,16 +1851,10 @@ pub fn resolve_prompt_input(
 pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<()> {
     cli.apply_thinking(&mut config)?;
     // One warning per unimplemented option, in a stable order.
-    for flag in [
-        "--image",
-        "--verbose",
-        "--fork-session",
-        "--include-partial-messages",
-    ] {
+    for flag in ["--image", "--verbose", "--include-partial-messages"] {
         let set = match flag {
             "--image" => !cli.images.is_empty(),
             "--verbose" => cli.verbose,
-            "--fork-session" => cli.fork_session,
             _ => cli.include_partial_messages,
         };
         if set {
@@ -1446,12 +1876,46 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         }
     };
 
+    // Session resolution (H.9): --continue / --session / --fork-session get
+    // their print-mode semantics here, before any model work.
+    let cwd = std::env::current_dir().map_err(|e| {
+        InvalidSnafu {
+            reason: format!("resolving the current directory: {e}"),
+        }
+        .build()
+    })?;
+    let plan = match StateDir::resolve() {
+        Ok(dir) => cli.resolve_session_plan(&dir, &cwd.display().to_string())?,
+        Err(e) => {
+            if cli.fork_session || cli.continue_session || cli.session.is_some() {
+                return InvalidSnafu {
+                    reason: format!("session storage is unavailable, cannot resume or fork: {e}"),
+                }
+                .fail();
+            }
+            ResumePlan::Fresh { id: None }
+        }
+    };
+    let mut query = HeadlessQuery::for_print(cli, prompt, None)?;
+    apply_resume_plan(cli, &mut query, plan);
+
     config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
-    run_headless_query(
-        config,
-        HeadlessQuery::for_print(cli, prompt, cli.resume_session()?)?,
-    )
-    .await
+    run_headless_query(config, query).await
+}
+
+/// Wire a resolved [`ResumePlan`] into the query: the session id the run
+/// persists under, and the stored `provider/model` when `--model` is absent
+/// (an explicit flag always wins, H.9).
+fn apply_resume_plan(cli: &Cli, query: &mut HeadlessQuery, plan: ResumePlan) {
+    match plan {
+        ResumePlan::Fresh { id } => query.session_id = id,
+        ResumePlan::Resume { id, model } | ResumePlan::Fork { new_id: id, model } => {
+            query.session_id = Some(id);
+            if cli.model.is_none() {
+                query.model = model;
+            }
+        }
+    }
 }
 
 /// Extra environment context (e.g. shell history) injected before the prompt.

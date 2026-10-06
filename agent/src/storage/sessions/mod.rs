@@ -727,6 +727,17 @@ where
     }
 }
 
+/// The raw session id the cwd index records for `cwd`, if any.
+///
+/// [`Session::latest`] degrades gracefully past an unreadable newest
+/// record (index miss → warn → rescan); an explicit resume-latest caller
+/// uses this to tell "no session yet" apart from "the indexed latest
+/// cannot be loaded" and fail loudly instead.
+pub fn indexed_latest(cwd: &str, dir: &StateDir) -> Option<String> {
+    let sessions_dir = dir.ensure_subdir(SESSIONS_DIR).ok()?;
+    load_cwd_index(&sessions_dir).get(cwd).cloned()
+}
+
 /// The model spec recorded by the most recent session for `cwd`, if any.
 ///
 /// Startup uses this to restore the model the user last selected without
