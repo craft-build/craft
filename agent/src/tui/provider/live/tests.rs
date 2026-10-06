@@ -717,3 +717,116 @@ async fn close_aborted_turn_appends_one_marker() {
     assert_eq!(history.len(), 2);
     assert_eq!(history[1].text(), crate::run::CANCEL_MARKER);
 }
+
+/// A one-shot local SSE server echoing OpenAI chat.completion chunks (the
+/// capture pattern from `providers::tests::server`); returns the base URL
+/// and a task yielding the captured request bytes.
+fn capture_server(body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let task = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "no request arrived");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let size = stream.read(&mut buffer).unwrap();
+            assert_ne!(size, 0, "incomplete request");
+            request.extend_from_slice(&buffer[..size]);
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .map(|value| value.parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    (base, task)
+}
+
+/// Regression (docs/hardening/10): the TUI turn must send the preamble
+/// exactly as `main` resolved it — one copy of the config baseline, one of
+/// the appended marker — in the final model request.
+#[tokio::test]
+async fn run_turn_sends_the_resolved_preamble_exactly_once() {
+    let sse = "data: {\"id\":\"t\",\"object\":\"chat.completion.chunk\",\"created\":0,\
+               \"model\":\"manual\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\
+               \"content\":\"hello\"},\"finish_reason\":null}]}\n\n\
+               data: {\"id\":\"t\",\"object\":\"chat.completion.chunk\",\"created\":0,\
+               \"model\":\"manual\",\"choices\":[{\"index\":0,\"delta\":{},\
+               \"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\
+               \"completion_tokens\":1,\"total_tokens\":2}}\n\n\
+               data: [DONE]\n\n";
+    unsafe { std::env::set_var("CRAFT_TEST_KEY", "test-key") };
+    let (base, server) = capture_server(sse);
+    let mut config = Config::parse(&format!(
+        "provider \"test\" {{\n  kind = \"openai-compatible\"\n  base_url = \"{base}/v1\"\n  \
+         api_key_env = \"CRAFT_TEST_KEY\"\n  model \"manual\" {{ name = \"Manual model\" }}\n}}",
+    ))
+    .unwrap();
+    config.providers.get_mut("test").unwrap().discover_models = false;
+    // The resolved preamble, as `main`'s `apply_prompt_overrides` leaves it.
+    config.agent.preamble = "BASELINE-PREAMBLE\n\nMARKER".into();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let ctx = super::turn::TurnCtx {
+        config: Arc::new(config),
+        workspace: Workspace::new(dir.path()).unwrap(),
+        instructions_text: String::new(),
+        selection: Selection {
+            provider: "test".into(),
+            model: "manual".into(),
+            context_length: None,
+        },
+        state: Arc::new(Mutex::new(SessionState::linked())),
+        files: Files::default(),
+        cancel: run::cancel_channel().0.token(),
+        subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
+        tx,
+        permissions: Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::path::PathBuf::new(),
+        )),
+        mode: crate::run::AgentMode::Build,
+    };
+    super::turn::run_turn(ctx, "hi".into(), Vec::new()).await;
+
+    let captured = server.join().unwrap();
+    let (_, body) = captured.split_once("\r\n\r\n").unwrap();
+    assert_eq!(body.matches("MARKER").count(), 1, "{body}");
+    assert_eq!(body.matches("BASELINE-PREAMBLE").count(), 1, "{body}");
+}

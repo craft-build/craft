@@ -77,7 +77,7 @@ async fn main() -> Result<(), Error> {
             // G.6 first run: auto-detect providers from credential env
             // vars when craft.bml configures none.
             let setup_notes = craft::setup::first_run(&mut config);
-            config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
+            cli.apply_prompt_overrides(&mut config);
             if let Some(max_turns) = cli.max_turns {
                 config.agent.max_turns = Some(max_turns);
             }

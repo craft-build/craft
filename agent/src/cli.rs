@@ -193,11 +193,12 @@ pub struct Cli {
     #[arg(long)]
     pub max_turns: Option<u32>,
 
-    /// System prompt override
+    /// Replaces the configurable agent preamble (not the built-in prompt
+    /// sections); an empty value is ignored
     #[arg(long)]
     pub system_prompt: Option<String>,
 
-    /// Append to system prompt
+    /// Appends to the configurable agent preamble; an empty value is ignored
     #[arg(long)]
     pub append_system_prompt: Option<String>,
 
@@ -681,11 +682,16 @@ impl Cli {
 
     /// The system-prompt text that replaces the config preamble:
     /// `--system-prompt` replaces it, `--append-system-prompt` appends to it,
-    /// otherwise the config value passes through unchanged.
+    /// otherwise the config value passes through unchanged. Empty or
+    /// whitespace-only flag values count as unset (matching the
+    /// predecessor's `sdk_mode.rs` filter), so `--system-prompt ""` never
+    /// wipes the config preamble.
     pub fn effective_preamble(&self, config_preamble: &str) -> String {
         let base = self
             .system_prompt
-            .clone()
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| config_preamble.to_string());
         match &self.append_system_prompt {
             Some(extra) if extra.trim().is_empty() => base,
@@ -693,6 +699,14 @@ impl Cli {
             Some(extra) => format!("{base}\n\n{extra}"),
             None => base,
         }
+    }
+
+    /// Resolve the `--system-prompt` / `--append-system-prompt` overrides
+    /// into `config.agent.preamble`. Applied exactly once per process, in
+    /// `main`, before the interactive TUI and the `--print` path read the
+    /// preamble — those surfaces must never re-apply it.
+    pub fn apply_prompt_overrides(&self, config: &mut crate::config::Config) {
+        config.agent.preamble = self.effective_preamble(&config.agent.preamble);
     }
 
     /// The session to resume, from `-s/--session` (alias `--resume`).
@@ -1528,6 +1542,44 @@ mod tests {
         assert_eq!(cli.effective_preamble(base), "a\n\nb");
     }
 
+    /// Empty or whitespace-only flag values count as unset (predecessor
+    /// semantics): `--system-prompt ""` never wipes the config preamble.
+    #[test]
+    fn effective_preamble_treats_empty_flag_values_as_unset() {
+        let base = "config text";
+        for value in ["", "  \n\t"] {
+            let cli = parse(&["--system-prompt", value]).unwrap();
+            assert_eq!(cli.effective_preamble(base), "config text", "{value:?}");
+            let cli = parse(&["--append-system-prompt", value]).unwrap();
+            assert_eq!(cli.effective_preamble(base), "config text", "{value:?}");
+            let cli =
+                parse(&["--system-prompt", value, "--append-system-prompt", "extra"]).unwrap();
+            assert_eq!(
+                cli.effective_preamble(base),
+                "config text\n\nextra",
+                "{value:?}"
+            );
+        }
+        // An empty config preamble leaves the append as the whole preamble.
+        let cli = parse(&["--append-system-prompt", "extra"]).unwrap();
+        assert_eq!(cli.effective_preamble(""), "extra");
+    }
+
+    #[test]
+    fn apply_prompt_overrides_writes_the_effective_preamble_into_config() {
+        let mut config = crate::config::Config::default();
+        config.agent.preamble = "config text".into();
+        let cli = parse(&["--append-system-prompt", "extra"]).unwrap();
+        cli.apply_prompt_overrides(&mut config);
+        assert_eq!(config.agent.preamble, "config text\n\nextra");
+
+        let mut config = crate::config::Config::default();
+        config.agent.preamble = "config text".into();
+        let cli = parse(&["--system-prompt", "override"]).unwrap();
+        cli.apply_prompt_overrides(&mut config);
+        assert_eq!(config.agent.preamble, "override");
+    }
+
     #[test]
     fn hidden_compat_flags_parse_and_warn() {
         let cli = parse(&["--fallback-model", "x", "--strict-mcp-config", "hi"]).unwrap();
@@ -1814,6 +1866,133 @@ mod tests {
             crate::permissions::ToolKey::native("bash")
         );
     }
+
+    /// A one-shot local SSE server echoing OpenAI chat.completion chunks
+    /// (the capture pattern from `providers::tests::server`); returns the
+    /// base URL and a task yielding the captured request bytes.
+    fn capture_server(body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "no request arrived");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 8192];
+            loop {
+                let size = stream.read(&mut buffer).unwrap();
+                assert_ne!(size, 0, "incomplete request");
+                request.extend_from_slice(&buffer[..size]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .map(|value| value.parse::<usize>().unwrap())
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (base, task)
+    }
+
+    /// An `openai-compatible` provider pointing at `base` with manual-only
+    /// model discovery, so the run never needs a second endpoint.
+    fn capture_provider_config(base: &str) -> crate::config::Config {
+        let mut config = crate::config::Config::parse(&format!(
+            "provider \"test\" {{\n  kind = \"openai-compatible\"\n  base_url = \"{base}/v1\"\n  \
+             api_key_env = \"CRAFT_TEST_KEY\"\n  model \"manual\" {{ name = \"Manual model\" }}\n}}",
+        ))
+        .unwrap();
+        config.providers.get_mut("test").unwrap().discover_models = false;
+        config
+    }
+
+    /// Regression (docs/hardening/10): the print path used to re-apply the
+    /// CLI prompt overrides, so `--append-system-prompt` text reached the
+    /// model twice. The final wire request must carry the resolved
+    /// preamble exactly once.
+    #[tokio::test]
+    async fn print_mode_sends_the_resolved_preamble_exactly_once() {
+        let sse = "data: {\"id\":\"t\",\"object\":\"chat.completion.chunk\",\"created\":0,\
+                   \"model\":\"manual\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\
+                   \"content\":\"hello\"},\"finish_reason\":null}]}\n\n\
+                   data: {\"id\":\"t\",\"object\":\"chat.completion.chunk\",\"created\":0,\
+                   \"model\":\"manual\",\"choices\":[{\"index\":0,\"delta\":{},\
+                   \"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\
+                   \"completion_tokens\":1,\"total_tokens\":2}}\n\n\
+                   data: [DONE]\n\n";
+        unsafe { std::env::set_var("CRAFT_TEST_KEY", "test-key") };
+        for (args, replacement) in [
+            (
+                vec!["--print", "--append-system-prompt", "MARKER", "hi"],
+                false,
+            ),
+            (
+                vec![
+                    "--print",
+                    "--system-prompt",
+                    "REPLACEMENT",
+                    "--append-system-prompt",
+                    "MARKER",
+                    "hi",
+                ],
+                true,
+            ),
+        ] {
+            let (base, server) = capture_server(sse);
+            let mut config = capture_provider_config(&base);
+            config.agent.preamble = "BASELINE-PREAMBLE".into();
+            // Exactly the production wiring: main resolves the prompt
+            // overrides once, then hands off to the print path.
+            let cli = parse(&args).unwrap();
+            cli.apply_prompt_overrides(&mut config);
+            run_print_with(&cli, config, None).await.unwrap();
+            let captured = server.join().unwrap();
+            let (_, body) = captured.split_once("\r\n\r\n").unwrap();
+            assert_eq!(body.matches("MARKER").count(), 1, "{args:?}: {body}");
+            assert_eq!(
+                body.matches("REPLACEMENT").count(),
+                usize::from(replacement),
+                "{args:?}: {body}"
+            );
+            assert_eq!(
+                body.matches("BASELINE-PREAMBLE").count(),
+                usize::from(!replacement),
+                "{args:?}: {body}"
+            );
+        }
+    }
 }
 
 /// Resolve the initial prompt for a run: the positional `PROMPT` wins; else
@@ -1847,8 +2026,20 @@ pub fn resolve_prompt_input(
 /// `craft --print` (G.3): run one prompt to completion against the
 /// configured providers and emit text, JSONL (`--output-format
 /// stream-json`), or a verbose transcript (`--verbose`). SDK-mode
-/// stream-json input remains unported.
-pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<()> {
+/// stream-json input remains unported. `config.agent.preamble` must
+/// already be the effective preamble — `main` applies the CLI prompt
+/// overrides once, before dispatch.
+pub async fn run_print(cli: &Cli, config: crate::config::Config) -> Result<()> {
+    run_print_with(cli, config, StateDir::resolve().ok()).await
+}
+
+/// [`run_print`] with an injectable state dir: tests pass `None` so runs
+/// never touch the developer's session storage.
+async fn run_print_with(
+    cli: &Cli,
+    mut config: crate::config::Config,
+    state_dir: Option<StateDir>,
+) -> Result<()> {
     cli.apply_thinking(&mut config)?;
     // One warning per unimplemented option, in a stable order.
     for flag in ["--image", "--verbose", "--include-partial-messages"] {
@@ -1884,12 +2075,12 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         }
         .build()
     })?;
-    let plan = match StateDir::resolve() {
-        Ok(dir) => cli.resolve_session_plan(&dir, &cwd.display().to_string())?,
-        Err(e) => {
+    let plan = match state_dir.as_ref() {
+        Some(dir) => cli.resolve_session_plan(dir, &cwd.display().to_string())?,
+        None => {
             if cli.fork_session || cli.continue_session || cli.session.is_some() {
                 return InvalidSnafu {
-                    reason: format!("session storage is unavailable, cannot resume or fork: {e}"),
+                    reason: "session storage is unavailable, cannot resume or fork".to_string(),
                 }
                 .fail();
             }
@@ -1898,9 +2089,7 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
     };
     let mut query = HeadlessQuery::for_print(cli, prompt, None)?;
     apply_resume_plan(cli, &mut query, plan);
-
-    config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
-    run_headless_query(config, query).await
+    run_headless_query_with(config, query, state_dir).await
 }
 
 /// Wire a resolved [`ResumePlan`] into the query: the session id the run
@@ -1995,6 +2184,16 @@ impl HeadlessQuery {
 }
 
 pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery) -> Result<()> {
+    run_headless_query_with(config, q, crate::storage::StateDir::resolve().ok()).await
+}
+
+/// [`run_headless_query`] with an injectable state dir: tests pass `None`
+/// so runs never touch the developer's session storage.
+async fn run_headless_query_with(
+    config: crate::config::Config,
+    q: HeadlessQuery,
+    state_dir: Option<StateDir>,
+) -> Result<()> {
     let _ = tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
     let prompt = inject_context(&q.prompt, &q.context);
     // Fails fast: silently dropping an image the caller explicitly attached
@@ -2115,7 +2314,6 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
         reviewer,
     )) as Arc<dyn BeforeExecute>);
     let workspace = env.workspace;
-    let state_dir = crate::storage::StateDir::resolve().ok();
 
     let mode = match q.mode {
         CliMode::Plan => crate::run::AgentMode::Plan(
