@@ -48,9 +48,14 @@ pub fn to_request(
 /// tool results ("does not support images in tool results"), while both
 /// families accept an image in user content.
 pub fn own_to_rig(messages: &[history::Message]) -> Vec<RigMessage> {
-    let mut out = Vec::with_capacity(messages.len());
+    let mut out: Vec<RigMessage> = Vec::with_capacity(messages.len());
     for message in messages {
-        out.push(own_message_to_rig(message));
+        if let history::Message::User { content } = message {
+            let blocks: Vec<UserContent> = content.iter().map(own_user_block_to_rig).collect();
+            push_user_message(&mut out, blocks);
+        } else {
+            out.push(own_message_to_rig(message));
+        }
         if let history::Message::User { content } = message {
             let images: Vec<UserContent> = content
                 .iter()
@@ -87,6 +92,31 @@ pub fn own_to_rig(messages: &[history::Message]) -> Vec<RigMessage> {
         }
     }
     out
+}
+
+fn image_free(content: &[UserContent]) -> bool {
+    content
+        .iter()
+        .all(|block| !matches!(block, UserContent::Image(_)))
+}
+
+/// Append one user message's blocks, coalescing adjacent user messages.
+///
+/// History records a separate user message per tool result (waves of
+/// parallel calls) and separate end/cancel markers after them. Bedrock and
+/// Anthropic reject that split on replay: every `tool_use` must be answered
+/// by `toolResult` blocks in the immediately following user message
+/// ("Expected toolResult blocks at messages.N.content"), so adjacent user
+/// messages merge into one wire message. Image-bearing messages stay
+/// separate: OpenAI Chat Completions rejects images in a message that also
+/// carries tool results.
+fn push_user_message(out: &mut Vec<RigMessage>, blocks: Vec<UserContent>) {
+    match out.last_mut() {
+        Some(RigMessage::User { content }) if image_free(&blocks) && image_free(content) => {
+            content.extend(blocks);
+        }
+        _ => out.push(RigMessage::User { content: blocks }),
+    }
 }
 
 pub fn own_message_to_rig(message: &history::Message) -> RigMessage {
@@ -539,6 +569,132 @@ mod tests {
         let once = rig_to_own(&own_to_rig(&own));
         let twice = rig_to_own(&own_to_rig(&once));
         assert_eq!(once, twice);
+    }
+
+    /// Regression for the Bedrock failure "Expected toolResult blocks at
+    /// messages.N.content": parallel tool calls commit as one assistant
+    /// message with a separate user message per result, so the wire copy
+    /// must coalesce them — every tool_use answered in the immediately
+    /// following user message.
+    #[test]
+    fn parallel_tool_results_replay_in_one_user_message() {
+        let result = |id: &str| {
+            history::UserContent::ToolResult(history::ToolResult {
+                call: id.into(),
+                name: "read".into(),
+                content: vec![history::ToolResultContent::text("ok")],
+                is_error: false,
+            })
+        };
+        let own = vec![
+            history::Message::Assistant {
+                content: vec![
+                    history::AssistantContent::ToolCall(history::ToolCall::new(
+                        "t1",
+                        "read",
+                        serde_json::json!({"path": "a"}),
+                    )),
+                    history::AssistantContent::ToolCall(history::ToolCall::new(
+                        "t2",
+                        "read",
+                        serde_json::json!({"path": "b"}),
+                    )),
+                ],
+            },
+            history::Message::User {
+                content: vec![result("t1")],
+            },
+            history::Message::User {
+                content: vec![result("t2")],
+            },
+        ];
+        let rig = own_to_rig(&own);
+        assert_eq!(rig.len(), 2, "per-result user messages must coalesce");
+        let RigMessage::User { content } = &rig[1] else {
+            panic!("expected user message");
+        };
+        let ids: Vec<&str> = content
+            .iter()
+            .filter_map(|block| match block {
+                UserContent::ToolResult(result) => Some(result.call.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["t1", "t2"]);
+    }
+
+    /// Cancel/end markers trail their tool-result messages as separate user
+    /// messages; they merge in so no tool_result-less user message directly
+    /// follows a tool_use.
+    #[test]
+    fn trailing_marker_merges_into_tool_result_message() {
+        let own = vec![
+            history::Message::Assistant {
+                content: vec![history::AssistantContent::ToolCall(history::ToolCall::new(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": "ls"}),
+                ))],
+            },
+            history::Message::User {
+                content: vec![history::UserContent::ToolResult(history::ToolResult {
+                    call: "t1".into(),
+                    name: "bash".into(),
+                    content: vec![history::ToolResultContent::text(
+                        "skipped: cancelled by the user",
+                    )],
+                    is_error: true,
+                })],
+            },
+            history::Message::user("[Cancelled by user]"),
+        ];
+        let rig = own_to_rig(&own);
+        assert_eq!(rig.len(), 2);
+        let RigMessage::User { content } = &rig[1] else {
+            panic!("expected user message");
+        };
+        assert!(matches!(content[0], UserContent::ToolResult(_)));
+        assert!(matches!(content[1], UserContent::Text(_)));
+    }
+
+    /// Image-bearing user messages never merge with tool-result messages,
+    /// preserving the OpenAI split the follow-up message exists for.
+    #[test]
+    fn image_messages_stay_out_of_tool_result_messages() {
+        let own = vec![
+            history::Message::Assistant {
+                content: vec![history::AssistantContent::ToolCall(history::ToolCall::new(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": "ls"}),
+                ))],
+            },
+            history::Message::User {
+                content: vec![history::UserContent::ToolResult(history::ToolResult {
+                    call: "t1".into(),
+                    name: "bash".into(),
+                    content: vec![history::ToolResultContent::text("done")],
+                    is_error: false,
+                })],
+            },
+            history::Message::User {
+                content: vec![history::UserContent::Image(history::ImageBlock {
+                    media_type: history::ImageMedia::Png,
+                    data: "aGk=".into(),
+                    caption: "[image]".into(),
+                })],
+            },
+        ];
+        let rig = own_to_rig(&own);
+        assert_eq!(rig.len(), 3);
+        let RigMessage::User { content } = &rig[1] else {
+            panic!("expected tool-result user message");
+        };
+        assert!(matches!(content[0], UserContent::ToolResult(_)));
+        let RigMessage::User { content } = &rig[2] else {
+            panic!("expected image user message");
+        };
+        assert!(matches!(content[0], UserContent::Image(_)));
     }
 
     #[test]
