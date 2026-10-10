@@ -8,14 +8,15 @@
 //!
 //! Ported from the reference `craft-agent/src/agent/auto_review.rs`,
 //! re-expressed for this repo's Rig edge: the reviewer call goes through
-//! [`crate::edge::to_request`] + `CompletionModel::completion`, like the
+//! [`crate::edge::to_request`] + `CompletionSource::completion`, like the
 //! compaction summarizer. Deviation: no reviewer-side cancel token (the
 //! reference races one); the deadline alone bounds the call.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use rig_core::completion::{CompletionModel, message::AssistantContent};
+use crate::providers::CompletionSource;
+use rig_core::completion::message::AssistantContent;
 use serde::Deserialize;
 use snafu::Snafu;
 use tokio::time::timeout;
@@ -258,7 +259,7 @@ fn review_message(tool: &str, scopes: &[String]) -> Message {
 /// being requested. The call carries no tools, so the reviewer cannot itself
 /// mutate state. Fails closed on timeout, provider error, or unparseable
 /// output.
-pub async fn review<M: CompletionModel>(
+pub async fn review<M: CompletionSource>(
     model: &M,
     tool: &str,
     scopes: &[String],
@@ -268,7 +269,7 @@ pub async fn review<M: CompletionModel>(
 
 /// Deadline-parameterized core so tests can exercise the timeout path
 /// without waiting the full 30 seconds.
-pub(crate) async fn review_with_deadline<M: CompletionModel>(
+pub(crate) async fn review_with_deadline<M: CompletionSource>(
     model: &M,
     tool: &str,
     scopes: &[String],
@@ -375,8 +376,11 @@ mod tests {
 
     #[tokio::test]
     async fn well_formed_allow_is_parsed_from_the_model() {
-        let model =
-            MockCompletionModel::new([MockTurn::text(decision_json("allow", "low", "read-only"))]);
+        let model = MockCompletionModel::from_turns([MockTurn::text(decision_json(
+            "allow",
+            "low",
+            "read-only",
+        ))]);
         let d = review(&model, "write", &["/tmp/x".into()]).await.unwrap();
         assert_eq!(d.verdict, Verdict::Allow);
         assert_eq!(d.risk, Risk::Low);
@@ -385,12 +389,12 @@ mod tests {
         assert_eq!(model.requests().len(), 1);
         let request = &model.requests()[0];
         assert!(request.tools.is_empty());
-        assert_eq!(request.preamble.as_deref(), Some(REVIEWER_SYSTEM_PROMPT));
+        assert_eq!(request.system_instructions(), Some(REVIEWER_SYSTEM_PROMPT));
     }
 
     #[tokio::test]
     async fn provider_error_fails_closed() {
-        let model = MockCompletionModel::new([MockTurn::error("rate limited")]);
+        let model = MockCompletionModel::from_turns([MockTurn::error("rate limited")]);
         assert!(matches!(
             review(&model, "bash", &["rm -rf /".into()]).await,
             Err(ReviewError::Provider { .. })
@@ -401,24 +405,27 @@ mod tests {
     async fn timeout_fails_closed() {
         #[derive(Clone)]
         struct HangingModel;
-        impl CompletionModel for HangingModel {
-            async fn completion(
+        impl CompletionSource for HangingModel {
+            fn completion(
                 &self,
                 _request: rig_core::completion::CompletionRequest,
-            ) -> Result<
-                rig_core::completion::CompletionResponse,
-                rig_core::completion::CompletionError,
-            > {
-                futures::future::pending().await
+            ) -> impl Future<
+                Output = Result<
+                    rig_core::completion::CompletionResponse,
+                    rig_core::error::ProviderError,
+                >,
+            > + Send {
+                futures::future::pending()
             }
-            async fn stream(
+            fn stream(
                 &self,
                 _request: rig_core::completion::CompletionRequest,
-            ) -> Result<
-                rig_core::streaming::StreamingCompletionResponse,
-                rig_core::completion::CompletionError,
-            > {
-                futures::future::pending().await
+            ) -> Result<rig_core::streaming::CompletionStream, rig_core::error::ProviderError>
+            {
+                Ok(rig_core::streaming::CompletionStream::relay(
+                    "hanging",
+                    Box::pin(futures::stream::pending()),
+                ))
             }
         }
         let err = review_with_deadline(&HangingModel, "bash", &[], Duration::from_millis(10))

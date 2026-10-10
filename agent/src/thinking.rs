@@ -751,12 +751,27 @@ pub fn wire(
             json!({"generationConfig": {"thinkingConfig": thinking}})
         }
         ProviderKind::Ollama => {
-            // Ollama distinguishes level-controlled GPT-OSS from toggle models.
+            // The /v1 OpenAI-compatible route spells effort
+            // `reasoning_effort`, snapped to the levels the server declares
+            // (gpt-oss); toggle models turn off with "none".
             let has_levels =
                 id.contains("gpt-oss") || info.options.iter().any(|o| o.kind == "effort");
             match config {
-                Off => json!({"think": false}),
-                Adaptive => json!({"think": true}),
+                Off => json!({"reasoning_effort": "none"}),
+                Adaptive if has_levels && !d.levels.is_empty() => {
+                    let levels = [
+                        crate::thinking::Effort::Low,
+                        crate::thinking::Effort::Medium,
+                        crate::thinking::Effort::High,
+                        crate::thinking::Effort::Max,
+                    ];
+                    let e: crate::thinking::Effort = effort
+                        .unwrap_or("high")
+                        .parse()
+                        .unwrap_or(crate::thinking::Effort::High);
+                    json!({"reasoning_effort": e.snap(&levels).as_str()})
+                }
+                Adaptive => json!({}),
                 _ if has_levels && !d.levels.is_empty() => {
                     let levels = [
                         crate::thinking::Effort::Low,
@@ -768,9 +783,9 @@ pub fn wire(
                         .unwrap_or("high")
                         .parse()
                         .unwrap_or(crate::thinking::Effort::High);
-                    json!({"think": e.snap(&levels).as_str()})
+                    json!({"reasoning_effort": e.snap(&levels).as_str()})
                 }
-                _ => json!({"think": true}),
+                _ => json!({}),
             }
         }
         ProviderKind::Deepseek | ProviderKind::Zai => {
@@ -1111,7 +1126,7 @@ mod tests {
                 &info,
                 None
             ),
-            json!({"think": false})
+            json!({"reasoning_effort": "none"})
         );
         assert_eq!(
             wire(

@@ -55,7 +55,7 @@ use view::compress_request_view;
 
 use std::sync::Arc;
 
-use rig_core::completion::CompletionModel;
+use crate::providers::CompletionSource;
 
 use crate::compression::CompressionConfig;
 use crate::config::{CompactionBuffer, CompactionConfig};
@@ -282,7 +282,7 @@ pub enum RunOutcome {
 /// Drive one multi-turn run. `history` is the caller-owned conversation; the
 /// prompt is appended as the turn's first user message. `emit` receives every
 /// event as it happens (it must not block).
-pub async fn run<M: CompletionModel + Clone>(
+pub async fn run<M: CompletionSource + Clone>(
     model: &M,
     params: &RunParams,
     tools: &ToolDispatch,
@@ -299,7 +299,7 @@ pub async fn run<M: CompletionModel + Clone>(
 // Clippy: the loop seam is deliberately flat (model, params, tools,
 // history, prompt, attachments, cancel, emit) rather than a builder.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_with_images<M: CompletionModel + Clone>(
+pub async fn run_with_images<M: CompletionSource + Clone>(
     model: &M,
     params: &RunParams,
     tools: &ToolDispatch,
@@ -348,7 +348,7 @@ pub async fn run_with_images<M: CompletionModel + Clone>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_inner<M: CompletionModel + Clone>(
+async fn run_inner<M: CompletionSource + Clone>(
     model: &M,
     params: &RunParams,
     tools: &ToolDispatch,
@@ -406,7 +406,7 @@ pub(crate) fn prompt_message(prompt: &str, images: &[ImageBlock]) -> Message {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_loop<M: CompletionModel + Clone>(
+async fn run_loop<M: CompletionSource + Clone>(
     model: &M,
     params: &RunParams,
     tools: &ToolDispatch,

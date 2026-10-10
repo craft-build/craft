@@ -46,12 +46,12 @@ async fn done_by_model_carries_priced_and_unpriced_models() {
     async fn collect_by_model(spec: &str) -> HashMap<String, crate::usage::StoredTokenUsage> {
         let (model, _turns) = stream_turns(vec![vec![
             MockStreamEvent::text("hi"),
-            MockStreamEvent::final_response(rig_core::completion::Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-                total_tokens: 15,
-                ..rig_core::completion::Usage::new()
-            }),
+            MockStreamEvent::final_response(
+                rig_core::completion::Usage::new()
+                    .input_tokens(10)
+                    .output_tokens(5)
+                    .total_tokens(15),
+            ),
         ]]);
         let tools = crate::tools::Workspace::new(std::env::temp_dir())
             .unwrap()

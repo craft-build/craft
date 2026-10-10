@@ -80,9 +80,7 @@ use std::{
 
 use rig_core::completion::ToolDefinition;
 use rig_core::completion::message::{ImageMediaType, ToolResultContent as RigToolResultContent};
-use rig_core::tool::{
-    PortableDynamicTool, PortableTool, ToolErrorKind, ToolExecutionError, ToolOutput,
-};
+use rig_core::tool::{DynamicTool, PortableTool, ToolErrorKind, ToolExecutionError, ToolOutput};
 
 pub(crate) type Result<T> = std::result::Result<T, ToolExecutionError>;
 pub(crate) const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -407,7 +405,7 @@ impl Workspace {
     fn builtin_tool_table(
         &self,
         sandbox: crate::sandbox::SandboxPolicyCell,
-    ) -> Vec<(&'static str, PortableDynamicTool)> {
+    ) -> Vec<(&'static str, DynamicTool)> {
         let mut table = self.core_builtin_table(sandbox);
         table.extend(argosy_tools());
         table
@@ -416,7 +414,7 @@ impl Workspace {
     fn core_builtin_table(
         &self,
         sandbox: crate::sandbox::SandboxPolicyCell,
-    ) -> Vec<(&'static str, PortableDynamicTool)> {
+    ) -> Vec<(&'static str, DynamicTool)> {
         vec![
             ("read", dynamic(Read(self.clone()))),
             ("grep", dynamic(Grep(self.clone()))),
@@ -462,7 +460,7 @@ impl Workspace {
     pub fn register_with_mode(&self, mode: crate::run::AgentMode) -> crate::run::ToolDispatch {
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
         let mut tools = self.mode_tool_set(&mode, batch.clone());
-        let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
+        let definitions = tools.iter().map(DynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
         let dispatch = crate::run::ToolDispatch::new(tools)
             .with_write_root((*self.root).clone())
@@ -486,7 +484,7 @@ impl Workspace {
         let mut tools =
             self.mode_tool_set(mode, Batch(std::sync::Arc::new(std::sync::OnceLock::new())));
         let mut definitions: Vec<ToolDefinition> =
-            tools.iter().map(PortableDynamicTool::definition).collect();
+            tools.iter().map(DynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions.clone()))));
         definitions.push(tools.last().expect("list_tools just pushed").definition());
         definitions
@@ -494,13 +492,9 @@ impl Workspace {
 
     /// The mode's full tool set (builtins + batch + MCP), before the
     /// self-describing `list_tools` entry is appended at registration.
-    fn mode_tool_set(
-        &self,
-        mode: &crate::run::AgentMode,
-        batch: Batch,
-    ) -> Vec<PortableDynamicTool> {
+    fn mode_tool_set(&self, mode: &crate::run::AgentMode, batch: Batch) -> Vec<DynamicTool> {
         let sandbox = self.turn_sandbox_cell(mode, false);
-        let mut tools: Vec<PortableDynamicTool> = self
+        let mut tools: Vec<DynamicTool> = self
             .builtin_tool_table(sandbox)
             .into_iter()
             .map(|(_, tool)| tool)
@@ -535,7 +529,7 @@ impl Workspace {
         let sandbox = self.turn_sandbox_cell(&crate::run::AgentMode::Build, !general);
         // The restricted table is the shared builtin table filtered by the
         // subagent tool budget.
-        let mut tools: Vec<PortableDynamicTool> = self
+        let mut tools: Vec<DynamicTool> = self
             .builtin_tool_table(sandbox)
             .into_iter()
             .filter(|(name, _)| allowed.contains(name))
@@ -552,7 +546,7 @@ impl Workspace {
                 .clone();
             tools.extend(mcp_tools(&handle, cancel));
         }
-        let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
+        let definitions = tools.iter().map(DynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
         let dispatch = crate::run::ToolDispatch::new(tools)
             .with_write_root((*self.root).clone())
@@ -575,13 +569,13 @@ impl Workspace {
     pub fn register_reviewer(&self) -> crate::run::ToolDispatch {
         let allowed = crate::subagent::REVIEWER_TOOLS;
         let sandbox = self.turn_sandbox_cell(&crate::run::AgentMode::Build, true);
-        let mut tools: Vec<PortableDynamicTool> = self
+        let mut tools: Vec<DynamicTool> = self
             .builtin_tool_table(sandbox)
             .into_iter()
             .filter(|(name, _)| allowed.contains(name))
             .map(|(_, tool)| tool)
             .collect();
-        let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
+        let definitions = tools.iter().map(DynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
         crate::run::ToolDispatch::new(tools)
             .with_write_root((*self.root).clone())
@@ -842,15 +836,15 @@ pub(crate) use impl_tool;
 /// [`crate::knowledge::render_report_text`] — embedded bodies (`content`,
 /// pre-rendered `text`, `drafted`) surface directly instead of as pretty
 /// JSON.
-fn argosy_tools() -> Vec<(&'static str, PortableDynamicTool)> {
+fn argosy_tools() -> Vec<(&'static str, DynamicTool)> {
     crate::knowledge::tool_definitions()
         .iter()
         .map(|def| {
             let name = def.name.clone();
             (
                 def.native,
-                PortableDynamicTool::new(
-                    def.native,
+                DynamicTool::new(
+                    crate::edge::tool_name(def.native),
                     def.description.clone(),
                     def.schema.clone(),
                     move |arguments| {
@@ -876,7 +870,7 @@ fn argosy_tools() -> Vec<(&'static str, PortableDynamicTool)> {
 fn mcp_tools(
     handle: &crate::mcp::McpHandle,
     cancel: Option<crate::run::CancelToken>,
-) -> Vec<PortableDynamicTool> {
+) -> Vec<DynamicTool> {
     handle
         .tool_descriptors()
         .into_iter()
@@ -884,8 +878,8 @@ fn mcp_tools(
             let handle = handle.clone();
             let qualified = descriptor.qualified_name.clone();
             let cancel = cancel.clone();
-            PortableDynamicTool::new(
-                descriptor.wire_name,
+            DynamicTool::new(
+                crate::edge::tool_name(&descriptor.wire_name),
                 descriptor.description,
                 descriptor.parameters,
                 move |arguments| {
@@ -968,14 +962,14 @@ fn image_media_type(mime: &str) -> Option<ImageMediaType> {
 }
 
 /// Adapt a typed portable tool into the erased tool the dispatcher executes.
-fn dynamic<T>(tool: T) -> PortableDynamicTool
+fn dynamic<T>(tool: T) -> DynamicTool
 where
     T: PortableTool + Clone + Send + Sync + 'static,
     T::Args: serde::de::DeserializeOwned + Send + Sync + 'static,
     T::Output: rig_core::tool::IntoToolOutput,
 {
-    PortableDynamicTool::new(
-        T::NAME,
+    DynamicTool::new(
+        crate::edge::tool_name(T::NAME),
         tool.description(),
         tool.parameters(),
         move |arguments| {

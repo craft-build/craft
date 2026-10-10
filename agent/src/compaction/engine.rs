@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use rig_core::completion::CompletionModel;
+use crate::providers::CompletionSource;
 
 use crate::config::{
     CompactionBuffer, CompactionConfig, CompactionKind,
@@ -149,7 +149,7 @@ impl CompactionEngine {
     /// the estimated context has already overflowed the buffer-subtracted
     /// window — overflow forces every armed stage in order (VCC first, then
     /// LLM), regardless of its ratio threshold.
-    pub async fn maybe_compact<M: CompletionModel + Clone>(
+    pub async fn maybe_compact<M: CompletionSource + Clone>(
         &self,
         state: &mut CompactionState,
         model: &M,
@@ -164,7 +164,7 @@ impl CompactionEngine {
     /// fill, following the same rule the overflow-forced path uses. Stages
     /// whose mechanics decline to run (too-short history) still leave the
     /// history untouched, so an already-compact history returns `false`.
-    pub async fn force_compact<M: CompletionModel + Clone>(
+    pub async fn force_compact<M: CompletionSource + Clone>(
         &self,
         state: &mut CompactionState,
         model: &M,
@@ -175,7 +175,7 @@ impl CompactionEngine {
             .await
     }
 
-    async fn compact_impl<M: CompletionModel + Clone>(
+    async fn compact_impl<M: CompletionSource + Clone>(
         &self,
         state: &mut CompactionState,
         model: &M,
@@ -405,7 +405,7 @@ mod tests {
         let tokens = estimate_tokens(&history);
         // Window sized so 80% of it is below the current estimate.
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
-        let model = MockCompletionModel::new([MockTurn::text("llm summary text")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("llm summary text")]);
         let ran = engine
             .maybe_compact(&mut state, &model, &mut history, Some(context_length))
             .await;
@@ -427,7 +427,7 @@ mod tests {
         // stage then runs and compacts effectively, re-arming everything.
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.99) as u32).max(1);
-        let model = MockCompletionModel::new([MockTurn::text("summarized")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("summarized")]);
         assert!(
             engine
                 .maybe_compact(&mut state, &model, &mut history, Some(context_length))
@@ -603,7 +603,7 @@ mod tests {
         state.protect_from(history.len() - 2);
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
-        let model = MockCompletionModel::new([MockTurn::text("summary")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("summary")]);
         assert!(
             engine
                 .maybe_compact(&mut state, &model, &mut history, Some(context_length))
@@ -654,7 +654,7 @@ mod tests {
         state.protect_from(0);
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.5) as u32).max(1);
-        let model = MockCompletionModel::new([MockTurn::text("summary")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("summary")]);
         assert!(
             !engine
                 .maybe_compact(&mut state, &model, &mut history, Some(context_length))
@@ -841,7 +841,7 @@ mod tests {
         // Fill ratio 0.7: over VCC's 0.6 threshold, under LLM's 0.8 and the
         // usable window, so the LLM stage only runs via the cascade.
         let context_length = ((tokens as f64 / 0.7) as u32).max(1);
-        let model = MockCompletionModel::new([MockTurn::text("summarized")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("summarized")]);
         assert!(
             engine
                 .maybe_compact(&mut state, &model, &mut history, Some(context_length))

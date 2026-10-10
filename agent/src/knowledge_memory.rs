@@ -10,7 +10,8 @@
 //!
 //! Controlled by `agent.memory_extraction` (default on).
 
-use rig_core::completion::{CompletionModel, message::AssistantContent};
+use crate::providers::CompletionSource;
+use rig_core::completion::message::AssistantContent;
 use serde::Deserialize;
 
 use crate::history::Message;
@@ -173,7 +174,7 @@ pub fn write_fact(fact: &Fact, cwd: &std::path::Path) -> Result<(), String> {
 
 /// One weak-tier side completion that extracts facts from the turn
 /// (the auto-review/compaction edge pattern).
-async fn extract_facts<M: CompletionModel>(
+async fn extract_facts<M: CompletionSource>(
     model: &M,
     history: &[Message],
 ) -> Result<Vec<Fact>, String> {

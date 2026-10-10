@@ -1,6 +1,6 @@
 //! Overflow recovery and terminal/partial-commit handling for the run loop.
 
-use rig_core::completion::CompletionModel;
+use crate::providers::CompletionSource;
 
 use crate::compaction::CompactionEngine;
 use crate::history::{self, Message};
@@ -19,7 +19,7 @@ pub(crate) const END_MARKER: &str = "[The turn ended here; the run was cut short
 /// instead of blindly retrying the identical oversized prompt. `history` is
 /// compacted in place; the un-committed turn is left intact and re-appended
 /// by the retried request.
-pub(super) async fn recover_from_overflow<M: CompletionModel + Clone>(
+pub(super) async fn recover_from_overflow<M: CompletionSource + Clone>(
     params: &RunParams,
     model: &M,
     history: &mut Vec<Message>,

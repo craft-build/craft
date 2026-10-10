@@ -90,7 +90,10 @@ fn deepseek_balance_url(config: &ProviderConfig) -> String {
 }
 
 async fn get_text(key: &str, url: &str) -> Result<String> {
-    let client = timeout_client(Timeouts::default())?;
+    let client = timeout_client(Timeouts::default())?
+        .inner()
+        .cloned()
+        .unwrap_or_default();
     let response = client
         .get(url)
         .bearer_auth(key)

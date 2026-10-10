@@ -8,7 +8,8 @@
 //! results by progressive ratio) before giving up and falling back to a
 //! static summary.
 
-use rig_core::completion::{CompletionError, CompletionModel};
+use crate::providers::CompletionSource;
+use rig_core::ProviderError;
 use snafu::ResultExt;
 
 use crate::edge;
@@ -42,7 +43,7 @@ pub type RelevanceScores<'a> = &'a [(usize, f32)];
 /// so input no turn has answered yet survives compaction verbatim (Craft's
 /// carry-protection). Returns whether the compacted history fits within
 /// `token_limit`.
-pub async fn llm_compact<M: CompletionModel + Clone>(
+pub async fn llm_compact<M: CompletionSource + Clone>(
     model: &M,
     history: &mut Vec<Message>,
     token_limit: u64,
@@ -173,13 +174,13 @@ pub(crate) fn is_context_overflow_body(message: &str) -> bool {
 /// Maps a rig completion error onto the overflow classification. Rig
 /// flattens provider failures into string payloads, so the sniff runs on
 /// whatever text the variant carries.
-fn is_context_overflow(error: &CompletionError) -> bool {
+fn is_context_overflow(error: &ProviderError) -> bool {
     match error {
-        CompletionError::ProviderError(message) | CompletionError::ResponseError(message) => {
+        ProviderError::Provider(message) | ProviderError::Response(message) => {
             is_context_overflow_body(message)
         }
-        CompletionError::RequestError(err) => is_context_overflow_body(&err.to_string()),
-        CompletionError::ProviderResponse(err) => is_context_overflow_body(&err.to_string()),
+        ProviderError::Request(err) => is_context_overflow_body(&err.to_string()),
+        ProviderError::ProviderResponse(err) => is_context_overflow_body(&err.body),
         _ => false,
     }
 }
@@ -188,7 +189,7 @@ fn is_context_overflow(error: &CompletionError) -> bool {
 /// pruned copy of it: first the tool-result tail is collapsed and the oldest
 /// round dropped, then tool results are stripped by ratio, and only when the
 /// ladder is exhausted does the caller's static fallback apply.
-async fn summarize<M: CompletionModel + Clone>(
+async fn summarize<M: CompletionSource + Clone>(
     model: &M,
     head: &[Message],
     relevance_scores: Option<RelevanceScores<'_>>,
@@ -357,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn summarizes_head_and_keeps_tail() {
-        let model = MockCompletionModel::new([MockTurn::text("condensed summary")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("condensed summary")]);
         let mut messages = history();
         let under = llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
@@ -371,7 +372,7 @@ mod tests {
         assert_eq!(model.requests().len(), 1);
         let request = &model.requests()[0];
         // The preamble travels as the request's preamble field.
-        assert_eq!(request.preamble.as_deref(), Some(COMPACTION_SYSTEM));
+        assert_eq!(request.system_instructions(), Some(COMPACTION_SYSTEM));
         assert!(matches!(
             request.chat_history.last(),
             Some(rig_core::completion::message::Message::User { content })
@@ -382,7 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn falls_back_to_static_summary_on_empty_response() {
-        let model = MockCompletionModel::new([MockTurn::text("")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("")]);
         let mut messages = history();
         let under = llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
@@ -402,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn targeted_prompt_embeds_top_topics() {
-        let model = MockCompletionModel::new([MockTurn::text("summary")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("summary")]);
         let mut messages = history();
         let scores: Vec<(usize, f32)> = (0..15).map(|i| (i, 0.9)).collect();
         llm_compact(&model, &mut messages, u64::MAX, 0, Some(&scores))
@@ -417,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn low_scores_fall_back_to_plain_prompt() {
-        let model = MockCompletionModel::new([MockTurn::text("summary")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("summary")]);
         let mut messages = history();
         let scores = vec![(0usize, 0.4f32), (1, 0.5)];
         llm_compact(&model, &mut messages, u64::MAX, 0, Some(&scores))
@@ -430,7 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn overflow_retries_collapse_then_drop_round() {
-        let model = MockCompletionModel::new([
+        let model = MockCompletionModel::from_turns([
             MockTurn::error(OVERFLOW),
             MockTurn::error(OVERFLOW),
             MockTurn::text("made it"),
@@ -457,7 +458,7 @@ mod tests {
         let turns = std::iter::repeat_with(|| MockTurn::error(OVERFLOW))
             .take(3 + super::super::PROGRESSIVE_TOOL_REMOVAL_RATIOS.len() + 1)
             .collect::<Vec<_>>();
-        let model = MockCompletionModel::new(turns);
+        let model = MockCompletionModel::from_turns(turns);
         let mut messages = tool_history();
         llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
@@ -475,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_overflow_error_falls_back_without_retry() {
-        let model = MockCompletionModel::new([MockTurn::error("rate limited")]);
+        let model = MockCompletionModel::from_turns([MockTurn::error("rate limited")]);
         let mut messages = tool_history();
         llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
@@ -574,11 +575,11 @@ mod tests {
 
     #[test]
     fn overflow_classifier_reads_rig_error_variants() {
-        assert!(is_context_overflow(&CompletionError::ProviderError(
+        assert!(is_context_overflow(&ProviderError::Provider(
             OVERFLOW.into()
         )));
-        assert!(!is_context_overflow(&CompletionError::JsonError(
-            serde_json::from_str::<()>("x").unwrap_err()
+        assert!(!is_context_overflow(&ProviderError::Json(
+            serde_json::from_str::<()>("x").unwrap_err().into()
         )));
     }
 }

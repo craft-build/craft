@@ -1,11 +1,9 @@
 //! Registry macros: the `providers!` table is the single source of truth for
 //! config kinds, concrete clients, construction, discovery, and completion
-//! support. Rig expresses provider capabilities at compile time, so
-//! unsupported listers must not be called.
+//! support. 0.44 named OpenAI-dialect vendors share the `OpenAI` client
+//! type; the table still keeps one variant per kind so per-kind wires,
+//! listings, and constructors stay addressable.
 
-use rig_core::client::{CompletionClient, ModelListingClient};
-use rig_core::model::ModelList;
-use rig_core::providers::*;
 use serde::Deserialize;
 use snafu::ResultExt;
 
@@ -13,13 +11,19 @@ use super::catalog::{CatalogModel, merge_catalog};
 use super::dynamic::DynamicModel;
 use super::openai_compat::list_openai_compatible_models;
 use super::{
-    Timeouts, base_url_env, build_azure, build_bedrock, build_chatgpt, build_copilot,
-    build_llamafile, build_ollama, credential, timeout_client,
+    Timeouts, build_anthropic, build_azure, build_bedrock, build_chatgpt, build_cohere,
+    build_copilot, build_deepseek, build_doubleword, build_gemini, build_groq, build_huggingface,
+    build_hyperbolic, build_llamafile, build_minimax, build_mira, build_mistral, build_moonshot,
+    build_ollama, build_openai, build_openai_compatible, build_openrouter, build_perplexity,
+    build_together, build_venice, build_voyageai, build_xai, build_xiaomimimo, build_zai,
+    credential,
 };
 use crate::config::ProviderConfig;
 use crate::error::{
     CreateProviderSnafu, InvalidSnafu, NoCompletionSnafu, Result, SelectModelSnafu,
 };
+use rig_core::model::ModelList;
+use rig_core::providers::{anthropic, cohere, copilot, gemini, ollama, openai, voyageai};
 
 macro_rules! list_models {
     ($client:expr, yes) => {
@@ -36,7 +40,10 @@ macro_rules! list_models {
 
 macro_rules! completion_model {
     ($client:expr, $model:expr, yes) => {
-        DynamicModel::wrap(Some($model), $client.completion_model($model))
+        DynamicModel::wrap(Some($model), $client.completion($model))
+    };
+    ($client:expr, $model:expr, chat) => {
+        DynamicModel::wrap(Some($model), $client.chat($model))
     };
     ($client:expr, $model:expr, no) => {{
         let _ = ($client, $model);
@@ -45,24 +52,8 @@ macro_rules! completion_model {
 }
 
 macro_rules! build_client {
-    ($config:expr, $client:ty, $env:literal, $timeouts:expr, $credential:expr) => {{
-        let config = $config;
-        let key = $credential(config.api_key_env.as_deref().unwrap_or($env))?;
-        let mut builder = <$client>::builder()
-            .api_key(key)
-            .http_client(timeout_client($timeouts)?);
-        let base_url = config.base_url.as_deref().map(str::to_owned).or_else(|| {
-            std::env::var(base_url_env($env))
-                .ok()
-                .filter(|s| !s.is_empty())
-        });
-        if let Some(base_url) = base_url {
-            builder = builder.base_url(base_url);
-        }
-        builder.build().map_err(crate::error::client_error)?
-    }};
-    ($config:expr, $client:ty, $factory:ident, $timeouts:expr, $credential:expr) => {
-        $factory($config, $timeouts, $credential)?
+    ($config:expr, $build:expr, $timeouts:expr, $credential:expr) => {
+        $build($config, $timeouts, $credential)?
     };
 }
 
@@ -79,7 +70,7 @@ macro_rules! default_env {
 }
 
 macro_rules! providers {
-    ($($variant:ident, $name:literal, $client:ty, $auth:tt, $listing:ident, $completion:ident;)+) => {
+    ($($variant:ident, $name:literal, $client:ty, $auth:tt, $build:ident, $listing:ident, $completion:ident;)+) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
         pub enum ProviderKind {
             $(#[serde(rename = $name)] $variant,)+
@@ -129,7 +120,7 @@ macro_rules! providers {
                 (|| -> Result<Self> {
                     Ok(match config.kind {
                         $(ProviderKind::$variant => Self::$variant(
-                            build_client!(config, $client, $auth, timeouts, credential)
+                            build_client!(config, $build, timeouts, credential)
                         ),)+
                     })
                 })().with_context(|_| CreateProviderSnafu {
@@ -218,34 +209,36 @@ macro_rules! providers {
     };
 }
 
-// Variant, config kind, client, auth, model listing, text completion.
+// Variant, config kind, client, default auth env, factory, model listing,
+// text completion. The `chat` route pins OpenAI-compatible endpoints to
+// Chat Completions; every other vendor keeps its own native default.
 providers! {
-    Anthropic, "anthropic", anthropic::Client, "ANTHROPIC_API_KEY", yes, yes;
-    Azure, "azure", azure::Client, build_azure, no, yes;
-    Bedrock, "amazon-bedrock", rig_bedrock::client::Client, build_bedrock, no, yes;
-    Chatgpt, "chatgpt", chatgpt::Client, build_chatgpt, no, yes;
-    Cohere, "cohere", cohere::Client, "COHERE_API_KEY", no, yes;
-    Copilot, "copilot", copilot::Client, build_copilot, yes, yes;
-    Deepseek, "deepseek", deepseek::Client, "DEEPSEEK_API_KEY", yes, yes;
-    Doubleword, "doubleword", doubleword::Client, "DOUBLEWORD_API_KEY", no, yes;
-    Gemini, "gemini", gemini::Client, "GEMINI_API_KEY", yes, yes;
-    Groq, "groq", groq::Client, "GROQ_API_KEY", yes, yes;
-    Huggingface, "huggingface", huggingface::Client, "HUGGINGFACE_API_KEY", no, yes;
-    Hyperbolic, "hyperbolic", hyperbolic::Client, "HYPERBOLIC_API_KEY", no, yes;
-    Llamafile, "llamafile", llamafile::Client, build_llamafile, no, yes;
-    Minimax, "minimax", minimax::Client, "MINIMAX_API_KEY", yes, yes;
-    Mira, "mira", mira::Client, "MIRA_API_KEY", yes, yes;
-    Mistral, "mistral", mistral::Client, "MISTRAL_API_KEY", yes, yes;
-    Moonshot, "moonshot", moonshot::Client, "MOONSHOT_API_KEY", yes, yes;
-    Ollama, "ollama", ollama::Client, build_ollama, yes, yes;
-    Openai, "openai", openai::Client, "OPENAI_API_KEY", yes, yes;
-    OpenaiCompatible, "openai-compatible", openai::CompletionsClient, "OPENAI_API_KEY", yes, yes;
-    Openrouter, "openrouter", openrouter::Client, "OPENROUTER_API_KEY", yes, yes;
-    Perplexity, "perplexity", perplexity::Client, "PERPLEXITY_API_KEY", no, yes;
-    Together, "together", together::Client, "TOGETHER_API_KEY", no, yes;
-    Venice, "venice", venice::Client, "VENICE_API_KEY", yes, yes;
-    Voyageai, "voyageai", voyageai::Client, "VOYAGEAI_API_KEY", no, no;
-    Xai, "xai", xai::Client, "XAI_API_KEY", no, yes;
-    Xiaomimimo, "xiaomimimo", xiaomimimo::Client, "XIAOMI_MIMO_API_KEY", yes, yes;
-    Zai, "zai", zai::Client, "ZAI_API_KEY", no, yes;
+    Anthropic, "anthropic", anthropic::Anthropic, "ANTHROPIC_API_KEY", build_anthropic, yes, yes;
+    Azure, "azure", openai::OpenAI, build_azure, build_azure, no, yes;
+    Bedrock, "amazon-bedrock", rig_bedrock::client::BedrockRuntime, build_bedrock, build_bedrock, no, yes;
+    Chatgpt, "chatgpt", openai::OpenAI, build_chatgpt, build_chatgpt, no, yes;
+    Cohere, "cohere", cohere::Cohere, "COHERE_API_KEY", build_cohere, no, yes;
+    Copilot, "copilot", copilot::Copilot, build_copilot, build_copilot, yes, yes;
+    Deepseek, "deepseek", openai::OpenAI, "DEEPSEEK_API_KEY", build_deepseek, yes, yes;
+    Doubleword, "doubleword", openai::OpenAI, "DOUBLEWORD_API_KEY", build_doubleword, no, yes;
+    Gemini, "gemini", gemini::Gemini, "GEMINI_API_KEY", build_gemini, yes, yes;
+    Groq, "groq", openai::OpenAI, "GROQ_API_KEY", build_groq, yes, yes;
+    Huggingface, "huggingface", openai::OpenAI, "HUGGINGFACE_API_KEY", build_huggingface, no, yes;
+    Hyperbolic, "hyperbolic", openai::OpenAI, "HYPERBOLIC_API_KEY", build_hyperbolic, no, yes;
+    Llamafile, "llamafile", openai::OpenAI, build_llamafile, build_llamafile, no, yes;
+    Minimax, "minimax", openai::OpenAI, "MINIMAX_API_KEY", build_minimax, yes, yes;
+    Mira, "mira", openai::OpenAI, "MIRA_API_KEY", build_mira, yes, yes;
+    Mistral, "mistral", openai::OpenAI, "MISTRAL_API_KEY", build_mistral, yes, yes;
+    Moonshot, "moonshot", openai::OpenAI, "MOONSHOT_API_KEY", build_moonshot, yes, yes;
+    Ollama, "ollama", ollama::Ollama, build_ollama, build_ollama, yes, yes;
+    Openai, "openai", openai::OpenAI, "OPENAI_API_KEY", build_openai, yes, yes;
+    OpenaiCompatible, "openai-compatible", openai::OpenAI, "OPENAI_API_KEY", build_openai_compatible, yes, chat;
+    Openrouter, "openrouter", openai::OpenAI, "OPENROUTER_API_KEY", build_openrouter, yes, yes;
+    Perplexity, "perplexity", openai::OpenAI, "PERPLEXITY_API_KEY", build_perplexity, no, yes;
+    Together, "together", openai::OpenAI, "TOGETHER_API_KEY", build_together, no, yes;
+    Venice, "venice", openai::OpenAI, "VENICE_API_KEY", build_venice, yes, yes;
+    Voyageai, "voyageai", voyageai::VoyageAi, "VOYAGEAI_API_KEY", build_voyageai, no, no;
+    Xai, "xai", openai::OpenAI, "XAI_API_KEY", build_xai, no, yes;
+    Xiaomimimo, "xiaomimimo", openai::OpenAI, "XIAOMI_MIMO_API_KEY", build_xiaomimimo, yes, yes;
+    Zai, "zai", openai::OpenAI, "ZAI_API_KEY", build_zai, no, yes;
 }

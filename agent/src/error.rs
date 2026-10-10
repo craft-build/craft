@@ -90,9 +90,7 @@ pub enum Error {
     },
 
     #[snafu(display("summarization request failed"))]
-    Summarize {
-        source: rig_core::completion::CompletionError,
-    },
+    Summarize { source: rig_core::ProviderError },
 
     #[snafu(display("ACP connection failed"))]
     #[snafu(visibility(pub))] // used by the binary's `#[snafu::report]` main

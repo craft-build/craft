@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use rig_core::completion::{CompletionModel, CompletionRequest, FinishReason};
+use crate::providers::CompletionSource;
+use rig_core::completion::{CompletionRequest, FinishReason};
 
 use crate::history::{self, Message};
 
@@ -34,7 +35,7 @@ pub(super) enum TurnEnd {
 /// Stream one model call for the current request, handling cancelled,
 /// overflow, and auth failures exactly as the inline loop did.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn stream_turn<M: CompletionModel + Clone>(
+pub(super) async fn stream_turn<M: CompletionSource + Clone>(
     model: &M,
     params: &RunParams,
     cancel: &CancelToken,

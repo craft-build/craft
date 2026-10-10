@@ -1,21 +1,53 @@
 //! Type-erased completion models.
 
+use rig_core::ProviderError;
+use rig_core::completion::{CompletionRequest, CompletionResponse};
+use rig_core::driver::Transport;
+use rig_core::operation::Completion;
+use rig_core::streaming::CompletionStream;
+use rig_core::wire::Wire;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rig_core::completion::{
-    CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-};
-use rig_core::streaming::StreamingCompletionResponse;
+/// The crate-local model interface, standing in for rig-core's removed
+/// `CompletionModel` trait: one request in, one reply or one event stream
+/// out, cheap to clone. Every model the rest of the crate sees is either a
+/// [`DynamicModel`] or a test double implementing this trait.
+pub trait CompletionSource: Clone + Send + Sync {
+    fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> impl Future<Output = Result<CompletionResponse, ProviderError>> + Send;
 
-/// A type-erased completion model: clones cheaply, implements rig-core's
-/// `CompletionModel` by forwarding to the provider's concrete model behind an
-/// `Arc`. This is the only model type the rest of the crate sees.
+    fn stream(&self, request: CompletionRequest) -> Result<CompletionStream, ProviderError>;
+}
+
+type SourceFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CompletionResponse, ProviderError>> + Send + 'a>>;
+
+trait ErasedSource: Send + Sync + 'static {
+    fn completion(&self, request: CompletionRequest) -> SourceFuture<'_>;
+    fn stream(&self, request: CompletionRequest) -> Result<CompletionStream, ProviderError>;
+}
+
+impl<M: CompletionSource + 'static> ErasedSource for M {
+    fn completion(&self, request: CompletionRequest) -> SourceFuture<'_> {
+        Box::pin(self.completion(request))
+    }
+
+    fn stream(&self, request: CompletionRequest) -> Result<CompletionStream, ProviderError> {
+        self.stream(request)
+    }
+}
+
+/// A type-erased completion model: clones cheaply and forwards to the
+/// wrapped [`CompletionSource`] behind an `Arc`. This is the only model
+/// type the rest of the crate names.
 #[derive(Clone)]
 pub struct DynamicModel {
     label: Option<String>,
-    inner: Arc<dyn ErasedModel>,
+    inner: Arc<dyn ErasedSource>,
     kind: Option<super::ProviderKind>,
     settings: Option<crate::config::ModelConfig>,
     catalog: Option<&'static str>,
@@ -23,28 +55,8 @@ pub struct DynamicModel {
     context_length: Option<u32>,
 }
 
-type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CompletionError>> + Send + 'a>>;
-
-trait ErasedModel: Send + Sync + 'static {
-    fn completion(&self, request: CompletionRequest) -> ModelFuture<'_, CompletionResponse>;
-    fn stream(&self, request: CompletionRequest) -> ModelFuture<'_, StreamingCompletionResponse>;
-}
-
-impl<M: CompletionModel + Send + Sync + 'static> ErasedModel for M {
-    fn completion(&self, request: CompletionRequest) -> ModelFuture<'_, CompletionResponse> {
-        Box::pin(async move { CompletionModel::completion(self, request).await })
-    }
-
-    fn stream(&self, request: CompletionRequest) -> ModelFuture<'_, StreamingCompletionResponse> {
-        Box::pin(async move { CompletionModel::stream(self, request).await })
-    }
-}
-
 impl DynamicModel {
-    pub(crate) fn wrap<M: CompletionModel + Send + Sync + 'static>(
-        label: Option<&str>,
-        model: M,
-    ) -> Self {
+    pub(crate) fn wrap(label: Option<&str>, model: impl CompletionSource + 'static) -> Self {
         Self {
             label: label.map(str::to_owned),
             inner: Arc::new(model),
@@ -80,15 +92,23 @@ impl DynamicModel {
         self
     }
 
+    /// The model/deployment ID this handle was built for, when known.
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn context_length(&self) -> Option<u32> {
+        self.context_length
+    }
+
     /// Strip the private preference envelope, then resolve for this handle.
     /// Both completion and streaming use this, so auxiliary calls default off
     /// and fallbacks never inherit another provider's JSON dialect.
-    fn prepare(
+    pub(crate) fn prepare(
         &self,
         mut request: CompletionRequest,
-    ) -> Result<CompletionRequest, CompletionError> {
-        let thinking = crate::thinking::take(&mut request)
-            .map_err(|e| CompletionError::RequestError(e.into()))?;
+    ) -> Result<CompletionRequest, ProviderError> {
+        let thinking = crate::thinking::take(&mut request).map_err(ProviderError::request)?;
         if let Some(kind) = self.kind {
             let id = request
                 .model
@@ -128,8 +148,9 @@ impl DynamicModel {
                 .zip(effective_output)
                 .is_some_and(|(thinking, output)| thinking > output / 2)
             {
-                return Err(CompletionError::RequestError(
-                    "output cap is too small for the minimum thinking budget and an answer; increase agent.max_tokens".into()));
+                return Err(ProviderError::request(
+                    "output cap is too small for the minimum thinking budget and an answer; increase agent.max_tokens",
+                ));
             }
             if extra.as_object().is_some_and(|o| !o.is_empty()) {
                 crate::thinking::merge(
@@ -150,15 +171,6 @@ impl DynamicModel {
         Ok(request)
     }
 
-    /// The model/deployment ID this handle was built for, when known.
-    pub fn label(&self) -> Option<&str> {
-        self.label.as_deref()
-    }
-
-    pub fn context_length(&self) -> Option<u32> {
-        self.context_length
-    }
-
     /// Output-token ceiling via the same metadata lookup `prepare` uses
     /// (settings override → discovered → catalog).
     pub fn max_output(&self) -> Option<u32> {
@@ -175,19 +187,39 @@ impl DynamicModel {
     }
 }
 
-impl CompletionModel for DynamicModel {
-    async fn completion(
+/// Every concrete rig model — provider-wired or script-mocked — already
+/// satisfies the source contract; this blanket keeps call sites usable
+/// with raw models in tests and equivalence checks.
+impl<W, T> CompletionSource for rig_core::driver::Model<W, T>
+where
+    W: Wire<Op = Completion> + Clone + Send + Sync + 'static,
+    T: Transport<W> + Clone + Send + Sync + 'static,
+{
+    fn completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse, CompletionError> {
-        self.inner.completion(self.prepare(request)?).await
+    ) -> impl Future<Output = Result<CompletionResponse, ProviderError>> + Send {
+        let inner = self.clone().erase();
+        async move { inner.call(request).await }
     }
 
-    async fn stream(
+    fn stream(&self, request: CompletionRequest) -> Result<CompletionStream, ProviderError> {
+        self.clone().erase().stream(request)
+    }
+}
+
+impl CompletionSource for DynamicModel {
+    fn completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<StreamingCompletionResponse, CompletionError> {
-        self.inner.stream(self.prepare(request)?).await
+    ) -> impl Future<Output = Result<CompletionResponse, ProviderError>> + Send {
+        let prepared = self.prepare(request);
+        let inner = self.inner.clone();
+        async move { inner.completion(prepared?).await }
+    }
+
+    fn stream(&self, request: CompletionRequest) -> Result<CompletionStream, ProviderError> {
+        self.inner.stream(self.prepare(request)?)
     }
 }
 

@@ -599,7 +599,7 @@ impl Bash {
             for handle in readers.drain(..) {
                 let _ = handle.await;
             }
-            Ok(status)
+            Ok::<_, rig_core::tool::ToolExecutionError>(status)
         };
         match tokio::time::timeout(Duration::from_secs(timeout_secs), wait_and_drain).await {
             Ok(status) => {

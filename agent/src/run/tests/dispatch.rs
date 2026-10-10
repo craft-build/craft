@@ -518,7 +518,7 @@ use std::sync::Mutex as StdMutex;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rig_core::tool::{PortableDynamicTool, ToolOutput};
+use rig_core::tool::{DynamicTool, ToolOutput};
 
 use crate::run::dispatch_tool_calls;
 
@@ -532,15 +532,20 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> crate::history::ToolCa
     }
 }
 
-fn tool(name: &str, run: impl Fn() + Send + Sync + Clone + 'static) -> PortableDynamicTool {
+fn tool(name: &str, run: impl Fn() + Send + Sync + Clone + 'static) -> DynamicTool {
     let run2 = run.clone();
-    PortableDynamicTool::new(name, name, serde_json::json!({}), move |_| {
-        let run = run2.clone();
-        Box::pin(async move {
-            run();
-            Ok(ToolOutput::text("ok"))
-        })
-    })
+    DynamicTool::new(
+        crate::edge::tool_name(name),
+        name,
+        serde_json::json!({}),
+        move |_| {
+            let run = run2.clone();
+            Box::pin(async move {
+                run();
+                Ok(ToolOutput::text("ok"))
+            })
+        },
+    )
 }
 
 async fn dispatch(
@@ -591,8 +596,8 @@ async fn independent_calls_run_concurrently() {
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let mk_probe = |name: &'static str, barrier: &std::sync::Arc<tokio::sync::Barrier>| {
         let barrier = std::sync::Arc::clone(barrier);
-        PortableDynamicTool::new(
-            name,
+        DynamicTool::new(
+            crate::edge::tool_name(name),
             name,
             serde_json::json!({}),
             move |_: serde_json::Value| {
@@ -631,8 +636,8 @@ async fn independent_calls_run_concurrently() {
 async fn identical_calls_blocked_as_doom_loop() {
     let runs = std::sync::Arc::new(AtomicUsize::new(0));
     let runs2 = std::sync::Arc::clone(&runs);
-    let tools = ToolDispatch::new([PortableDynamicTool::new(
-        "probe",
+    let tools = ToolDispatch::new([DynamicTool::new(
+        crate::edge::tool_name("probe"),
         "probe",
         serde_json::json!({}),
         move |_: serde_json::Value| {

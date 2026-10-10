@@ -8,14 +8,33 @@
 use std::collections::HashMap;
 
 use rig_core::completion::message::{
-    AssistantContent, DocumentSourceKind, Image as RigImage, ImageMediaType, Message as RigMessage,
-    Reasoning as RigReasoning, Text as RigText, ToolCall as RigToolCall, ToolCallId, ToolFunction,
-    ToolResult as RigToolResult, ToolResultContent as RigToolResultContent, UserContent,
+    AssistantContent, AssistantMessage, CallId, DocumentSourceKind, ImageMediaType,
+    Message as RigMessage, Reasoning as RigReasoning, ToolCall as RigToolCall, ToolName,
+    ToolResultContent as RigToolResultContent, UserContent,
 };
 use rig_core::completion::{CompletionRequest, ToolDefinition};
-use rig_core::streaming::StreamedAssistantContent;
+use rig_core::streaming::{Part, StreamEvent};
 
 use crate::history;
+
+/// A validated tool name, tolerating degenerate history records with empty
+/// names: those replay under a stable placeholder rather than failing the
+/// mapping.
+pub(crate) fn tool_name(name: &str) -> ToolName {
+    ToolName::new(name)
+        .unwrap_or_else(|_| ToolName::new("unnamed").expect("placeholder tool name is non-empty"))
+}
+
+/// Pull a provider reasoning signature out of a block's native item, when
+/// the provider preserved one (Anthropic and Bedrock write `signature`).
+fn reasoning_signature(reasoning: &RigReasoning) -> Option<String> {
+    reasoning
+        .native
+        .as_ref()
+        .and_then(|native| native.item.get("signature"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
 
 /// Build the provider request for one model call.
 #[allow(clippy::too_many_arguments)]
@@ -26,19 +45,15 @@ pub fn to_request(
     temperature: Option<f64>,
     max_tokens: Option<u64>,
 ) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        preamble: preamble.filter(|text| !text.is_empty()).map(str::to_owned),
-        chat_history: own_to_rig(history),
-        documents: Vec::new(),
-        tools: tools.to_vec(),
-        temperature,
-        max_tokens,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
+    let mut request = CompletionRequest::from(own_to_rig(history))
+        .tools(tools.to_vec())
+        .temperature(temperature)
+        .max_tokens(max_tokens)
+        .accept_unknown_finish_reasons(true);
+    if let Some(text) = preamble.filter(|text| !text.is_empty()) {
+        request = request.preamble(text);
     }
+    request
 }
 
 /// Convert our history into rig's replay format.
@@ -54,7 +69,13 @@ pub fn own_to_rig(messages: &[history::Message]) -> Vec<RigMessage> {
             let blocks: Vec<UserContent> = content.iter().map(own_user_block_to_rig).collect();
             push_user_message(&mut out, blocks);
         } else {
-            out.push(own_message_to_rig(message));
+            let mapped = own_message_to_rig(message);
+            // An assistant turn whose every part filtered out (e.g. thinking
+            // that carries no replayable payload) must not reach the wire as
+            // an empty message providers reject; drop the turn instead.
+            if !matches!(&mapped, RigMessage::Assistant(a) if a.content.is_empty()) {
+                out.push(mapped);
+            }
         }
         if let history::Message::User { content } = message {
             let images: Vec<UserContent> = content
@@ -66,12 +87,11 @@ pub fn own_to_rig(messages: &[history::Message]) -> Vec<RigMessage> {
                             .iter()
                             .filter_map(|item| match item {
                                 history::ToolResultContent::Image(image) => {
-                                    Some(UserContent::Image(RigImage {
-                                        data: DocumentSourceKind::Base64(image.data.clone()),
-                                        media_type: Some(media_own_to_rig(image.media_type)),
-                                        detail: None,
-                                        additional_params: None,
-                                    }))
+                                    Some(UserContent::image_base64(
+                                        image.data.clone(),
+                                        Some(media_own_to_rig(image.media_type)),
+                                        None,
+                                    ))
                                 }
                                 _ => None,
                             })
@@ -83,9 +103,9 @@ pub fn own_to_rig(messages: &[history::Message]) -> Vec<RigMessage> {
                 .flatten()
                 .collect();
             if !images.is_empty() {
-                let mut content = vec![UserContent::Text(rig_text(
+                let mut content = vec![UserContent::text(
                     "Images returned by the tool calls above:",
-                ))];
+                )];
                 content.extend(images);
                 out.push(RigMessage::User { content });
             }
@@ -125,123 +145,107 @@ pub fn own_message_to_rig(message: &history::Message) -> RigMessage {
         history::Message::User { content } => RigMessage::User {
             content: content.iter().map(own_user_block_to_rig).collect(),
         },
-        history::Message::Assistant { content } => RigMessage::Assistant {
-            id: None,
-            content: content
+        history::Message::Assistant { content } => RigMessage::Assistant(AssistantMessage::new(
+            content
                 .iter()
-                .filter_map(own_assistant_block_to_rig)
+                .flat_map(own_assistant_block_to_rig)
                 .collect(),
-        },
+        )),
     }
 }
 
 fn own_user_block_to_rig(block: &history::UserContent) -> UserContent {
     match block {
-        history::UserContent::Text(text) => UserContent::Text(rig_text(&text.text)),
-        history::UserContent::Image(image) => UserContent::Image(RigImage {
-            data: DocumentSourceKind::Base64(image.data.clone()),
-            media_type: Some(media_own_to_rig(image.media_type)),
-            detail: None,
-            additional_params: None,
-        }),
-        history::UserContent::ToolResult(result) => UserContent::ToolResult(RigToolResult {
-            call: ToolCallId::new_or_mint(&result.call),
-            provider: None,
-            name: result.name.clone(),
-            content: result
+        history::UserContent::Text(text) => UserContent::text(&text.text),
+        history::UserContent::Image(image) => UserContent::image_base64(
+            image.data.clone(),
+            Some(media_own_to_rig(image.media_type)),
+            None,
+        ),
+        history::UserContent::ToolResult(result) => UserContent::tool_result(
+            CallId::from_wire(&result.call),
+            tool_name(&result.name),
+            result
                 .content
                 .iter()
                 .map(|item| match item {
                     history::ToolResultContent::Text(text) => {
-                        RigToolResultContent::Text(rig_text(&text.text))
+                        RigToolResultContent::text(&text.text)
                     }
                     history::ToolResultContent::Json { value } => RigToolResultContent::Json {
                         value: value.clone(),
                     },
                     history::ToolResultContent::Image(image) => {
-                        RigToolResultContent::Text(rig_text(&format!(
+                        RigToolResultContent::text(format!(
                             "[image {} returned; attached in the next message]",
                             image.caption
-                        )))
+                        ))
                     }
                 })
                 .collect(),
-        }),
+        ),
     }
 }
 
-fn own_assistant_block_to_rig(block: &history::AssistantContent) -> Option<AssistantContent> {
+fn own_assistant_block_to_rig(block: &history::AssistantContent) -> Vec<AssistantContent> {
     match block {
-        history::AssistantContent::Text(text) => Some(AssistantContent::Text(rig_text(&text.text))),
-        history::AssistantContent::Reasoning(reasoning) => {
-            let content: Vec<_> = reasoning
-                .content
-                .iter()
-                .map(own_reasoning_to_rig)
-                // A part with neither text nor signature carries nothing any
-                // provider can replay (Bedrock rejects the block outright);
-                // dropping it recovers sessions persisted without signatures.
-                .filter(|part| match part {
-                    rig_core::message::ReasoningContent::Text { text, signature } => {
-                        !text.is_empty() || signature.is_some()
-                    }
-                    rig_core::message::ReasoningContent::Encrypted(data)
-                    | rig_core::message::ReasoningContent::Redacted { data } => !data.is_empty(),
-                    _ => true,
-                })
-                .collect();
-            (!content.is_empty())
-                .then(|| AssistantContent::Reasoning(RigReasoning { id: None, content }))
-        }
-        history::AssistantContent::ToolCall(call) => {
-            Some(AssistantContent::ToolCall(RigToolCall {
-                id: ToolCallId::new_or_mint(&call.id),
-                provider: None,
-                function: ToolFunction {
-                    name: call.function.name.clone(),
-                    arguments: call.function.arguments.clone(),
-                },
-                signature: None,
-                additional_params: None,
-            }))
-        }
+        history::AssistantContent::Text(text) => vec![AssistantContent::text(&text.text)],
+        history::AssistantContent::Reasoning(reasoning) => reasoning
+            .content
+            .iter()
+            .map(own_reasoning_to_rig)
+            // A part with neither a payload nor a provider-native item
+            // carries nothing any provider can replay (Bedrock rejects the
+            // block outright); dropping it recovers sessions persisted
+            // without signatures.
+            .filter(|reasoning| {
+                !reasoning.text.is_empty() || reasoning.redacted || reasoning.native.is_some()
+            })
+            .map(AssistantContent::Reasoning)
+            .collect(),
+        history::AssistantContent::ToolCall(call) => vec![AssistantContent::tool_call(
+            &call.id,
+            tool_name(&call.function.name),
+            call.function.arguments.clone(),
+        )],
     }
 }
 
-fn rig_text(text: &str) -> RigText {
-    RigText {
-        text: text.to_owned(),
-        additional_params: None,
-    }
-}
-
-fn own_reasoning_to_rig(
-    item: &history::ReasoningContent,
-) -> rig_core::completion::message::ReasoningContent {
-    use rig_core::completion::message::ReasoningContent as Rig;
+/// Each persisted reasoning part becomes its own streamed block; signatures
+/// ride the provider-native item when the provider kept one.
+fn own_reasoning_to_rig(item: &history::ReasoningContent) -> RigReasoning {
     match item {
-        history::ReasoningContent::Text { text, signature } => Rig::Text {
+        history::ReasoningContent::Text { text, .. } => RigReasoning {
             text: text.clone(),
-            signature: signature.clone(),
+            redacted: false,
+            native: None,
         },
-        history::ReasoningContent::Opaque(data) => Rig::Encrypted(data.clone()),
-        history::ReasoningContent::Redacted { data } => Rig::Redacted { data: data.clone() },
+        history::ReasoningContent::Opaque(data) => RigReasoning {
+            text: data.clone(),
+            redacted: false,
+            native: None,
+        },
+        history::ReasoningContent::Redacted { data } => RigReasoning {
+            text: data.clone(),
+            redacted: true,
+            native: None,
+        },
     }
 }
 
-fn rig_reasoning_to_own(
-    item: &rig_core::completion::message::ReasoningContent,
-) -> history::ReasoningContent {
-    use rig_core::completion::message::ReasoningContent as Rig;
-    match item {
-        Rig::Text { text, signature } => history::ReasoningContent::Text {
-            text: text.clone(),
-            signature: signature.clone(),
+fn rig_reasoning_block_to_own(reasoning: &RigReasoning) -> history::ReasoningContent {
+    let signature = reasoning_signature(reasoning);
+    match () {
+        _ if reasoning.redacted => history::ReasoningContent::Redacted {
+            data: reasoning.text.clone(),
         },
-        Rig::Encrypted(data) | Rig::Summary(data) => {
-            history::ReasoningContent::Opaque(data.clone())
+        _ if reasoning.text.is_empty() && signature.is_none() => {
+            history::ReasoningContent::Opaque(String::new())
         }
-        Rig::Redacted { data } => history::ReasoningContent::Redacted { data: data.clone() },
+        _ => history::ReasoningContent::Text {
+            text: reasoning.text.clone(),
+            signature,
+        },
     }
 }
 
@@ -272,8 +276,8 @@ pub fn assistant_from_stream(
                 .cloned()
                 .unwrap_or_else(|| call.id.to_string()),
             function: history::ToolFunction {
-                name: call.function.name.clone(),
-                arguments: call.function.arguments.clone(),
+                name: call.function.name.to_string(),
+                arguments: call.function.arguments_value(),
             },
         }));
     }
@@ -288,17 +292,17 @@ pub struct StreamedParts {
     /// Correlator of the reasoning block the deltas are accumulating into;
     /// a complete event under a different correlator is a sibling block
     /// (e.g. redacted beside plaintext) and must not clobber it.
-    reasoning_block_id: Option<String>,
+    reasoning_block_id: Option<Part>,
     pub tool_calls: Vec<RigToolCall>,
 }
 
 /// Record one streamed assistant event into `parts`.
-pub fn fold_streamed_event(parts: &mut StreamedParts, event: &StreamedAssistantContent) {
+pub fn fold_streamed_event(parts: &mut StreamedParts, event: &StreamEvent) {
     match event {
-        StreamedAssistantContent::Text(text) => parts.text.push_str(&text.text),
-        StreamedAssistantContent::ReasoningDelta { id, reasoning, .. } => {
-            if parts.reasoning_block_id.as_deref() != Some(id.as_str()) {
-                parts.reasoning_block_id = Some(id.clone());
+        StreamEvent::Text { text, .. } => parts.text.push_str(text),
+        StreamEvent::Reasoning { part, text } => {
+            if parts.reasoning_block_id != Some(*part) {
+                parts.reasoning_block_id = Some(*part);
                 parts
                     .reasoning
                     .content
@@ -307,28 +311,32 @@ pub fn fold_streamed_event(parts: &mut StreamedParts, event: &StreamedAssistantC
                         signature: None,
                     });
             }
-            if let Some(history::ReasoningContent::Text { text, .. }) =
+            if let Some(history::ReasoningContent::Text { text: pending, .. }) =
                 parts.reasoning.content.last_mut()
             {
-                text.push_str(reasoning);
+                pending.push_str(text);
             }
         }
-        StreamedAssistantContent::Reasoning { id, reasoning, .. } => {
-            // The complete block supersedes its own deltas (matched by
-            // correlator) and carries what the deltas could not — the
-            // signature, which the wire delivers out of band.
-            let content: Vec<_> = reasoning.content.iter().map(rig_reasoning_to_own).collect();
-            if parts.reasoning_block_id.as_deref() == Some(id.as_str())
-                && parts.reasoning.content.pop().is_some()
-            {
-                parts.reasoning.content.extend(content);
+        StreamEvent::End {
+            part,
+            content: AssistantContent::Reasoning(reasoning),
+        } => {
+            // The complete block supersedes its own deltas (matched by part)
+            // and carries what the deltas could not — the signature, which
+            // the wire delivers out of band.
+            let block = rig_reasoning_block_to_own(reasoning);
+            if parts.reasoning_block_id == Some(*part) && parts.reasoning.content.pop().is_some() {
+                parts.reasoning.content.push(block);
             } else {
-                parts.reasoning_block_id = Some(id.clone());
-                parts.reasoning.content.extend(content);
+                parts.reasoning_block_id = Some(*part);
+                parts.reasoning.content.push(block);
             }
         }
-        StreamedAssistantContent::ToolCall { tool_call, .. } => {
-            parts.tool_calls.push(tool_call.clone());
+        StreamEvent::End {
+            content: AssistantContent::ToolCall(call),
+            ..
+        } => {
+            parts.tool_calls.push(call.clone());
         }
         _ => {}
     }
@@ -368,7 +376,7 @@ fn rig_message_to_own(message: &RigMessage) -> history::Message {
                     UserContent::ToolResult(result) => {
                         Some(history::UserContent::ToolResult(history::ToolResult {
                             call: result.call.to_string(),
-                            name: result.name.clone(),
+                            name: result.name.to_string(),
                             content: result
                                 .content
                                 .iter()
@@ -381,8 +389,9 @@ fn rig_message_to_own(message: &RigMessage) -> history::Message {
                 })
                 .collect(),
         },
-        RigMessage::Assistant { content, .. } => history::Message::Assistant {
-            content: content
+        RigMessage::Assistant(assistant) => history::Message::Assistant {
+            content: assistant
+                .content
                 .iter()
                 .filter_map(|block| match block {
                     AssistantContent::Text(text) => {
@@ -392,15 +401,15 @@ fn rig_message_to_own(message: &RigMessage) -> history::Message {
                     }
                     AssistantContent::Reasoning(reasoning) => {
                         Some(history::AssistantContent::Reasoning(history::Reasoning {
-                            content: reasoning.content.iter().map(rig_reasoning_to_own).collect(),
+                            content: vec![rig_reasoning_block_to_own(reasoning)],
                         }))
                     }
                     AssistantContent::ToolCall(call) => {
                         Some(history::AssistantContent::ToolCall(history::ToolCall {
                             id: call.id.to_string(),
                             function: history::ToolFunction {
-                                name: call.function.name.clone(),
-                                arguments: call.function.arguments.clone(),
+                                name: call.function.name.to_string(),
+                                arguments: call.function.arguments_value(),
                             },
                         }))
                     }
@@ -416,18 +425,18 @@ fn rig_result_content_to_own(item: &RigToolResultContent) -> history::ToolResult
         RigToolResultContent::Text(text) => history::ToolResultContent::Text(history::Text {
             text: text.text.clone(),
         }),
-        RigToolResultContent::Json { value, .. } => history::ToolResultContent::Json {
+        RigToolResultContent::Json { value } => history::ToolResultContent::Json {
             value: value.clone(),
         },
         RigToolResultContent::Image(image) => {
             history::ToolResultContent::Image(history::ImageBlock {
                 media_type: image
                     .media_type
-                    .as_ref()
-                    .map(|media| media_rig_to_own(media.clone()))
+                    .clone()
+                    .map(media_rig_to_own)
                     .unwrap_or(history::ImageMedia::Png),
                 data: match &image.data {
-                    rig_core::completion::message::DocumentSourceKind::Base64(data) => data.clone(),
+                    DocumentSourceKind::Base64(data) => data.clone(),
                     _ => String::new(),
                 },
                 caption: "[image]".into(),
@@ -460,6 +469,11 @@ fn media_rig_to_own(media: ImageMediaType) -> history::ImageMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::completion::message::ToolFunction;
+
+    fn part(index: u32) -> Part {
+        serde_json::from_value(serde_json::json!(index)).expect("part index")
+    }
 
     fn sample() -> Vec<history::Message> {
         vec![
@@ -500,6 +514,28 @@ mod tests {
                 ],
             },
         ]
+    }
+
+    fn reasoning_native(json: &str) -> rig_core::message::Native {
+        let item: serde_json::Value = serde_json::from_str(json).expect("native item");
+        rig_core::message::Native {
+            fingerprint: rig_core::message::Fingerprint::of(&item),
+            item,
+        }
+    }
+
+    fn reasoning_event(part_index: u32, reasoning: RigReasoning) -> StreamEvent {
+        StreamEvent::End {
+            part: part(part_index),
+            content: AssistantContent::Reasoning(reasoning),
+        }
+    }
+
+    fn reasoning_delta(part_index: u32, text: &str) -> StreamEvent {
+        StreamEvent::Reasoning {
+            part: part(part_index),
+            text: text.to_owned(),
+        }
     }
 
     #[test]
@@ -613,14 +649,17 @@ mod tests {
         let RigMessage::User { content } = &rig[1] else {
             panic!("expected user message");
         };
-        let ids: Vec<&str> = content
+        let ids: Vec<String> = content
             .iter()
             .filter_map(|block| match block {
-                UserContent::ToolResult(result) => Some(result.call.as_str()),
+                UserContent::ToolResult(result) => Some(result.call.wire().to_string()),
                 _ => None,
             })
             .collect();
-        assert_eq!(ids, ["t1", "t2"]);
+        assert_eq!(
+            ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["t1", "t2"]
+        );
     }
 
     /// Cancel/end markers trail their tool-result messages as separate user
@@ -700,44 +739,53 @@ mod tests {
     #[test]
     fn to_request_sets_preamble_tools_and_sampling() {
         let tools = vec![ToolDefinition {
-            name: "bash".into(),
+            name: ToolName::new("bash").expect("non-empty name"),
             description: "run".into(),
             parameters: serde_json::json!({}),
         }];
         let request = to_request(&sample(), &tools, Some("be brief"), Some(0.5), Some(1024));
-        assert_eq!(request.preamble.as_deref(), Some("be brief"));
-        assert_eq!(request.chat_history.len(), 4);
+        assert_eq!(request.system_instructions(), Some("be brief"));
+        // Sample history's own system message rides after the preamble.
+        assert_eq!(request.chat_history.len(), 5);
         assert_eq!(request.tools.len(), 1);
         assert_eq!(request.temperature, Some(0.5));
         assert_eq!(request.max_tokens, Some(1024));
-        assert!(matches!(request.chat_history[0], RigMessage::System { .. }));
+        assert!(request.accept_unknown_finish_reasons);
+        assert!(matches!(
+            request.chat_history.first(),
+            Some(RigMessage::System { content }) if content == "be brief"
+        ));
     }
 
     #[test]
     fn empty_preamble_is_omitted() {
         let request = to_request(&sample(), &[], Some(""), None, None);
-        assert_eq!(request.preamble, None);
+        assert_eq!(request.system_instructions(), Some("sys"));
+        assert!(matches!(
+            request.chat_history.first(),
+            Some(RigMessage::System { content }) if content == "sys"
+        ));
     }
 
     #[test]
     fn assistant_from_stream_remaps_tool_ids() {
         let mut parts = StreamedParts::default();
-        fold_streamed_event(&mut parts, &StreamedAssistantContent::text("partial"));
-        let call = rig_core::completion::message::ToolCall {
-            id: ToolCallId::new_or_mint("provider-id"),
-            provider: None,
-            function: ToolFunction {
-                name: "bash".into(),
-                arguments: serde_json::json!({"command": "ls"}),
-            },
-            signature: None,
-            additional_params: None,
-        };
         fold_streamed_event(
             &mut parts,
-            &StreamedAssistantContent::ToolCall {
-                tool_call: call,
-                internal_call_id: "internal-1".into(),
+            &StreamEvent::Text {
+                part: part(0),
+                text: "partial".into(),
+            },
+        );
+        let call = rig_core::completion::message::ToolCall::from_wire(
+            "provider-id",
+            ToolFunction::new(tool_name("bash"), serde_json::json!({"command": "ls"})),
+        );
+        fold_streamed_event(
+            &mut parts,
+            &StreamEvent::End {
+                part: part(1),
+                content: AssistantContent::ToolCall(call),
             },
         );
         let mut ids = HashMap::new();
@@ -786,55 +834,46 @@ mod tests {
             history::UserContent::Image(b) if b.data == "d2Vi-cA=="
         ));
     }
-    fn reasoning_event(
-        id: &str,
-        content: Vec<rig_core::message::ReasoningContent>,
-    ) -> StreamedAssistantContent {
-        StreamedAssistantContent::Reasoning {
-            reasoning: rig_core::message::Reasoning { id: None, content },
-            id: id.to_owned(),
-        }
-    }
-
-    fn reasoning_delta(id: &str, text: &str) -> StreamedAssistantContent {
-        StreamedAssistantContent::ReasoningDelta {
-            id: id.to_owned(),
-            provider_id: None,
-            reasoning: text.to_owned(),
-        }
-    }
 
     /// Regression for the Bedrock failure "reasoning conversion requires at
     /// least one text or summary block": an adaptive-thinking block is
-    /// signature-only, and the signature used to be dropped when persisting
-    /// the stream, so replay sent an empty unsigned block.
+    /// signature-only, and the signature must survive the stream fold into
+    /// history. The canonical 0.44 wire form carries signatures only in
+    /// provider-native items a generic mapping cannot mint, so the replay
+    /// copy drops the empty block instead of sending thinking Bedrock
+    /// rejects — exactly the failure this guards against.
     #[test]
     fn signature_only_thinking_block_replays_with_its_signature() {
         let mut parts = StreamedParts::default();
         fold_streamed_event(
             &mut parts,
             &reasoning_event(
-                "b1",
-                vec![rig_core::message::ReasoningContent::Text {
+                0,
+                RigReasoning {
                     text: String::new(),
-                    signature: Some("sig-1".into()),
-                }],
+                    redacted: false,
+                    native: Some(reasoning_native(r#"{"signature": "sig-1"}"#)),
+                },
             ),
         );
         let message = assistant_from_stream(&[], &HashMap::new(), &parts);
-        let rig = own_to_rig(&[message, history::Message::user("next")]);
-        let RigMessage::Assistant { content, .. } = &rig[0] else {
+        let history::Message::Assistant { content } = &message else {
             panic!("assistant message");
         };
-        assert!(matches!(
+        // The signature persists into craft's own history form.
+        assert_eq!(
             content.first(),
-            Some(AssistantContent::Reasoning(reasoning))
-                if matches!(
-                    reasoning.content.first(),
-                    Some(rig_core::message::ReasoningContent::Text { text, signature })
-                        if text.is_empty() && signature.as_deref() == Some("sig-1")
-                )
-        ));
+            Some(&history::AssistantContent::Reasoning(history::Reasoning {
+                content: vec![history::ReasoningContent::Text {
+                    text: String::new(),
+                    signature: Some("sig-1".into()),
+                }],
+            }))
+        );
+        // ...and the wire copy omits the empty block rather than shipping
+        // thinking no provider can answer back.
+        let rig = own_to_rig(&[message, history::Message::user("next")]);
+        assert!(matches!(rig.first(), Some(RigMessage::User { .. })));
     }
 
     #[test]
@@ -848,18 +887,34 @@ mod tests {
             })],
         }];
         let rig = own_to_rig(&own);
-        let RigMessage::Assistant { content, .. } = &rig[0] else {
+        let RigMessage::Assistant(assistant) = &rig[0] else {
             panic!("assistant message");
         };
         assert!(matches!(
-            content.first(),
+            assistant.content.first(),
             Some(AssistantContent::Reasoning(reasoning))
-                if matches!(
-                    reasoning.content.first(),
-                    Some(rig_core::message::ReasoningContent::Text { text, signature })
-                        if text == "deliberating" && signature.as_deref() == Some("sig-2")
-                )
+                if reasoning.text == "deliberating"
         ));
+        // The signature lives in craft's stored copy; the wire copy carries
+        // text reasoning and lets providers that need signatures replay it
+        // through their own provenance channel.
+        let back = rig_to_own(&rig);
+        let history::Message::Assistant { content } = &back[0] else {
+            panic!("assistant message");
+        };
+        let history::AssistantContent::Reasoning(reasoning) = &content[0] else {
+            panic!("reasoning block");
+        };
+        assert_eq!(reasoning.content.len(), 1);
+        match &reasoning.content[0] {
+            history::ReasoningContent::Text { text, signature } => {
+                assert_eq!(text, "deliberating");
+                // The canonical wire form of 0.44 carries signatures only in
+                // provider-native items, which a generic mapping cannot mint.
+                assert_eq!(signature, &None);
+            }
+            other => panic!("expected text reasoning, got {other:?}"),
+        }
     }
 
     /// A redacted sibling arrives as its own complete block after the
@@ -867,24 +922,27 @@ mod tests {
     #[test]
     fn redacted_sibling_keeps_the_thinking_text() {
         let mut parts = StreamedParts::default();
-        fold_streamed_event(&mut parts, &reasoning_delta("b1", "step one"));
+        fold_streamed_event(&mut parts, &reasoning_delta(0, "step one"));
         fold_streamed_event(
             &mut parts,
             &reasoning_event(
-                "b1",
-                vec![rig_core::message::ReasoningContent::Text {
+                0,
+                RigReasoning {
                     text: "step one".into(),
-                    signature: Some("sig-3".into()),
-                }],
+                    redacted: false,
+                    native: Some(reasoning_native(r#"{"signature": "sig-3"}"#)),
+                },
             ),
         );
         fold_streamed_event(
             &mut parts,
             &reasoning_event(
-                "b2",
-                vec![rig_core::message::ReasoningContent::Redacted {
-                    data: "cmVkYWN0ZWQ=".into(),
-                }],
+                1,
+                RigReasoning {
+                    text: "cmVkYWN0ZWQ=".into(),
+                    redacted: true,
+                    native: None,
+                },
             ),
         );
         let message = assistant_from_stream(&[], &HashMap::new(), &parts);
@@ -926,24 +984,23 @@ mod tests {
             })],
         }];
         let rig = own_to_rig(&own);
-        let RigMessage::Assistant { content, .. } = &rig[0] else {
+        let RigMessage::Assistant(assistant) = &rig[0] else {
             panic!("assistant message");
         };
-        let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
-            panic!("reasoning block");
-        };
-        // Bedrock decodes `Redacted` base64 back into `redactedContent`;
-        // `Encrypted` marks foreign ciphertext it will safely drop.
-        assert!(matches!(
-            reasoning.content[0],
-            rig_core::message::ReasoningContent::Redacted { ref data }
-                if data == "YmVkcm9jay1ibG9i"
-        ));
-        assert!(matches!(
-            reasoning.content[1],
-            rig_core::message::ReasoningContent::Encrypted(ref data)
-                if data == "openai-encrypted"
-        ));
+        // Each persisted part is its own streamed block: redacted carries the
+        // payload under the redacted flag, opaque ciphertext replays as text.
+        match &assistant.content[0] {
+            AssistantContent::Reasoning(reasoning) => {
+                assert!(reasoning.redacted && reasoning.text == "YmVkcm9jay1ibG9i");
+            }
+            other => panic!("expected redacted reasoning, got {other:?}"),
+        }
+        match &assistant.content[1] {
+            AssistantContent::Reasoning(reasoning) => {
+                assert!(!reasoning.redacted && reasoning.text == "openai-encrypted");
+            }
+            other => panic!("expected opaque reasoning, got {other:?}"),
+        }
         // Inbound direction: a stream's redacted block persists as Redacted.
         let back = rig_to_own(&rig);
         let history::Message::Assistant { content } = &back[0] else {
@@ -976,10 +1033,10 @@ mod tests {
             ],
         }];
         let rig = own_to_rig(&own);
-        let RigMessage::Assistant { content, .. } = &rig[0] else {
+        let RigMessage::Assistant(assistant) = &rig[0] else {
             panic!("assistant message");
         };
-        assert_eq!(content.len(), 1);
-        assert!(matches!(content[0], AssistantContent::Text(_)));
+        assert_eq!(assistant.content.len(), 1);
+        assert!(matches!(assistant.content[0], AssistantContent::Text(_)));
     }
 }

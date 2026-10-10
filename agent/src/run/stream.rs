@@ -1,20 +1,22 @@
 //! Streaming aggregation over a provider model's stream.
 //!
-//! rig-core's `StreamingCompletionResponse` already assembles ragged
-//! tool-argument fragments and multi-part text; this module consumes its
-//! public events, forwards them as [`Event`]s (text/reasoning deltas, tool
-//! start), and produces the completed [`history::Message`] for the assistant
-//! turn plus its usage report.
+//! rig-core's `CompletionStream` already assembles ragged tool-argument
+//! fragments and multi-part text; this module consumes its public events,
+//! forwards them as [`Event`]s (text/reasoning deltas, tool start), and
+//! produces the completed [`history::Message`] for the assistant turn plus
+//! its usage report.
 
 use std::collections::HashMap;
 
+use crate::providers::CompletionSource;
 use futures::StreamExt;
-use rig_core::completion::{CompletionModel, CompletionRequest, FinishReason};
-use rig_core::streaming::{StreamFinal, StreamedAssistantContent};
+use rig_core::completion::message::AssistantContent;
+use rig_core::completion::{CompletionRequest, FinishReason};
+use rig_core::error::ProviderError;
+use rig_core::streaming::{Item, StreamEvent};
 
 use crate::edge::{StreamedParts, assistant_from_stream, fold_streamed_event};
 use crate::history;
-use rig_core::completion::CompletionError;
 
 use super::{CancelToken, Event};
 
@@ -54,9 +56,9 @@ impl StreamFailure {
 
 /// Recovery taxonomy for provider stream errors, ported from the
 /// reference's `AgentError::{is_retryable, should_rotate_key, should_abort}`
-/// (`craft-providers/src/error.rs`). rig surfaces most failures as strings
-/// or `HttpError`, so classification starts from the HTTP status when one
-/// survived and falls back to message matching.
+/// (`craft-providers/src/error.rs`). Most failures classify from the
+/// preserved HTTP status, when one survived, and otherwise fall back to
+/// message matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ErrorKind {
     /// 429: retried with backoff; the first remedy is key rotation.
@@ -112,19 +114,33 @@ impl ErrorKind {
     }
 }
 
-/// Classify a typed rig completion error: use the preserved HTTP status when
-/// one exists (non-success statuses surface as `InvalidStatusCodeWithMessage`),
-/// otherwise match on the display string.
-pub(crate) fn classify_error(error: &CompletionError) -> ErrorKind {
-    if let CompletionError::HttpError(http) = error
-        && let rig_core::http_client::Error::InvalidStatusCodeWithMessage(status, _) = http
-    {
+/// Classify a typed rig provider error: use the preserved HTTP status when
+/// one exists (non-success statuses surface as `ProviderResponse`, in
+/// transport-refusals and failed replies alike), otherwise match on the
+/// display string.
+pub(crate) fn classify_error(error: &ProviderError) -> ErrorKind {
+    if matches!(error, ProviderError::Truncated) {
+        // A stream cut before its terminal record is retryable transport
+        // damage, not a short honest answer.
+        return ErrorKind::Transport;
+    }
+    if let Some(status) = error.provider_response_status() {
         match status.as_u16() {
             401 => return ErrorKind::Auth,
             429 => return ErrorKind::RateLimited,
             500..=599 => return ErrorKind::Server,
             // 4xx bodies carry the real reason (overflow, content policy);
             // keep matching on the message instead of guessing Fatal.
+            _ => {}
+        }
+    }
+    if let ProviderError::Http(http) = error
+        && let Some(status) = http.non_success_status()
+    {
+        match status.as_u16() {
+            401 => return ErrorKind::Auth,
+            429 => return ErrorKind::RateLimited,
+            500..=599 => return ErrorKind::Server,
             _ => {}
         }
     }
@@ -181,7 +197,7 @@ fn classify_string(message: &str) -> ErrorKind {
     ErrorKind::Fatal
 }
 
-fn failure_from_error(error: &CompletionError) -> StreamFailure {
+fn failure_from_error(error: &ProviderError) -> StreamFailure {
     StreamFailure::Error {
         kind: classify_error(error),
         message: error.to_string(),
@@ -189,41 +205,28 @@ fn failure_from_error(error: &CompletionError) -> StreamFailure {
 }
 
 /// Run one model stream to completion.
-pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
+pub(crate) async fn run_model_stream<M: CompletionSource + Clone>(
     model: &M,
     request: CompletionRequest,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> std::result::Result<TurnOutput, StreamFailure> {
-    // The establishment await predates the cancel subscription below, so
-    // race it: an Esc during a slow handshake must settle as a normal
-    // cancellation (committing the partial turn), not hang until the
-    // interrupt grace abort drops the whole turn.
-    let mut stream = match cancel.race(model.stream(request)).await {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(e)) => return Err(failure_from_error(&e)),
-        Err(_) => {
-            return Err(StreamFailure::Cancelled {
-                streamed: String::new(),
-            });
-        }
-    };
+    // Request-building failures (an unrepresentable wire body) surface
+    // before any bytes hit the network; the transport handshake itself now
+    // happens inside the polled loop below, where cancel outranks it.
+    if cancel.cancelled() {
+        return Err(StreamFailure::Cancelled {
+            streamed: String::new(),
+        });
+    }
+    let mut stream = model.stream(request).map_err(|e| failure_from_error(&e))?;
     // The reply text streamed so far; carried out on cancellation so the
     // committed history keeps what the user already saw.
     let mut streamed = String::new();
     let mut parts = StreamedParts::default();
     // provider tool-call id -> run-stable internal id recorded at call time.
     let mut call_ids: HashMap<String, String> = HashMap::new();
-    let mut usage: Option<history::Usage> = None;
-    let mut finish_reason: Option<FinishReason> = None;
     let mut cancel_rx = cancel.subscribe();
-    // `subscribe` snapshots the current generation as seen, so a cancel
-    // that fired between the establishment race and here would be
-    // invisible to `changed()`; check the epoch directly so it cannot be
-    // missed.
-    if cancel.cancelled() {
-        return Err(StreamFailure::Cancelled { streamed });
-    }
     // A dropped CancelFlag makes `changed()` ready (with Err) on every poll;
     // polling it forever would busy-loop, so disable the branch once that
     // happens and let the stream drive the loop.
@@ -240,31 +243,37 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
             item = stream.next() => match item {
                 None => break,
                 Some(Err(error)) => return Err(failure_from_error(&error)),
-                Some(Ok(event)) => {
+                Some(Ok(Item::Unknown(_))) => {}
+                Some(Ok(Item::Event(event))) => {
                     match &event {
-                        StreamedAssistantContent::Text(delta) => {
-                            streamed.push_str(&delta.text);
-                            emit(Event::TextDelta(delta.text.clone()));
+                        StreamEvent::Text { text, .. } => {
+                            streamed.push_str(text);
+                            emit(Event::TextDelta(text.clone()));
                         }
-                        StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                            emit(Event::ThinkingDelta(reasoning.clone()));
+                        StreamEvent::Reasoning { text, .. } => {
+                            emit(Event::ThinkingDelta(text.clone()));
                         }
-                        StreamedAssistantContent::ToolCall {
-                            tool_call,
-                            internal_call_id,
+                        StreamEvent::End {
+                            content: AssistantContent::ToolCall(tool_call),
+                            ..
                         } => {
-                            call_ids
+                            // Stream ids are provider property (fresh on
+                            // every attempt); mint a run-stable internal id
+                            // so replayed history survives retries and
+                            // cross-wire fallbacks.
+                            let internal_call_id = format!(
+                                "call-{}",
+                                call_ids.len()
+                            );
+                            let internal_call_id = call_ids
                                 .entry(tool_call.id.to_string())
-                                .or_insert_with(|| internal_call_id.clone());
+                                .or_insert(internal_call_id)
+                                .clone();
                             emit(Event::ToolStart {
-                                id: internal_call_id.clone(),
-                                name: tool_call.function.name.clone(),
-                                arguments: tool_call.function.arguments.clone(),
+                                id: internal_call_id,
+                                name: tool_call.function.name.to_string(),
+                                arguments: tool_call.function.arguments_value(),
                             });
-                        }
-                        StreamedAssistantContent::Final(final_) => {
-                            usage = Some(usage_from_final(final_));
-                            finish_reason = final_.finish_reason.clone();
                         }
                         _ => {}
                     }
@@ -273,32 +282,34 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
             },
         }
     }
-    let usage = usage.unwrap_or_else(|| usage_from_response(&stream));
-    let assistant = assistant_from_stream(stream.choice.as_ref(), &call_ids, &parts);
+    // The folded turn: usage, finish reason, and the assembled choice come
+    // from the same response a blocking call would have returned.
+    let response = match stream.finish().await {
+        Ok(response) => response,
+        Err(error) => return Err(failure_from_error(&error)),
+    };
+    let usage = usage_from_response(&response);
+    let assistant = assistant_from_stream(&response.choice, &call_ids, &parts);
     Ok(TurnOutput {
         assistant,
         usage,
-        finish_reason,
+        finish_reason: response.finish_reason(),
     })
 }
 
-fn usage_from_final(final_: &StreamFinal) -> history::Usage {
+/// Zero-valued counters are the documented sentinel for a missing report;
+/// `total_tokens` is derived when the provider omitted it.
+fn usage_from_response(response: &rig_core::completion::CompletionResponse) -> history::Usage {
+    let rig_usage = &response.usage;
+    let input = rig_usage.input_tokens.unwrap_or(0);
+    let output = rig_usage.output_tokens.unwrap_or(0);
+    let total = rig_usage
+        .total_tokens
+        .unwrap_or(input.saturating_add(output));
     history::Usage {
-        input_tokens: final_.usage.input_tokens,
-        output_tokens: final_.usage.output_tokens,
-        total_tokens: final_.usage.total_tokens,
-    }
-}
-
-/// Zero-valued usage is the documented sentinel for a missing report.
-fn usage_from_response(
-    response: &rig_core::streaming::StreamingCompletionResponse,
-) -> history::Usage {
-    let usage = response.usage();
-    history::Usage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        total_tokens: usage.total_tokens,
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
     }
 }
 
@@ -325,7 +336,13 @@ mod tests {
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
     fn request() -> CompletionRequest {
-        crate::edge::to_request(&[], &[], None, None, None)
+        crate::edge::to_request(
+            &[crate::history::Message::user("hi")],
+            &[],
+            None,
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -446,8 +463,8 @@ mod tests {
         }
     }
 
-    /// A typed `HttpError` with a preserved status classifies without string
-    /// matching.
+    /// A preserved provider status classifies without string matching, both
+    /// from transport refusals and provider-shaped failures.
     #[test]
     fn classifies_typed_http_status() {
         for (status, expected) in [
@@ -457,14 +474,28 @@ mod tests {
             (400, ErrorKind::Fatal),
             (401, ErrorKind::Auth),
         ] {
-            let error = CompletionError::HttpError(
-                rig_core::http_client::Error::InvalidStatusCodeWithMessage(
-                    http::StatusCode::from_u16(status).unwrap(),
-                    "boom".into(),
-                ),
+            let error = ProviderError::from_http_response(
+                http::StatusCode::from_u16(status).unwrap(),
+                "boom",
             );
             assert_eq!(classify_error(&error), expected, "status {status}");
+            assert_eq!(
+                classify_error(&ProviderError::from_transport_error(
+                    rig_core::http_client::Error::non_success_with_details(
+                        http::StatusCode::from_u16(status).unwrap(),
+                        http::HeaderMap::new(),
+                        "boom".into(),
+                    ),
+                )),
+                expected,
+                "transport status {status}"
+            );
         }
+        // A truncated stream is retryable transport damage.
+        assert_eq!(
+            classify_error(&ProviderError::Truncated),
+            ErrorKind::Transport
+        );
     }
 
     /// A dropped `CancelFlag` must disable the cancel branch instead of
@@ -473,7 +504,7 @@ mod tests {
     async fn dropped_cancel_flag_lets_the_stream_complete() {
         let model = MockCompletionModel::from_stream_turns(vec![vec![
             MockStreamEvent::text("hello"),
-            MockStreamEvent::final_response_with_total_tokens(3),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final_with_total_tokens(3)),
         ]]);
         let (flag, cancel) = crate::run::cancel_channel();
         drop(flag);
@@ -485,15 +516,18 @@ mod tests {
         assert_eq!(output.finish_reason, None);
     }
 
-    /// A `Final` event's finish reason rides the turn output.
+    /// A `FinalResponse` finish's reason rides the turn output.
     #[tokio::test]
     async fn finish_reason_rides_the_turn_output() {
+        let finish = {
+            let mut finish =
+                rig_core::test_utils::mock_final(rig_core::completion::Usage::default());
+            finish.reason = Some(rig_core::completion::FinishReason::Length);
+            finish
+        };
         let model = MockCompletionModel::from_stream_turns(vec![vec![
             MockStreamEvent::text("trunc"),
-            MockStreamEvent::FinalResponse(
-                rig_core::streaming::StreamFinal::new("mock", rig_core::completion::Usage::new())
-                    .with_finish_reason(rig_core::completion::FinishReason::Length),
-            ),
+            MockStreamEvent::FinalResponse(finish),
         ]]);
         let (_flag, cancel) = crate::run::cancel_channel();
         let output = run_model_stream(&model, request(), &cancel, &|_| {})
@@ -505,11 +539,16 @@ mod tests {
         );
     }
 
-    /// A stream without a `Final` usage event falls back to the response's
-    /// usage report (zero-valued sentinel when the provider sent none).
+    /// A stream that ends without reporting usage yields the zero-valued
+    /// sentinel when the provider sent none.
     #[tokio::test]
-    async fn missing_final_event_falls_back_to_response_usage() {
-        let model = MockCompletionModel::from_stream_turns(vec![vec![MockStreamEvent::text("hi")]]);
+    async fn missing_usage_report_falls_back_to_zero() {
+        let model = MockCompletionModel::from_stream_turns(vec![vec![
+            MockStreamEvent::text("hi"),
+            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
+                rig_core::completion::Usage::default(),
+            )),
+        ]]);
         let (_flag, cancel) = crate::run::cancel_channel();
         let output = run_model_stream(&model, request(), &cancel, &|_| {})
             .await
@@ -518,32 +557,47 @@ mod tests {
         assert_eq!(output.usage.total_tokens, 0);
     }
 
-    /// A model whose requests never resolve: the establishment await is
-    /// the window an Esc lands in during a slow provider handshake.
-    #[derive(Clone)]
-    struct HangingModel;
-
-    impl CompletionModel for HangingModel {
-        async fn completion(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<rig_core::completion::CompletionResponse, rig_core::completion::CompletionError>
-        {
-            std::future::pending().await
-        }
-
-        async fn stream(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<
-            rig_core::streaming::StreamingCompletionResponse,
-            rig_core::completion::CompletionError,
-        > {
-            std::future::pending().await
+    /// A stream that ends without the provider's terminal record is
+    /// truncation-damaged transport, not a short honest answer: it
+    /// classifies retryable and carries a message.
+    #[tokio::test]
+    async fn unterminated_stream_is_transport_failure() {
+        let model = MockCompletionModel::from_stream_turns(vec![vec![MockStreamEvent::text("hi")]]);
+        let (_flag, cancel) = crate::run::cancel_channel();
+        match run_model_stream(&model, request(), &cancel, &|_| {}).await {
+            Err(StreamFailure::Error { kind, .. }) => {
+                assert!(kind.is_retryable(), "{kind:?}");
+            }
+            other => panic!("expected transport failure, got {other:?}"),
         }
     }
 
-    /// An Esc that lands while the stream is still being established must
+    /// A model whose stream never resolves: the first poll is the window an
+    /// Esc lands in during a slow provider handshake.
+    #[derive(Clone)]
+    struct HangingModel;
+
+    impl CompletionSource for HangingModel {
+        fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> impl Future<Output = Result<rig_core::completion::CompletionResponse, ProviderError>> + Send
+        {
+            std::future::pending()
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<rig_core::streaming::CompletionStream, ProviderError> {
+            Ok(rig_core::streaming::CompletionStream::relay(
+                "hanging",
+                Box::pin(futures::stream::pending()),
+            ))
+        }
+    }
+
+    /// An Esc that lands while the handshake is still being polled must
     /// settle the turn as a normal cancellation (partial history commit)
     /// instead of hanging until the interrupt grace abort drops the turn.
     #[tokio::test]
@@ -552,7 +606,7 @@ mod tests {
         let task = tokio::spawn(async move {
             run_model_stream(&HangingModel, request(), &cancel, &|_| {}).await
         });
-        // Let the task park inside the establishment await, then interrupt.
+        // Let the task park inside the handshake poll, then interrupt.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         flag.set(true);
         match task.await.unwrap() {
@@ -561,8 +615,7 @@ mod tests {
         }
     }
 
-    /// A token already cancelled before the call must not slip past the
-    /// establishment race either.
+    /// A token already cancelled before the call must not enter the stream.
     #[tokio::test]
     async fn pre_cancelled_token_cancels_before_establishment() {
         let (flag, cancel) = crate::run::cancel_channel();

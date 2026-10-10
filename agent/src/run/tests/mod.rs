@@ -23,15 +23,9 @@ fn tool_event(id: &str, name: &str, args: serde_json::Value) -> MockStreamEvent 
 }
 
 fn length_final(total_tokens: u64) -> MockStreamEvent {
-    use rig_core::streaming::StreamFinal;
-    MockStreamEvent::FinalResponse(
-        StreamFinal::new(
-            "mock",
-            rig_core::completion::Usage {
-                total_tokens,
-                ..Default::default()
-            },
-        )
-        .with_finish_reason(rig_core::completion::FinishReason::Length),
-    )
+    let mut finish = rig_core::test_utils::mock_final(
+        rig_core::completion::Usage::new().total_tokens(total_tokens),
+    );
+    finish.reason = Some(rig_core::completion::FinishReason::Length);
+    MockStreamEvent::FinalResponse(finish)
 }

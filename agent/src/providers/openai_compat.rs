@@ -3,7 +3,7 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use rig_core::model::{Model, ModelList};
+use rig_core::model::{ModelInfo as Model, ModelList};
 
 use crate::config::ProviderConfig;
 use crate::error::{InvalidSnafu, Result};

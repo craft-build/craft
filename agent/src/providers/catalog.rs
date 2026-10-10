@@ -1,6 +1,6 @@
 //! Provider catalogs: crate-owned model entries and config/discovery merge.
 
-use rig_core::model::{Model, ModelList};
+use rig_core::model::{ModelInfo as Model, ModelList};
 
 use crate::config::ProviderConfig;
 

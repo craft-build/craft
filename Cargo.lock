@@ -188,7 +188,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -199,7 +199,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -363,12 +363,6 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
-
-[[package]]
-name = "as-any"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0f477b951e452a0b6b4a10b53ccd569042d1d01729b519e02074a9c0958a063"
 
 [[package]]
 name = "as-raw-xcb-connection"
@@ -941,7 +935,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-async",
- "aws-smithy-eventstream",
+ "aws-smithy-eventstream 0.61.4",
  "aws-smithy-http",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
@@ -969,7 +963,7 @@ dependencies = [
  "aws-runtime",
  "aws-sigv4",
  "aws-smithy-async",
- "aws-smithy-eventstream",
+ "aws-smithy-eventstream 0.61.4",
  "aws-smithy-http",
  "aws-smithy-json",
  "aws-smithy-observability",
@@ -1019,7 +1013,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2312577f088c9fbf4206dfdb884cf1de9407b43e1a923cbed5237775116fc24b"
 dependencies = [
  "aws-credential-types",
- "aws-smithy-eventstream",
+ "aws-smithy-eventstream 0.61.4",
  "aws-smithy-http",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
@@ -1047,6 +1041,17 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-eventstream"
+version = "0.60.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78d8391e65fcea47c586a22e1a41f173b38615b112b2c6b7a44e80cec3e6b706"
+dependencies = [
+ "aws-smithy-types",
+ "bytes",
+ "crc32fast",
+]
+
+[[package]]
+name = "aws-smithy-eventstream"
 version = "0.61.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80c2051c2f1016fb8e6548dd07b8bc2ac9c3fe583721444b92f515e856d31609"
@@ -1062,7 +1067,7 @@ version = "0.64.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "639b4d8f8555f24a9be649811c3eb0b4d4616f4d61daf0c32e28873bc1ea9af1"
 dependencies = [
- "aws-smithy-eventstream",
+ "aws-smithy-eventstream 0.61.4",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
@@ -2027,7 +2032,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -2396,6 +2401,7 @@ dependencies = [
  "reqwest",
  "rig-bedrock",
  "rig-core",
+ "rig-reqwest",
  "rmcp",
  "schemars 1.2.2",
  "serde",
@@ -2913,7 +2919,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3123,7 +3129,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3190,17 +3196,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener 5.4.2",
- "pin-project-lite",
-]
-
-[[package]]
-name = "eventsource-stream"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
-dependencies = [
- "futures-core",
- "nom 7.1.3",
  "pin-project-lite",
 ]
 
@@ -4487,7 +4482,7 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
- "windows-registry 0.6.1",
+ "windows-registry 0.4.0",
 ]
 
 [[package]]
@@ -4502,7 +4497,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -5818,7 +5813,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7030,7 +7025,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7618,73 +7613,115 @@ dependencies = [
 
 [[package]]
 name = "rig-bedrock"
-version = "0.42.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2de67aba3ed4984021681128259746744c30e14aba34557b35a4aef208177e4a"
+checksum = "182065e388df2229dba9edd7f38094994e63d9c49b58becc03f06551e1626854"
 dependencies = [
  "async-stream",
  "aws-config",
  "aws-sdk-bedrockruntime",
+ "aws-smithy-eventstream 0.60.21",
+ "aws-smithy-runtime-api",
  "aws-smithy-types",
  "base64 0.22.1",
+ "bytes",
  "futures",
+ "http-body",
  "rig-core",
- "rig-derive",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
- "tracing-futures",
- "uuid",
 ]
 
 [[package]]
 name = "rig-core"
-version = "0.42.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "432d83e0facf16749f91fe729cbffca84437e8062d2f4e92f4f12e903693922d"
+checksum = "6c60db6e3da7681abbdfa9637c1a76dbd5a713f935f0a6753d72c5d2770ed4c6"
 dependencies = [
- "as-any",
  "async-stream",
  "base64 0.22.1",
  "bytes",
- "eventsource-stream",
  "fastrand 2.5.0",
  "futures",
- "futures-timer",
  "glob",
  "http",
- "indexmap 2.14.2",
  "mime",
  "mime_guess",
  "ordered-float 5.5.0",
- "pin-project-lite",
- "reqwest",
  "rig-derive",
+ "rig-http",
+ "rig-reqwest",
+ "rig-tungstenite",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
- "tokio",
- "tokio-tungstenite",
  "tracing",
- "tracing-futures",
+ "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
 name = "rig-derive"
-version = "0.42.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de0a33f1bac45f16e50146c248bcbbfaa44518c7252d274e972c7f4ad71aaba7"
+checksum = "1146bdcb55a3b2dbdd9d2df7a8846714499c9985e9042926c06ffe98b3a821bc"
 dependencies = [
  "convert_case 0.11.0",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "rig-http"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9b68e5fe7258d64aeffb0a976ad0665ad2f94104d41eb4cdf463065ba57ec0b"
+dependencies = [
+ "bytes",
+ "futures",
+ "futures-timer",
+ "http",
+ "mime",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "rig-reqwest"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d478ca821bdf7030b4cabfdc7acc07ab5f0449886f9a7e472de205a6ec4b2b1d"
+dependencies = [
+ "bytes",
+ "futures",
+ "http",
+ "reqwest",
+ "rig-http",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "rig-tungstenite"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d145d2d41722fd040dbb47f05b797c8119884697bb4ee7e53fc5c1c1ec9610df"
+dependencies = [
+ "futures",
+ "rig-http",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -7863,7 +7900,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7930,7 +7967,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8564,7 +8601,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8647,7 +8684,7 @@ dependencies = [
  "cfg-if 1.0.5",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9131,7 +9168,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9173,7 +9210,7 @@ dependencies = [
  "parking_lot",
  "rustix 1.1.5",
  "signal-hook",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9757,18 +9794,6 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
-]
-
-[[package]]
-name = "tracing-futures"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97d095ae15e245a057c8e8451bab9b3ee1e1f68e9ba2b4fbc18d0ac5237835f2"
-dependencies = [
- "futures",
- "futures-task",
- "pin-project",
- "tracing",
 ]
 
 [[package]]
@@ -10664,7 +10689,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11401,7 +11426,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -11677,17 +11702,6 @@ dependencies = [
  "windows-link 0.1.3",
  "windows-result 0.3.4",
  "windows-strings 0.4.2",
-]
-
-[[package]]
-name = "windows-registry"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
-dependencies = [
- "windows-link 0.2.1",
- "windows-result 0.4.1",
- "windows-strings 0.5.1",
 ]
 
 [[package]]

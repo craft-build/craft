@@ -1,7 +1,7 @@
 //! Config-driven native Rig clients. Keep concrete clients available so future
 //! inference, embeddings, tools, and streaming can use their full capabilities.
 //! [`DynamicModel`] erases the concrete model type behind rig-core's
-//! `CompletionModel` so the rest of the crate never names a provider type.
+//! `DynModel` so the rest of the crate never names a provider type.
 
 mod catalog;
 mod dynamic;
@@ -11,15 +11,15 @@ mod registry;
 pub mod usage_fetch;
 
 pub use catalog::{CatalogEntry, CatalogModel};
-pub use dynamic::DynamicModel;
+pub use dynamic::{CompletionSource, DynamicModel};
 pub use reauth::reauth_hook;
 pub use registry::{Provider, ProviderKind};
 pub use usage_fetch::{ModelUsageRow, ProviderUsage, UsageLimit};
 
+use std::future::Future;
 use std::time::Duration;
 
-use rig_core::client::ProviderClient;
-use rig_core::providers::*;
+use rig_core::providers::{anthropic, chatgpt, cohere, copilot, gemini, ollama, openai, voyageai};
 use snafu::{OptionExt, ResultExt};
 
 use crate::config::ProviderConfig;
@@ -66,69 +66,292 @@ impl Default for Timeouts {
     }
 }
 
-/// The shared HTTP backend every configured provider is built on, matching the
-/// reference `http_client`: connect timeout plus an overall stream timeout.
-pub(crate) fn timeout_client(timeouts: Timeouts) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+/// The shared HTTP backend every configured provider is built on, wrapping
+/// the same connect-timeout plus overall stream timeout policy in
+/// rig-reqwest's transport newtype.
+pub(crate) fn timeout_client(timeouts: Timeouts) -> Result<rig_reqwest::ReqwestClient> {
+    let client = reqwest::Client::builder()
         .connect_timeout(timeouts.connect)
         .timeout(timeouts.stream)
         .build()
-        .map_err(crate::error::client_error)
+        .map_err(crate::error::client_error)?;
+    Ok(rig_reqwest::ReqwestClient::from(client))
 }
 
-/// The base-URL env var rig's `from_env` reads for a provider whose key env
-/// is `api_env` (e.g. `ANTHROPIC_API_KEY` → `ANTHROPIC_BASE_URL`).
-pub(crate) fn base_url_env(api_env: &str) -> String {
+/// The base-URL env var convention `from_env` reads for a provider whose
+/// key env is `api_env` (e.g. `ANTHROPIC_API_KEY` → `ANTHROPIC_BASE_URL`).
+fn base_url_env(api_env: &str) -> String {
     api_env.replace("_API_KEY", "_BASE_URL")
 }
 
+/// The base-URL override for a provider: explicit config first, then the
+/// `<NAME>_BASE_URL` environment convention `from_env` reads.
+fn effective_base_url(config: &ProviderConfig, api_env: &str) -> Option<String> {
+    config.base_url.as_deref().map(str::to_owned).or_else(|| {
+        std::env::var(base_url_env(api_env))
+            .ok()
+            .filter(|s| !s.is_empty())
+    })
+}
+
+/// Resolve the API key for a plain vendor row: the config's named
+/// credential, or the vendor's default environment variable.
+fn api_key(
+    config: &ProviderConfig,
+    credential: &dyn Fn(&str) -> Result<String>,
+    env_default: &'static str,
+) -> Result<String> {
+    credential(config.api_key_env.as_deref().unwrap_or(env_default))
+}
+
+/// Every OpenAI-dialect vendor shares one construction: the dialect's config
+/// with the resolved key and optional base-URL override, connected to the
+/// shared timeout transport.
+fn openai_dialect(
+    dialect: &openai::wire::Dialect,
+    key: String,
+    base_url: Option<String>,
+    timeouts: Timeouts,
+) -> Result<openai::OpenAI> {
+    let mut config = openai::OpenAIConfig::with_key(dialect, key);
+    if let Some(base_url) = base_url {
+        config = config.with_base_url(base_url);
+    }
+    Ok(config.connect(timeout_client(timeouts)?))
+}
+
+macro_rules! openai_vendor_factory {
+    ($(#[$doc:meta])* $name:ident, $client:ident, $env:literal, $dialect:path) => {
+        $(#[$doc])*
+        pub(crate) fn $name(
+            config: &ProviderConfig,
+            timeouts: Timeouts,
+            credential: &dyn Fn(&str) -> Result<String>,
+        ) -> Result<openai::$client> {
+            openai_dialect(
+                &$dialect,
+                api_key(config, credential, $env)?,
+                effective_base_url(config, $env),
+                timeouts,
+            )
+        }
+    };
+}
+
+openai_vendor_factory!(
+    build_deepseek,
+    OpenAI,
+    "DEEPSEEK_API_KEY",
+    openai::wire::DEEPSEEK
+);
+openai_vendor_factory!(
+    build_doubleword,
+    OpenAI,
+    "DOUBLEWORD_API_KEY",
+    openai::wire::DOUBLEWORD
+);
+openai_vendor_factory!(build_groq, OpenAI, "GROQ_API_KEY", openai::wire::GROQ);
+openai_vendor_factory!(
+    build_huggingface,
+    OpenAI,
+    "HUGGINGFACE_API_KEY",
+    openai::wire::HUGGINGFACE
+);
+openai_vendor_factory!(
+    build_hyperbolic,
+    OpenAI,
+    "HYPERBOLIC_API_KEY",
+    openai::wire::HYPERBOLIC
+);
+openai_vendor_factory!(
+    build_minimax,
+    OpenAI,
+    "MINIMAX_API_KEY",
+    openai::wire::MINIMAX
+);
+openai_vendor_factory!(build_mira, OpenAI, "MIRA_API_KEY", openai::wire::MIRA);
+openai_vendor_factory!(
+    build_mistral,
+    OpenAI,
+    "MISTRAL_API_KEY",
+    openai::wire::MISTRAL
+);
+openai_vendor_factory!(
+    build_moonshot,
+    OpenAI,
+    "MOONSHOT_API_KEY",
+    openai::wire::MOONSHOT
+);
+openai_vendor_factory!(
+    build_openrouter,
+    OpenAI,
+    "OPENROUTER_API_KEY",
+    openai::wire::OPENROUTER
+);
+openai_vendor_factory!(
+    build_perplexity,
+    OpenAI,
+    "PERPLEXITY_API_KEY",
+    openai::wire::PERPLEXITY
+);
+openai_vendor_factory!(
+    build_together,
+    OpenAI,
+    "TOGETHER_API_KEY",
+    openai::wire::TOGETHER
+);
+openai_vendor_factory!(build_venice, OpenAI, "VENICE_API_KEY", openai::wire::VENICE);
+openai_vendor_factory!(
+    build_xai,
+    OpenAI,
+    "XAI_API_KEY",
+    rig_core::providers::xai::DIALECT
+);
+openai_vendor_factory!(
+    build_xiaomimimo,
+    OpenAI,
+    "XIAOMI_MIMO_API_KEY",
+    openai::wire::XIAOMIMIMO
+);
+openai_vendor_factory!(build_zai, OpenAI, "ZAI_API_KEY", openai::wire::ZAI);
+
+pub(crate) fn build_openai(
+    config: &ProviderConfig,
+    timeouts: Timeouts,
+    credential: &dyn Fn(&str) -> Result<String>,
+) -> Result<openai::OpenAI> {
+    openai_dialect(
+        &openai::wire::OPENAI,
+        api_key(config, credential, "OPENAI_API_KEY")?,
+        effective_base_url(config, "OPENAI_API_KEY"),
+        timeouts,
+    )
+}
+
+/// Third-party OpenAI-compatible endpoints: the OpenAI wire vocabulary on
+/// the Chat Completions route, pointed at the configured base URL.
+pub(crate) fn build_openai_compatible(
+    config: &ProviderConfig,
+    timeouts: Timeouts,
+    credential: &dyn Fn(&str) -> Result<String>,
+) -> Result<openai::OpenAI> {
+    let key = match &config.api_key_env {
+        Some(name) => credential(name)?,
+        None => std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+    };
+    openai_dialect(
+        &openai::wire::OPENAI,
+        key,
+        effective_base_url(config, "OPENAI_API_KEY"),
+        timeouts,
+    )
+}
+
+/// Legacy llamafile deployments continue to work over the llama.cpp
+/// OpenAI-compatible wire (the llamafile module was folded into llamacpp).
 pub(crate) fn build_llamafile(
     config: &ProviderConfig,
     timeouts: Timeouts,
     _: &dyn Fn(&str) -> Result<String>,
-) -> Result<llamafile::Client> {
-    let mut builder = llamafile::Client::builder()
-        .api_key(rig_core::client::Nothing)
-        .http_client(timeout_client(timeouts)?);
-    if let Some(base) = &config.base_url {
-        builder = builder.base_url(base);
-    } else if let Ok(base) = std::env::var("LLAMAFILE_API_BASE_URL") {
-        builder = builder.base_url(base);
+) -> Result<openai::OpenAI> {
+    openai_dialect(
+        &openai::wire::LLAMACPP,
+        String::new(),
+        config
+            .base_url
+            .clone()
+            .or_else(|| std::env::var("LLAMAFILE_API_BASE_URL").ok()),
+        timeouts,
+    )
+}
+
+pub(crate) fn build_anthropic(
+    config: &ProviderConfig,
+    timeouts: Timeouts,
+    credential: &dyn Fn(&str) -> Result<String>,
+) -> Result<anthropic::Anthropic> {
+    let mut provider =
+        anthropic::AnthropicConfig::new(api_key(config, credential, "ANTHROPIC_API_KEY")?);
+    if let Some(base_url) = effective_base_url(config, "ANTHROPIC_API_KEY") {
+        provider = provider.with_base_url(base_url);
     }
-    builder.build().map_err(crate::error::client_error)
+    Ok(provider.connect(timeout_client(timeouts)?))
+}
+
+pub(crate) fn build_cohere(
+    config: &ProviderConfig,
+    timeouts: Timeouts,
+    credential: &dyn Fn(&str) -> Result<String>,
+) -> Result<cohere::Cohere> {
+    let mut provider = cohere::CohereConfig::new(api_key(config, credential, "COHERE_API_KEY")?);
+    if let Some(base_url) = effective_base_url(config, "COHERE_API_KEY") {
+        provider = provider.with_base_url(base_url);
+    }
+    Ok(provider.connect(timeout_client(timeouts)?))
+}
+
+pub(crate) fn build_gemini(
+    config: &ProviderConfig,
+    timeouts: Timeouts,
+    credential: &dyn Fn(&str) -> Result<String>,
+) -> Result<gemini::Gemini> {
+    let mut provider = gemini::GeminiConfig::new(api_key(config, credential, "GEMINI_API_KEY")?);
+    if let Some(base_url) = effective_base_url(config, "GEMINI_API_KEY") {
+        provider = provider.with_base_url(base_url);
+    }
+    Ok(provider.connect(timeout_client(timeouts)?))
+}
+
+/// Embedding and rerank only: no completion models come from Voyage AI.
+pub(crate) fn build_voyageai(
+    config: &ProviderConfig,
+    timeouts: Timeouts,
+    credential: &dyn Fn(&str) -> Result<String>,
+) -> Result<voyageai::VoyageAi> {
+    let mut provider =
+        voyageai::VoyageAiConfig::new(api_key(config, credential, "VOYAGEAI_API_KEY")?);
+    if let Some(base_url) = effective_base_url(config, "VOYAGEAI_API_KEY") {
+        provider = provider.with_base_url(base_url);
+    }
+    Ok(provider.connect(timeout_client(timeouts)?))
 }
 
 pub(crate) fn build_ollama(
     config: &ProviderConfig,
     timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
-) -> Result<ollama::Client> {
+) -> Result<ollama::Ollama> {
     let key = match &config.api_key_env {
         Some(name) => credential(name)?,
         None => std::env::var("OLLAMA_API_KEY").unwrap_or_default(),
     };
-    let mut builder = ollama::Client::builder()
-        .api_key(key)
-        .http_client(timeout_client(timeouts)?);
-    if let Some(base) = &config.base_url {
-        builder = builder.base_url(base);
-    } else if let Ok(base) = std::env::var("OLLAMA_API_BASE_URL") {
-        builder = builder.base_url(base);
+    let mut provider = ollama::OllamaConfig::new();
+    if let Some(base_url) = config
+        .base_url
+        .clone()
+        .or_else(|| std::env::var("OLLAMA_API_BASE_URL").ok())
+    {
+        provider = provider.with_base_url(base_url);
     }
-    builder.build().map_err(crate::error::client_error)
+    if !key.is_empty() {
+        provider = provider.with_api_key(key);
+    }
+    Ok(provider.connect(timeout_client(timeouts)?))
 }
 
 pub(crate) fn build_azure(
     config: &ProviderConfig,
     timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
-) -> Result<azure::Client> {
-    let auth = if let Some(name) = &config.api_key_env {
-        azure::AzureOpenAIAuth::ApiKey(credential(name)?)
+) -> Result<openai::OpenAI> {
+    // Key auth when the config names one or AZURE_API_KEY is set; otherwise
+    // the deployment takes an Entra ID bearer token (AZURE_TOKEN).
+    let (secret, token_auth) = if let Some(name) = &config.api_key_env {
+        (credential(name)?, false)
     } else if let Ok(key) = std::env::var("AZURE_API_KEY") {
-        azure::AzureOpenAIAuth::ApiKey(key)
+        (key, false)
     } else {
-        azure::AzureOpenAIAuth::Token(credential("AZURE_TOKEN")?)
+        (credential("AZURE_TOKEN")?, true)
     };
     let endpoint = config
         .base_url
@@ -140,82 +363,133 @@ pub(crate) fn build_azure(
         .clone()
         .or_else(|| std::env::var("AZURE_API_VERSION").ok())
         .context(AzureApiVersionMissingSnafu)?;
-    azure::Client::builder()
-        .api_key(auth)
-        .azure_endpoint(endpoint)
-        .api_version(&version)
-        .http_client(timeout_client(timeouts)?)
-        .build()
-        .map_err(crate::error::client_error)
+    let mut provider =
+        openai::OpenAIConfig::with_key(&openai::wire::AZURE, secret).with_base_url(endpoint);
+    if token_auth {
+        provider.auth = openai::wire::Auth::Bearer;
+    }
+    Ok(provider
+        .with_api_version(version)
+        .connect(timeout_client(timeouts)?))
 }
 
 /// Bedrock has no craft-side credential or base URL: the AWS SDK's default
 /// chain (environment credentials, `~/.aws` profiles, SSO, container/IMDS
-/// roles) supplies both credentials and region, resolved lazily on the first
-/// request. The AWS SDK also owns its transport, so the shared reqwest
-/// [`Timeouts`] policy does not apply; AWS call timeouts live in the SDK
-/// config instead.
+/// roles) supplies both credentials and region, resolved lazily on the
+/// first request. The AWS SDK also owns its transport, so the shared
+/// reqwest [`Timeouts`] policy does not apply; AWS call timeouts live in
+/// the SDK config instead.
 pub(crate) fn build_bedrock(
     _: &ProviderConfig,
     _: Timeouts,
     _: &dyn Fn(&str) -> Result<String>,
-) -> Result<rig_bedrock::client::Client> {
-    rig_bedrock::client::Client::from_env().map_err(crate::error::client_error)
+) -> Result<rig_bedrock::client::BedrockRuntime> {
+    Ok(rig_bedrock::client::BedrockRuntime::from_env())
+}
+
+/// The OAuth and GitHub-token device flows are async; providers are still
+/// built synchronously. On the multi-threaded app runtime the flow parks the
+/// calling thread onto the reactor; outside any runtime a private
+/// current-thread runtime runs it to completion. Test credential injection
+/// never takes these branches.
+fn block_on_auth<F: Future>(future: F) -> Result<F::Output> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => Ok(tokio::task::block_in_place(|| handle.block_on(future))),
+        Err(_) => Ok(tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(crate::error::client_error)?
+            .block_on(future)),
+    }
 }
 
 pub(crate) fn build_chatgpt(
     config: &ProviderConfig,
     timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
-) -> Result<chatgpt::Client> {
-    let auth = if let Some(name) = &config.api_key_env {
-        chatgpt::ChatGPTAuth::AccessToken {
-            access_token: credential(name)?,
-            account_id: config.account_id.clone(),
-        }
+) -> Result<openai::OpenAI> {
+    let mut provider = if let Some(name) = &config.api_key_env {
+        openai::OpenAIConfig::with_key(&chatgpt::DIALECT, credential(name)?)
     } else if let Ok(access_token) = std::env::var("CHATGPT_ACCESS_TOKEN") {
-        chatgpt::ChatGPTAuth::AccessToken {
-            access_token,
-            account_id: std::env::var("CHATGPT_ACCOUNT_ID").ok(),
+        let mut provider = openai::OpenAIConfig::with_key(&chatgpt::DIALECT, access_token);
+        if let Ok(account_id) = std::env::var("CHATGPT_ACCOUNT_ID") {
+            provider.account_id = Some(account_id);
         }
+        provider
     } else {
-        chatgpt::ChatGPTAuth::OAuth
+        let authenticator = chatgpt::auth::Authenticator::new(
+            chatgpt::auth::AuthSource::OAuth,
+            None,
+            chatgpt::auth::DeviceCodeHandler::default(),
+            true,
+        );
+        let mut provider = openai::OpenAIConfig::with_key(&chatgpt::DIALECT, String::new());
+        if let Some(base_url) = &config.base_url {
+            provider = provider.with_base_url(base_url.clone());
+        }
+        let client = provider.connect(timeout_client(timeouts)?);
+        return block_on_auth(async { client.authenticate(&authenticator).await })?
+            .map_err(crate::error::client_error);
     };
-    let mut builder = chatgpt::Client::builder()
-        .api_key(auth)
-        .http_client(timeout_client(timeouts)?);
-    if let Some(base) = &config.base_url {
-        builder = builder.base_url(base);
+    if let Some(account_id) = &config.account_id {
+        provider.account_id = Some(account_id.clone());
     }
-    builder.build().map_err(crate::error::client_error)
+    if let Some(base_url) = &config.base_url {
+        provider = provider.with_base_url(base_url.clone());
+    }
+    Ok(provider.connect(timeout_client(timeouts)?))
 }
 
 pub(crate) fn build_copilot(
     config: &ProviderConfig,
     timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
-) -> Result<copilot::Client> {
-    let http = || timeout_client(timeouts).map_err(crate::error::client_error);
-    let mut builder = copilot::Client::builder();
-    if let Some(base) = &config.base_url {
-        builder = builder.base_url(base);
+) -> Result<copilot::Copilot> {
+    use copilot::auth::{AuthSource, Authenticator, DeviceCodeHandler};
+
+    // Exchanged session keys are used as-is.
+    if let Some(key) = config
+        .api_key_env
+        .as_deref()
+        .map(credential)
+        .transpose()?
+        .or_else(|| first_env(&["GITHUB_COPILOT_API_KEY", "COPILOT_API_KEY"]))
+    {
+        let mut provider = copilot::CopilotConfig::new(key);
+        if let Some(base_url) = &config.base_url {
+            provider = provider.with_base_url(base_url.clone());
+        }
+        return Ok(provider.connect(timeout_client(timeouts)?));
     }
-    if let Some(name) = &config.api_key_env {
-        builder
-            .api_key(credential(name)?)
-            .http_client(http()?)
-            .build()
-    } else if let Some(key) = first_env(&["GITHUB_COPILOT_API_KEY", "COPILOT_API_KEY"]) {
-        builder.api_key(key).http_client(http()?).build()
-    } else if let Some(token) = first_env(&["COPILOT_GITHUB_ACCESS_TOKEN", "GITHUB_TOKEN"]) {
-        builder
-            .github_access_token(token)
-            .http_client(http()?)
-            .build()
+
+    // GitHub tokens need the exchange; OAuth runs the cached device flow.
+    let source = if let Some(token) = first_env(&["COPILOT_GITHUB_ACCESS_TOKEN", "GITHUB_TOKEN"]) {
+        AuthSource::GitHubAccessToken(token)
     } else {
-        builder.oauth().http_client(http()?).build()
+        AuthSource::OAuth
+    };
+    let (access_token_file, api_key_file) = copilot::auth::default_token_dir()
+        .map(|dir| {
+            (
+                Some(dir.join("access-token")),
+                Some(dir.join("api-key.json")),
+            )
+        })
+        .unwrap_or((None, None));
+    let authenticator = Authenticator::new(
+        source,
+        access_token_file,
+        api_key_file,
+        DeviceCodeHandler::default(),
+        true,
+    );
+    let mut provider = copilot::CopilotConfig::new("");
+    if let Some(base_url) = &config.base_url {
+        provider = provider.with_base_url(base_url.clone());
     }
-    .map_err(crate::error::client_error)
+    let client = provider.connect(timeout_client(timeouts)?);
+    block_on_auth(async { client.authenticate(&authenticator).await })?
+        .map_err(crate::error::client_error)
 }
 
 fn first_env(names: &[&str]) -> Option<String> {
@@ -228,7 +502,7 @@ fn first_env(names: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use rig_core::model::{Model, ModelList};
+    use rig_core::model::{ModelInfo as Model, ModelList};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -314,15 +588,14 @@ mod tests {
         // surface the client-side timeout.
         use futures::StreamExt;
         let started = Instant::now();
-        let error = match rig_core::completion::CompletionModel::stream(&model, request).await {
-            Err(error) => error,
-            Ok(mut stream) => loop {
-                match stream.next().await {
-                    Some(Err(error)) => break error,
-                    Some(Ok(_)) => continue,
-                    None => panic!("stalled provider stream unexpectedly ended"),
-                }
-            },
+        let mut stream = crate::providers::CompletionSource::stream(&model, request)
+            .expect("the request is representable");
+        let error = loop {
+            match stream.next().await {
+                Some(Err(error)) => break error,
+                Some(Ok(_)) => continue,
+                None => panic!("stalled provider stream unexpectedly ended"),
+            }
         };
         assert!(started.elapsed() < Duration::from_secs(3), "{started:?}");
         let mut chain = String::new();
@@ -383,15 +656,14 @@ mod tests {
         );
         use futures::StreamExt;
         let started = Instant::now();
-        let error = match rig_core::completion::CompletionModel::stream(&model, request).await {
-            Err(error) => error,
-            Ok(mut stream) => loop {
-                match stream.next().await {
-                    Some(Err(error)) => break error,
-                    Some(Ok(_)) => continue,
-                    None => panic!("stalled provider stream unexpectedly ended"),
-                }
-            },
+        let mut stream = crate::providers::CompletionSource::stream(&model, request)
+            .expect("the request is representable");
+        let error = loop {
+            match stream.next().await {
+                Some(Err(error)) => break error,
+                Some(Ok(_)) => continue,
+                None => panic!("stalled provider stream unexpectedly ended"),
+            }
         };
         assert!(started.elapsed() < Duration::from_secs(3), "{started:?}");
         assert!(!error.to_string().to_lowercase().contains("refused"));
@@ -536,8 +808,8 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_controls_reach_each_native_http_protocol() {
+        use crate::providers::CompletionSource;
         use crate::thinking::{Effort, ReasoningOption, ThinkingConfig};
-        use rig_core::completion::CompletionModel;
         fn assert_fragment(body: &serde_json::Value, expected: &serde_json::Value) {
             if let Some(object) = expected.as_object() {
                 for (key, value) in object {
@@ -595,7 +867,7 @@ mod tests {
                 ProviderKind::Ollama,
                 "qwen3",
                 ThinkingConfig::Off,
-                serde_json::json!({"think": false}),
+                serde_json::json!({"reasoning_effort": "none"}),
             ),
             (
                 ProviderKind::Deepseek,
@@ -639,7 +911,7 @@ mod tests {
             crate::thinking::attach(&mut request, thinking);
             // Some rig providers create a lazy stream; drive it so the HTTP
             // request is sent and the intentional rejection is observed.
-            if let Ok(mut stream) = model.stream(request).await {
+            if let Ok(mut stream) = model.stream(request) {
                 use futures::StreamExt;
                 while let Some(item) = stream.next().await {
                     if item.is_err() {

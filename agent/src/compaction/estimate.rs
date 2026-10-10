@@ -180,6 +180,7 @@ pub fn estimate_prompt_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::message::ToolName;
 
     fn user(text: &str) -> Message {
         Message::User {
@@ -240,12 +241,12 @@ mod tests {
     fn request_overhead_sums_preamble_and_tool_schemas() {
         let tools = vec![
             ToolDefinition {
-                name: "bash".into(),
+                name: ToolName::new("bash").expect("non-empty"),
                 description: "run a command".into(),
                 parameters: serde_json::json!({"type": "object"}),
             },
             ToolDefinition {
-                name: "read".into(),
+                name: ToolName::new("read").expect("non-empty"),
                 description: "read".into(),
                 parameters: serde_json::Value::Null,
             },

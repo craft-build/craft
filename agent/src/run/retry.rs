@@ -14,7 +14,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rig_core::completion::{CompletionModel, CompletionRequest};
+use crate::providers::CompletionSource;
+use rig_core::completion::CompletionRequest;
 
 use super::CancelToken;
 use super::Event;
@@ -169,7 +170,7 @@ pub(crate) async fn stream_with_retry<'a, M>(
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> Result<(TurnOutput, Option<&'a str>), StreamFailure>
 where
-    M: CompletionModel + Clone,
+    M: CompletionSource + Clone,
 {
     let mut retry = RetryState::new();
     let mut next_fallback = 0usize;
@@ -307,7 +308,13 @@ mod tests {
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
     fn request() -> CompletionRequest {
-        crate::edge::to_request(&[], &[], None, None, None)
+        crate::edge::to_request(
+            &[crate::history::Message::user("hi")],
+            &[],
+            None,
+            None,
+            None,
+        )
     }
 
     fn rate_limit_turn() -> Vec<MockStreamEvent> {
@@ -680,6 +687,7 @@ mod tests {
     /// Records the outgoing request before delegating to rig's mock;
     /// `DynamicModel::wrap` erases rig's own recorder, so hop bodies whose
     /// requests we must inspect wrap this instead.
+    #[derive(Clone)]
     struct RecordingModel {
         mock: MockCompletionModel,
         requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
@@ -700,25 +708,27 @@ mod tests {
         }
     }
 
-    impl CompletionModel for RecordingModel {
-        async fn completion(
+    impl CompletionSource for RecordingModel {
+        fn completion(
             &self,
             request: CompletionRequest,
-        ) -> Result<rig_core::completion::CompletionResponse, rig_core::completion::CompletionError>
-        {
+        ) -> impl Future<
+            Output = Result<
+                rig_core::completion::CompletionResponse,
+                rig_core::error::ProviderError,
+            >,
+        > + Send {
+            let mock = self.mock.clone();
             self.requests.lock().unwrap().push(request.clone());
-            self.mock.completion(request).await
+            async move { mock.call(request).await }
         }
 
-        async fn stream(
+        fn stream(
             &self,
             request: CompletionRequest,
-        ) -> Result<
-            rig_core::streaming::StreamingCompletionResponse,
-            rig_core::completion::CompletionError,
-        > {
+        ) -> Result<rig_core::streaming::CompletionStream, rig_core::error::ProviderError> {
             self.requests.lock().unwrap().push(request.clone());
-            self.mock.stream(request).await
+            self.mock.stream(request)
         }
     }
 
@@ -763,7 +773,13 @@ mod tests {
         );
         let (_, cancel) = crate::run::cancel_channel();
         let events = std::sync::Mutex::new(Vec::new());
-        let request = crate::edge::to_request(&[], &[], None, None, Some(8_192));
+        let request = crate::edge::to_request(
+            &[crate::history::Message::user("hi")],
+            &[],
+            None,
+            None,
+            Some(8_192),
+        );
         let chain = [fallback];
         let (output, served) = stream_with_retry(
             &primary,
@@ -837,7 +853,13 @@ mod tests {
         );
         let (_, cancel) = crate::run::cancel_channel();
         let events = std::sync::Mutex::new(Vec::new());
-        let request = crate::edge::to_request(&[], &[], None, None, Some(16_000));
+        let request = crate::edge::to_request(
+            &[crate::history::Message::user("hi")],
+            &[],
+            None,
+            None,
+            Some(16_000),
+        );
         let (output, _) = stream_with_retry(
             &primary,
             &[fallback],
@@ -871,7 +893,13 @@ mod tests {
         );
         let (_, cancel) = crate::run::cancel_channel();
         let events = std::sync::Mutex::new(Vec::new());
-        let request = crate::edge::to_request(&[], &[], None, None, Some(16_000));
+        let request = crate::edge::to_request(
+            &[crate::history::Message::user("hi")],
+            &[],
+            None,
+            None,
+            Some(16_000),
+        );
         let (output, _) = stream_with_retry(
             &primary,
             &[fallback],
@@ -1000,7 +1028,13 @@ mod tests {
         let (hop_b, b_requests) = hop("hop-b", vec![done_turn("b")], None, None, None);
         let (_, cancel) = crate::run::cancel_channel();
         let events = std::sync::Mutex::new(Vec::new());
-        let request = crate::edge::to_request(&[], &[], None, None, Some(8_192));
+        let request = crate::edge::to_request(
+            &[crate::history::Message::user("hi")],
+            &[],
+            None,
+            None,
+            Some(8_192),
+        );
         let (output, _) = stream_with_retry(
             &primary,
             &[hop_a, hop_b],

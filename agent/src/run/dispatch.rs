@@ -1,7 +1,7 @@
 //! Tool dispatch: our own executor over rig-core portable tools.
 //!
 //! Takes the tool calls of a turn and executes them sequentially through the
-//! registered [`PortableDynamicTool`]s, with two interception points:
+//! registered [`DynamicTool`]s, with two interception points:
 //! a [`BeforeExecute`] hook (approval/deny/rewrite) consulted before each
 //! execution, and an [`AfterExecute`] hook (output transform) applied to each
 //! result. Both default to pass-through; the TUI's approval gate is a
@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 use rig_core::completion::ToolDefinition;
-use rig_core::tool::PortableDynamicTool;
+use rig_core::tool::DynamicTool;
 
 use crate::history;
 
@@ -68,7 +68,7 @@ pub trait AfterExecute: Send + Sync {
 /// The turn's tool set: name-keyed portable tools plus interception hooks.
 #[derive(Clone, Default)]
 pub struct ToolDispatch {
-    tools: BTreeMap<String, PortableDynamicTool>,
+    tools: BTreeMap<String, DynamicTool>,
     // The hook/cache slots below are shared across clones on purpose. The
     // `batch` tool holds a clone of the table taken during registration, before
     // the caller attaches these with the `with_*` builders; a plain field would
@@ -99,11 +99,11 @@ pub enum DispatchOutcome {
 }
 
 impl ToolDispatch {
-    pub fn new(tools: impl IntoIterator<Item = PortableDynamicTool>) -> Self {
+    pub fn new(tools: impl IntoIterator<Item = DynamicTool>) -> Self {
         Self {
             tools: tools
                 .into_iter()
-                .map(|tool| (tool.name().to_owned(), tool))
+                .map(|tool| (tool.name().to_string(), tool))
                 .collect(),
             before: Arc::new(RwLock::new(None)),
             after: Arc::new(RwLock::new(None)),
@@ -192,10 +192,7 @@ impl ToolDispatch {
 
     /// Provider-facing definitions for the request.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(PortableDynamicTool::definition)
-            .collect()
+        self.tools.values().map(DynamicTool::definition).collect()
     }
 
     pub fn is_empty(&self) -> bool {

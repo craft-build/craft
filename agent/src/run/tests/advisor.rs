@@ -4,12 +4,12 @@
 #[cfg(test)]
 mod advisor_tests {
     use crate::config::{AdvisorAutoAct, AdvisorConfig};
+    use crate::providers::CompletionSource;
     use crate::run::{self, Event, RunOutcome, ToolDispatch, cancel_channel};
-    use rig_core::completion::{
-        CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-    };
-    use rig_core::streaming::StreamingCompletionResponse;
+    use rig_core::completion::{CompletionRequest, CompletionResponse};
+    use rig_core::streaming::CompletionStream;
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
+    use std::future::Future;
 
     #[derive(Clone)]
     struct SplitMock {
@@ -17,19 +17,21 @@ mod advisor_tests {
         completion: MockCompletionModel,
     }
 
-    impl CompletionModel for SplitMock {
-        async fn completion(
+    impl CompletionSource for SplitMock {
+        fn completion(
             &self,
             request: CompletionRequest,
-        ) -> Result<CompletionResponse, CompletionError> {
-            self.completion.completion(request).await
+        ) -> impl Future<Output = Result<CompletionResponse, rig_core::error::ProviderError>> + Send
+        {
+            let mock = self.completion.clone();
+            async move { mock.call(request).await }
         }
 
-        async fn stream(
+        fn stream(
             &self,
             request: CompletionRequest,
-        ) -> Result<StreamingCompletionResponse, CompletionError> {
-            self.stream.stream(request).await
+        ) -> Result<CompletionStream, rig_core::error::ProviderError> {
+            self.stream.stream(request)
         }
     }
 
@@ -95,7 +97,7 @@ mod advisor_tests {
                 done_turn("first reply"),
                 done_turn("fixed reply"),
             ]),
-            completion: MockCompletionModel::new([
+            completion: MockCompletionModel::from_turns([
                 MockTurn::text("concern: fix X"),
                 MockTurn::text("ok"),
             ]),
@@ -127,7 +129,7 @@ mod advisor_tests {
         params.advisor.auto_act = AdvisorAutoAct::Concern;
         let model = SplitMock {
             stream: MockCompletionModel::from_stream_turns([done_turn("first reply")]),
-            completion: MockCompletionModel::new([MockTurn::text("nit: tiny thing")]),
+            completion: MockCompletionModel::from_turns([MockTurn::text("nit: tiny thing")]),
         };
         let (outcome, history, events) = run_with(&model, &params).await;
         assert!(
@@ -146,7 +148,7 @@ mod advisor_tests {
     async fn disabled_advisor_makes_no_extra_calls() {
         let model = SplitMock {
             stream: MockCompletionModel::from_stream_turns([done_turn("done")]),
-            completion: MockCompletionModel::new(Vec::<MockTurn>::new()),
+            completion: MockCompletionModel::from_turns(Vec::<MockTurn>::new()),
         };
         let (outcome, _, events) = run_with(&model, &run::RunParams::default()).await;
         assert!(matches!(outcome, RunOutcome::Done { .. }));
@@ -163,7 +165,7 @@ mod advisor_tests {
                 done_turn("first"),
                 done_turn("second"),
             ]),
-            completion: MockCompletionModel::new([
+            completion: MockCompletionModel::from_turns([
                 MockTurn::text("concern: fix X"),
                 MockTurn::text("concern: fix Y"),
             ]),
@@ -181,7 +183,7 @@ mod advisor_tests {
     async fn advisor_failure_never_fails_the_run() {
         let model = SplitMock {
             stream: MockCompletionModel::from_stream_turns([done_turn("done")]),
-            completion: MockCompletionModel::new([MockTurn::error("rate limited")]),
+            completion: MockCompletionModel::from_turns([MockTurn::error("rate limited")]),
         };
         let (outcome, _, events) = run_with(&model, &advisor_params()).await;
         assert!(matches!(outcome, RunOutcome::Done { .. }), "{outcome:?}");

@@ -42,8 +42,9 @@ ratatui-image = {
 }
 regex = "1"
 reqwest = "0.13"
-rig-bedrock = "0.42"
-rig-core = "0.42"
+rig-bedrock = "0.44"
+rig-core = { version = "0.44", features = ["reqwest"] }
+rig-reqwest = "0.44"
 rmcp = {
   version = "3.5",
   default-features = false,

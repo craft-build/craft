@@ -15,7 +15,7 @@
 //! Ported from the reference `craft-agent/src/agent/advisor.rs` +
 //! `agent/run/flow.rs` wiring, re-expressed for this repo's Rig edge: the
 //! review call goes through [`crate::edge::to_request`] +
-//! `CompletionModel::completion`, like the auto-reviewer. Deviations from the
+//! `CompletionSource::completion`, like the auto-reviewer. Deviations from the
 //! reference: no advisor model-role/spec resolution (the run's model serves
 //! the review, which is the reference's own fallback), no cancel-raced
 //! provider stream (the caller checks the token and the deadline bounds the
@@ -23,7 +23,7 @@
 
 use std::collections::VecDeque;
 
-use rig_core::completion::CompletionModel;
+use crate::providers::CompletionSource;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::warn;
@@ -173,7 +173,7 @@ impl AdvisorState {
 /// Review the transcript delta. Returns `Ok(None)` when the advisor is
 /// silent, the note is content-free, or a duplicate. Provider failures are
 /// logged and swallowed — an advisor problem must never fail the run.
-pub async fn review<M: CompletionModel>(
+pub async fn review<M: CompletionSource>(
     model: &M,
     state: &mut AdvisorState,
     history: &[Message],
@@ -476,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn review_returns_none_on_empty_history() {
-        let model = MockCompletionModel::new(Vec::<MockTurn>::new());
+        let model = MockCompletionModel::from_turns(Vec::<MockTurn>::new());
         let mut state = AdvisorState::with_dedup(8);
         assert!(review(&model, &mut state, &[]).await.is_none());
         assert_eq!(model.request_count(), 0);
@@ -484,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn review_parses_and_admits_a_note() {
-        let model = MockCompletionModel::new([MockTurn::text("concern: unchecked unwrap")]);
+        let model = MockCompletionModel::from_turns([MockTurn::text("concern: unchecked unwrap")]);
         let mut state = AdvisorState::with_dedup(8);
         let history = vec![Message::user("do the thing"), Message::assistant("done")];
         let note = review(&model, &mut state, &history).await.unwrap();
@@ -495,12 +495,12 @@ mod tests {
         assert_eq!(model.request_count(), 1);
         let request = &model.requests()[0];
         assert!(request.tools.is_empty());
-        assert_eq!(request.preamble.as_deref(), Some(ADVISOR_SYSTEM));
+        assert_eq!(request.system_instructions(), Some(ADVISOR_SYSTEM));
     }
 
     #[tokio::test]
     async fn review_swallows_provider_errors_and_dedupes_repeats() {
-        let model = MockCompletionModel::new([
+        let model = MockCompletionModel::from_turns([
             MockTurn::text("blocker: real bug"),
             MockTurn::text("blocker: real bug"),
         ]);
@@ -510,7 +510,7 @@ mod tests {
         // Same note again: deduped to silence.
         assert!(review(&model, &mut state, &history).await.is_none());
 
-        let failing = MockCompletionModel::new([MockTurn::error("rate limited")]);
+        let failing = MockCompletionModel::from_turns([MockTurn::error("rate limited")]);
         let mut state = AdvisorState::with_dedup(8);
         assert!(review(&failing, &mut state, &history).await.is_none());
     }
