@@ -672,13 +672,17 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, _avail: u32) {
 
     // Publish the composer area for mouse selection confinement (the
     // box container's rect — previous frame's, matching the one-frame
-    // handoff cadence the transcript regions use).
+    // handoff cadence the transcript regions use). Overlay layer + 1x1:
+    // slt skips deferred draws whose rect collapses to zero, so flow-space
+    // bookkeeping regions never run reliably.
     let paint = app.view.paint.clone();
     let rect = box_resp.rect;
-    ui.container().draw(move |_buf, _area| {
-        if let Ok(mut p) = paint.lock() {
-            p.composer_area = crate::tui::geom::Rect::from_slt(rect);
-        }
+    ui.overlay(|ui| {
+        ui.container().w(1).h(1).draw(move |_buf, _area| {
+            if let Ok(mut p) = paint.lock() {
+                p.composer_area = crate::tui::geom::Rect::from_slt(rect);
+            }
+        });
     });
 }
 

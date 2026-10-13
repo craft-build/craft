@@ -393,7 +393,11 @@ pub(super) fn render_file_picker_slt(ui: &mut slt::Context, app: &mut App) {
     let no_matches = s.matches.is_empty() && !s.query.is_empty();
     let more_row = s.total_matches > file_picker::max_materialized()
         && s.scroll_offset + s.viewport_height >= s.matches.len();
-    let more_n = s.total_matches - file_picker::max_materialized();
+    let more_n = if more_row {
+        s.total_matches - file_picker::max_materialized()
+    } else {
+        0
+    };
 
     // Query row: spinner while walking, block cursor over the caret char.
     let mut qspans = vec![Span::styled(

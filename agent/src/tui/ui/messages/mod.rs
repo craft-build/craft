@@ -891,7 +891,13 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
     };
 
     let paint = app.view.paint.clone();
-    ui.container().grow(1).col(move |ui| {
+    let area_only = paint.clone();
+    // Region data crosses the col closure boundary through this slot so
+    // the always-run overlay publish (declared after the col) can own it.
+    let regions_out: std::sync::Arc<std::sync::Mutex<(Vec<(usize, u16, u16)>, Vec<(usize, u16)>)>> =
+        std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new())));
+    let regions_slot = std::sync::Arc::clone(&regions_out);
+    let grow_resp = ui.container().grow(1).col(move |ui| {
         // The legacy painter's top margin row (its `inner.y = area.y + 1`).
         ui.container().h(1).draw(|_, _| {});
 
@@ -970,18 +976,36 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                     }
                 }
             }
-            let paint = paint.clone();
+            // Unsatisfied-grow publish (frame 1 and degenerate cases):
+            // a trailing in-col region that only has room when the bands
+            // don't fill the viewport — carrying the TRUE area so the
+            // second frame builds at the right width.
             ui.container().grow(1).draw(move |_, rect| {
-                publish_frame_slt(&paint, rect, total_rows, &tool_spans, &notice_rows);
+                publish_area_slt(&area_only, rect, total_rows);
             });
+            *regions_slot.lock().expect("paint handoff") = (tool_spans, notice_rows);
         } else {
-            // Degenerate width: keep the layout slot and hand off an empty
-            // frame so the next render sees the true area.
-            let paint = paint.clone();
-            ui.container().grow(1).draw(move |_, rect| {
-                publish_frame_slt(&paint, rect, 0, &[], &[]);
-            });
+            *regions_slot.lock().expect("paint handoff") = (Vec::new(), Vec::new());
         }
+    });
+
+    // Bookkeeping (regions/width/msg_area): an overlay-layer 1x1 region —
+    // it runs EVERY frame (slt skips deferred draws whose rect collapses
+    // to zero, and a satisfied grow does exactly that once the bands fill
+    // the viewport) — carrying the grow container's previous-frame rect,
+    // one frame stale like the rest of the handoff.
+    let (tool_spans, notice_rows) =
+        std::mem::take(&mut *regions_out.lock().expect("paint handoff"));
+    let paint_for_publish = paint.clone();
+    ui.overlay(|ui| {
+        ui.container().w(1).h(1).draw(move |_, _rect| {
+            publish_frame_slt(
+                &paint_for_publish,
+                grow_resp.rect,
+                &tool_spans,
+                &notice_rows,
+            );
+        });
     });
 }
 
@@ -1067,27 +1091,42 @@ fn apply_link_slt(cell: &mut slt::Cell, uri: &str) {
 /// last band: its x/width match the transcript area, its bottom is the
 /// area's bottom, and the content rows above it are ours, so the area's
 /// origin and the inner-relative hit regions resolve exactly.
+/// Publish one frame's handoff. `area` is the FULL transcript area (the
+/// grow container's rect): regions are offset by the inner margins from
+/// its top-left, exactly where the bands painted.
 fn publish_frame_slt(
     paint: &std::sync::Arc<std::sync::Mutex<crate::tui::app::PaintData>>,
-    rect: slt::Rect,
-    total_rows: u32,
+    area: slt::Rect,
     tool_spans: &[(usize, u16, u16)],
     notice_rows: &[(usize, u16)],
 ) {
     let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
     let mut p = paint.lock().expect("paint handoff");
-    let area_y = rect.y.saturating_sub(total_rows + 1);
-    let bottom = rect.y.saturating_add(rect.height);
-    p.msg_area = geom::Rect::new(
-        clamp16(rect.x),
-        clamp16(area_y),
-        clamp16(rect.width),
-        clamp16(bottom.saturating_sub(area_y)),
-    );
-    p.width = clamp16(rect.width);
-    let inner_x = rect.x + u32::from(MARGIN);
-    let inner_y = area_y + 1;
-    let inner_w = rect.width.saturating_sub(u32::from(MARGIN) * 2);
+    // Frame 1: the grow Response rect is still 0x0 — keep whatever the
+    // in-col unsatisfied-grow publish discovered (the true area) and only
+    // refresh the regions.
+    if area.width > 0 && area.height > 0 {
+        p.msg_area = geom::Rect::new(
+            clamp16(area.x),
+            clamp16(area.y),
+            clamp16(area.width),
+            clamp16(area.height),
+        );
+        p.width = clamp16(area.width);
+    }
+    let area = if area.width > 0 && area.height > 0 {
+        area
+    } else {
+        slt::Rect::new(
+            u32::from(p.msg_area.x),
+            u32::from(p.msg_area.y),
+            u32::from(p.msg_area.width),
+            u32::from(p.msg_area.height),
+        )
+    };
+    let inner_x = area.x + u32::from(MARGIN);
+    let inner_y = area.y + 1;
+    let inner_w = area.width.saturating_sub(u32::from(MARGIN) * 2);
     p.tool_regions = tool_spans
         .iter()
         .map(|&(idx, s, e)| {
@@ -1116,6 +1155,31 @@ fn publish_frame_slt(
             )
         })
         .collect();
+}
+
+/// Publish the area only, from the leftover region below the bands (the
+/// trailing in-col draw that only has room while the grow is unsatisfied —
+/// frame 1 before the width handoff settles).
+fn publish_area_slt(
+    paint: &std::sync::Arc<std::sync::Mutex<crate::tui::app::PaintData>>,
+    leftover: slt::Rect,
+    total_rows: u32,
+) {
+    let area = slt::Rect::new(
+        leftover.x,
+        leftover.y.saturating_sub(total_rows + 1),
+        leftover.width,
+        leftover.height.saturating_add(total_rows + 1),
+    );
+    let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
+    let mut p = paint.lock().expect("paint handoff");
+    p.msg_area = geom::Rect::new(
+        clamp16(area.x),
+        clamp16(area.y),
+        clamp16(area.width),
+        clamp16(area.height),
+    );
+    p.width = clamp16(area.width);
 }
 
 /// iTerm2 terminals get the OSC 1337 widget (encoded payload); everything

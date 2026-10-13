@@ -56,35 +56,12 @@ const EVENT_DRAIN_BUDGET: usize = 256;
 /// Run the terminal UI against `provider` until the user quits.
 /// `startup_prompt` (the positional `PROMPT` / piped stdin) is submitted
 /// exactly once, after the provider has started up.
+///
+/// Wave 2a flip: the slt loop owns the terminal session (raw mode, alt
+/// screen, mouse, bracketed paste, focus reporting, panic + suspend
+/// restore — see `slt::RunConfig` and its terminal module).
 pub async fn run<P: Provider>(provider: P, startup_prompt: Option<String>) -> io::Result<()> {
-    enable_raw_mode()?;
-    // Mouse capture: terminals then show the standard arrow pointer on hover
-    // instead of the I-beam text cursor. Bracketed paste: multi-line pastes
-    // arrive as one Paste event instead of per-line Enter keypresses. Focus
-    // change: bell notifications only fire when the user is not watching.
-    io::stdout()
-        .execute(EnterAlternateScreen)?
-        .execute(EnableMouseCapture)?
-        .execute(EnableBracketedPaste)?
-        .execute(EnableFocusChange)?;
-    let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    // Make sure the terminal is restored on panic too.
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = io::stdout().execute(LeaveAlternateScreen);
-        original_hook(info);
-    }));
-
-    let result = drive(terminal, provider, startup_prompt).await;
-
-    disable_raw_mode()?;
-    io::stdout()
-        .execute(DisableBracketedPaste)?
-        .execute(DisableFocusChange)?
-        .execute(DisableMouseCapture)?
-        .execute(LeaveAlternateScreen)?;
-    result
+    drive_slt(provider, startup_prompt).await
 }
 
 /// CSI ?2026h — begin synchronized output. Terminals that support it batch

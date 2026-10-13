@@ -1010,21 +1010,20 @@ impl App {
 /// Shared fixtures for the submodule test modules.
 #[cfg(test)]
 pub(crate) mod testutil {
-    // Frozen this wave: the fixtures still drive the *legacy* ratatui
-    // TestBackend paint (`ui::draw`) and migrate with the paint wave, not
-    // this one. The stored-region literal below is already on the app
-    // `geom::Rect` type, so hit-testing state matches the geom swap.
     use super::*;
     use crate::tui::provider::AgentEvent;
     use crate::tui::ui;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     /// Paint the app once so the renderer builds the segment document and
     /// resolves the viewport, as the real loop does before key handling.
+    /// Renders through the slt frame; a second stabilizing pass mirrors
+    /// the real loop's prev-frame layout reads (scroll bounds, widths).
     pub(crate) fn draw_app(app: &mut App, width: u16, height: u16) {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| ui::draw(f, app)).unwrap();
+        let mut view = ui::frame::View::default();
+        let mut tb = slt::TestBackend::new(u32::from(width), u32::from(height));
+        tb.render(|ui| ui::frame::frame(ui, app, &mut view));
+        app.status_tick = 0; // the compared frame starts from tick 0
+        tb.render(|ui| ui::frame::frame(ui, app, &mut view));
     }
 
     pub(crate) fn scrolled_app() -> App {
@@ -1038,13 +1037,22 @@ pub(crate) mod testutil {
     }
 
     pub(crate) fn screen_text(app: &mut App, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| ui::draw(f, app)).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        (0..buf.area.height)
+        let mut view = ui::frame::View::default();
+        let mut tb = slt::TestBackend::new(u32::from(width), u32::from(height));
+        tb.render(|ui| ui::frame::frame(ui, app, &mut view));
+        app.status_tick = 0; // the compared frame starts from tick 0
+        tb.render(|ui| ui::frame::frame(ui, app, &mut view));
+        (0..u32::from(height))
             .map(|r| {
-                (0..buf.area.width)
-                    .map(|c| buf[(c, r)].symbol().to_string())
+                (0..u32::from(width))
+                    .map(|c| {
+                        let cell = tb.buffer().get(c, r);
+                        if cell.symbol.is_empty() {
+                            " ".to_string()
+                        } else {
+                            cell.symbol.to_string()
+                        }
+                    })
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
