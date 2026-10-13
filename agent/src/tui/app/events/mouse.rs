@@ -71,11 +71,11 @@ impl App {
             MouseKind::Down(MouseButton::Left) => {
                 // A selection starts only inside a selectable region (chat
                 // messages or the composer input) and is confined to it; a
-                // click elsewhere (sidebar, chrome) just clears the highlight.
+                // click elsewhere (chrome) just clears the highlight.
                 let pos = (row, col);
-                let (msg_area, composer_area) = {
+                let (msg_area, composer_area, todo_header, files_header) = {
                     let p = self.view.paint.lock().expect("paint handoff");
-                    (p.msg_area, p.composer_area)
+                    (p.msg_area, p.composer_area, p.todo_header, p.files_header)
                 };
                 self.view.selection = [msg_area, composer_area]
                     .iter()
@@ -89,7 +89,11 @@ impl App {
                 self.view.pending_click = self
                     .notice_at(row, col)
                     .map(PendingClick::Notice)
-                    .or_else(|| self.tool_at(row, col).map(PendingClick::Card));
+                    .or_else(|| self.tool_at(row, col).map(PendingClick::Card))
+                    .or_else(|| rect_contains(todo_header, row, col).then_some(PendingClick::Todo))
+                    .or_else(|| {
+                        rect_contains(files_header, row, col).then_some(PendingClick::Files)
+                    });
             }
             MouseKind::Drag(MouseButton::Left) => {
                 // A drag is a text selection, not a card press.
@@ -110,6 +114,15 @@ impl App {
                     (Some(PendingClick::Notice(idx)), true) => {
                         self.view.selection = None;
                         self.toggle_body(idx);
+                    }
+                    // A press on a todo-widget header folds that section.
+                    (Some(PendingClick::Todo), true) => {
+                        self.view.selection = None;
+                        self.session.todo_open = !self.session.todo_open;
+                    }
+                    (Some(PendingClick::Files), true) => {
+                        self.view.selection = None;
+                        self.session.files_open = !self.session.files_open;
                     }
                     _ => self.copy_selection(),
                 }

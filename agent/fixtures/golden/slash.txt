@@ -1,0 +1,24 @@
+
+    No messages yet.
+
+    Send a message — the mock provider will replay the scripted "session refre
+
+
+
+
+
+
+
+
+
+
+
+
+  ▎
+  ▎  /sessions  List sessions
+  ▎  /stats  Show cost across all sessions
+  ▎  /scan  Run the argosy project-documentation workflow
+  ▎
+  ▎ > /s▎                                                          enter send
+  ▎
+  ● GLM-5.3 · off  │   BUILD  · tab to switch                               …

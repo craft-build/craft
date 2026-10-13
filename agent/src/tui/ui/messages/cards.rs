@@ -13,7 +13,11 @@ use crate::markdown::highlight::Highlighter;
 use crate::tui::app::DiffState;
 use crate::tui::provider::{LineKind, ToolKind};
 
-const BODY_INDENT: usize = 4;
+/// Body rows sit under the tool name (bar + space + caret = 4 cells; the
+/// bar is prepended after layout, so 3 inside the card's inner width).
+const BODY_INDENT: usize = 3;
+/// Diff rows hug the bar more closely (the design's 14px inset).
+const DIFF_INDENT: usize = 1;
 
 /// Bodies hiding fewer lines than this render in full; a notice for a
 /// couple of hidden lines buys nothing.
@@ -36,15 +40,21 @@ pub(super) fn tool_block(
     // Hovered collapsible cards lift to a slightly lighter background.
     let card_bg = if hovered { t.bg_overlay } else { t.bg_surface };
     let surf = surface_style_with(card_bg);
-    let marker = if focused { "▌" } else { " " };
-    let marker_style = if focused {
-        Style::default().fg(t.accent).bg(card_bg)
-    } else {
-        surf
+    // Left bar: accent for tool runs, the strong border for file edits
+    // (the design's neutral diff card); focus thickens it in the accent.
+    let (bar, bar_fg) = match (focused, kind) {
+        (true, _) => ("▌", t.accent),
+        (false, ToolKind::Edit { .. }) => ("▎", t.border_strong),
+        (false, _) => ("▎", t.accent),
     };
+    let bar_style = Style::default().fg(bar_fg).bg(card_bg);
+    // Everything below lays out inside the bar; it is prepended per row
+    // at the end.
+    let outer_width = width;
+    let width = width.saturating_sub(1);
 
     // --- header row ---
-    let mut prefix: Vec<Span<'static>> = vec![Span::styled(marker, marker_style)];
+    let mut prefix: Vec<Span<'static>> = vec![Span::styled(" ", surf)];
     match kind {
         ToolKind::Read { .. } | ToolKind::Grep { .. } | ToolKind::Card { .. } => {
             prefix.push(Span::styled(
@@ -69,15 +79,29 @@ pub(super) fn tool_block(
     // The label wraps onto continuation rows indented under it, so a long
     // title — a full shell command especially — stays readable instead of
     // clipping at the card edge.
+    // The label's first word is the tool/command name (bold, primary);
+    // the rest reads as arguments — paths in the secondary tone so they
+    // stay legible, everything else muted.
     let label = tool_label(kind);
-    let label_style = Style::default().fg(t.text_secondary).bg(card_bg);
+    let name_style = Style::default().fg(t.text_primary).bg(card_bg).bold();
+    let args_fg = match kind {
+        ToolKind::Read { .. } | ToolKind::Edit { .. } => t.text_secondary,
+        _ => t.text_tertiary,
+    };
+    let args_style = Style::default().fg(args_fg).bg(card_bg);
     let label_avail = width.saturating_sub(prefix_w).max(1);
     let mut label_rows: Vec<Vec<Span<'static>>> = Vec::new();
-    for part in label.split('\n') {
-        let mut rows = wrap_spans(
-            vec![Span::styled(part.to_string(), label_style)],
-            label_avail,
-        );
+    for (i, part) in label.split('\n').enumerate() {
+        let spans = if i == 0 {
+            let split = part.find(' ').unwrap_or(part.len());
+            vec![
+                Span::styled(part[..split].to_string(), name_style),
+                Span::styled(part[split..].to_string(), args_style),
+            ]
+        } else {
+            vec![Span::styled(part.to_string(), args_style)]
+        };
+        let mut rows = wrap_spans(spans, label_avail);
         label_rows.append(&mut rows);
     }
     // OSC-8 link target: the path text inside the header label. Columns
@@ -95,13 +119,24 @@ pub(super) fn tool_block(
                     .map(|byte| label[..byte].chars().count())
             };
             super::file_uri(path).zip(path_off).map(|(uri, off)| {
-                let start = prefix_w + off;
+                // +1: the bar column prepended after layout.
+                let start = 1 + prefix_w + off;
                 Hyperlink::new(0, start as u16, (start + cell_len(path)) as u16, uri)
             })
         }
         ToolKind::Grep { .. } | ToolKind::Bash { .. } | ToolKind::Card { .. } => None,
     };
-    let blank = |lines: &mut Vec<Line<'static>>| lines.push(pad_row(Vec::new(), width, surf));
+    // Prepend the bar to every laid-out row.
+    let with_bar = |lines: Vec<Line<'static>>| -> Vec<Line<'static>> {
+        lines
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::styled(bar, bar_style)];
+                spans.extend(line.spans);
+                pad_row(spans, outer_width, surf)
+            })
+            .collect()
+    };
 
     // right-aligned badge / summary
     let badge = diff_badge(diff);
@@ -110,6 +145,9 @@ pub(super) fn tool_block(
         (None, k) if k.collapsible() => Some((tool_summary(k), t.text_tertiary)),
         _ => None,
     };
+    // Blank padding rows above the header and below the last row; the
+    // bar runs through them.
+    let blank = |lines: &mut Vec<Line<'static>>| lines.push(pad_row(Vec::new(), width, surf));
     let mut lines = Vec::new();
     blank(&mut lines); // top padding
     for (row, label_row) in label_rows.iter().enumerate() {
@@ -139,7 +177,7 @@ pub(super) fn tool_block(
     let expanded = !kind.collapsible() || !collapsed;
     if !expanded {
         blank(&mut lines); // bottom padding
-        return (lines, None, link);
+        return (with_bar(lines), None, link);
     }
 
     fn gutter_span(nr: usize, w: usize, bg: Color) -> Span<'static> {
@@ -184,7 +222,7 @@ pub(super) fn tool_block(
         let content = styled_diff_spans(&ln.text, segs.as_deref(), &ln.emph, base, emph_style);
 
         let lead = vec![
-            Span::styled(" ".repeat(BODY_INDENT), surf),
+            Span::styled(" ".repeat(DIFF_INDENT), surf),
             gutter_span(ln.nr, gutter_w, card_bg),
             Span::styled(sign.to_string(), base),
         ];
@@ -273,7 +311,7 @@ pub(super) fn tool_block(
         match ln.kind {
             LineKind::Gap if is_edit => lines.push(pad_row(
                 vec![
-                    Span::styled(indent.clone(), surf),
+                    Span::styled(" ".repeat(DIFF_INDENT), surf),
                     Span::styled(
                         " ...".to_string(),
                         Style::default().fg(t.text_tertiary).bg(card_bg),
@@ -323,7 +361,13 @@ pub(super) fn tool_block(
                     .as_mut()
                     .map(|h| h.highlight_line(&ln.text))
                     .filter(|s| !s.is_empty());
-                let mut lead = vec![Span::styled(indent.clone(), surf)];
+                // Edit context rows line up with the diff rows' gutter.
+                let lead_indent = if is_edit {
+                    " ".repeat(DIFF_INDENT)
+                } else {
+                    indent.clone()
+                };
+                let mut lead = vec![Span::styled(lead_indent, surf)];
                 if is_edit {
                     lead.push(gutter_span(ln.nr, gutter_w, card_bg));
                     lead.push(Span::styled("  ".to_string(), surf));
@@ -372,7 +416,7 @@ pub(super) fn tool_block(
     }
 
     blank(&mut lines); // bottom padding
-    (lines, notice_row, link)
+    (with_bar(lines), notice_row, link)
 }
 
 #[cfg(test)]
@@ -575,9 +619,9 @@ mod tests {
         let (_, _, link) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
         let hl = link.expect("read card carries a link");
         assert!(hl.uri.starts_with("file://"), "{}", hl.uri);
-        // marker (1) + caret (2) + "Read " (5) precede the path text.
-        assert_eq!(hl.col_start, 8);
-        assert_eq!(hl.col_end, 8 + "src/a.rs".len() as u16);
+        // bar (1) + space (1) + caret (2) + "Read " (5) precede the path.
+        assert_eq!(hl.col_start, 9);
+        assert_eq!(hl.col_end, 9 + "src/a.rs".len() as u16);
 
         let kind = crate::tui::provider::ToolKind::Edit {
             path: "src/b.rs".into(),

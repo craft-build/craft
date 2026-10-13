@@ -71,8 +71,13 @@ pub(super) fn dim_slt(ui: &mut slt::Context) {
     });
 }
 
-/// Legacy `dim` + `boxed`: the dimmed modal with a raised-surface box
-/// and its absolutely-positioned content rows.
+/// Cells the panel chrome adds left of a sheet's content box: the accent
+/// bar and one cell of padding (the composer's `▎ ` inset).
+pub(super) const PANEL_INSET: u32 = 2;
+
+/// The dimmed modal: a panel in the composer's style (surface fill, accent
+/// bar down the left edge) around the absolutely-positioned content rows.
+/// Centered sheets lay out their own padding rows.
 pub(super) fn sheet_slt(
     ui: &mut slt::Context,
     x: u32,
@@ -81,9 +86,7 @@ pub(super) fn sheet_slt(
     h: u32,
     rows: Vec<SheetRow>,
 ) {
-    let t = theme::current();
-    let sunken = t.bg_sunken;
-    let raised = t.bg_raised;
+    let sunken = theme::current().bg_sunken;
     let _ = ui.overlay(move |ui| {
         ui.container().grow(1).draw(move |buf, _rect| {
             fill_slt(
@@ -94,13 +97,13 @@ pub(super) fn sheet_slt(
                 buf.area.height,
                 sunken,
             );
-            paint_sheet_slt(buf, x, y, w, h, &rows, raised);
+            paint_sheet_slt(buf, x, y, w, h, &rows, 0);
         });
     });
 }
 
-/// A raised-surface box at `(x, y)` with no dim — the legacy `Clear` +
-/// `boxed()` combo of the composer-adjacent menus.
+/// The same panel with no dim, plus one padding row above and below — the composer-adjacent drop-ups (slash
+/// completion, model menu).
 pub(super) fn boxed_slt(
     ui: &mut slt::Context,
     x: u32,
@@ -109,15 +112,17 @@ pub(super) fn boxed_slt(
     h: u32,
     rows: Vec<SheetRow>,
 ) {
-    let raised = theme::current().bg_raised;
     let _ = ui.overlay(move |ui| {
         ui.container().grow(1).draw(move |buf, _rect| {
-            paint_sheet_slt(buf, x, y, w, h, &rows, raised);
+            paint_sheet_slt(buf, x, y, w, h, &rows, 1);
         });
     });
 }
 
-/// The box fill + content rows (shared by the dimmed and bare sheets).
+/// The panel chrome + content rows (shared by the dimmed and bare sheets).
+/// The chrome sits outside the `(x, y, w, h)` content box: the bar and its
+/// padding cell to the left, `pad_rows` padding rows above and below — so
+/// every caller's row geometry stays as laid out.
 fn paint_sheet_slt(
     buf: &mut slt::buffer::Buffer,
     x: u32,
@@ -125,9 +130,21 @@ fn paint_sheet_slt(
     w: u32,
     h: u32,
     rows: &[SheetRow],
-    raised: crate::tui::style::Color,
+    pad_rows: u32,
 ) {
-    fill_slt(buf, x, y, w, h, raised);
+    let t = theme::current();
+    let surface = t.bg_surface;
+    let left = x.saturating_sub(PANEL_INSET);
+    let top = y.saturating_sub(pad_rows);
+    let bottom = y
+        .saturating_add(h)
+        .saturating_add(pad_rows)
+        .min(buf.area.height);
+    fill_slt(buf, left, top, x + w - left, bottom - top, surface);
+    let bar = Style::default().fg(t.accent).bg(surface);
+    for row in top..bottom {
+        buf.set_string(left, row, "▎", bar);
+    }
     for row in rows {
         paint_spans_slt(
             buf,
@@ -135,7 +152,7 @@ fn paint_sheet_slt(
             y + row.dy,
             w.saturating_sub(row.dx),
             &row.spans,
-            raised,
+            surface,
         );
     }
 }
@@ -187,16 +204,16 @@ fn paint_spans_slt(
     }
 }
 
-/// Legacy `render_rows` row build: pad the span list to `w` cells and
-/// bake the selected/unselected bg into every span so the selected row
-/// reads as one bar.
+/// Selection-list row build: pad the span list to `w` cells and bake the
+/// selected (overlay) / unselected (panel surface) bg into every span so
+/// the selected row reads as one bar.
 pub(super) fn row_spans(
     mut spans: Vec<Span<'static>>,
     selected: bool,
     w: usize,
 ) -> Vec<Span<'static>> {
     let t = theme::current();
-    let bg = if selected { t.bg_overlay } else { t.bg_raised };
+    let bg = if selected { t.bg_overlay } else { t.bg_surface };
     let used: usize = spans
         .iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))

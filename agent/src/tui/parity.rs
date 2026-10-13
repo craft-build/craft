@@ -171,6 +171,125 @@ fn scene_question() -> App {
     app
 }
 
+/// The design's working turn: user prompt, agent prose, a shell card, a
+/// diff card, and the todo widget (checklist open, files touched open)
+/// above the composer with a context meter.
+fn scene_todo() -> App {
+    use crate::tui::provider::{LineKind, PlanItem, Tone, ToolLine, TouchedFile};
+    let mut app = seeded_app();
+    app.handle_event(AgentEvent::SessionLoaded {
+        messages: vec![crate::tui::provider::LoadedMessage::User(
+            "add raylib and fix the linker error on build".into(),
+        )],
+        draft: String::new(),
+        mode: None,
+    });
+    app.handle_event(AgentEvent::AssistantText(
+        "Found it — raylib isn't declared yet. Adding the dependency.".into(),
+    ));
+    app.handle_event(AgentEvent::ToolCall(ToolCallData {
+        awaiting_approval: false,
+        id: "b1".into(),
+        kind: ToolKind::Bash {
+            cmd: "craft add --git raysan5/raylib.git".into(),
+        },
+        lines: vec![
+            ToolLine::new(LineKind::Muted, "resolved v5.5"),
+            ToolLine::new(LineKind::Success, "dependency added"),
+        ],
+        image: None,
+    }));
+    app.handle_event(AgentEvent::ToolCall(ToolCallData {
+        awaiting_approval: false,
+        id: "e1".into(),
+        kind: ToolKind::Edit {
+            path: "craft.toml".into(),
+            summary: "+1 -1".into(),
+        },
+        lines: vec![
+            ToolLine {
+                kind: LineKind::Del,
+                text: "links = []".into(),
+                nr: 13,
+                ..Default::default()
+            },
+            ToolLine {
+                kind: LineKind::Add,
+                text: "links = [\"raylib\"]".into(),
+                nr: 13,
+                ..Default::default()
+            },
+        ],
+        image: None,
+    }));
+    // Edits start collapsed; open this one like a click would.
+    app.conversation.collapsed.retain(|id| id != "e1");
+    app.handle_event(AgentEvent::PlanSet(vec![
+        PlanItem {
+            label: "add raylib dependency".into(),
+            done: true,
+            active: false,
+        },
+        PlanItem {
+            label: "rebuild in release mode".into(),
+            done: false,
+            active: true,
+        },
+        PlanItem {
+            label: "run craft test".into(),
+            done: false,
+            active: false,
+        },
+    ]));
+    app.handle_event(AgentEvent::FilesSet(vec![TouchedFile {
+        path: "craft.toml".into(),
+        status: "M".into(),
+        tone: Tone::Warning,
+    }]));
+    app.session.files_open = true;
+    app.handle_event(AgentEvent::TokenUsage("68.2K/200K (34%)".into()));
+    app.handle_event(AgentEvent::StatusChanged(Status::Done));
+    app
+}
+
+/// Slash completion drop-up over the composer.
+fn scene_slash() -> App {
+    let mut app = seeded_app();
+    app.composer.set_text("/s".into());
+    app.handle_event(AgentEvent::StatusChanged(Status::Done));
+    app
+}
+
+/// Model menu drop-up with a small catalog.
+fn scene_model_menu() -> App {
+    use crate::tui::provider::ModelChoice;
+    let mut app = seeded_app();
+    let models = ["claude-opus-5-5", "claude-sonnet-5-5", "glm-5.3"]
+        .iter()
+        .map(|m| ModelChoice {
+            provider: "p".into(),
+            model: (*m).into(),
+            label: (*m).into(),
+            provider_label: "provider".into(),
+            thinking_choices: crate::thinking::ThinkingConfig::choices(),
+        })
+        .collect();
+    app.handle_event(AgentEvent::CatalogSet { models, current: 1 });
+    app.overlays.modal = crate::tui::modals::Modal::ModelMenu(1);
+    app.handle_event(AgentEvent::StatusChanged(Status::Done));
+    app
+}
+
+/// Plan decision menu in the composer's place.
+fn scene_plan_form() -> App {
+    let mut app = seeded_app();
+    app.mode = crate::tui::app::Mode::Plan;
+    app.plan_mode.plan_path = Some(PathBuf::from("/tmp/plans/x.md"));
+    app.plan_mode.plan_form.on_plan_ready();
+    app.handle_event(AgentEvent::StatusChanged(Status::Done));
+    app
+}
+
 pub(crate) fn scenes() -> Vec<(&'static str, App)> {
     vec![
         ("empty", seeded_app()),
@@ -181,6 +300,10 @@ pub(crate) fn scenes() -> Vec<(&'static str, App)> {
         ("palette", scene_palette()),
         ("help", scene_help()),
         ("question_direct", scene_question()),
+        ("todo", scene_todo()),
+        ("slash", scene_slash()),
+        ("model_menu", scene_model_menu()),
+        ("plan_form", scene_plan_form()),
     ]
 }
 

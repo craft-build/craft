@@ -1,52 +1,41 @@
 //! Per-kind text renderers: user / assistant / thinking / notice blocks.
 
-use crate::tui::style::{Color, Style, StyleExt};
+use crate::tui::style::{Color, Style};
 use crate::tui::text::{Line, Span};
 
 use super::super::scrollback::SharedLines;
 use super::super::theme;
 use super::tools::seg_color;
-use super::wrap::{spans_width, wrap_text};
+use super::wrap::{pad_row, wrap_text};
 use crate::markdown::Emphasis;
 use crate::markdown::render::{self, StyleToken};
 use crate::tui::provider::Tone;
-
-fn surface_style() -> Style {
-    Style::default().bg(theme::current().bg_surface)
-}
 
 pub(super) fn surface_style_with(bg: Color) -> Style {
     Style::default().bg(bg)
 }
 
-/// User-message row: `▎` on the app background, then the tool-card surface
-/// background from the cell right of the bar to one cell before the edge.
-pub(super) fn user_line(mut spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
-    let target = width.saturating_sub(1);
-    let w = spans_width(&spans);
-    if w < target {
-        spans.push(Span::styled(" ".repeat(target - w), surface_style()));
-    }
-    Line::from(spans)
-}
-
+/// User message block: a raised panel with the blue user bar down its
+/// left edge — a blank padding row, the wrapped prompt text, and a
+/// closing blank padding row.
 pub(super) fn user_block(text: &str, width: usize) -> Vec<Line<'static>> {
-    let surf = surface_style();
-    let mut lines = Vec::new();
-    for chunk in wrap_text(text, width.saturating_sub(3)) {
-        lines.push(user_line(
+    let t = theme::current();
+    let surf = surface_style_with(t.bg_raised);
+    let bar = || Span::styled("▎", Style::default().fg(t.blue_400).bg(t.bg_raised));
+    let blank = || pad_row(vec![bar()], width, surf);
+    let mut lines = vec![blank()];
+    for chunk in wrap_text(text, width.saturating_sub(4).max(1)) {
+        lines.push(pad_row(
             vec![
-                Span::styled("▎", Style::default().fg(theme::current().accent)),
-                Span::styled(
-                    format!(" {chunk}"),
-                    Style::default()
-                        .fg(theme::current().text_primary)
-                        .patch(surf),
-                ),
+                bar(),
+                Span::styled(" ", surf),
+                Span::styled(chunk, Style::default().fg(t.text_primary).bg(t.bg_raised)),
             ],
             width,
+            surf,
         ));
     }
+    lines.push(blank());
     lines
 }
 
@@ -55,6 +44,8 @@ fn md_style(token: &StyleToken, emph: &Emphasis) -> Style {
     let t = theme::current();
 
     let mut style = match token {
+        // Agent prose reads in the primary tone (as user messages do), so
+        // it stands apart from the secondary-toned thinking text.
         StyleToken::Text => Style::default().fg(t.text_primary),
         StyleToken::InlineCode => Style::default().fg(t.cyan),
         StyleToken::Highlight {
@@ -284,6 +275,19 @@ mod tests {
         assert!(cache.entries[&0].renderer.stable_lines().is_empty());
         assert!(cache.entries[&0].renderer.tail_lines().is_empty());
         assert_eq!(cache.entries[&0].renderer.source(), grown);
+    }
+
+    /// Agent prose paints in the primary tone and thinking in the
+    /// secondary one, so the two read apart.
+    #[test]
+    fn agent_prose_is_brighter_than_thinking() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = theme::current();
+        let prose = styled_markdown(render::render("plain answer", 40));
+        assert_eq!(prose[0].spans[0].style.fg, Some(t.text_primary));
+        let thinking = thinking_block("pondering", 40);
+        assert_eq!(thinking[0].spans[0].style.fg, Some(t.text_secondary));
+        assert_ne!(t.text_primary, t.text_secondary);
     }
 
     #[test]

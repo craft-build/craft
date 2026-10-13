@@ -12,31 +12,21 @@ use crate::tui::text::Span;
 // ─────────────────────────────────────────────────────────────────────────
 
 use super::super::composer;
-use super::{SheetRow, boxed_slt, clip_spans, row_spans, sheet_slt};
+use super::{PANEL_INSET, SheetRow, boxed_slt, clip_spans, row_spans, sheet_slt};
 
-/// The chat-column and composer-block coordinates the legacy `draw()`
-/// splits produce — the slash popup and model menu anchor against them.
-/// Returns `(chat_x, chat_w, bottom_y)`.
-fn chat_bottom(app: &App, term_w: u32, term_h: u32) -> (u32, u32, u32) {
-    const SIDEBAR_MIN_WIDTH: u32 = 80; // legacy gate (frame.rs)
-    const SIDEBAR_WIDTH: u32 = 34; // legacy `ui/mod.rs` SIDEBAR_WIDTH
-    const CHAT_MIN_WIDTH: u32 = 60; // legacy `Constraint::Min(60)`
-    let show_sidebar = app.session.sidebar_open && term_w >= SIDEBAR_MIN_WIDTH;
-    let chat_w = if show_sidebar {
-        (term_w - SIDEBAR_WIDTH).max(CHAT_MIN_WIDTH)
-    } else {
-        term_w
-    };
-    let text_w = (chat_w as usize)
-        .saturating_sub(2 + composer::TEXT_LEFT_PAD + composer::TEXT_RIGHT_PAD)
-        .max(1);
-    let row_count = crate::tui::ui::messages::wrap_rows(&app.composer.text, text_w).len();
-    let composer_h = row_count.min(composer::MAX_TEXT_ROWS) as u32 + 3;
-    (0, chat_w, term_h.saturating_sub(composer_h + 3))
+/// Drop-up geometry: the content box's x (so the panel's bar lines up
+/// with the composer's), the widest content the column allows, and the
+/// composer box's top row — the drop-up's bottom padding row lands on the
+/// box's own top padding row, so the two read as one attached panel.
+/// Returns `(x, max_w, bottom_y)`.
+fn drop_up(app: &App, term_w: u32, term_h: u32) -> (u32, u32, u32) {
+    let x = composer::SIDE_MARGIN + PANEL_INSET;
+    let max_w = (composer::box_width(term_w) as u32).saturating_sub(PANEL_INSET);
+    (x, max_w, composer::box_top(app, term_w, term_h))
 }
 
-/// Slash-command popup above the composer (no dim — it floats over the
-/// chat like the legacy `Clear` + raised block).
+/// Slash-command drop-up above the composer (no dim — it floats over the
+/// chat, attached to the input).
 pub(super) fn render_slash_slt(ui: &mut slt::Context, app: &App) {
     let t = theme::current();
 
@@ -45,10 +35,10 @@ pub(super) fn render_slash_slt(ui: &mut slt::Context, app: &App) {
         return;
     }
     let (sw, sh) = (ui.width(), ui.height());
-    let (_, chat_w, bottom_y) = chat_bottom(app, sw, sh);
+    let (x, max_w, bottom_y) = drop_up(app, sw, sh);
     let n = items.len().min(6) as u32;
-    let width = chat_w.saturating_sub(4).min(64);
-    let (x, y) = (2, bottom_y.saturating_sub(n));
+    let width = max_w.min(64);
+    let y = bottom_y.saturating_sub(n);
     // Scroll the window so the highlighted row stays visible past the edge.
     let window = n as usize;
     let start = app
@@ -64,7 +54,7 @@ pub(super) fn render_slash_slt(ui: &mut slt::Context, app: &App) {
         .enumerate()
         .map(|(i, (cmd, desc))| {
             let spans = vec![
-                Span::styled(format!(" {cmd}"), Style::default().fg(t.cyan)),
+                Span::styled(format!(" {cmd}"), Style::default().fg(t.accent)),
                 Span::styled(format!("  {desc}"), Style::default().fg(t.text_tertiary)),
             ];
             SheetRow {
@@ -88,13 +78,17 @@ pub(super) fn render_model_menu_slt(ui: &mut slt::Context, app: &App) {
         return;
     }
     let (sw, sh) = (ui.width(), ui.height());
-    let (_, chat_w, bottom_y) = chat_bottom(app, sw, sh);
-    let available = bottom_y.saturating_sub(2) as usize;
+    let (x, max_w, bottom_y) = drop_up(app, sw, sh);
+    // Rows left above the menu for its chrome (title/hint rows + the
+    // panel's top padding row).
+    let available = bottom_y.saturating_sub(4) as usize;
     let visible = app.session.models.len().min(available.max(1));
     let start = selected.min(app.session.models.len().saturating_sub(visible));
     let n = visible as u32;
-    let width = 56.min(chat_w.saturating_sub(4));
-    let (x, y) = (2, bottom_y.saturating_sub(n + 3));
+    let width = 56.min(max_w);
+    // Rows, a blank, the key hints; the panel pads above and below.
+    let height = n + 2;
+    let y = bottom_y.saturating_sub(height);
     let all_rows: Vec<Vec<Span<'static>>> = app
         .session
         .models
@@ -127,7 +121,7 @@ pub(super) fn render_model_menu_slt(ui: &mut slt::Context, app: &App) {
                     Style::default().fg(if i == app.session.model_idx {
                         t.accent
                     } else {
-                        t.bg_raised
+                        t.bg_surface
                     }),
                 ),
                 Span::styled(choice.label.clone(), label_style),
@@ -144,23 +138,35 @@ pub(super) fn render_model_menu_slt(ui: &mut slt::Context, app: &App) {
         .enumerate()
         .map(|(i, spans)| SheetRow {
             dx: 0,
-            dy: 1 + i as u32,
+            dy: i as u32,
             spans: row_spans(spans.clone(), i == selected - start, width as usize),
         })
         .collect();
     // Keybind footer: Enter selects; !@#$ (or 1-4) toggle tier assignment.
+    // Keys in the accent, actions muted — the forms' hint-row style.
+    let key = Style::default().fg(t.accent);
+    let desc = Style::default().fg(t.text_tertiary);
+    let mut hints = Vec::new();
+    for (i, (k, d)) in [
+        ("Enter", "select"),
+        ("!", "strong"),
+        ("@", "medium"),
+        ("#", "weak"),
+        ("$", "compaction"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        hints.push(Span::styled(if i == 0 { " " } else { "  " }, desc));
+        hints.push(Span::styled(k, key));
+        hints.push(Span::styled(format!(" {d}"), desc));
+    }
     rows.push(SheetRow {
         dx: 0,
-        dy: 1 + n,
-        spans: vec![
-            Span::styled(" Enter select", Style::default().fg(t.cyan)),
-            Span::styled("  ! strong", Style::default().fg(t.accent)),
-            Span::styled("  @ medium", Style::default().fg(t.accent)),
-            Span::styled("  # weak", Style::default().fg(t.accent)),
-            Span::styled("  $ compaction", Style::default().fg(t.accent)),
-        ],
+        dy: n + 1,
+        spans: hints,
     });
-    boxed_slt(ui, x, y, width, n + 3, rows);
+    boxed_slt(ui, x, y, width, height, rows);
 }
 
 /// ctrl+p command palette, centered near the top.
@@ -195,7 +201,7 @@ pub(super) fn render_palette_slt(ui: &mut slt::Context, app: &App) {
     // is painted, not a TextInputState; see docs/tui-slt-migration.md).
     let qspans = clip_spans(
         vec![
-            Span::styled("> ", Style::default().fg(t.cyan)),
+            Span::styled("> ", Style::default().fg(t.accent).bold()),
             Span::styled(
                 if query.is_empty() {
                     "Type a command…".to_string()

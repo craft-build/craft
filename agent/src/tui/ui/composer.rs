@@ -1,4 +1,5 @@
-//! Composer (input box), status bar and footer hint row.
+//! Composer (input box), model/mode/context row, activity row and footer
+//! hint row.
 
 use unicode_width::UnicodeWidthStr;
 
@@ -12,9 +13,6 @@ use crate::tui::text::Span;
 
 /// Max text rows the composer grows to before it scrolls instead of expanding.
 pub const MAX_TEXT_ROWS: usize = 12;
-/// Inner left/right padding of the text area (left includes the accent bar).
-pub const TEXT_LEFT_PAD: usize = 3; // 1 pad + ▎ bar + 1 space
-pub const TEXT_RIGHT_PAD: usize = 2;
 
 /// Bang-prefix highlighting (task 96, ported from the reference's
 /// `shell_highlight_spans`): a first line starting `!` / `!!` renders its
@@ -57,11 +55,14 @@ fn seg_color(c: SegmentColor) -> Option<crate::tui::style::Color> {
     }
 }
 
-/// Spinner / status word with the running timer and interrupt hint.
-fn status_indicator(app: &App) -> Vec<Span<'static>> {
+/// Turn activity for the status bar: spinner, status word, the running
+/// timer and the interrupt hint while a turn is live; the failure mark
+/// after a failed one; nothing while idle.
+fn status_indicator(app: &App, with_esc_hint: bool) -> Vec<Span<'static>> {
     let t = theme::current();
 
     let tertiary = Style::default().fg(t.text_tertiary);
+    let dim = Style::default().fg(t.text_disabled);
     const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     // Prompt-progress: how long the current turn has been running, so a
     // silent model reads as slow rather than stuck.
@@ -77,30 +78,20 @@ fn status_indicator(app: &App) -> Vec<Span<'static>> {
                 Status::Running => "running",
                 _ => "awaiting approval",
             };
-            vec![
+            let mut spans = vec![
                 Span::styled(format!("{frame} "), Style::default().fg(t.accent)),
-                Span::styled(format!("{word} {elapsed}s  esc interrupt"), tertiary),
-            ]
+                Span::styled(format!("{word} {elapsed}s"), tertiary),
+            ];
+            if with_esc_hint {
+                spans.push(Span::styled(" · esc interrupt", dim));
+            }
+            spans
         }
         Status::Failed => vec![
             Span::styled("✖ ", Style::default().fg(t.danger)),
-            Span::styled("failed  esc interrupt", tertiary),
+            Span::styled("failed", tertiary),
         ],
-        Status::Done => vec![Span::styled("········  esc interrupt", tertiary)],
-    }
-}
-
-/// Abbreviate a cwd for the status row: keep the last two components, `…`
-/// prefix when something was cut (reference `cwd_branch_label` shape).
-fn abbreviated_cwd(cwd: &str) -> String {
-    if cwd.is_empty() {
-        return "—".into();
-    }
-    let parts: Vec<&str> = cwd.split('/').filter(|p| !p.is_empty()).collect();
-    match parts.len() {
-        0 => "/".into(),
-        1 => parts[0].into(),
-        _ => format!("…/{}", parts[parts.len() - 1]),
+        Status::Done => Vec::new(),
     }
 }
 
@@ -190,49 +181,229 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt composer panel
+// The slt composer panel
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Render the composer box + status + footer hint rows into the slt
-/// frame's bottom block (the shared top border is drawn by `frame.rs`).
+/// Outer horizontal margin of the composer column (box, widget, rows).
+pub const SIDE_MARGIN: u32 = 2;
+/// Cells left of the text inside the box: bar, space, `>`, space.
+const PROMPT_W: usize = 4;
+/// The right-aligned `enter send` hint plus its gutter; dropped when the
+/// box is too narrow to spare it.
+const SEND_HINT: &str = "enter send";
+const SEND_HINT_W: usize = 12; // 1 gap + hint + 1 pad
+/// Below this box width the hint is dropped (text keeps a 1-cell pad).
+const SEND_HINT_MIN_BOX: usize = 36;
+
+/// Width of the composer box for a terminal `term_w` cells wide.
+pub(crate) fn box_width(term_w: u32) -> usize {
+    (term_w.saturating_sub(SIDE_MARGIN * 2) as usize).max(1)
+}
+
+/// Whether the box has room for the `enter send` hint.
+fn shows_send_hint(box_w: usize) -> bool {
+    box_w >= SEND_HINT_MIN_BOX
+}
+
+/// Wrap width of the composer text for a terminal `term_w` cells wide.
+pub(crate) fn text_width(term_w: u32) -> usize {
+    let box_w = box_width(term_w);
+    let right = if shows_send_hint(box_w) {
+        SEND_HINT_W
+    } else {
+        1
+    };
+    box_w.saturating_sub(PROMPT_W + right).max(1)
+}
+
+/// Visible text rows of the composer box (wrapped, capped).
+pub(crate) fn view_rows(app: &App, term_w: u32) -> usize {
+    super::messages::wrap_rows(&app.composer.text, text_width(term_w))
+        .len()
+        .clamp(1, MAX_TEXT_ROWS)
+}
+
+/// Blank padding rows above and below the composer text inside the box.
+const BOX_PAD_ROWS: usize = 1;
+
+/// Rows the composer block occupies under the box: the status bar and the
+/// optional footer hint row.
+fn rows_below(app: &App) -> u32 {
+    1 + u32::from(footer_hint(app).is_some())
+}
+
+/// Height of the composer box: the text rows plus the padding rows.
+fn box_height(view_rows: usize) -> u32 {
+    (view_rows + 2 * BOX_PAD_ROWS) as u32
+}
+
+/// Screen row of the composer box's top edge; popups anchored to the
+/// composer (slash completion, model menu) float above it.
+pub(crate) fn box_top(app: &App, term_w: u32, term_h: u32) -> u32 {
+    term_h.saturating_sub(box_height(view_rows(app, term_w)) + rows_below(app))
+}
+
+/// The footer hint row, when there is one: the dismissed plan form's
+/// `Plan Ctrl+T` reminder, or the running-subagents hint (task 96).
+fn footer_hint(app: &App) -> Option<Vec<Span<'static>>> {
+    let t = theme::current();
+    if let Some(hint) = app.plan_mode.plan_form.hint_line() {
+        return Some(hint.spans);
+    }
+    if app.active_task.is_none() && app.any_task_working() {
+        let n = app
+            .task_chats
+            .iter()
+            .filter(|c| c.outcome.is_none())
+            .count();
+        return Some(vec![Span::styled(
+            format!(
+                " {n} task{} running — Ctrl-N to view",
+                if n == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(t.text_tertiary),
+        )]);
+    }
+    None
+}
+
+/// Parse the provider's token label (`"44.8K/1M (4%)"`) into the used /
+/// budget text and the percentage for the context meter.
+fn parse_token_label(label: &str) -> Option<(String, u8)> {
+    let (used, rest) = label.split_once(" (")?;
+    let pct = rest.strip_suffix("%)")?.trim().parse::<f32>().ok()?;
+    let used = used.replacen('/', " / ", 1);
+    Some((used, pct.clamp(0.0, 100.0).round() as u8))
+}
+
+/// Cells in the context meter.
+const METER_CELLS: usize = 10;
+
+/// Right side of the model row: `▰▰▰▱… used / budget pct%`, or the raw
+/// label when the provider's string has another shape.
+fn context_meter(label: &str) -> Vec<Span<'static>> {
+    let t = theme::current();
+    let tertiary = Style::default().fg(t.text_tertiary);
+    match parse_token_label(label) {
+        Some((used, pct)) => {
+            let filled = (usize::from(pct) * METER_CELLS)
+                .div_ceil(100)
+                .min(METER_CELLS);
+            vec![
+                Span::styled("▰".repeat(filled), Style::default().fg(t.accent)),
+                Span::styled(
+                    "▰".repeat(METER_CELLS - filled),
+                    Style::default().fg(t.border_subtle),
+                ),
+                Span::styled(format!(" {used} "), tertiary),
+                Span::styled(format!("{pct}%"), Style::default().fg(t.border_strong)),
+            ]
+        }
+        None => vec![Span::styled(label.to_owned(), tertiary)],
+    }
+}
+
+/// Left side of the status bar: `● model · thinking [images] │ BUILD ·
+/// tab to switch`, then the turn activity (spinner) and any flash. The
+/// chip is the active mode only; Tab switches it.
+fn status_left_spans(app: &App, with_tab_hint: bool, with_esc_hint: bool) -> Vec<Span<'static>> {
+    let t = theme::current();
+    let dim = Style::default().fg(t.text_disabled);
+    let sep = || Span::styled(" · ", dim);
+    let (model, _provider) = app.model();
+    let mut spans = vec![
+        Span::styled("● ", Style::default().fg(t.accent)),
+        Span::styled(model.to_string(), Style::default().fg(t.text_tertiary)),
+        sep(),
+        Span::styled(app.thinking_label(), Style::default().fg(t.text_tertiary)),
+    ];
+    // Attached images (F.6): a count chip, so staged attachments are
+    // visible before the message is sent.
+    let n_images = app.images.attached.len();
+    if n_images > 0 {
+        spans.push(sep());
+        spans.push(Span::styled(
+            format!("[{n_images} image{}]", if n_images == 1 { "" } else { "s" }),
+            Style::default().fg(t.accent),
+        ));
+    }
+    spans.push(Span::styled("  │  ", Style::default().fg(t.border_subtle)));
+    let chip = app.mode.label().trim_matches(['[', ']']);
+    spans.push(Span::styled(
+        format!(" {chip} "),
+        Style::default()
+            .fg(t.bg_app)
+            .bg(app.mode.color())
+            .add_modifier(Modifier::BOLD),
+    ));
+    if with_tab_hint {
+        spans.push(Span::styled(
+            " · tab to switch",
+            Style::default().fg(t.border_strong),
+        ));
+    }
+    let activity = status_indicator(app, with_esc_hint);
+    if !activity.is_empty() {
+        spans.push(Span::raw("   "));
+        spans.extend(activity);
+    }
+    if let Some(flash) = app.flash_text() {
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(
+            flash.to_owned(),
+            Style::default().fg(t.accent),
+        ));
+    }
+    spans
+}
+
+/// Lay `left` and `right` out across `width` cells: left clipped to leave
+/// room for right, the gap padded with spaces.
+fn split_row(
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let right_w: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    let (left, left_w) = truncate_spans(left, width.saturating_sub(right_w + 1));
+    let gap = width.saturating_sub(left_w + right_w);
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.extend(right);
+    spans
+}
+
+/// Render the composer column's bottom block into the slt frame (the box
+/// is skipped when `show_box` is false — a form has taken its place):
 ///
-/// `avail` is frame.rs's `width - sidebar_width`, but the legacy column
-/// layout (`[Min(60), Length(34)]`) keeps the chat at least 60 wide and
-/// squeezes the sidebar instead — the composer recomputes that width so
-/// narrow terminals (the 80-col fixture terminal → chat 60) match.
+/// ```text
+///   ▎
+///   ▎ > message text…                                          enter send
+///   ▎
+///   ● model · thinking  │   BUILD  · tab to switch   ⠙ running 3s · esc interrupt   ▰▰▰▱▱ 44.8K / 1M 4%
+///   [footer hint row — dismissed plan form / running subagents]
+/// ```
 ///
-/// Wave 2b: the text rows render through `slt::TextareaState` (real caret
-/// — `▎` glyph plus the hardware cursor position). The state is a render
+/// The text rows render through `slt::TextareaState` (real caret — `▎`
+/// glyph plus the hardware cursor position). The state is a render
 /// *mirror*: `App`'s composer owns text + cursor (history gating, word
 /// ops, submit), and the closure consumes every key it dispatches, so the
-/// widget never edits. Its `lines` are the legacy `wrap_rows` output (word
-/// preferring) rather than the widget's own hard wrap, keeping row breaks
-/// byte-identical; `wrap_width` stays `None` so each line renders as-is.
+/// widget never edits. Its `lines` are the `wrap_rows` output (word
+/// preferring) rather than the widget's own hard wrap; `wrap_width` stays
+/// `None` so each line renders as-is.
 pub(crate) fn render_slt(
     ui: &mut slt::Context,
     app: &App,
     state: &mut slt::TextareaState,
-    _avail: u32,
+    show_box: bool,
 ) {
     let t = theme::current();
-    const SIDEBAR_MIN_WIDTH: u32 = 80; // legacy gate (frame.rs)
-    const SIDEBAR_WIDTH: u32 = 34; // legacy `ui/mod.rs` SIDEBAR_WIDTH
-    const CHAT_MIN_WIDTH: u32 = 60; // legacy `Constraint::Min(60)`
-    let term_w = ui.width();
-    let avail = if app.session.sidebar_open && term_w >= SIDEBAR_MIN_WIDTH {
-        (term_w - SIDEBAR_WIDTH).max(CHAT_MIN_WIDTH)
-    } else {
-        term_w
-    }
-    .max(1);
-
-    // Height math mirrors `draw()`: wrap width → row count → capped rows.
-    let text_w = (avail as usize)
-        .saturating_sub(2 + TEXT_LEFT_PAD + TEXT_RIGHT_PAD)
-        .max(1);
+    let term_w = ui.width().max(1);
+    let box_w = box_width(term_w);
+    let text_w = text_width(term_w);
     let rows = super::messages::wrap_rows(&app.composer.text, text_w);
-    let view_rows = rows.len().min(MAX_TEXT_ROWS);
-    let box_h = (view_rows + 3) as u32; // pad + rows + pad + info line
+    let view_rows = rows.len().clamp(1, MAX_TEXT_ROWS);
+    let send_hint = shows_send_hint(box_w);
 
     // Sync the mirror before the widget renders: pre-wrapped rows plus the
     // cursor mapped onto them (the app cursor is a char index into the
@@ -241,7 +412,7 @@ pub(crate) fn render_slt(
 
     // Bang-prefix spans for the first wrapped row (painted by the overlay
     // pass below — the widget renders one style per row).
-    let bang_spans = if avail >= 11 && !app.composer.text.is_empty() {
+    let bang_spans = if !app.composer.text.is_empty() {
         let (s, e) = rows[0];
         let line: String = app.composer.text.chars().skip(s).take(e - s).collect();
         shell_spans(&line, Style::default().fg(t.text_primary).bg(t.bg_surface))
@@ -250,189 +421,116 @@ pub(crate) fn render_slt(
     };
     let empty = app.composer.text.is_empty();
 
-    // ── Composer box: 1 cell of app-bg margin each side of the surface ──
-    let mut text_rect: Option<slt::Rect> = None;
-    let box_resp = ui
-        .container()
-        .bg(t.bg_surface)
-        .ml(1)
-        .w(avail.saturating_sub(2))
-        .h(box_h)
-        .col(|ui| {
-            box_row(ui, &[]); // top padding row
-
-            if avail < 11 {
-                return; // legacy guard: inset too narrow for bar/text/info
-            }
-
-            // Text rows: 1 pad + bar cell + 1 pad, then the textarea at a
-            // fixed width so its rect (used by the overlays one frame
-            // later) is stable across frames. The accent bar itself is
-            // painted by the box-wide overlay pass — the widget owns its
-            // own rows, so the bar cannot interleave in flow.
-            ui.line(|ui| {
-                let surf = Style::default().bg(t.bg_surface);
-                ui.styled(" ", surf);
-                ui.styled(" ", surf);
-                ui.styled(" ", surf);
-                let resp = ui.container().w(text_w as u32).col(|ui| {
-                    let _ = ui.textarea(state, view_rows as u32);
+    // The question form and plan decision menu take the box's place
+    // (frame.rs paints them); the status bar below stays.
+    let box_rect: Option<slt::Rect> = if show_box {
+        // ── Composer box: surface panel, bar + `>` prompt, the textarea ──
+        let surf = Style::default().bg(t.bg_surface);
+        let mut text_rect: Option<slt::Rect> = None;
+        let box_resp = ui
+            .container()
+            .bg(t.bg_surface)
+            .ml(SIDE_MARGIN)
+            .w(box_w as u32)
+            .h(box_height(view_rows))
+            .col(|ui| {
+                // The bar, `>` and hint are painted by the overlay pass (the
+                // widget owns its rows, so they cannot flow inline through
+                // them); the flow reserves their cells. The textarea sits at a
+                // fixed width so its rect (read one frame later) is stable.
+                // Blank rows above and below give the input its height.
+                for _ in 0..BOX_PAD_ROWS {
+                    ui.styled(" ", surf);
+                }
+                ui.line(|ui| {
+                    ui.styled(" ".repeat(PROMPT_W), surf);
+                    let resp = ui.container().w(text_w as u32).col(|ui| {
+                        let _ = ui.textarea(state, view_rows as u32);
+                    });
+                    text_rect = Some(resp.rect);
                 });
-                text_rect = Some(resp.rect);
-            });
-
-            box_row(ui, &[]); // padding row between text and the info line
-
-            // Info line: `model · provider · thinking` left, context usage
-            // right-aligned (same math as `render_input`).
-            let tertiary = Style::default().fg(t.text_tertiary).bg(t.bg_surface);
-            let sep = || Span::styled(" · ", tertiary);
-            let (model, provider) = app.model();
-            let mut left = vec![
-                Span::styled(
-                    app.mode.label(),
-                    Style::default()
-                        .fg(app.mode.color())
-                        .bg(t.bg_surface)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                sep(),
-                Span::styled(
-                    model.to_string(),
-                    Style::default().fg(t.blue_400).bg(t.bg_surface),
-                ),
-                sep(),
-                Span::styled(provider.to_string(), tertiary),
-                sep(),
-            ];
-            // Attached images (F.6): a count chip, so staged attachments
-            // are visible before the message is sent.
-            if !app.images.attached.is_empty() {
-                left.push(Span::styled(
-                    format!(
-                        "[{} image{}] ",
-                        app.images.attached.len(),
-                        if app.images.attached.len() == 1 {
-                            ""
-                        } else {
-                            "s"
-                        }
-                    ),
-                    Style::default().fg(t.accent).bg(t.bg_surface),
-                ));
-                left.push(sep());
-            }
-            left.push(Span::styled(
-                app.thinking_label(),
-                Style::default().fg(t.warning).bg(t.bg_surface),
-            ));
-            let surf = Style::default().bg(t.bg_surface);
-            let right = format!("{}  ", app.session.token_label);
-            let info_w = (avail as usize).saturating_sub(6); // inset.width - pads
-            let right_w = right.chars().count();
-            let (left, left_w) = truncate_spans(left, info_w.saturating_sub(right_w + 1));
-            let gap = info_w.saturating_sub(left_w + right_w);
-            let mut info = left;
-            info.push(Span::styled(" ".repeat(gap), surf));
-            info.push(Span::styled(right, tertiary));
-            box_row(ui, &info);
-        });
-
-    // ── Overlay pass over the finished box (wave 2b) ──
-    //
-    // The textarea renders with slt's own row styles, so the craft theme
-    // is re-applied on top: the accent bar down column 1 (the widget owns
-    // its rows, so the bar cannot flow inline through them), the text
-    // cells restyled to the craft palette, bang-prefix syntax colors on
-    // the first wrapped row, and the placeholder on an empty composer.
-    // Rects are the previous frame's — the same one-frame handoff cadence
-    // the transcript regions use (`Response::rect` reports post-layout
-    // geometry, so a first-of-kind or resized frame simply skips). The
-    // bar is derived from the text rect (its wrapper predicts reliably;
-    // the outer box container's response rect does not).
-    let bar_fg = t.accent;
-    let bar_bg = t.bg_surface;
-    if let Some(rect) = text_rect.filter(|r| r.width > 0 && r.height > 0) {
-        let base = Style::default().fg(t.text_primary).bg(t.bg_surface);
-        let placeholder_style = Style::default().fg(t.text_tertiary).bg(t.bg_surface);
-        let bang = bang_spans.clone();
-        // Box rows: top pad + text rows + gap pad + info line.
-        let bar_x = rect.x.saturating_sub(2);
-        let bar_rows = rect.y.saturating_sub(1)..rect.y + rect.height + 2;
-        let _ = ui.overlay(|ui| {
-            ui.container().grow(1).draw(move |buf, _area| {
-                for y in bar_rows.clone() {
-                    buf.set_string(bar_x, y, "▎", Style::default().fg(bar_fg).bg(bar_bg));
-                }
-                restyle_text_area(buf, rect, base, bang.as_deref());
-                if empty {
-                    // The placeholder replaces the widget's empty-row
-                    // glyph (its `▎` included) — the hardware cursor
-                    // still lands on the first cell from `set_cursor_pos`.
-                    buf.set_string(rect.x, rect.y, "Message Craft…", placeholder_style);
+                for _ in 0..BOX_PAD_ROWS {
+                    ui.styled(" ", surf);
                 }
             });
-        });
-    }
 
-    // ── Status row (single bottom row, full width) ──
-    let tertiary = Style::default().fg(t.text_tertiary);
-    let sep = || Span::styled(" · ", tertiary);
-    // Two leading spaces line the indicator up under the composer's
-    // accent bar, which sits two cells in from the row's left edge.
-    let mut left = vec![Span::raw("  ")];
-    left.extend(status_indicator(app));
-    left.extend([
-        sep(),
-        Span::styled(abbreviated_cwd(&app.session.cwd), tertiary),
-    ]);
-    let right = if let Some(flash) = app.flash_text() {
-        format!("  {flash}  ")
-    } else {
-        "ctrl+p commands  ".to_string()
-    };
-    let width = avail as usize;
-    let right_w = right.chars().count();
-    let max_left = width.saturating_sub(right_w + 1);
-    let (left, left_w) = truncate_spans(left, max_left);
-    let gap = width.saturating_sub(left_w + right_w);
-    let mut spans = left;
-    spans.push(Span::raw(" ".repeat(gap)));
-    let right_style = if app.flash_text().is_some() {
-        Style::default().fg(t.accent)
-    } else {
-        tertiary
-    };
-    spans.push(Span::styled(right, right_style));
-    ui.line(|ui| {
-        for span in &spans {
-            ui.styled(span.content.as_ref(), span.style);
+        // ── Overlay pass over the finished box ──
+        //
+        // The textarea renders with slt's own row styles, so the craft theme
+        // is re-applied on top: the accent bar down the box's left edge, the
+        // `>` prompt and `enter send` hint on the first row, the text cells
+        // restyled to the craft palette, bang-prefix syntax colors on the
+        // first wrapped row, and the placeholder on an empty composer. Rects
+        // are the previous frame's (`Response::rect` reports post-layout
+        // geometry, so a first-of-kind or resized frame simply skips); the
+        // geometry derives from the text rect, whose fixed-width wrapper
+        // predicts reliably (the outer box container's does not).
+        if let Some(rect) = text_rect.filter(|r| r.width > 0 && r.height > 0) {
+            let base = Style::default().fg(t.text_primary).bg(t.bg_surface);
+            let placeholder_style = Style::default().fg(t.text_disabled).bg(t.bg_surface);
+            let bar_style = Style::default().fg(t.accent).bg(t.bg_surface);
+            let prompt_style = bar_style.add_modifier(Modifier::BOLD);
+            let hint_style = Style::default().fg(t.text_disabled).bg(t.bg_surface);
+            let bang = bang_spans.clone();
+            let bar_x = rect.x.saturating_sub(PROMPT_W as u32);
+            let pad = BOX_PAD_ROWS as u32;
+            let _ = ui.overlay(|ui| {
+                ui.container().grow(1).draw(move |buf, _area| {
+                    // The bar runs the box's full height, padding rows included.
+                    for y in rect.y.saturating_sub(pad)..rect.y + rect.height + pad {
+                        buf.set_string(bar_x, y, "▎", bar_style);
+                    }
+                    buf.set_string(bar_x + 2, rect.y, ">", prompt_style);
+                    if send_hint {
+                        let hint_x = rect.x + rect.width + 1;
+                        buf.set_string(hint_x, rect.y, SEND_HINT, hint_style);
+                    }
+                    restyle_text_area(buf, rect, base, bang.as_deref());
+                    if empty {
+                        // The placeholder replaces the widget's empty-row
+                        // glyph (its `▎` included) — the hardware cursor
+                        // still lands on the first cell from `set_cursor_pos`.
+                        buf.set_string(rect.x, rect.y, "Message Craft…", placeholder_style);
+                    }
+                });
+            });
         }
-    });
 
-    // ── Footer hint row (draw()'s footer block) ──
-    if let Some(hint) = app.plan_mode.plan_form.hint_line() {
+        Some(box_resp.rect)
+    } else {
+        None
+    };
+
+    let paint_row = |ui: &mut slt::Context, spans: Vec<Span<'static>>| {
         ui.line(|ui| {
-            for span in &hint.spans {
+            for span in &spans {
                 ui.styled(span.content.as_ref(), span.style);
             }
         });
-    } else if app.active_task.is_none() && app.any_task_working() {
-        // Main-chat hint while subagents run: how many, and the chord
-        // that opens their chats (task 96).
-        let n = app
-            .task_chats
-            .iter()
-            .filter(|c| c.outcome.is_none())
-            .count();
-        let hint = format!(
-            "{n} task{} running — Ctrl-N to view",
-            if n == 1 { "" } else { "s" }
-        );
-        ui.styled(hint, Style::default().fg(t.text_tertiary));
-    } else {
-        // The reserved blank row.
-        ui.styled(" ", Style::default().bg(t.bg_app));
+    };
+
+    // ── Status bar: model · thinking │ mode chip · tab hint  activity …
+    //    context meter, starting in the box's bar column ──
+    let mut right = context_meter(&app.session.token_label);
+    right.push(Span::raw(" "));
+    let right_w: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    // Narrow terminals shed the interrupt hint, then the tab hint, before
+    // the row is clipped.
+    let mut left = Vec::new();
+    for (tab_hint, esc_hint) in [(true, true), (true, false), (false, false)] {
+        left = status_left_spans(app, tab_hint, esc_hint);
+        let left_w: usize = left.iter().map(|s| s.content.chars().count()).sum();
+        if left_w + right_w < box_w {
+            break;
+        }
+    }
+    left.insert(0, Span::raw(" ".repeat(SIDE_MARGIN as usize)));
+    paint_row(ui, split_row(left, right, box_w + SIDE_MARGIN as usize));
+
+    // ── Footer hint row (only when there is something to say) ──
+    if let Some(mut hint) = footer_hint(app) {
+        hint.insert(0, Span::raw(" ".repeat(SIDE_MARGIN as usize)));
+        paint_row(ui, hint);
     }
 
     // Publish the composer area for mouse selection confinement (the
@@ -441,30 +539,101 @@ pub(crate) fn render_slt(
     // slt skips deferred draws whose rect collapses to zero, so flow-space
     // bookkeeping regions never run reliably.
     let paint = app.view.paint.clone();
-    let rect = box_resp.rect;
+    let area = box_rect
+        .map(crate::tui::geom::Rect::from_slt)
+        .unwrap_or_default();
     let _ = ui.overlay(|ui| {
         ui.container().w(1).h(1).draw(move |_buf, _area| {
             if let Ok(mut p) = paint.lock() {
-                p.composer_area = crate::tui::geom::Rect::from_slt(rect);
+                p.composer_area = area;
             }
         });
     });
 }
 
-/// One row inside the composer surface box: every row carries the accent
-/// bar at column 1 (it spans the full box height), then optional content
-/// starting after the `▎ ` prefix.
-fn box_row(ui: &mut slt::Context, spans: &[Span<'static>]) {
+/// Paint a form (permission prompt, question form, plan decision menu) in
+/// the composer box's place and style: the surface panel with a left bar
+/// in `bar`, a padding row above and below, and the form's rows where the
+/// text field would be. Leading/trailing blank lines are dropped (the
+/// panel pads instead) and one leading space comes off every row (the
+/// panel's bar + space inset replaces the forms' own one-cell margin).
+pub(crate) fn render_form_panel(
+    ui: &mut slt::Context,
+    lines: &[crate::tui::text::Line<'static>],
+    bar: crate::tui::style::Color,
+) {
+    use crate::tui::text::Line;
+
     let t = theme::current();
+    let box_w = box_width(ui.width());
+    let inner_w = box_w.saturating_sub(3).max(1); // bar + space + right pad
     let surf = Style::default().bg(t.bg_surface);
-    ui.line(|ui| {
-        ui.styled(" ", surf);
-        ui.styled("▎", Style::default().fg(t.accent).bg(t.bg_surface));
-        ui.styled(" ", surf);
-        for span in spans {
-            ui.styled(span.content.as_ref(), span.style);
+    let bar_style = Style::default().fg(bar).bg(t.bg_surface);
+    let is_blank = |l: &Line<'static>| l.spans.iter().all(|s| s.content.trim().is_empty());
+    let first = lines
+        .iter()
+        .position(|l| !is_blank(l))
+        .unwrap_or(lines.len());
+    let last = lines
+        .iter()
+        .rposition(|l| !is_blank(l))
+        .map_or(first, |i| i + 1);
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    for line in &lines[first..last] {
+        let mut line = line.clone();
+        if let Some(span) = line.spans.first_mut()
+            && let Some(rest) = span.content.strip_prefix(' ')
+        {
+            span.content = rest.to_owned().into();
         }
-    });
+        // Wrapped rows hang under the line's text: its leading indent plus
+        // two cells (past a `▸ `-style marker).
+        let lead: usize = line
+            .spans
+            .iter()
+            .flat_map(|s| s.content.chars())
+            .take_while(|c| *c == ' ')
+            .count();
+        let hang = (lead + 2).min(inner_w / 2);
+        let wrapped = crate::tui::permission_prompt::wrap_line_rows(
+            &line,
+            inner_w.saturating_sub(hang).max(1),
+            surf,
+        );
+        for (i, mut row) in wrapped.into_iter().enumerate() {
+            if i > 0 {
+                row.insert(0, Span::styled(" ".repeat(hang), surf));
+            }
+            rows.push(row);
+        }
+    }
+
+    let _ = ui
+        .container()
+        .bg(t.bg_surface)
+        .ml(SIDE_MARGIN)
+        .w(box_w as u32)
+        .col(|ui| {
+            let paint = |ui: &mut slt::Context, spans: &[Span<'static>]| {
+                ui.line(|ui| {
+                    ui.styled("▎", bar_style);
+                    ui.styled(" ", surf);
+                    for span in spans {
+                        ui.styled(span.content.as_ref(), span.style);
+                    }
+                });
+            };
+            for _ in 0..BOX_PAD_ROWS {
+                paint(ui, &[]);
+            }
+            for row in &rows {
+                paint(ui, row);
+            }
+            for _ in 0..BOX_PAD_ROWS {
+                paint(ui, &[]);
+            }
+        });
 }
 
 /// Feed the app's composer state into the render mirror: the widget's

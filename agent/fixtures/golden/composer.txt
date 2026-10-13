@@ -1,23 +1,24 @@
 
-  No messages yet.                                            /craft
-                                                              main
-  Send a message — the mock provider will replay the scrip
-                                                              ────────────────
+    No messages yet.
 
-                                                              PLAN
-
-
-                                                              ────────────────
-
-                                                              FILES TOUCHED
+    Send a message — the mock provider will replay the scripted "session refre
 
 
 
 
-────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+
+
   ▎
-  ▎ ! git status && git diff --stat  zweite Zeile
-  ▎ 中 文 输 入 测 试  wrappable tail▎
+  ▎ > ! git status && git diff --stat  zweite Zeile 中 文 输 入 测 试    enter send
+  ▎   wrappable tail▎
   ▎
-  ▎ [BUILD] · GLM-5.3 · Zhipu AI Coding Plan · off     …
-  ········  esc interrupt · craft          ctrl+p commands
+  ● GLM-5.3 · off  │   BUILD  · tab to switch                               …

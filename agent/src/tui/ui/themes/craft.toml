@@ -1,5 +1,6 @@
-# Craft's own brand theme — dark ink background with a blue → violet → magenta
-# accent range, matching the Craft design system (see site/ terminal prototype).
+# Craft's own brand theme — the "Craft TUI" design: slate-ink background,
+# green accent (tool cards, caret, BUILD chip), blue user-message bar, and
+# blue → violet → magenta syntax colors.
 # Syntax scopes are Helix-compatible (can use Helix theme files directly)
 #
 # Palette colors are used directly in UI code for simple fg/bg styling.
@@ -90,26 +91,26 @@
 "variable.parameter"              = { fg = "amber", modifiers = ["italic"] }
 
 [palette]
-background     = "#060911"
-foreground     = "#f7f8fb"
-comment        = "#5b6784"
-current_line   = "#0f1424"
-selection      = "#161d30"
-border         = "#28324c"
+background     = "#11151d"
+foreground     = "#e6e9ef"
+comment        = "#6b7385"
+current_line   = "#1a2230"
+selection      = "#252f40"
+border         = "#3d4658"
 fog_200        = "#ccd0dd"
 fog_100        = "#e9ebf1"
 blue           = "#4f8dff"
-blue_bright    = "#6fa8ff"
+blue_bright    = "#6cb6ff"
 violet         = "#9457f2"
 violet_bright  = "#a875f5"
 magenta        = "#e13fea"
 magenta_bright = "#ee6bf0"
 cyan           = "#22d3ee"
 cyan_bright    = "#5fe6f7"
-green          = "#3ddc84"
+green          = "#7ee787"
 amber          = "#f0a93e"
-red            = "#f0455f"
-mode_build     = "#6fa8ff"
+red            = "#ff8080"
+mode_build     = "#7ee787"
 # This repo's plan-mode indicator rides the planning cyan (not the
 # reference's violet), pinned here so the default look is unchanged.
 mode_plan      = "#22d3ee"
@@ -117,16 +118,16 @@ mode_plan      = "#22d3ee"
 mode_bash      = "#e13fea"
 
 [ui]
-surface            = { bg = "#0a0e1a" }
-border_subtle      = { fg = "#1b2338" }
-border_strong      = { fg = "#3a4664" }
-text_disabled      = { fg = "#40485f" }
-layer01           = { bg = "#0f1424" }
-layer02           = { bg = "#161d30" }
+surface            = { bg = "#161c27" }
+border_subtle      = { fg = "#2a3140" }
+border_strong      = { fg = "#3d4658" }
+text_disabled      = { fg = "#4a536a" }
+layer01           = { bg = "#1a2230" }
+layer02           = { bg = "#252f40" }
 text_primary      = { fg = "foreground" }
-text_secondary    = { fg = "#a6acc0" }
+text_secondary    = { fg = "#a6adbd" }
 text_helper       = { fg = "comment" }
-user              = { fg = "blue" }
+user              = { fg = "blue_bright" }
 assistant         = { fg = "foreground" }
 assistant_prefix  = { fg = "violet_bright" }
 thinking          = { fg = "comment", modifiers = ["italic"] }
@@ -144,8 +145,8 @@ plan_rule         = { fg = "violet_bright", modifiers = ["bold"] }
 code_block        = { fg = "fog_100" }
 horizontal_rule   = { fg = "comment" }
 table_border      = { fg = "comment" }
-diff_old          = { bg = "#22101a" }
-diff_new          = { bg = "#0d221f" }
+diff_old          = { bg = "#2a1c22" }
+diff_new          = { bg = "#18291f" }
 diff_old_emphasis = { bg = "#6b3b46" }
 diff_new_emphasis = { bg = "#34674f" }
 diff_line_nr      = { fg = "comment" }
@@ -153,10 +154,10 @@ todo_completed    = { fg = "green" }
 todo_in_progress  = { fg = "amber" }
 todo_pending      = { fg = "comment" }
 todo_cancelled    = { fg = "red", modifiers = ["crossed_out"] }
-item_selected     = { fg = "background", bg = "blue" }
+item_selected     = { fg = "background", bg = "green" }
 item              = { fg = "fog_200" }
 item_desc         = { fg = "comment" }
-accent            = { fg = "blue" }
+accent            = { fg = "green" }
 accent_secondary  = { fg = "violet" }
 accent_tertiary   = { fg = "magenta" }
 panel_border      = { fg = "border" }
@@ -174,5 +175,5 @@ status_retry_info = { fg = "comment" }
 input_placeholder = { fg = "comment" }
 queue_delete      = { fg = "red", modifiers = ["bold"] }
 timestamp         = { fg = "comment" }
-spinner           = { fg = "blue_bright" }
+spinner           = { fg = "green" }
 active            = { fg = "blue_bright" }

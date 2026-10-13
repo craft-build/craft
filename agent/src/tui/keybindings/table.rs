@@ -190,7 +190,7 @@ pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         action_id: Some(super::ActionId::Sidebar),
         label: KeyLabel::Single(key::SIDEBAR.label),
-        description: "Toggle context panel",
+        description: "Toggle files touched",
         context: KeybindContext::General,
         platform: Platform::All,
     },
@@ -225,7 +225,7 @@ pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         action_id: Some(super::ActionId::PlanToggle),
         label: KeyLabel::Single(key::PLAN_TOGGLE.label),
-        description: "Toggle todo / plan panel",
+        description: "Toggle todo list / plan form",
         context: KeybindContext::General,
         platform: Platform::All,
     },

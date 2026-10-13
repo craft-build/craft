@@ -1,23 +1,24 @@
 
-  No messages yet.                                            /craft
-                                                              main
-  Send a message — the mock provider will replay the scrip
-                                                              ────────────────
+    No messages yet.
 
-                                                              PLAN
+    Send a message — the mock provider will replay the scripted "session refre
 
 
- Q1. Which database should the app target?                    ────────────────
-
-  ❯   SQLite                                                  FILES TOUCHED
-      Postgres
-    ✓ Type your own answer
-  ↑↓ Move    Enter Select    Tab Next    Esc Dismiss
 
 
-────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
   ▎
-  ▎ Message Craft…
+  ▎ Q1. Which database should the app target?
   ▎
-  ▎ [BUILD] · GLM-5.3 · Zhipu AI Coding Plan · off     …
-  ········  esc interrupt · craft          ctrl+p commands
+  ▎  ❯   SQLite
+  ▎      Postgres
+  ▎    ✓ Type your own answer
+  ▎  ↑↓ Move    Enter Select    Tab Next    Esc Dismiss
+  ▎
+  ● GLM-5.3 · off  │   BUILD  · tab to switch                               …

@@ -407,6 +407,7 @@ mod reveal_tests {
 /// deferred (after the frame closure returns), so they hand data back
 /// through this shared lock instead of borrowing `App`; event handlers read
 /// it one frame later, exactly as the ratatui-era snapshot was read.
+#[derive(Default)]
 pub struct PaintData {
     /// Text of the last rendered frame, one entry per terminal row (used to
     /// extract selection text on copy).
@@ -420,23 +421,14 @@ pub struct PaintData {
     /// One-row screen rects of "click to expand" notice rows: (message
     /// index, rect). Checked before card regions on click.
     pub notice_regions: Vec<(usize, Rect)>,
+    /// One-row screen rects of the todo widget's section headers; a click
+    /// folds/unfolds that section.
+    pub todo_header: Rect,
+    pub files_header: Rect,
     /// Outer width of the transcript area in the last frame; the slt painter
     /// reads it to pre-wrap rows before its own layout resolves (one frame
     /// stale, 0 until the first paint).
     pub width: u16,
-}
-
-impl Default for PaintData {
-    fn default() -> Self {
-        PaintData {
-            frame_text: Vec::new(),
-            msg_area: Rect::default(),
-            composer_area: Rect::default(),
-            tool_regions: Vec::new(),
-            notice_regions: Vec::new(),
-            width: 0,
-        }
-    }
 }
 
 /// Viewport state: the scrollback document (segments + the viewport's
@@ -474,6 +466,10 @@ pub struct ViewModel {
 pub enum PendingClick {
     Card(usize),
     Notice(usize),
+    /// The todo widget's plan header.
+    Todo,
+    /// The todo widget's files-touched header.
+    Files,
 }
 
 impl ViewModel {
@@ -495,7 +491,8 @@ impl ViewModel {
     }
 }
 
-/// Session chrome: model catalog + selection, cwd/branch, tokens, sidebar.
+/// Session chrome: model catalog + selection, cwd/branch, tokens, and the
+/// collapse state of the todo widget above the composer.
 pub struct Session {
     pub models: Vec<ModelChoice>,
     pub model_idx: usize,
@@ -503,7 +500,12 @@ pub struct Session {
     pub cwd: String,
     pub branch: String,
     pub token_label: String,
-    pub sidebar_open: bool,
+    /// Todo widget: plan checklist expanded (Ctrl-T in Build mode) or
+    /// folded to its one-line summary.
+    pub todo_open: bool,
+    /// Todo widget: files-touched list expanded (Ctrl-B) or folded to its
+    /// count.
+    pub files_open: bool,
 }
 
 impl Session {
@@ -515,7 +517,8 @@ impl Session {
             cwd: String::new(),
             branch: String::new(),
             token_label: "…".into(),
-            sidebar_open: true,
+            todo_open: true,
+            files_open: false,
         }
     }
 }

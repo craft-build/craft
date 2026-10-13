@@ -1,23 +1,24 @@
 
-  No messages yet.                                            /craft
-                                                              main
-  Send a message — the mock provider will replay the scrip
-                                                              ────────────────
+    No messages yet.
 
-                                                              PLAN
-
-
-                                                              ────────────────
-
-                                                              FILES TOUCHED
+    Send a message — the mock provider will replay the scripted "session refre
 
 
 
 
 
-────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+
+
   ▎
-  ▎ Message Craft…
+  ▎ > Message Craft…                                               enter send
   ▎
-  ▎ [BUILD] · GLM-5.3 · Zhipu AI Coding Plan · off     …
-  ········  esc interrupt · craft          ctrl+p commands
+  ● GLM-5.3 · off  │   BUILD  · tab to switch                               …

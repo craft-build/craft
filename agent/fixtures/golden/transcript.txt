@@ -1,23 +1,24 @@
 
-  ▎                                                           /craft
-  ▎ please read src/x.ts and explain                          main
+    ▎
+    ▎ please read src/x.ts and explain
+    ▎
+
+    Reading the file first, then I'll explain what it does. src/x.ts exports
+    the widget.
+
+    ▎
+    ▎ ▸ Read ]8;;file://<ROOT>/src/x.ts\s]8;;\]8;;file://<ROOT>/src/x.ts\r]8;;\]8;;file://<ROOT>/src/x.ts\c]8;;\]8;;file://<ROOT>/src/x.ts\/]8;;\]8;;file://<ROOT>/src/x.ts\x]8;;\]8;;file://<ROOT>/src/x.ts\.]8;;\]8;;file://<ROOT>/src/x.ts\t]8;;\]8;;file://<ROOT>/src/x.ts\s]8;;\                                               10 lines
+    ▎
+
+    The file defines a Widget class with render and a default export.
+    中 文 注 释  confirms it wraps the DOM node — CJK width matters for wrapping
+    parity.
+
+
+
+
+
   ▎
-                                                              ────────────────
-  Reading the file first, then I'll explain what it does.
-  src/x.ts exports the widget.                                PLAN
-
-
-   ▸ Read ]8;;file://<ROOT>/src/x.ts\s]8;;\]8;;file://<ROOT>/src/x.ts\r]8;;\]8;;file://<ROOT>/src/x.ts\c]8;;\]8;;file://<ROOT>/src/x.ts\/]8;;\]8;;file://<ROOT>/src/x.ts\x]8;;\]8;;file://<ROOT>/src/x.ts\.]8;;\]8;;file://<ROOT>/src/x.ts\t]8;;\]8;;file://<ROOT>/src/x.ts\s]8;;\                              10 lines      ────────────────
-
-                                                              FILES TOUCHED
-  The file defines a Widget class with render and a
-  default export. 中 文 注 释  confirms it wraps the DOM node
-  — CJK width matters for wrapping parity.
-
-
-────────────────────────────────────────────────────────────
+  ▎ > Message Craft…                                               enter send
   ▎
-  ▎ Message Craft…
-  ▎
-  ▎ [BUILD] · GLM-5.3 · Zhipu AI Coding Plan · off     …
-  ········  esc interrupt · craft          ctrl+p commands
+  ● GLM-5.3 · off  │   BUILD  · tab to switch                               …

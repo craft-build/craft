@@ -1,24 +1,24 @@
-
-         Keybindings
-           General
-           Ctrl+C                            Quit / clear input / inter
-           Ctrl+P                            Command palette
-           Ctrl+H                            Show keybindings
-           Ctrl+B                            Toggle context panel
-           Ctrl+L                            Model menu
-           Ctrl+F                            Search the transcript
-           Ctrl+N                            Task chat picker
-           Ctrl+S                            File picker
-           Ctrl+T                            Toggle todo / plan panel
-           Ctrl+O                            Open plan in editor
-           Ctrl+Z                            Suspend process
-
-           Editing
-           Enter                             Submit prompt
-           ⇧↵ / ⌃↵ / ⌃J / ⌥↵                 Newline
-           Tab                               Cycle mode / focus next to
-           /command                          Slash-command popup
-           Ctrl+W / ⌥⌫                       Delete word backward
-           Ctrl+Left / Ctrl+Right / ⌥← / ⌥→  Move word left / right
-           Ctrl+K                            Delete to end of line
-         ↑↓ scroll · esc to close
+      ▎
+      ▎  Keybindings
+      ▎    General
+      ▎    Ctrl+C                            Quit / clear input / inter
+      ▎    Ctrl+P                            Command palette
+      ▎    Ctrl+H                            Show keybindings
+      ▎    Ctrl+B                            Toggle files touched
+      ▎    Ctrl+L                            Model menu
+      ▎    Ctrl+F                            Search the transcript
+      ▎    Ctrl+N                            Task chat picker
+      ▎    Ctrl+S                            File picker
+      ▎    Ctrl+T                            Toggle todo list / plan fo
+      ▎    Ctrl+O                            Open plan in editor
+      ▎    Ctrl+Z                            Suspend process
+      ▎
+      ▎    Editing
+      ▎    Enter                             Submit prompt
+      ▎    ⇧↵ / ⌃↵ / ⌃J / ⌥↵                 Newline
+      ▎    Tab                               Cycle mode / focus next to
+      ▎    /command                          Slash-command popup
+      ▎    Ctrl+W / ⌥⌫                       Delete word backward
+      ▎    Ctrl+Left / Ctrl+Right / ⌥← / ⌥→  Move word left / right
+      ▎    Ctrl+K                            Delete to end of line
+      ▎  ↑↓ scroll · esc to close

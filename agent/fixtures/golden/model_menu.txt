@@ -1,0 +1,24 @@
+
+    No messages yet.
+
+    Send a message — the mock provider will replay the scripted "session refre
+
+
+
+
+
+
+
+
+
+
+  ▎
+  ▎   claude-opus-5-5  provider
+  ▎ ● claude-sonnet-5-5  provider
+  ▎   glm-5.3  provider
+  ▎
+  ▎  Enter select  ! strong  @ medium  # weak  $ compaction
+  ▎
+  ▎ > Message Craft…                                               enter send
+  ▎
+  ● claude-sonnet-5-5 · off  │   BUILD  · tab to switch                     …

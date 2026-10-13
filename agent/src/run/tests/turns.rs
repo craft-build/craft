@@ -797,6 +797,55 @@ async fn cancel_before_the_first_model_call_commits_prompt_and_marker_only() {
 }
 
 #[tokio::test]
+async fn tool_call_ids_stay_unique_across_model_streams() {
+    // Every model response restarts the provider's own call numbering; the
+    // internal ids the driver mints must not, or history carries duplicate
+    // tool ids and the TUI merges the second call into the first card.
+    let (model, _turns) = stream_turns(vec![
+        vec![
+            MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path":"f"})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path":"f"})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "a\n").unwrap();
+    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+    let (_, cancel) = cancel_channel();
+    let mut history = Vec::new();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let outcome = run(
+        &model,
+        &RunParams::default(),
+        &tools,
+        &mut history,
+        "go",
+        &cancel,
+        &|event| events.lock().unwrap().push(event),
+    )
+    .await;
+    assert!(matches!(outcome, RunOutcome::Done { .. }));
+    let ids: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolStart { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert_ne!(ids[0], ids[1], "each call gets its own id: {ids:?}");
+}
+
+#[tokio::test]
 async fn argument_fragments_accumulate_into_one_call() {
     // rig-core's assembler owns fragment folding; the driver must surface
     // exactly one ToolStart and one assistant tool-call block per call,

@@ -62,6 +62,7 @@ impl<'a> Line<'a> {
     }
 
     /// Display width of the whole line, in terminal cells.
+    #[allow(dead_code)] // painter API
     pub fn width(&self) -> usize {
         self.spans.iter().map(|s| s.width()).sum()
     }

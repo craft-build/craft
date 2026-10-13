@@ -393,7 +393,7 @@ impl PermissionPrompt {
                 let byte = buffer.char_to_byte();
                 (&text[..byte], &text[byte..])
             };
-            let mut chars = after.chars();
+            let chars = after.chars();
             let rest: String = chars.collect();
             let mut spans = vec![
                 Span::raw("  "),
@@ -438,21 +438,6 @@ impl PermissionPrompt {
         // Bottom padding: `height()` reserves one trailing margin row, which
         // renders empty. A blank here on top of that gave two rows.
         lines
-    }
-
-    pub fn height(&self, width: u16) -> u16 {
-        let inner_width = width.saturating_sub(2).max(1) as usize;
-        // `Paragraph::line_count` is unstable; estimate wrapped rows by
-        // unicode width per line, matching `Wrap { trim: false }`.
-        let rows: usize = self
-            .build_lines()
-            .iter()
-            .map(|line| {
-                let w = line.width();
-                w.div_ceil(inner_width).max(1)
-            })
-            .sum();
-        rows as u16 + 1 // rounding margin
     }
 }
 
@@ -645,24 +630,6 @@ mod tests {
 // Wave 2a: the slt panel for this form
 // ─────────────────────────────────────────────────────────────────────────
 
-/// The chat column's width, replicating the legacy `[Min(60), Length(34)]`
-/// split `ui::draw()` used (see `composer::render_slt`): the sidebar is
-/// squeezed before the chat drops below 60 cells. Shared with the other
-/// stacked forms so every box agrees on the width they carve out of the
-/// message area.
-pub(crate) fn chat_width(ui: &slt::Context, app: &crate::tui::app::App) -> u32 {
-    const SIDEBAR_MIN_WIDTH: u32 = 80; // legacy gate (frame.rs)
-    const SIDEBAR_WIDTH: u32 = 34; // legacy `ui/mod.rs` SIDEBAR_WIDTH
-    const CHAT_MIN_WIDTH: u32 = 60; // legacy `Constraint::Min(60)`
-    let term_w = ui.width();
-    if app.session.sidebar_open && term_w >= SIDEBAR_MIN_WIDTH {
-        (term_w - SIDEBAR_WIDTH).max(CHAT_MIN_WIDTH)
-    } else {
-        term_w
-    }
-    .max(1)
-}
-
 /// Word-wrap one styled line to `max` cells, matching ratatui's
 /// `Paragraph` + `Wrap { trim: false }` byte for byte: a faithful port of
 /// `WordWrapper::process_input` (ratatui-widgets `reflow.rs`) over
@@ -782,49 +749,13 @@ pub(crate) fn wrap_line_rows(line: &Line<'_>, max: usize, base: Style) -> Vec<Ve
         .collect()
 }
 
-/// Paint a raised-background form (permission prompt / question form):
-/// a self-sized container whose rows are the wrapped `build_lines()`
-/// output. Empty rows still emit one styled space so the row keeps its
-/// height inside the column (the container bg fills the rest, matching
-/// the legacy `Paragraph` whole-area style fill).
-pub(crate) fn paint_raised_form(
-    ui: &mut slt::Context,
-    lines: &[Line<'static>],
-    width: u32,
-    height: u16,
-    bg: slt::style::Color,
-) {
-    let base = Style::default().bg(bg);
-    let _ = ui
-        .container()
-        .bg(bg)
-        .w(width)
-        .h(u32::from(height))
-        .col(|ui| {
-            for line in lines {
-                for row in wrap_line_rows(line, width as usize, base) {
-                    ui.line(|ui| {
-                        if row.is_empty() {
-                            ui.styled(" ", base);
-                        }
-                        for span in &row {
-                            ui.styled(span.content.as_ref(), span.style);
-                        }
-                    });
-                }
-            }
-        });
-}
-
-/// Render this form into the slt frame above the composer block. The
-/// container self-sizes from the same height helper the ratatui view used.
+/// Render this form in the composer box's place, styled like the input
+/// bar; the warning-colored bar marks it as a decision the run waits on.
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
     let prompt = &app.overlays.permission_prompt;
     if !prompt.is_open() {
         return;
     }
-    let t = theme::current();
-    let width = chat_width(ui, app);
     let lines = prompt.build_lines();
-    paint_raised_form(ui, &lines, width, prompt.height(width as u16), t.bg_raised);
+    crate::tui::ui::composer::render_form_panel(ui, &lines, theme::current().warning);
 }

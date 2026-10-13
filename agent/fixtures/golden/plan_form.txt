@@ -1,0 +1,24 @@
+
+    No messages yet.
+
+    Send a message — the mock provider will replay the scripted "session refre
+
+
+
+
+
+
+
+
+  ▎
+  ▎ Plan complete
+  ▎
+  ▎  ▸ Refine plan  Dismiss and keep editing the plan
+  ▎    Clear context and implement  Start fresh session, then implement
+  ▎      the plan
+  ▎    Implement plan  Keep current context, implement the plan
+  ▎
+  ▎  ↑↓ select  Space toggle parallel  Enter confirm  Ctrl+O edit plan
+  ▎    ⌃T/Esc dismiss
+  ▎
+  ● GLM-5.3 · off  │   PLAN  · tab to switch                                …

@@ -1,16 +1,16 @@
-//! Layout composition: chat column (messages / composer / status / footer)
-//! plus the optional right sidebar, with overlays on top. Painting lives in
+//! Layout composition: one chat column (messages / forms / todo widget /
+//! composer / status rows), with overlays on top. Painting lives in
 //! [`frame::frame` (the slt path)](`crate::tui::ui::frame::frame`); this
 //! module owns the panel tree.
 
-mod composer;
+pub(crate) mod composer;
 pub mod frame;
 pub mod image;
 pub(crate) mod messages;
 mod overlays;
 pub mod scrollback;
-mod sidebar;
 pub mod theme;
+mod todo;
 
 #[cfg(test)]
 mod tests {
@@ -160,8 +160,12 @@ mod tests {
         assert!(all.contains("esc to close"), "footer rendered");
     }
 
+    /// The permission prompt renders in the composer box's place, styled
+    /// like it: warning-colored bar, padded panel, the tool call and its
+    /// key hints — the todo widget above it, the status bar below, and no
+    /// input box (or input selection region) while it is up.
     #[test]
-    fn permission_prompt_sits_above_the_composer_without_overlap() {
+    fn permission_prompt_replaces_the_composer() {
         let mut screen = Screen::new(100, 30);
         let mut app = seeded_app();
         app.handle_event(AgentEvent::PermissionRequest {
@@ -175,13 +179,17 @@ mod tests {
         screen.draw_settled(&mut app);
         let rows = screen.rows();
 
-        // The prompt form's title and the tool call must be visible...
         let title = rows
             .iter()
             .position(|r| r.contains("Permission Required"))
             .expect("prompt title rendered");
         assert!(
-            rows[title + 2].trim().starts_with("bash"),
+            rows[title].starts_with("  ▎ Permission Required"),
+            "{:?}",
+            rows[title]
+        );
+        assert!(
+            rows[title + 2].contains("bash"),
             "tool row: {:?}",
             rows[title + 2]
         );
@@ -190,32 +198,31 @@ mod tests {
             "cmd row: {:?}",
             rows[title + 3]
         );
-
-        // ...strictly above the composer block, whose rows are unchanged:
-        // the top border is the first row below the prompt, and the
-        // composer's accent bar never appears inside the prompt rows.
-        let prompt_h = app.overlays.permission_prompt.height(66) as usize;
-        let border_y = (title + prompt_h).saturating_sub(1).min(rows.len() - 1);
-        assert!(
-            rows[border_y].starts_with('─'),
-            "border below prompt: {:?}",
-            rows[border_y]
+        let t = theme::current();
+        assert_eq!(
+            screen.tb.buffer().get(2, title as u32).style.fg,
+            Some(t.warning),
+            "warning-colored bar"
         );
-        for r in rows[title..border_y].iter() {
-            assert!(!r.contains('▎'), "composer bled into prompt: {r:?}");
-        }
-        // The composer area snapshot matches where its accent bar renders.
-        let composer_y = app.view.paint.lock().unwrap().composer_area.y;
+
+        // The todo widget sits above the prompt; no input box anywhere.
+        let todo = rows.iter().position(|r| r.contains("todo ")).expect("todo");
+        assert!(todo < title, "todo widget above the prompt");
+        assert!(!screen.text().contains("Message Craft…"), "input hidden");
         assert!(
-            rows[composer_y as usize].contains('▎'),
-            "composer at {}",
-            composer_y
+            rows.last().unwrap().contains("tab to switch"),
+            "status bar kept"
+        );
+        assert_eq!(
+            app.view.paint.lock().unwrap().composer_area,
+            crate::tui::geom::Rect::default()
         );
     }
 
     #[test]
     fn composer_info_line_carries_model_provider_and_context_usage() {
-        let mut screen = Screen::new(100, 24);
+        // Wide enough that the bar sheds nothing.
+        let mut screen = Screen::new(140, 24);
         let mut app = seeded_app();
         app.composer.clear();
         app.handle_event(AgentEvent::CatalogSet {
@@ -231,20 +238,25 @@ mod tests {
         screen.draw_settled(&mut app);
         let rows = screen.rows();
         let bottom: Vec<String> = rows[rows.len() - 4..].to_vec();
-        // Composer info line (4th line of the input box): model · provider ·
-        // thinking level on the left, used/total (pct) right-aligned, and
-        // the box's accent bar still on its left edge.
-        let info = &bottom[1];
-        assert!(info.contains("▎"), "accent bar on info line: {info:?}");
-        assert!(info.contains("claude-sonnet-5"), "model: {info:?}");
-        assert!(info.contains("anthropic"), "provider: {info:?}");
-        assert!(info.contains("· off"), "thinking setting: {info:?}");
-        assert!(info.contains("44.8K/1M (4%)"), "context usage: {info:?}");
-        // Status row below keeps the active status indicator.
-        let status = &bottom[2];
+        // The composer box: the text row between blank padding rows, the
+        // accent bar down all three.
+        for (i, r) in bottom[..3].iter().enumerate() {
+            assert!(r.starts_with("  ▎"), "box row {i}: {r:?}");
+        }
+        assert!(bottom[1].contains("▎ >"), "prompt row: {:?}", bottom[1]);
+        // The status bar: model · thinking │ mode chip · tab hint, the
+        // spinner right of the hint, the context meter right-aligned.
+        let bar = &bottom[3];
+        assert!(bar.contains("● claude-sonnet-5 · off"), "model: {bar:?}");
+        assert!(!bar.contains("anthropic"), "no provider: {bar:?}");
+        assert!(bar.contains("│   BUILD  · tab to switch"), "mode: {bar:?}");
+        let hint = bar.find("tab to switch").unwrap();
+        let spin = bar.find("awaiting approval").expect("spinner");
+        assert!(spin > hint, "spinner right of the tab hint: {bar:?}");
+        assert!(bar.contains("esc interrupt"), "{bar:?}");
         assert!(
-            status.contains("awaiting approval") && status.contains("esc interrupt"),
-            "status row: {status:?}"
+            bar.trim_end().ends_with("▰ 44.8K / 1M 4%"),
+            "meter: {bar:?}"
         );
     }
 
@@ -472,7 +484,7 @@ mod tests {
     /// selection instead of painting over the chat and composer rows.
     #[test]
     fn model_menu_windows_around_selection_for_large_catalogs() {
-        let mut screen = Screen::new(120, 36);
+        let mut screen = Screen::new(120, 30);
         let mut app = seeded_app();
         let models: Vec<ModelChoice> = (0..30)
             .map(|i| ModelChoice {
@@ -576,7 +588,7 @@ mod tests {
         assert!(screen.text().contains("failed"));
     }
 
-    /// The status row's indicator starts two cells in, lined up under the
+    /// The activity row's indicator starts two cells in, lined up under the
     /// composer's accent bar rather than flush with the row's left edge.
     #[test]
     fn status_indicator_aligns_under_the_composer_accent_bar() {
@@ -600,19 +612,24 @@ mod tests {
     }
 
     #[test]
-    fn narrow_terminal_hides_sidebar() {
-        let mut screen = Screen::new(70, 24);
+    fn narrow_terminal_renders_without_panicking() {
+        let mut screen = Screen::new(30, 12);
         let mut app = seeded_app();
+        app.plan = vec![PlanItem {
+            label: "a long step label that cannot fit".into(),
+            done: false,
+            active: true,
+        }];
         screen.draw_settled(&mut app);
-        // Should not panic and should not render the sidebar plan heading.
-        assert!(!screen.text().contains("PLAN"));
+        assert!(screen.text().contains("todo 0/1"));
     }
 
-    /// The plan form (Ctrl-T) rides above the composer: its menu items are
-    /// visible in Plan mode, and the dismissed state leaves the one-row
-    /// " Plan Ctrl+T " hint in the footer.
+    /// The plan form (Ctrl-T) renders in the composer box's place: its menu
+    /// items are visible in Plan mode with the input hidden and the status
+    /// bar kept, and the dismissed state brings the input back and leaves
+    /// the one-row " Plan Ctrl+T " hint in the footer.
     #[test]
-    fn plan_form_renders_above_composer_and_hints_when_dismissed() {
+    fn plan_form_replaces_composer_and_hints_when_dismissed() {
         let mut screen = Screen::new(100, 30);
         let mut app = App::new();
         app.mode = crate::tui::app::Mode::Plan;
@@ -623,11 +640,19 @@ mod tests {
         assert!(text.contains("Plan complete"), "form title missing");
         assert!(text.contains("Implement plan"), "menu missing");
         assert!(text.contains("Refine plan"));
+        assert!(!text.contains("Message Craft…"), "input hidden under form");
+        assert!(text.contains("tab to switch"), "status bar kept");
+        assert_eq!(
+            app.view.paint.lock().unwrap().composer_area,
+            crate::tui::geom::Rect::default(),
+            "no composer selection region while the form is up"
+        );
 
         app.plan_mode.plan_form.hide();
         screen.draw_settled(&mut app);
         let text = screen.text();
         assert!(!text.contains("Plan complete"));
+        assert!(text.contains("Message Craft…"), "input back");
         assert!(text.contains("Plan Ctrl+T"), "dismissed hint missing");
     }
 }

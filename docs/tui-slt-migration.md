@@ -58,14 +58,17 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View);
 
 `View` is a light struct in `frame.rs` for slt-side persistent state
 (`ScrollState`-compatible offsets stay in `App` — the doc engine remains
-the source of truth). Root layout: transcript column + optional sidebar,
-forms stacked above the composer block, overlays back to front, the
+the source of truth). Root layout: one transcript column (the right
+sidebar was removed in the "Craft TUI" redesign), forms stacked above the
+todo widget and composer block, overlays back to front, the
 in-TUI editor modal on top, then the trailing selection/frame_text pass.
 
 Panel signatures (each panel owns its file(s); frame.rs calls these):
 
-* `ui::composer::render_slt(ui, app, avail)` — composer box + status row.
-* `ui::sidebar::render_slt(ui, app)` — right sidebar.
+* `ui::composer::render_slt(ui, app, state)` — composer box + model/mode/
+  context row + activity row.
+* `ui::todo::render_slt(ui, app)` — collapsible todo widget (plan
+  checklist + files touched) above the composer.
 * `ui::messages::render_slt(ui, app)` — transcript col (see design notes).
 * `ui::overlays::render_slt(ui, app)` — modal stack incl. prompts/forms.
 

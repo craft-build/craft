@@ -57,7 +57,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         id: "toggle-sidebar",
         slash: None,
         alias: None,
-        label: "Toggle context panel",
+        label: "Toggle files touched",
         hint: "ctrl+b",
         desc: "",
     },
@@ -284,7 +284,7 @@ impl App {
                 let _ = tx.send(Command::ResumeLatest);
             }
             "theme" => self.open_theme_picker(),
-            "toggle-sidebar" => self.session.sidebar_open = !self.session.sidebar_open,
+            "toggle-sidebar" => self.session.files_open = !self.session.files_open,
             "model" => self.open_model_menu(),
             "thinking" => self.open_thinking_picker(),
             "clear" => {
@@ -906,11 +906,11 @@ mod tests {
             app.conversation
                 .messages
                 .push(Message::Assistant("hello".into()));
-            let sidebar = app.session.sidebar_open;
+            let files = app.session.files_open;
             app.run_command(spec.id, &tx);
             let sent = rx.try_recv().is_ok();
             let modal = !matches!(app.overlays.modal, Modal::None);
-            let flipped = app.session.sidebar_open != sidebar;
+            let flipped = app.session.files_open != files;
             let noticed = matches!(
                 app.conversation.messages.last(),
                 Some(Message::Notice { .. })

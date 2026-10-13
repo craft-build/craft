@@ -35,7 +35,7 @@ fn picker_row(
     vec![
         Span::styled(
             format!("{marker} "),
-            Style::default().fg(if is_active { t.accent } else { t.bg_raised }),
+            Style::default().fg(if is_active { t.accent } else { t.bg_surface }),
         ),
         Span::styled(label, Style::default().fg(t.text_primary)),
         Span::raw(" ".repeat(gap)),
@@ -317,7 +317,7 @@ pub(super) fn render_theme_picker_slt(ui: &mut slt::Context, app: &App) {
                         Style::default().fg(if name == original {
                             t.accent
                         } else {
-                            t.bg_raised
+                            t.bg_surface
                         }),
                     ),
                     Span::styled(name.clone(), Style::default().fg(t.text_primary)),

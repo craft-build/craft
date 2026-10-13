@@ -18,9 +18,14 @@ pub(crate) use self::text::AssistantCache;
 pub(crate) use self::wrap::wrap_rows;
 
 use self::cards::tool_block;
-use self::text::{notice_block, thinking_block, user_block, user_line};
+use self::text::{notice_block, thinking_block, user_block};
 
-const MARGIN: u16 = 2;
+/// Transcript side margins. The left one is two cells deeper than the
+/// composer's (which sits at 2), so message blocks read as indented under
+/// the input column — the design's 20px block inset.
+const MARGIN_L: u16 = 4;
+const MARGIN_R: u16 = 2;
+const MARGINS: u16 = MARGIN_L + MARGIN_R;
 
 /// Doc-row deltas feed screen rows (hit regions, link rows, image
 /// blits), which are `u16`. A huge document delta must clamp, not wrap:
@@ -176,15 +181,6 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
     app.view.segments.clear();
     app.view.assistant_cache.begin_frame();
 
-    // Blank spacer carrying the user-message accent bar, so the block's
-    // left border reads as one continuous line.
-    let bar_blank = |width: usize| {
-        user_line(
-            vec![Span::styled("▎", Style::default().fg(t.accent))],
-            width,
-        )
-    };
-
     if app.conversation.messages.is_empty() {
         let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled(
             "No messages yet.",
@@ -215,12 +211,6 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
     let mut pending_images: Vec<(usize, String, String)> = Vec::new();
     for (idx, msg) in app.conversation.messages.iter().enumerate() {
         msg_seg_start.push(app.view.segments.len());
-        let is_user = matches!(msg, Message::User(_));
-        if is_user {
-            app.view
-                .segments
-                .push(Segment::with_lines(vec![bar_blank(width)]));
-        }
         match msg {
             Message::User(text) => app
                 .view
@@ -299,11 +289,6 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                 }
             }
         }
-        if is_user {
-            app.view
-                .segments
-                .push(Segment::with_lines(vec![bar_blank(width)]));
-        }
         app.view
             .segments
             .push(Segment::with_lines(vec![Line::default()]));
@@ -370,14 +355,14 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
         let img_start = caption.max(pos.row);
         let img_end = (caption + img_rows).min(pos.row + capacity);
         let img_taken = img_end.saturating_sub(img_start);
-        if img_taken > 0 {
-            if let Some(state) = seg.image.clone() {
-                bands.push(Band::Image {
-                    state,
-                    rows: img_taken,
-                });
-                taken += img_taken;
-            }
+        if img_taken > 0
+            && let Some(state) = seg.image.clone()
+        {
+            bands.push(Band::Image {
+                state,
+                rows: img_taken,
+            });
+            taken += img_taken;
         }
         pos.seg += 1;
         pos.row = 0;
@@ -722,7 +707,7 @@ mod tests {
         let ry = rows.iter().position(|r| r.contains("Read ")).unwrap();
         assert!(rows[ry].contains("\u{1b}]8;;file://"));
         assert!(rows[ry].contains("probe.rs"));
-        for x in 2..78u32 {
+        for x in 4..78u32 {
             assert!(
                 buf.get(x, ry as u32).style.bg.is_some(),
                 "unpainted cell at x={x}"
@@ -883,7 +868,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
     let inner = geom::Rect {
         x: 0,
         y: 0,
-        width: area_w.saturating_sub(MARGIN * 2),
+        width: area_w.saturating_sub(MARGINS),
         height: area_h.saturating_sub(1),
     };
     let build = if inner.width == 0 {
@@ -932,8 +917,8 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                                 band_links.push((row - row_cursor, cs, ce, uri));
                             }
                             ui.container()
-                                .ml(u32::from(MARGIN))
-                                .mr(u32::from(MARGIN))
+                                .ml(u32::from(MARGIN_L))
+                                .mr(u32::from(MARGIN_R))
                                 .h(u32::from(count))
                                 .draw(move |buf, rect| {
                                     paint_rows_slt(buf, rect, &rows, &band_links, bg);
@@ -950,8 +935,8 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                                 // falls back to halfblocks itself.
                                 let _ = ui
                                     .container()
-                                    .ml(u32::from(MARGIN))
-                                    .mr(u32::from(MARGIN))
+                                    .ml(u32::from(MARGIN_L))
+                                    .mr(u32::from(MARGIN_R))
                                     .h(u32::from(rows))
                                     .row(|ui| {
                                         if iterm_terminal() {
@@ -971,7 +956,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                             } else {
                                 // No pixel payload: still reserve the rows so
                                 // the flow below the image stays aligned.
-                                let _ = ui.container().h(u32::from(rows)).draw(|_, _| {});
+                                ui.container().h(u32::from(rows)).draw(|_, _| {});
                             }
                             total_rows += u32::from(rows);
                             row_cursor += rows;
@@ -983,7 +968,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
             // a trailing in-col region that only has room when the bands
             // don't fill the viewport — carrying the TRUE area so the
             // second frame builds at the right width.
-            let _ = ui.container().grow(1).draw(move |_, rect| {
+            ui.container().grow(1).draw(move |_, rect| {
                 publish_area_slt(&area_only, rect, total_rows);
             });
             *regions_slot.lock().expect("paint handoff") = (tool_spans, notice_rows);
@@ -1001,7 +986,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
         std::mem::take(&mut *regions_out.lock().expect("paint handoff"));
     let paint_for_publish = paint.clone();
     let _ = ui.overlay(|ui| {
-        let _ = ui.container().w(1).h(1).draw(move |_, _rect| {
+        ui.container().w(1).h(1).draw(move |_, _rect| {
             publish_frame_slt(
                 &paint_for_publish,
                 grow_resp.rect,
@@ -1126,9 +1111,9 @@ fn publish_frame_slt(
             u32::from(p.msg_area.height),
         )
     };
-    let inner_x = area.x + u32::from(MARGIN);
+    let inner_x = area.x + u32::from(MARGIN_L);
     let inner_y = area.y + 1;
-    let inner_w = area.width.saturating_sub(u32::from(MARGIN) * 2);
+    let inner_w = area.width.saturating_sub(u32::from(MARGINS));
     p.tool_regions = tool_spans
         .iter()
         .map(|&(idx, s, e)| {
@@ -1214,14 +1199,14 @@ pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
     };
 
     let _ = ui.overlay(|ui| {
-        let _ = ui.container().grow(1).draw(move |buf, _rect| {
+        ui.container().grow(1).draw(move |buf, _rect| {
             let (inner_x, inner_y, inner_w) = {
                 let p = paint.lock().expect("paint handoff");
                 let m = p.msg_area;
                 (
-                    u32::from(m.x + MARGIN),
+                    u32::from(m.x + MARGIN_L),
                     u32::from(m.y + 1),
-                    u32::from(m.width.saturating_sub(MARGIN * 2)),
+                    u32::from(m.width.saturating_sub(MARGINS)),
                 )
             };
 
@@ -1233,7 +1218,7 @@ pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
                 for row in start..end {
                     let y = inner_y + u32::from(row);
                     for col in 0..inner_w {
-                        if let Some(cell) = buf.try_get_mut(inner_x + u32::from(col), y) {
+                        if let Some(cell) = buf.try_get_mut(inner_x + col, y) {
                             std::mem::swap(&mut cell.style.fg, &mut cell.style.bg);
                         }
                     }

@@ -409,16 +409,6 @@ impl QuestionForm {
         lines.push(Line::from(""));
         lines
     }
-
-    pub fn height(&self, width: u16) -> u16 {
-        let inner_width = width.saturating_sub(2).max(1) as usize;
-        let rows: usize = self
-            .build_lines()
-            .iter()
-            .map(|line| line.width().div_ceil(inner_width).max(1))
-            .sum();
-        rows as u16 + 1
-    }
 }
 
 impl Default for QuestionForm {
@@ -699,23 +689,13 @@ mod tests {
 // Wave 2a: the slt panel for this form
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Render this form into the slt frame above the composer block. The
-/// container self-sizes from the same height helper the ratatui view used;
-/// row painting is shared with the permission prompt (same raised
-/// `Paragraph` + `Wrap { trim: false }` shape).
+/// Render this form in the composer box's place, styled like the input
+/// bar (accent bar, padding rows, the form's rows as its content).
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
     let form = &app.overlays.question_form;
     if !form.is_open() {
         return;
     }
-    let t = theme::current();
-    let width = super::permission_prompt::chat_width(ui, app);
     let lines = form.build_lines();
-    super::permission_prompt::paint_raised_form(
-        ui,
-        &lines,
-        width,
-        form.height(width as u16),
-        t.bg_raised,
-    );
+    super::ui::composer::render_form_panel(ui, &lines, theme::current().accent);
 }

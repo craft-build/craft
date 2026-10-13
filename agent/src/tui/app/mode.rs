@@ -125,13 +125,13 @@ impl App {
     }
 
     /// Ctrl-T: toggle the plan form in Plan mode; in Build mode the panel
-    /// is the sidebar's plan checklist, so the chord toggles the sidebar
+    /// is the todo widget's plan checklist, so the chord folds/unfolds it
     /// (the reference toggles its float panel, which is not ported).
     pub(crate) fn toggle_plan_panel(&mut self) {
         if self.mode == Mode::Plan {
             self.plan_mode.plan_form.toggle();
         } else {
-            self.session.sidebar_open = !self.session.sidebar_open;
+            self.session.todo_open = !self.session.todo_open;
         }
     }
 
@@ -397,7 +397,7 @@ mod tests {
         assert!(app.take_editor_request().is_none(), "request consumed");
     }
 
-    /// Ctrl-T in Build mode toggles the sidebar (the todo/plan panel);
+    /// Ctrl-T in Build mode folds/unfolds the todo widget's checklist;
     /// Ctrl-O without a plan flashes instead of requesting an editor.
     #[test]
     fn build_mode_panel_and_missing_plan() {
@@ -406,9 +406,9 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         let ctrl = |c: char| crate::tui::compat::slt_key(KeyCode::Char(c), KeyModifiers::CONTROL);
-        let sidebar = app.session.sidebar_open;
+        let open = app.session.todo_open;
         app.handle_key(ctrl('t'), &tx);
-        assert_eq!(app.session.sidebar_open, !sidebar);
+        assert_eq!(app.session.todo_open, !open);
         app.handle_key(ctrl('o'), &tx);
         assert!(app.take_editor_request().is_none());
         assert_eq!(app.flash_text(), Some("No plan file"));

@@ -19,7 +19,7 @@ fn highlighted_path_row(
     let base_style = Style::default().bg(if is_selected {
         t.bg_overlay
     } else {
-        t.bg_raised
+        t.bg_surface
     });
     let match_style = base_style.fg(t.accent).add_modifier(Modifier::BOLD);
 

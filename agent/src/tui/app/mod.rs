@@ -1114,17 +1114,24 @@ mod tests {
     use super::*;
     use crate::tui::repaint::Cadence;
 
-    /// The composer info line carries the active mode label (F.2).
+    /// The status bar carries the active mode as a chip (F.2); the
+    /// inactive mode is not rendered.
     #[test]
-    fn composer_info_line_shows_mode_label() {
+    fn status_bar_shows_only_the_active_mode() {
         let mut app = App::new();
-        app.session.sidebar_open = false;
         let build = screen_text(&mut app, 120, 24);
-        assert!(build.contains("[BUILD]"), "build label missing:\n{build}");
-        assert!(!build.contains("[PLAN]"));
+        assert!(
+            build.contains(" BUILD  · tab to switch"),
+            "build chip:\n{build}"
+        );
+        assert!(!build.contains("PLAN") && !build.contains(" plan "));
         app.toggle_mode();
         let plan = screen_text(&mut app, 120, 24);
-        assert!(plan.contains("[PLAN]"), "plan label missing:\n{plan}");
+        assert!(
+            plan.contains(" PLAN  · tab to switch"),
+            "plan chip:\n{plan}"
+        );
+        assert!(!plan.contains("BUILD") && !plan.contains(" build "));
     }
 
     /// Only the statuses that render the spinner glyph owe cadence frames;
@@ -1172,23 +1179,20 @@ mod tests {
         assert!(!app.conversation.reveal_pending(true));
     }
 
-    /// The status row gains the cwd (abbreviated to its last component) and
-    /// the turn's elapsed-seconds prompt progress.
+    /// The status bar carries the turn's elapsed-seconds prompt progress
+    /// while a turn runs, and no activity once it settles.
     #[test]
-    fn status_row_shows_cwd_and_elapsed_seconds() {
+    fn status_bar_shows_elapsed_seconds_while_running() {
         let mut app = App::new();
-        app.session.sidebar_open = false;
-        app.handle_event(AgentEvent::SessionInfo {
-            cwd: "/Users/x/Projects/craft-code".into(),
-            branch: "main".into(),
-        });
         app.handle_event(AgentEvent::StatusChanged(Status::Running));
         let text = screen_text(&mut app, 120, 24);
-        assert!(
-            text.contains("…/craft-code"),
-            "cwd segment missing:\n{text}"
-        );
         assert!(text.contains("running 0s"), "elapsed missing:\n{text}");
+        app.handle_event(AgentEvent::StatusChanged(Status::Done));
+        let text = screen_text(&mut app, 120, 24);
+        assert!(
+            !text.contains("esc interrupt"),
+            "idle bar is quiet:\n{text}"
+        );
     }
 
     /// A loaded session's preserved draft lands back in the composer (F.3),

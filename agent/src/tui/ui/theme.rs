@@ -15,32 +15,33 @@ use crate::tui::style::{Color, Style, StyleExt};
 pub const DEFAULT_THEME: &str = "craft";
 const RESERVED_KEYS: &[&str] = &["palette", "ui", "inherits"];
 
-// Fallback values: the pre-theme-picker hardcoded palette. Derivation falls
-// back to these so a thin theme TOML degrades to the old look, not to black.
+// Fallback values: the default `craft` palette (the "Craft TUI" design).
+// Derivation falls back to these so a thin theme TOML degrades to the
+// default look, not to black.
 mod fallback {
     use crate::tui::style::Color;
 
-    pub const BG_APP: Color = Color::Rgb(0x06, 0x09, 0x11);
-    pub const BG_SURFACE: Color = Color::Rgb(0x0a, 0x0e, 0x1a);
-    pub const BG_RAISED: Color = Color::Rgb(0x0f, 0x14, 0x24);
-    pub const BG_OVERLAY: Color = Color::Rgb(0x16, 0x1d, 0x30);
-    pub const BG_SUNKEN: Color = Color::Rgb(0x02, 0x04, 0x0a);
-    pub const BORDER_SUBTLE: Color = Color::Rgb(0x1b, 0x23, 0x38);
-    pub const BORDER_STRONG: Color = Color::Rgb(0x3a, 0x46, 0x64);
-    pub const TEXT_PRIMARY: Color = Color::Rgb(0xf7, 0xf8, 0xfb);
-    pub const TEXT_SECONDARY: Color = Color::Rgb(0xa6, 0xac, 0xc0);
-    pub const TEXT_TERTIARY: Color = Color::Rgb(0x5b, 0x67, 0x84);
-    pub const TEXT_DISABLED: Color = Color::Rgb(0x40, 0x48, 0x5f);
-    pub const ACCENT: Color = Color::Rgb(0x4f, 0x8d, 0xff);
-    pub const BLUE_400: Color = Color::Rgb(0x6f, 0xa8, 0xff);
+    pub const BG_APP: Color = Color::Rgb(0x11, 0x15, 0x1d);
+    pub const BG_SURFACE: Color = Color::Rgb(0x16, 0x1c, 0x27);
+    pub const BG_RAISED: Color = Color::Rgb(0x1a, 0x22, 0x30);
+    pub const BG_OVERLAY: Color = Color::Rgb(0x25, 0x2f, 0x40);
+    pub const BG_SUNKEN: Color = Color::Rgb(0x0d, 0x10, 0x17);
+    pub const BORDER_SUBTLE: Color = Color::Rgb(0x2a, 0x31, 0x40);
+    pub const BORDER_STRONG: Color = Color::Rgb(0x3d, 0x46, 0x58);
+    pub const TEXT_PRIMARY: Color = Color::Rgb(0xe6, 0xe9, 0xef);
+    pub const TEXT_SECONDARY: Color = Color::Rgb(0xa6, 0xad, 0xbd);
+    pub const TEXT_TERTIARY: Color = Color::Rgb(0x6b, 0x73, 0x85);
+    pub const TEXT_DISABLED: Color = Color::Rgb(0x4a, 0x53, 0x6a);
+    pub const ACCENT: Color = Color::Rgb(0x7e, 0xe7, 0x87);
+    pub const BLUE_400: Color = Color::Rgb(0x6c, 0xb6, 0xff);
     pub const CYAN: Color = Color::Rgb(0x22, 0xd3, 0xee);
-    pub const SUCCESS: Color = Color::Rgb(0x3d, 0xdc, 0x84);
+    pub const SUCCESS: Color = Color::Rgb(0x7e, 0xe7, 0x87);
     pub const WARNING: Color = Color::Rgb(0xf0, 0xa9, 0x3e);
-    pub const DANGER: Color = Color::Rgb(0xf0, 0x45, 0x5f);
-    pub const DIFF_ADD_TEXT: Color = Color::Rgb(0x7d, 0xe8, 0xa8);
-    pub const DIFF_ADD_BG: Color = Color::Rgb(0x10, 0x27, 0x27);
-    pub const DIFF_DEL_TEXT: Color = Color::Rgb(0xf2, 0x8a, 0x97);
-    pub const DIFF_DEL_BG: Color = Color::Rgb(0x26, 0x15, 0x22);
+    pub const DANGER: Color = Color::Rgb(0xff, 0x80, 0x80);
+    pub const DIFF_ADD_TEXT: Color = Color::Rgb(0x7e, 0xe7, 0x87);
+    pub const DIFF_ADD_BG: Color = Color::Rgb(0x18, 0x29, 0x1f);
+    pub const DIFF_DEL_TEXT: Color = Color::Rgb(0xff, 0x80, 0x80);
+    pub const DIFF_DEL_BG: Color = Color::Rgb(0x2a, 0x1c, 0x22);
 }
 
 pub struct ThemeEntry {

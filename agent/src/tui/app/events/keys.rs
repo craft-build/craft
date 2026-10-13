@@ -201,7 +201,7 @@ impl App {
             return true;
         }
         if m(ActionId::Sidebar) {
-            self.session.sidebar_open = !self.session.sidebar_open;
+            self.session.files_open = !self.session.files_open;
             return true;
         }
         if m(ActionId::ModelMenu) {

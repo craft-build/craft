@@ -1,19 +1,18 @@
 //! The `slt` frame: root layout for the whole TUI, replacing the legacy
 //! ratatui `draw()` composition one panel at a time (wave 2a).
 //!
-//! Layout mirrors `draw()` exactly — same regions, same theme colors, same
-//! heights — verified against the golden fixtures by `tui::parity_slt`:
+//! Layout (the "Craft TUI" design), verified against the golden fixtures
+//! by `tui::parity_slt`:
 //!
 //! ```text
 //! root col (bg = bg_app)
-//! ├─ row [ chat col (grow) | sidebar (w=34, when open) ]
-//! │    chat col:
+//! ├─ chat col (full width):
 //! │    ├─ task header (1 row, task chats)
 //! │    ├─ transcript container (grow)     ← messages painter (segment flow)
-//! │    ├─ plan form / question form / permission prompt (stacked above
-//! │    │   the composer block, in that order, exactly as before)
-//! │    └─ bottom block (shared top border):
-//! │        border row │ composer box │ status row │ footer hint row
+//! │    ├─ todo widget (plan checklist + files touched, collapsible)
+//! │    └─ bottom block: composer box — or, in its place, the permission
+//! │        prompt / question form / plan decision menu (styled like the
+//! │        box) │ status bar │ footer hint row (when present)
 //! └─ trailing full-screen draw: selection REVERSED + frame_text snapshot
 //!    + modal overlays declared after the base UI
 //! ```
@@ -22,12 +21,7 @@ use crate::tui::app::App;
 use crate::tui::ui::theme;
 
 use super::messages;
-use super::{composer, sidebar};
-
-/// Terminal width at which the sidebar may share the layout (legacy gate).
-const SIDEBAR_MIN_WIDTH: u32 = 80;
-/// Right-column width (legacy `SIDEBAR_WIDTH`).
-const SIDEBAR_WIDTH: u32 = 34;
+use super::{composer, todo};
 
 /// View state that persists across frames on the `slt` side. The document
 /// engine in `App` stays the source of truth; the input-widget states here
@@ -94,19 +88,10 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
     app.clear_expired_flash();
 
     let t = theme::current();
-    let width = ui.width();
 
     // Root: one full-size column with the app background.
     let _ = ui.container().bg(t.bg_app).grow(1).col(|ui| {
-        let show_sidebar = app.session.sidebar_open && width >= SIDEBAR_MIN_WIDTH;
-        if show_sidebar {
-            let _ = ui.container().grow(1).row(|ui| {
-                chat_column(ui, app, view, width - SIDEBAR_WIDTH);
-                sidebar::render_slt(ui, app);
-            });
-        } else {
-            chat_column(ui, app, view, width);
-        }
+        chat_column(ui, app, view);
 
         // Overlays, back to front (modal stack, matching draw() ordering).
         super::overlays::render_slt(ui, app);
@@ -123,9 +108,9 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
     });
 }
 
-/// The chat half: transcript on top, forms stacked above the composer
-/// block, all pinned to the bottom. `avail` is the chat column's width.
-fn chat_column(ui: &mut slt::Context, app: &mut App, view: &mut View, avail: u32) {
+/// The chat column: transcript on top; forms, the todo widget and the
+/// composer block pinned to the bottom.
+fn chat_column(ui: &mut slt::Context, app: &mut App, view: &mut View) {
     let _ = ui.container().grow(1).col(|ui| {
         // Task-chat header (task 96): one line above the transcript.
         if app.active_task.is_some() {
@@ -135,33 +120,21 @@ fn chat_column(ui: &mut slt::Context, app: &mut App, view: &mut View, avail: u32
         // Transcript: the segment-flow painter owns this region.
         messages::render_slt(ui, app);
 
-        // Forms stack directly above the composer block, in draw() order:
-        // plan form lowest (closest to the composer), then the question
-        // form, then the permission prompt on top.
-        crate::tui::permission_prompt::render_slt(ui, app);
-        crate::tui::question_form::render_slt(ui, app);
-        crate::tui::plan_form::render_slt(ui, app);
+        todo::render_slt(ui, app);
 
-        bottom_block(ui, app, view, avail);
-    });
-}
-
-/// The shared-top-border block: border row, composer box, status row, and
-/// the blank footer hint row.
-fn bottom_block(ui: &mut slt::Context, app: &App, view: &mut View, avail: u32) {
-    let t = theme::current();
-    let _ = ui
-        .container()
-        .border(slt::Border::Single)
-        .border_sides(slt::style::BorderSides {
-            top: true,
-            ..slt::style::BorderSides::none()
-        })
-        .border_fg(t.border_subtle)
-        .grow(0)
-        .col(|ui| {
-            composer::render_slt(ui, app, &mut view.composer, avail);
+        // The permission prompt, question form and plan decision menu
+        // render in the composer box's place, styled like it; the status
+        // bar stays below them.
+        let form_open = app.overlays.permission_prompt.is_open()
+            || app.overlays.question_form.is_open()
+            || app.plan_mode.plan_form.is_visible();
+        let _ = ui.container().grow(0).col(|ui| {
+            crate::tui::permission_prompt::render_slt(ui, app);
+            crate::tui::question_form::render_slt(ui, app);
+            crate::tui::plan_form::render_slt(ui, app);
+            composer::render_slt(ui, app, &mut view.composer, !form_open);
         });
+    });
 }
 
 /// One-line task header above a focused task chat (task 96).

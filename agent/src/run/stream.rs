@@ -258,13 +258,15 @@ pub(crate) async fn run_model_stream<M: CompletionSource + Clone>(
                             ..
                         } => {
                             // Stream ids are provider property (fresh on
-                            // every attempt); mint a run-stable internal id
-                            // so replayed history survives retries and
-                            // cross-wire fallbacks.
-                            let internal_call_id = format!(
-                                "call-{}",
-                                call_ids.len()
-                            );
+                            // every attempt); mint a globally unique internal
+                            // id so replayed history survives retries and
+                            // cross-wire fallbacks. It must stay unique across
+                            // streams too: a per-stream counter restarted at
+                            // `call-0` on every model response, so history
+                            // carried duplicate tool ids and the TUI merged a
+                            // later call into an earlier call's card.
+                            let internal_call_id =
+                                format!("call-{}", crate::id::CraftId::generate());
                             let internal_call_id = call_ids
                                 .entry(tool_call.id.to_string())
                                 .or_insert(internal_call_id)
