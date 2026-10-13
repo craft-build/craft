@@ -83,16 +83,64 @@ files therefore take `&App` / `&mut App` but never read input.
 and compares against `agent/fixtures/golden/`. Re-capture with
 `UPDATE_FIXTURES=1`.
 
-# Wave 2b (remaining)
+# Wave 2b — DONE (composer + editor on input widgets; query rows on the ▎ idiom)
 
-* Adopt slt input widgets ([`TextareaState`] for the composer + the in-TUI
-  editor modal, [`TextInputState`] for palette/search/picker query rows
-  and question-form fields) for hardware-caret fidelity, per the planning
-  decisions. Fixtures are re-captured with the caret-rendering delta
-  applied deliberately and reviewed. The wave-2a spoofed block caret
-  (`apply_caret` in composer.rs and the query-row carets) is what 2b
-  replaces.
-* The `$EDITOR`/Ctrl-O handoff currently runs through the in-TUI
-  `EditorForm` modal (plain buffer editing, Ctrl-S save / Esc cancel);
-  2b decides whether `TextareaState` keeps or replaces it. Ctrl-Z
-  suspend/resume is slt built-in (`RunConfig::handle_suspend`).
+Adopted where typing actually lives, in three steps (all fixture-gated):
+
+1. **Composer → `slt::TextareaState` (render mirror).** `View.composer`
+   is synced each frame from `App.composer`: text via the legacy
+   `wrap_rows` output (slt's own wrap is hard-cluster; ours is
+   word-preferring — feeding pre-wrapped lines with `wrap_width = None`
+   keeps row breaks byte-identical), cursor mapped onto those rows. The
+   app keeps owning every edit (history gating on Up/Down, word ops,
+   submit-on-Enter): the run-loop closure consumes each key/paste it
+   dispatches (`ui.events().enumerate()` + `ui.consume_event(i)` —
+   nothing consumes before the closure, so indices align; mouse stays
+   unconsumed for click-to-focus), so the focused widget renders + carries
+   the real caret (`▎` glyph + `buf.set_cursor_pos` hardware cell) but
+   never edits. Accent bar, craft-theme restyle, bang syntax colors, and
+   the placeholder paint in a trailing `grow(1)` overlay from the
+   fixed-width wrapper's prev-frame rect (the outer box container's
+   `Response::rect` predicts unreliably; the fixed-width wrapper's is
+   exact — same one-frame handoff cadence as the transcript regions).
+2. **Editor modal → `TextareaState` (widget-owned editing).** A plain
+   textarea needs no custom semantics, so the widget owns editing
+   natively: grapheme-safe caret, word jumps (Ctrl/Alt+arrows), undo/redo
+   (Ctrl-Z/Y), kill-line (Ctrl-K). The closure intercepts Esc (cancel)
+   and Ctrl-S (save), keeps readline Ctrl-A/E by moving the state cursor,
+   leaves exactly the widget's own edit-key set unconsumed
+   (`editor_key_edits_widget` mirrors the widget's consumption set), and
+   swallows everything else. Pastes while the modal is open now land in
+   the editor (2a sent them to the composer under the modal — fixed).
+   Known cosmetic: while any slt modal is active, non-modal overlay draws
+   collapse to 0×0, so the composer overlays pause under the editor modal
+   (dimmed background only; no fixture scene opens the modal).
+3. **Query rows → the `▎` idiom.** Palette query, question-form free
+   text, permission-prompt guide input: the REVERSED-cell spoof became
+   the `▎` glyph for one consistent caret idiom. These stay painted rows
+   (not `TextInputState`) because the app must own every keystroke
+   (list filtering, tab order) and the hardware-caret API is widget-only;
+   forcing it through widgets needs `focus_by_name` choreography across
+   the five sheet surfaces — optional follow-up, not worth the risk while
+   the surfaces are transient single-line filters.
+
+Fixture deltas, all deliberate caret changes: `composer.txt` (+`▎` at the
+caret), `palette.txt` (+`▎` on the query row).
+
+## Wave 2b debugging harnesses (kept for future regressions)
+
+* `agent/examples/mock_tui` — the scripted mock provider end-to-end;
+  `MOCK_TUI_STREAM=1` swaps in a GLM-shaped stream (ReasoningDelta then
+  markdown-heavy AssistantDelta). Verified: streaming paints within
+  ~250 ms under tmux.
+* `CRAFT_TUI_TRACE=<path>` — per-frame render-loop trace (message/ui
+  event counts, status, reveal state, painted visible-prefix length +
+  paint area); zero-cost when unset.
+
+## Remaining manual QA (pre-merge)
+
+* Resize + suspend/resume (Ctrl-Z), CJK paste into composer/editor,
+  mouse-copy, images on kitty/iTerm/tmux, hyperlink clicks, focus bells.
+* Editor modal round trip: Alt-O from a non-empty composer, Ctrl-S back.
+* A `plan`-form fixture scene (title-cell nuance: slt pins titles 2 cells
+  in vs ratatui's 1) — candidate for the next capture.

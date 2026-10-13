@@ -215,10 +215,16 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
     let cmd_tx_frame = cmd_tx.clone();
     let handle = slt::run_async_with::<AgentEvent>(config, move |ui, msgs| {
         if trace_enabled() {
+            let evs: Vec<String> = ui
+                .raw_events()
+                .map(|e| match e {
+                    slt::Event::Key(k) => format!("{:?}+{:?}", k.code, k.modifiers),
+                    other => format!("{other:?}"),
+                })
+                .collect();
             trace_frame(format!(
-                "frame msgs={} ui_ev={} busy={:?} status={:?} conv_len={} reveal_anim={}",
+                "frame msgs={} ui_ev={evs:?} busy={:?} status={:?} conv_len={} reveal_anim={}",
                 msgs.len(),
-                ui.events().count(),
                 app.busy(),
                 app.status,
                 app.conversation.messages.len(),
@@ -273,8 +279,15 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
         // `App`'s composer state stays the single source of truth (the
         // render mirrors sync from it each frame). Mouse events stay
         // unconsumed so clicks keep their widget-focus meaning.
+        //
+        // `raw_events` (not `events`): the plain accessor is blocked while
+        // a modal was active the previous frame — with the editor modal
+        // open, the closure would see no keys at all and Esc/Ctrl-S could
+        // never fire. The app is a global input router; the raw stream is
+        // the documented bypass. Indices align with the consumed flags
+        // (nothing consumes before the closure runs).
         let events: Vec<(usize, slt::Event)> = ui
-            .events()
+            .raw_events()
             .enumerate()
             .map(|(i, ev)| (i, ev.clone()))
             .collect();
@@ -282,52 +295,10 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
             match ev {
                 slt::Event::Key(key) if key.kind == KeyEventKind::Press => {
                     focus.note_input();
-                    // The editor modal owns the keyboard while open. Its
-                    // textarea does the editing (native caret, undo, and
-                    // paste), so the widget's own edit keys are left
-                    // unconsumed; Esc/Ctrl-S are intercepted here and
-                    // everything else is swallowed.
-                    if let Some(editor) = view.editor.as_mut() {
-                        use slt::event::{KeyCode, KeyModifiers};
-                        if key.code == KeyCode::Esc {
-                            view.editor = None;
-                            ui.consume_event(i);
-                            continue;
-                        }
-                        if key.code == KeyCode::Char('s')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            let editor = view.editor.take().expect("just borrowed");
-                            let text = editor.text();
-                            match editor.origin {
-                                ui::frame::EditorOrigin::ComposerDraft => {
-                                    app.composer.set_text(text);
-                                }
-                                ui::frame::EditorOrigin::PlanFile(path) => {
-                                    if let Err(e) = std::fs::write(&path, text) {
-                                        eprintln!("warning: could not write plan file: {e}");
-                                    }
-                                }
-                            }
-                            ui.consume_event(i);
-                            continue;
-                        }
-                        // Readline home/end (the widget has no Ctrl-A/E).
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            match key.code {
-                                KeyCode::Char('a') => editor.state.cursor_col = 0,
-                                KeyCode::Char('e') => {
-                                    editor.state.cursor_col =
-                                        editor.state.lines[editor.state.cursor_row].chars().count();
-                                }
-                                _ => {}
-                            }
-                            ui.consume_event(i);
-                            continue;
-                        }
-                        if !editor_key_edits_widget(&key) {
-                            // Swallow: no other handler may see keys while
-                            // the editor is open.
+                    // The editor modal owns the keyboard while open (see
+                    // `editor_modal_key` for the contract).
+                    if view.editor.is_some() {
+                        if editor_modal_key(&mut app, &mut view, &key) {
                             ui.consume_event(i);
                         }
                         continue;
@@ -460,6 +431,60 @@ fn editor_key_edits_widget(key: &slt::event::KeyEvent) -> bool {
     }
 }
 
+/// Route one keypress while the editor modal is open. Returns whether the
+/// run loop must consume the event: `false` only for the widget's own edit
+/// keys (see [`editor_key_edits_widget`]), which the focused `TextareaState`
+/// handles natively during render.
+///
+/// Esc cancels; Ctrl-S saves (composer draft / plan file); Ctrl-A/E keep
+/// their readline meaning by moving the state cursor; everything else is
+/// swallowed — the editor owns the keyboard, the 2a `handle_editor_key`
+/// contract.
+fn editor_modal_key(
+    app: &mut crate::tui::app::App,
+    view: &mut ui::frame::View,
+    key: &slt::event::KeyEvent,
+) -> bool {
+    use slt::event::{KeyCode, KeyModifiers};
+
+    if key.code == KeyCode::Esc {
+        view.editor = None;
+        return true;
+    }
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        let editor = view.editor.take().expect("editor open");
+        let text = editor.text();
+        match editor.origin {
+            ui::frame::EditorOrigin::ComposerDraft => {
+                app.composer.set_text(text);
+            }
+            ui::frame::EditorOrigin::PlanFile(path) => {
+                if let Err(e) = std::fs::write(&path, text) {
+                    eprintln!("warning: could not write plan file: {e}");
+                }
+            }
+        }
+        return true;
+    }
+    // Readline home/end (the widget has no Ctrl-A/E).
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(editor) = view.editor.as_mut() {
+            match key.code {
+                KeyCode::Char('a') => editor.state.cursor_col = 0,
+                KeyCode::Char('e') => {
+                    editor.state.cursor_col =
+                        editor.state.lines[editor.state.cursor_row].chars().count();
+                }
+                _ => {}
+            }
+        }
+        return true;
+    }
+    // The widget's own edit keys stay unconsumed; everything else is
+    // swallowed so no other handler sees keys while the editor is open.
+    !editor_key_edits_widget(key)
+}
+
 /// The terminal bell (writes exactly the classic `\a` sequence).
 fn ring() {
     let _ = write_and_flush("\u{7}");
@@ -469,6 +494,88 @@ fn ring() {
 mod tests {
     use super::*;
     use crate::tui::provider::Status;
+
+    /// Wave 2b routing contract: while the editor modal is open,
+    /// `editor_modal_key` consumes everything except the textarea's own
+    /// edit keys; Esc cancels, Ctrl-S saves into the composer.
+    #[test]
+    fn editor_modal_key_routes_save_cancel_and_swallows() {
+        use crate::tui::compat::slt_key;
+        use crate::tui::ui::frame::{EditorForm, EditorOrigin, View};
+        use slt::event::{KeyCode, KeyModifiers};
+
+        let mut app = App::new();
+        let mut view = View::default();
+        view.editor = Some(EditorForm::open(EditorOrigin::ComposerDraft, "d"));
+
+        // Typing stays unconsumed (the widget edits during render).
+        assert!(!editor_modal_key(
+            &mut app,
+            &mut view,
+            &slt_key(KeyCode::Char('x'), KeyModifiers::NONE)
+        ));
+        assert!(view.editor.is_some(), "typing does not close the editor");
+
+        // Stray chords are swallowed, not leaked to the app.
+        assert!(editor_modal_key(
+            &mut app,
+            &mut view,
+            &slt_key(KeyCode::F(4), KeyModifiers::NONE)
+        ));
+        assert!(editor_modal_key(
+            &mut app,
+            &mut view,
+            &slt_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        ));
+
+        // Ctrl-S saves and closes; the composer gets the text + end cursor.
+        assert!(editor_modal_key(
+            &mut app,
+            &mut view,
+            &slt_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        ));
+        assert!(view.editor.is_none());
+        assert_eq!(app.composer.text, "d");
+        assert_eq!(app.composer.cursor, 1);
+
+        // Esc cancels without touching the composer.
+        view.editor = Some(EditorForm::open(EditorOrigin::ComposerDraft, "nope"));
+        assert!(editor_modal_key(
+            &mut app,
+            &mut view,
+            &slt_key(KeyCode::Esc, KeyModifiers::NONE)
+        ));
+        assert!(view.editor.is_none());
+        assert_eq!(app.composer.text, "d");
+    }
+
+    /// The widget-edit predicate matches exactly the textarea's own
+    /// consumption set (see `editor_key_edits_widget`).
+    #[test]
+    fn editor_edit_keys_match_the_widget_set() {
+        use crate::tui::compat::slt_key;
+        use slt::event::{KeyCode, KeyModifiers};
+
+        for (code, mods, edits) in [
+            (KeyCode::Char('a'), KeyModifiers::NONE, true),
+            (KeyCode::Enter, KeyModifiers::NONE, true),
+            (KeyCode::Backspace, KeyModifiers::NONE, true),
+            (KeyCode::Up, KeyModifiers::NONE, true),
+            (KeyCode::Home, KeyModifiers::NONE, true),
+            (KeyCode::Left, KeyModifiers::CONTROL, true),
+            (KeyCode::Char('z'), KeyModifiers::CONTROL, true),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL, false),
+            (KeyCode::Esc, KeyModifiers::NONE, false),
+            (KeyCode::Char('a'), KeyModifiers::CONTROL, false),
+            (KeyCode::F(4), KeyModifiers::NONE, false),
+        ] {
+            assert_eq!(
+                editor_key_edits_widget(&slt_key(code.clone(), mods)),
+                edits,
+                "{code:?} + {mods:?}"
+            );
+        }
+    }
 
     #[test]
     fn base_owns_keyboard_tracks_overlays() {
@@ -662,86 +769,4 @@ fn startup_prompt_submits_build_mode_and_none_submits_nothing() {
     let mut pending: Option<String> = None;
     submit_startup_prompt(&mut app, &cmd_tx, &mut pending);
     assert!(sent_messages(&mut cmd_rx).is_empty());
-    /// Wave 2b routing contract: while the editor modal is open, typing
-    /// goes to its `TextareaState` (widget-owned editing) — the composer
-    /// mirror is untouched, Esc cancels, Ctrl-S saves into the composer.
-    #[test]
-    fn editor_modal_routes_typing_to_its_textarea() {
-        use crate::tui::compat::slt_key;
-        use slt::event::{KeyCode, KeyModifiers};
-
-        let mut app = App::new();
-        let mut view = crate::tui::ui::frame::View::default();
-        view.editor = Some(crate::tui::ui::frame::EditorForm::open(
-            crate::tui::ui::frame::EditorOrigin::ComposerDraft,
-            "draft",
-        ));
-        let mut tb = slt::TestBackend::new(80, 24);
-
-        // Stabilize layout predictions, then type through the widget.
-        tb.render(|ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view));
-        app.status_tick = 0;
-        tb.sequence()
-            .events(
-                vec![
-                    slt::Event::Key(slt_key(KeyCode::Char('x'), KeyModifiers::NONE)),
-                    slt::Event::Key(slt_key(KeyCode::Enter, KeyModifiers::NONE)),
-                    slt::Event::Key(slt_key(KeyCode::Char('y'), KeyModifiers::NONE)),
-                ],
-                |ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view),
-            )
-            .run();
-        let editor = view.editor.as_ref().expect("editor still open");
-        assert_eq!(
-            editor.text(),
-            "draft\nx\ny",
-            "typing edits the editor buffer"
-        );
-        assert!(app.composer.text.is_empty(), "composer mirror untouched");
-
-        // Esc closes without saving; Ctrl-S closes and saves.
-        tb.sequence()
-            .events(
-                vec![slt::Event::Key(slt_key(
-                    KeyCode::Char('s'),
-                    KeyModifiers::CONTROL,
-                ))],
-                |ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view),
-            )
-            .run();
-        assert!(view.editor.is_none(), "Ctrl-S closes the editor");
-        assert_eq!(
-            app.composer.text, "draft\nx\ny",
-            "save applies to the composer"
-        );
-        assert_eq!(app.composer.cursor, app.composer.text.chars().count());
-    }
-
-    /// The widget-edit predicate matches exactly the textarea's own
-    /// consumption set (see `editor_key_edits_widget`).
-    #[test]
-    fn editor_edit_keys_match_the_widget_set() {
-        use crate::tui::compat::slt_key;
-        use slt::event::{KeyCode, KeyModifiers};
-
-        for (code, mods, edits) in [
-            (KeyCode::Char('a'), KeyModifiers::NONE, true),
-            (KeyCode::Enter, KeyModifiers::NONE, true),
-            (KeyCode::Backspace, KeyModifiers::NONE, true),
-            (KeyCode::Up, KeyModifiers::NONE, true),
-            (KeyCode::Home, KeyModifiers::NONE, true),
-            (KeyCode::Left, KeyModifiers::CONTROL, true),
-            (KeyCode::Char('z'), KeyModifiers::CONTROL, true),
-            (KeyCode::Char('s'), KeyModifiers::CONTROL, false),
-            (KeyCode::Esc, KeyModifiers::NONE, false),
-            (KeyCode::Char('a'), KeyModifiers::CONTROL, false),
-            (KeyCode::F(4), KeyModifiers::NONE, false),
-        ] {
-            assert_eq!(
-                editor_key_edits_widget(&slt_key(code.clone(), mods)),
-                edits,
-                "{code:?} + {mods:?}"
-            );
-        }
-    }
 }
