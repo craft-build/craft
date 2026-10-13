@@ -15,7 +15,7 @@ mod task_chats;
 pub use self::commands::{COMMANDS, CommandSpec};
 #[allow(unused_imports)]
 pub use self::models::{
-    AutoReviewLine, Conversation, DiffState, Message, PendingClick, Session, ViewModel,
+    AutoReviewLine, Conversation, DiffState, Message, PaintData, PendingClick, Session, ViewModel,
 };
 #[allow(unused_imports)]
 pub use self::task_chats::{TaskChat, TaskOutcome, TaskStatus};
@@ -993,8 +993,11 @@ impl App {
         self.view.hover_tool = None;
         self.view.pending_click = None;
         self.view.highlight_segment = None;
-        self.view.tool_regions.clear();
-        self.view.notice_regions.clear();
+        {
+            let mut p = self.view.paint.lock().expect("paint handoff");
+            p.tool_regions.clear();
+            p.notice_regions.clear();
+        }
         self.overlays.modal = Modal::None;
         self.view.scroll = ScrollPos::default();
         self.view.segments.clear();
@@ -1063,7 +1066,7 @@ pub(crate) mod testutil {
             image: None,
         }));
         // Card spans rows 2..6, columns 2..40 (as the renderer would report).
-        app.view.tool_regions = vec![(
+        app.view.paint.lock().unwrap().tool_regions = vec![(
             0,
             crate::tui::geom::Rect {
                 x: 2,

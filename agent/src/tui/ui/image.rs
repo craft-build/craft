@@ -113,13 +113,29 @@ impl ImagePicker {
         };
         let protocol = self
             .picker
-            .new_protocol(dyn_img, area, Resize::Fit(None))
+            .new_protocol(dyn_img.clone(), area, Resize::Fit(None))
             .ok()?;
         Some(ImageRenderState {
             protocol: Arc::new(protocol),
             rows: target_rows,
+            slt: Some(SltPixels {
+                file: raw,
+                rgba: dyn_img.to_rgba8().into_raw(),
+                pixel_width: px_w,
+                pixel_height: px_h,
+            }),
         })
     }
+}
+
+/// Decoded image data for the `slt` painter: the original file bytes (for
+/// the iTerm2 widget, which takes encoded payloads) and raw RGBA plus pixel
+/// dimensions (for the Kitty widget and the halfblock fallback).
+pub struct SltPixels {
+    pub file: Vec<u8>,
+    pub rgba: Vec<u8>,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
 }
 
 /// A decoded image ready to render into a frame area, plus its computed
@@ -127,6 +143,9 @@ impl ImagePicker {
 pub struct ImageRenderState {
     protocol: Arc<Protocol>,
     pub rows: u16,
+    /// Payload for the slt image widgets; `None` for states built without
+    /// pixel data (none today — the field keeps the painter honest).
+    slt: Option<SltPixels>,
 }
 
 impl ImageRenderState {
@@ -134,6 +153,12 @@ impl ImageRenderState {
     /// `<= self.rows`; width should be `<=` the available columns.
     pub fn render(&self, area: ratatui::layout::Rect, frame: &mut ratatui::Frame) {
         frame.render_widget(Image::new(&self.protocol), area);
+    }
+
+    /// Decoded payload for the slt image widgets (`kitty_image` /
+    /// `iterm_image` / halfblock fallback), sized by this state's row count.
+    pub fn slt_pixels(&self) -> Option<&SltPixels> {
+        self.slt.as_ref()
     }
 }
 

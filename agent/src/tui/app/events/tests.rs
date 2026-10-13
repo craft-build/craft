@@ -497,7 +497,7 @@ fn click_toggles_collapsible_card() {
 #[test]
 fn drag_selects_instead_of_toggling() {
     let mut app = app_with_collapsible_tool();
-    app.view.msg_area = Rect {
+    app.view.paint.lock().unwrap().msg_area = Rect {
         x: 0,
         y: 0,
         width: 80,
@@ -535,7 +535,15 @@ fn click_notice_row_expands_and_retruncates_body() {
         app.handle_mouse(mouse(MouseKind::Down(MouseButton::Left), row, col));
         app.handle_mouse(mouse(MouseKind::Up(MouseButton::Left), row, col));
     };
-    let notice = |app: &App| app.view.notice_regions.first().copied();
+    let notice = |app: &App| {
+        app.view
+            .paint
+            .lock()
+            .unwrap()
+            .notice_regions
+            .first()
+            .copied()
+    };
     let (idx, rect) = notice(&app).expect("truncated body carries a notice");
     press(&mut app, rect.y, rect.x + 4);
     assert!(

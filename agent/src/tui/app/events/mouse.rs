@@ -8,6 +8,9 @@ impl App {
     /// Collapsible tool card (message index) at a screen position, if any.
     pub fn tool_at(&self, row: u16, col: u16) -> Option<usize> {
         self.view
+            .paint
+            .lock()
+            .expect("paint handoff")
             .tool_regions
             .iter()
             .find(|(_, r)| rect_contains(*r, row, col))
@@ -17,6 +20,9 @@ impl App {
     /// "Click to expand" notice row (message index) at a screen position.
     fn notice_at(&self, row: u16, col: u16) -> Option<usize> {
         self.view
+            .paint
+            .lock()
+            .expect("paint handoff")
             .notice_regions
             .iter()
             .find(|(_, r)| rect_contains(*r, row, col))
@@ -67,7 +73,11 @@ impl App {
                 // messages or the composer input) and is confined to it; a
                 // click elsewhere (sidebar, chrome) just clears the highlight.
                 let pos = (row, col);
-                self.view.selection = [self.view.msg_area, self.view.composer_area]
+                let (msg_area, composer_area) = {
+                    let p = self.view.paint.lock().expect("paint handoff");
+                    (p.msg_area, p.composer_area)
+                };
+                self.view.selection = [msg_area, composer_area]
                     .iter()
                     .copied()
                     .find(|r| rect_contains(*r, row, col))
@@ -119,7 +129,10 @@ impl App {
             self.view.selection = None;
             return;
         }
-        let text = extract_selection_text(&self.view.frame_text, sel);
+        let text = extract_selection_text(
+            &self.view.paint.lock().expect("paint handoff").frame_text,
+            sel,
+        );
         self.view.selection = None;
         if !text.is_empty() {
             if copy_to_clipboard(&text) {

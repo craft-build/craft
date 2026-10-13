@@ -7,10 +7,13 @@ use ratatui::widgets::Paragraph;
 use super::theme;
 use crate::tui::app::{App, Message};
 use crate::tui::compat;
+use crate::tui::geom;
 use crate::tui::hyperlink;
 use crate::tui::style::Style;
 use crate::tui::text::{Line, Span};
 use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
+
+use std::collections::VecDeque;
 
 mod cards;
 mod text;
@@ -34,18 +37,140 @@ fn clamp_row_u16(delta: u32) -> u16 {
 }
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
-    let t = theme::current();
-
     let inner = Rect {
         x: area.x + MARGIN,
         y: area.y + 1,
         width: area.width.saturating_sub(MARGIN * 2),
         height: area.height.saturating_sub(1),
     };
-    let width = inner.width as usize;
-    if width == 0 {
+    if inner.width == 0 {
         return;
     }
+    let g = crate::tui::geom::Rect::new(inner.x, inner.y, inner.width, inner.height);
+    let build = build_frame(app, g);
+
+    // App lines meet the legacy ratatui painter here; the compat shim
+    // borrows them as ratatui text at the paint boundary. Image bands
+    // blank-pad their reserved rows, exactly as the slice loop computed.
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner.height as usize);
+    for band in &build.bands {
+        match band {
+            Band::Text(rows) => lines.extend(rows.iter().cloned()),
+            Band::Image { rows, .. } => lines.extend((0..*rows).map(|_| Line::default())),
+        }
+    }
+    let para = Paragraph::new(compat::rat_text(&lines));
+    f.render_widget(para, inner);
+
+    // Draw inline images over their reserved rows. Like the hyperlink
+    // injection this happens after the Paragraph so the layout math is
+    // untouched; skipped rows (scrolled out above or below) simply don't
+    // draw.
+    let mut off: u16 = 0;
+    for band in &build.bands {
+        match band {
+            Band::Text(rows) => off += rows.len() as u16,
+            Band::Image { state, rows } => {
+                state.render(
+                    Rect {
+                        x: inner.x,
+                        y: inner.y + off,
+                        width: inner.width,
+                        height: *rows,
+                    },
+                    f,
+                );
+                off += rows;
+            }
+        }
+    }
+
+    // The search modal's current match highlight (F.3): the segment's
+    // visible cells are reversed, mirroring the reference's
+    // `Cursor::render(..., highlight)`.
+    if let Some((start, end)) = build.highlight {
+        for row in start..end {
+            for col in 0..inner.width {
+                let cell = f
+                    .buffer_mut()
+                    .cell_mut((inner.x + col, inner.y + row))
+                    .expect("bounded by inner");
+                std::mem::swap(&mut cell.fg, &mut cell.bg);
+            }
+        }
+    }
+
+    // Rewrite the linked header cells in place: spans stayed plain text
+    // during layout, so wrap math is unaffected. The mux gate and the
+    // single-row/column bounds were applied when the links were resolved.
+    for (row, col_start, col_end, uri) in &build.links {
+        for col in *col_start..*col_end {
+            let cell = f
+                .buffer_mut()
+                .cell_mut((inner.x + col, inner.y + row))
+                .expect("col bounded by inner.width, vis by inner.height");
+            hyperlink::apply_to_cell(cell, uri);
+        }
+    }
+
+    // Publish the hit regions and the transcript area's width through the
+    // frame handoff (event handlers read them one frame later).
+    let mut p = app.view.paint.lock().expect("paint handoff");
+    p.tool_regions = build
+        .tool_spans
+        .iter()
+        .map(|&(idx, s, e)| {
+            (
+                idx,
+                crate::tui::geom::Rect::new(g.x, g.y + s, g.width, e - s),
+            )
+        })
+        .collect();
+    p.notice_regions = build
+        .notice_rows
+        .iter()
+        .map(|&(idx, r)| (idx, crate::tui::geom::Rect::new(g.x, g.y + r, g.width, 1)))
+        .collect();
+    p.width = area.width;
+}
+
+/// One horizontal band of the visible transcript produced by
+/// [`build_frame`]: consecutive caption rows, or reserved inline-image rows.
+enum Band {
+    /// Caption rows in document order, sliced to the viewport.
+    Text(Vec<Line<'static>>),
+    /// Reserved inline-image rows, capacity-clamped like the text rows.
+    Image {
+        state: std::sync::Arc<crate::tui::ui::image::ImageRenderState>,
+        rows: u16,
+    },
+}
+
+/// The painter-neutral transcript frame: visible bands plus hit-region,
+/// link, and highlight data, all addressed in inner-rect-relative rows so
+/// the legacy ratatui painter and the slt painter share one math.
+struct FrameBuild {
+    bands: Vec<Band>,
+    /// (message index, start..end rows) of collapsible tool cards.
+    tool_spans: Vec<(usize, u16, u16)>,
+    /// (message index, row) of "click to expand" notice rows.
+    notice_rows: Vec<(usize, u16)>,
+    /// (row, col_start, col_end, uri) of card link headers; empty under a
+    /// muxed terminal or when every header is off-screen.
+    links: Vec<(u16, u16, u16, String)>,
+    /// Search-highlight rows (start..end), when the highlighted segment
+    /// intersects the viewport.
+    highlight: Option<(u16, u16)>,
+}
+
+/// Build the frame's visible transcript: refill the segment document, resolve
+/// the viewport through the scrollback engine (follow pins to the bottom,
+/// anything else is clamped back inside its segment), and slice the visible
+/// rows into bands. This is the single source of truth for both painters —
+/// the math is TRUTH, painting is per-backend.
+fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
+    let t = theme::current();
+    let width = inner.width as usize;
 
     // Build the frame's segment document: one segment per block, in
     // deterministic message order, so stored scroll positions survive the
@@ -85,15 +210,8 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let mut tool_seg_ranges: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, start, end)
     let mut notice_seg_rows: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, seg, row)
     // (segment index, link) for card headers carrying an OSC-8 target;
-    // injected into the buffer after layout, once the row is known.
+    // resolved into viewport rows once the layout is known.
     let mut card_links: Vec<(usize, hyperlink::Hyperlink)> = Vec::new();
-    // (segment, caption rows, render state) for inline images; drawn into
-    // the buffer after the Paragraph, mirroring the hyperlink injection.
-    let mut image_renders: Vec<(
-        usize,
-        u16,
-        std::sync::Arc<crate::tui::ui::image::ImageRenderState>,
-    )> = Vec::new();
     // (segment, tool id, base64 payload) collected during the message walk;
     // resolved into render states right after it.
     let mut pending_images: Vec<(usize, String, String)> = Vec::new();
@@ -166,9 +284,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 app.view.segments.push(Segment::with_lines(lines));
                 // F.6 inline images: `view_image` results render below the
                 // card body, in the same segment so scroll/height math
-                // covers them.
-                // The message loop holds `&app.conversation`; decoding is
-                // deferred to after it (the picker cache needs `&mut app`).
+                // covers them. The message loop holds `&app.conversation`;
+                // decoding is deferred to after it (the picker cache needs
+                // `&mut app`).
                 if let Some(data) = image {
                     pending_images.push((app.view.segments.len(), id.clone(), data.clone()));
                 }
@@ -195,17 +313,10 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     app.view.assistant_cache.end_frame();
 
     for (seg, id, data) in pending_images {
-        let caption_rows = app
-            .view
-            .segments
-            .get(seg)
-            .map(|s| s.lines().len().min(u16::MAX as usize) as u16)
-            .unwrap_or(0);
-        if let Some(state) = app.image_state(&id, &data, inner.width) {
-            image_renders.push((seg, caption_rows, state.clone()));
-            if let Some(s) = app.view.segments.get_mut(seg) {
-                s.set_image(Some(state));
-            }
+        if let Some(state) = app.image_state(&id, &data, inner.width)
+            && let Some(s) = app.view.segments.get_mut(seg)
+        {
+            s.set_image(Some(state));
         }
     }
 
@@ -227,10 +338,12 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Slice the visible rows out of the segments starting at the scroll
     // position. Lines are pre-wrapped (one display row each), so slicing
-    // rows is slicing lines.
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner.height as usize);
+    // rows is slicing lines; image rows blank-pad into their own bands so
+    // following segments stay below the image.
+    let mut bands: Vec<Band> = Vec::new();
+    let mut taken: u16 = 0;
     let mut pos = app.view.scroll;
-    while lines.len() < inner.height as usize && pos.seg < app.view.segments.len() {
+    while taken < inner.height && pos.seg < app.view.segments.len() {
         let seg = app
             .view
             .segments
@@ -238,26 +351,43 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             .expect("bounds checked above");
         let caption = seg.lines().len().min(u16::MAX as usize) as u16;
         let img_rows = seg.image.as_ref().map_or(0, |img| img.rows);
-        let capacity = inner.height - lines.len() as u16;
+        let capacity = inner.height - taken;
         // Caption rows are real lines; image rows have none, so they are
         // blank-padded to keep following segments below the image. A
         // position can point inside the image region, so clamp the slice
         // start to the caption lines (height() counts image rows too).
         let take_lines = caption.saturating_sub(pos.row).min(capacity);
         let start = (pos.row as usize).min(seg.lines().len());
-        lines.extend(seg.lines().range(start, take_lines as usize).cloned());
+        let rows: Vec<Line<'static>> = seg
+            .lines()
+            .range(start, take_lines as usize)
+            .cloned()
+            .collect();
+        match bands.last_mut() {
+            // Consecutive caption rows merge into one text band.
+            Some(Band::Text(v)) => v.extend(rows),
+            _ => bands.push(Band::Text(rows)),
+        }
+        taken += take_lines;
         let img_start = caption.max(pos.row);
         let img_end = (caption + img_rows).min(pos.row + capacity);
-        for _ in img_start..img_end {
-            lines.push(Line::default());
+        let img_taken = img_end.saturating_sub(img_start);
+        if img_taken > 0 {
+            if let Some(state) = seg.image.clone() {
+                bands.push(Band::Image {
+                    state,
+                    rows: img_taken,
+                });
+                taken += img_taken;
+            }
         }
         pos.seg += 1;
         pos.row = 0;
     }
 
-    // Visible screen rects of collapsible tool cards (for hover/click),
+    // Visible screen rows of collapsible tool cards (for hover/click),
     // addressed in doc rows so they track the scroll position.
-    app.view.tool_regions = tool_seg_ranges
+    let tool_spans = tool_seg_ranges
         .iter()
         .filter_map(|&(idx, s_start, s_end)| {
             let vis_start = clamp_row_u16(
@@ -274,27 +404,13 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                     .saturating_sub(top_row),
             )
             .min(inner.height);
-            if vis_end <= vis_start || vis_start >= inner.height {
-                None
-            } else {
-                Some((
-                    idx,
-                    // Stored regions use the app rect; paint-time rects stay
-                    // ratatui (converted where they are painted).
-                    crate::tui::geom::Rect::new(
-                        inner.x,
-                        inner.y + vis_start,
-                        inner.width,
-                        vis_end - vis_start,
-                    ),
-                ))
-            }
+            (vis_end > vis_start && vis_start < inner.height).then_some((idx, vis_start, vis_end))
         })
         .collect();
 
-    // Visible one-row rects of "click to expand" notice rows, addressed the
-    // same way as card regions so they track the scroll position.
-    app.view.notice_regions = notice_seg_rows
+    // Visible rows of "click to expand" notice rows, addressed the same
+    // way as card regions so they track the scroll position.
+    let notice_rows = notice_seg_rows
         .iter()
         .filter_map(|&(idx, seg, row)| {
             let vis = clamp_row_u16(
@@ -305,74 +421,18 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                     })
                     .saturating_sub(top_row),
             );
-            (vis < inner.height).then_some((
-                idx,
-                crate::tui::geom::Rect::new(inner.x, inner.y + vis, inner.width, 1),
-            ))
+            (vis < inner.height).then_some((idx, vis))
         })
         .collect();
 
-    // App lines meet the legacy ratatui painter here; the compat shim
-    // borrows them as ratatui text at the paint boundary.
-    let para = Paragraph::new(compat::rat_text(&lines));
-    f.render_widget(para, inner);
-
-    // Draw inline images over their reserved rows. Like the hyperlink
-    // injection this happens after the Paragraph so the layout math is
-    // untouched; skipped rows (scrolled out above or below) simply don't
-    // draw.
-    for (seg, caption_rows, state) in image_renders {
-        let doc = layout.doc_row(ScrollPos {
-            seg,
-            row: caption_rows,
-        });
-        if doc < top_row {
-            continue;
-        }
-        let vis = clamp_row_u16(doc - top_row);
-        if vis >= inner.height {
-            continue;
-        }
-        let height = state.rows.min(inner.height - vis);
-        state.render(
-            Rect {
-                x: inner.x,
-                y: inner.y + vis,
-                width: inner.width,
-                height,
-            },
-            f,
-        );
-    }
-
-    // The search modal's current match highlight (F.3): the segment's
-    // visible cells are reversed, mirroring the reference's
-    // `Cursor::render(..., highlight)`.
-    if let Some(seg) = app.view.highlight_segment
-        && let Some(s) = app.view.segments.get(seg)
-    {
-        let start = layout.doc_row(ScrollPos { seg, row: 0 });
-        let end = start + u32::from(s.height(inner.width));
-        for doc in start.max(top_row)..end.min(top_row + u32::from(inner.height)) {
-            let vis = (doc - top_row) as u16;
-            for col in 0..inner.width {
-                let cell = f
-                    .buffer_mut()
-                    .cell_mut((inner.x + col, inner.y + vis))
-                    .expect("bounded by inner");
-                std::mem::swap(&mut cell.fg, &mut cell.bg);
-            }
-        }
-    }
-
-    // Rewrite the linked header cells in place: spans stayed plain text
-    // during layout, so wrap math is unaffected. Skipped under tmux, whose
-    // passthrough mangles OSC-8. The single-row guard mirrors the
-    // reference: a header is one pre-wrapped row, and column bounds keep
-    // any overflow from writing outside the viewport.
-    if !card_links.is_empty() && !hyperlink::is_muxed() {
+    // Resolve card links to visible rows: the header sits one row under the
+    // card's top-padding blank. Skipped under tmux, whose passthrough
+    // mangles OSC-8. The single-row guard mirrors the reference: a header
+    // is one pre-wrapped row, and column bounds keep any overflow from
+    // writing outside the viewport.
+    let mut links = Vec::new();
+    if !hyperlink::is_muxed() {
         for (seg, hl) in card_links {
-            // The header sits one row under the card's top-padding blank.
             let doc = layout.doc_row(ScrollPos { seg, row: 1 });
             // Skip rows scrolled out above (plain subtraction, not
             // saturating) or pushed out below the viewport.
@@ -386,15 +446,36 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             if hl.col_start >= inner.width || hl.col_end > inner.width {
                 continue;
             }
-            for col in hl.col_start..hl.col_end {
-                let cell = f
-                    .buffer_mut()
-                    .cell_mut((inner.x + col, inner.y + vis))
-                    .expect("col bounded by inner.width, vis by inner.height");
-                hyperlink::apply_to_cell(cell, &hl.uri);
-            }
+            links.push((vis, hl.col_start, hl.col_end, hl.uri));
         }
     }
+
+    let highlight = highlight_visible(app, &layout, top_row, inner);
+
+    FrameBuild {
+        bands,
+        tool_spans,
+        notice_rows,
+        links,
+        highlight,
+    }
+}
+
+/// The search modal's current match highlight (F.3) as visible rows: the
+/// highlighted segment's doc-row span intersected with the viewport.
+fn highlight_visible(
+    app: &App,
+    layout: &Layout<'_>,
+    top_row: u32,
+    inner: crate::tui::geom::Rect,
+) -> Option<(u16, u16)> {
+    let seg = app.view.highlight_segment?;
+    let s = app.view.segments.get(seg)?;
+    let start = layout.doc_row(ScrollPos { seg, row: 0 });
+    let end = start + u32::from(s.height(inner.width));
+    let lo = start.max(top_row);
+    let hi = end.min(top_row + u32::from(inner.height));
+    (hi > lo).then(|| ((lo - top_row) as u16, (hi - top_row) as u16))
 }
 
 #[cfg(test)]
@@ -777,19 +858,381 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt transcript painter (stubs until the transcript wave)
+// Wave 2a: the slt transcript painter (segment flow per the docs contract)
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Paint the transcript: segments in document order via the existing
-/// scrollback engine, with inline images and hyperlink cells.
+/// Paint the transcript: the visible bands from [`build_frame`] become
+/// per-segment children in document order — text runs as fixed-height
+/// `.draw()` regions painting app `Line`s via `Buffer::set_string`, image
+/// segments as slt image widgets — plus a trailing bookkeeping region that
+/// publishes `msg_area` / hit regions / width into [`PaintData`] for the
+/// next frame's event handlers and wrap math (one frame stale, like the
+/// ratatui-era snapshot reads).
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
-    let _ = (ui, app);
-    // TODO(wave-2a transcript): segment-flow painter per docs contract.
+    // slt lays out after the frame closure returns, so the wrap width and
+    // viewport height can only come from the previous frame's handoff; the
+    // bookkeeping draw below republishes the true rect every frame (the
+    // parity harness renders twice, so frame 2 is exact). 80 columns is the
+    // first-frame fallback.
+    let (area_w, area_h) = {
+        let p = app.view.paint.lock().expect("paint handoff");
+        (if p.width == 0 { 80 } else { p.width }, p.msg_area.height)
+    };
+    let inner = geom::Rect {
+        x: 0,
+        y: 0,
+        width: area_w.saturating_sub(MARGIN * 2),
+        height: area_h.saturating_sub(1),
+    };
+    let build = if inner.width == 0 {
+        None
+    } else {
+        Some(build_frame(app, inner))
+    };
+
+    let paint = app.view.paint.clone();
+    ui.container().grow(1).col(move |ui| {
+        // The legacy painter's top margin row (its `inner.y = area.y + 1`).
+        ui.container().h(1).draw(|_, _| {});
+
+        let mut total_rows: u32 = 0;
+        if let Some(build) = build {
+            let FrameBuild {
+                bands,
+                tool_spans,
+                notice_rows,
+                links,
+                ..
+            } = build;
+            let bg = Some(theme::current().bg_app);
+            let cols = u32::from(inner.width);
+            let mut links = VecDeque::from(links);
+            let mut row_cursor: u16 = 0;
+            for band in bands {
+                match band {
+                    Band::Text(rows) => {
+                        let count = rows.len() as u16;
+                        if count > 0 {
+                            // Links land inside their band: rows are
+                            // inner-relative and ascend with the walk.
+                            let mut band_links = Vec::new();
+                            while let Some(&(row, ..)) = links.front() {
+                                if row >= row_cursor.wrapping_add(count) {
+                                    break;
+                                }
+                                let (row, cs, ce, uri) = links.pop_front().expect("peeked");
+                                band_links.push((row - row_cursor, cs, ce, uri));
+                            }
+                            ui.container()
+                                .ml(u32::from(MARGIN))
+                                .mr(u32::from(MARGIN))
+                                .h(u32::from(count))
+                                .draw(move |buf, rect| {
+                                    paint_rows_slt(buf, rect, &rows, &band_links, bg);
+                                });
+                            total_rows += u32::from(count);
+                            row_cursor += count;
+                        }
+                    }
+                    Band::Image { state, rows } => {
+                        if rows > 0 {
+                            if let Some(px) = state.slt_pixels() {
+                                // Margins align the widget with the text
+                                // column; slt owns protocol detection and
+                                // falls back to halfblocks itself.
+                                ui.container()
+                                    .ml(u32::from(MARGIN))
+                                    .mr(u32::from(MARGIN))
+                                    .h(u32::from(rows))
+                                    .row(|ui| {
+                                        if iterm_terminal() {
+                                            let file = px.file.clone();
+                                            ui.iterm_image(&file, cols, u32::from(rows));
+                                        } else {
+                                            let rgba = px.rgba.clone();
+                                            ui.kitty_image(
+                                                &rgba,
+                                                px.pixel_width,
+                                                px.pixel_height,
+                                                cols,
+                                                u32::from(rows),
+                                            );
+                                        }
+                                    });
+                            } else {
+                                // No pixel payload: still reserve the rows so
+                                // the flow below the image stays aligned.
+                                ui.container().h(u32::from(rows)).draw(|_, _| {});
+                            }
+                            total_rows += u32::from(rows);
+                            row_cursor += rows;
+                        }
+                    }
+                }
+            }
+            let paint = paint.clone();
+            ui.container().grow(1).draw(move |_, rect| {
+                publish_frame_slt(&paint, rect, total_rows, &tool_spans, &notice_rows);
+            });
+        } else {
+            // Degenerate width: keep the layout slot and hand off an empty
+            // frame so the next render sees the true area.
+            let paint = paint.clone();
+            ui.container().grow(1).draw(move |_, rect| {
+                publish_frame_slt(&paint, rect, 0, &[], &[]);
+            });
+        }
+    });
 }
 
-/// Trailing per-frame buffer pass: selection REVERSED, search-highlight
-/// swap, and the frame_text/hit-region handoff back into `app.view`.
+/// Paint pre-wrapped app lines into an slt buffer region: one display row
+/// per line, spans left to right, advancing `x` by each span's unicode
+/// width. App styles are slt styles already; unset span backgrounds inherit
+/// the app background, mirroring how the ratatui Paragraph's style patch
+/// kept the root fill under the text. The band's rect is the inner column
+/// (the declaring container carries the margins), so `set_string`'s clip
+/// trims unwrappable rows exactly where the legacy Paragraph did.
+fn paint_rows_slt(
+    buf: &mut slt::buffer::Buffer,
+    rect: slt::Rect,
+    lines: &[Line<'static>],
+    links: &[(u16, u16, u16, String)],
+    bg: Option<crate::tui::style::Color>,
+) {
+    use unicode_width::UnicodeWidthStr;
+
+    let x_max = rect.x.saturating_add(rect.width);
+    for (dy, line) in lines.iter().enumerate() {
+        let y = rect.y + dy as u32;
+        let mut x = rect.x;
+        for span in &line.spans {
+            let mut style = span.style;
+            if style.bg.is_none() {
+                style.bg = bg;
+            }
+            if x < x_max {
+                buf.set_string(x, y, &span.content, style);
+            }
+            x = x.saturating_add(span.width() as u32);
+        }
+        // ratatui parity: a wide grapheme's continuation cell reads as a
+        // plain space in the frame dump (ratatui resets the skipped cell);
+        // slt leaves it empty-symbol, so normalize it here.
+        let mut cx = rect.x;
+        while cx < x_max {
+            let width = buf
+                .try_get(cx, y)
+                .map(|c| UnicodeWidthStr::width(c.symbol.as_str()) as u32)
+                .unwrap_or(1);
+            if width == 2 {
+                if let Some(cell) = buf.try_get_mut(cx + 1, y) {
+                    cell.set_char(' ');
+                }
+                cx += 2;
+            } else {
+                cx += 1;
+            }
+        }
+    }
+    for (dy, col_start, col_end, uri) in links {
+        let y = rect.y + u32::from(*dy);
+        if y >= rect.bottom() {
+            continue;
+        }
+        for col in *col_start..*col_end {
+            let x = rect.x + u32::from(col);
+            if x >= x_max {
+                continue;
+            }
+            if let Some(cell) = buf.try_get_mut(x, y) {
+                apply_link_slt(cell, uri);
+            }
+        }
+    }
+}
+
+/// Wrap a linked cell's symbol in OSC-8 and set the first-class
+/// [`slt::Cell::hyperlink`] target. slt counterpart of
+/// [`hyperlink::apply_to_cell`]: the escape bytes live in the symbol (what
+/// the golden fixtures capture byte-for-byte), while `hyperlink` carries
+/// the URL for terminals that render OSC 8 natively.
+fn apply_link_slt(cell: &mut slt::Cell, uri: &str) {
+    let prev = cell.symbol.to_string();
+    let wrapped = format!("\u{1b}]8;;{uri}\u{1b}\\{prev}\u{1b}]8;;\u{1b}\\");
+    cell.symbol = wrapped.into();
+    cell.hyperlink = Some(uri.to_string().into());
+}
+
+/// Publish the transcript frame handoff from the leftover region under the
+/// last band: its x/width match the transcript area, its bottom is the
+/// area's bottom, and the content rows above it are ours, so the area's
+/// origin and the inner-relative hit regions resolve exactly.
+fn publish_frame_slt(
+    paint: &std::sync::Arc<std::sync::Mutex<crate::tui::app::PaintData>>,
+    rect: slt::Rect,
+    total_rows: u32,
+    tool_spans: &[(usize, u16, u16)],
+    notice_rows: &[(usize, u16)],
+) {
+    let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
+    let mut p = paint.lock().expect("paint handoff");
+    let area_y = rect.y.saturating_sub(total_rows + 1);
+    let bottom = rect.y.saturating_add(rect.height);
+    p.msg_area = geom::Rect::new(
+        clamp16(rect.x),
+        clamp16(area_y),
+        clamp16(rect.width),
+        clamp16(bottom.saturating_sub(area_y)),
+    );
+    p.width = clamp16(rect.width);
+    let inner_x = rect.x + u32::from(MARGIN);
+    let inner_y = area_y + 1;
+    let inner_w = rect.width.saturating_sub(u32::from(MARGIN) * 2);
+    p.tool_regions = tool_spans
+        .iter()
+        .map(|&(idx, s, e)| {
+            (
+                idx,
+                geom::Rect::new(
+                    clamp16(inner_x),
+                    clamp16(inner_y + u32::from(s)),
+                    clamp16(inner_w),
+                    e - s,
+                ),
+            )
+        })
+        .collect();
+    p.notice_regions = notice_rows
+        .iter()
+        .map(|&(idx, r)| {
+            (
+                idx,
+                geom::Rect::new(
+                    clamp16(inner_x),
+                    clamp16(inner_y + u32::from(r)),
+                    clamp16(inner_w),
+                    1,
+                ),
+            )
+        })
+        .collect();
+}
+
+/// iTerm2 terminals get the OSC 1337 widget (encoded payload); everything
+/// else goes through `kitty_image`, whose own capability probe falls back
+/// to halfblock cells. Env-based so tests deterministically take the
+/// halfblock path.
+fn iterm_terminal() -> bool {
+    std::env::var_os("TERM_PROGRAM").is_some_and(|v| v == "iTerm.app")
+}
+
+/// Trailing per-frame buffer pass, declared last so it sees the finished
+/// cells: the search-highlight fg↔bg swap, the full-screen `frame_text`
+/// snapshot, and the current selection as REVERSED cells (the same math as
+/// the legacy `render_selection`).
 pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
-    let _ = (ui, app);
-    // TODO(wave-2a transcript): full-screen trailing `.draw()` surgery.
+    let sel = app.view.selection;
+    let paint = app.view.paint.clone();
+    // The highlight span is recomputed from the doc engine (the same math
+    // `build_frame` used this frame); the closure translates it to screen
+    // rows through the fresh `msg_area` the transcript just published.
+    let hl_rows = {
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        let top_row = layout.doc_row(app.view.scroll);
+        highlight_visible(
+            app,
+            &layout,
+            top_row,
+            geom::Rect::new(0, 0, app.view.view_width, app.view.view_height),
+        )
+    };
+
+    ui.overlay(|ui| {
+        let _ = ui.container().grow(1).draw(move |buf, _rect| {
+            let (inner_x, inner_y, inner_w) = {
+                let p = paint.lock().expect("paint handoff");
+                let m = p.msg_area;
+                (
+                    u32::from(m.x + MARGIN),
+                    u32::from(m.y + 1),
+                    u32::from(m.width.saturating_sub(MARGIN * 2)),
+                )
+            };
+
+            // Search highlight (F.3): the segment's visible cells swap
+            // fg↔bg, mirroring the reference's `Cursor::render(highlight)`.
+            if let Some((start, end)) = hl_rows
+                && inner_w > 0
+            {
+                for row in start..end {
+                    let y = inner_y + u32::from(row);
+                    for col in 0..inner_w {
+                        if let Some(cell) = buf.try_get_mut(inner_x + u32::from(col), y) {
+                            std::mem::swap(&mut cell.style.fg, &mut cell.style.bg);
+                        }
+                    }
+                }
+            }
+
+            // Snapshot the frame as plain text (selection copy extracts from
+            // this); link cells carry OSC 8 in their symbols, so strip it.
+            let mut frame_text: Vec<String> = Vec::with_capacity(buf.area.height as usize);
+            for r in 0..buf.area.height {
+                let mut line = String::with_capacity(buf.area.width as usize);
+                for c in 0..buf.area.width {
+                    let symbol = buf.get(c, r).symbol.as_str();
+                    if symbol.contains('\u{1b}') {
+                        line.push_str(&hyperlink::strip_osc8(symbol));
+                    } else {
+                        line.push_str(symbol);
+                    }
+                }
+                frame_text.push(line);
+            }
+
+            // The current selection as REVERSED cells: the highlight binds
+            // to real text (per-row extents inside the selection's region)
+            // so padding, margins, and decoration glyphs never highlight.
+            if let Some(sel) = sel
+                && !sel.is_empty()
+            {
+                let ((r1, c1), (r2, c2)) = sel.normalized();
+                let region = sel.region;
+                for r in r1..=r2.min(
+                    u16::try_from(buf.area.height)
+                        .unwrap_or(u16::MAX)
+                        .saturating_sub(1),
+                ) {
+                    if r < region.y || r >= region.y + region.height {
+                        continue;
+                    }
+                    let Some(row) = frame_text.get(r as usize) else {
+                        continue;
+                    };
+                    let Some((first, last)) = crate::tui::selection::text_extent(row, region)
+                    else {
+                        continue;
+                    };
+                    let (first, last) = (first as u16, last as u16);
+                    let row_from = if r == r1 { c1 } else { region.x };
+                    let row_to = if r == r2 {
+                        c2
+                    } else {
+                        region.x + region.width - 1
+                    };
+                    let from = row_from.max(first);
+                    let to = row_to.min(last);
+                    for c in from..=to {
+                        if let Some(cell) = buf.try_get_mut(u32::from(c), u32::from(r)) {
+                            cell.style
+                                .modifiers
+                                .insert(crate::tui::style::Modifiers::REVERSED);
+                        }
+                    }
+                }
+            }
+
+            paint.lock().expect("paint handoff").frame_text = frame_text;
+        });
+    });
 }

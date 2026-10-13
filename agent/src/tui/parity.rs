@@ -43,12 +43,22 @@ pub(crate) fn render_screen(app: &mut App) -> String {
     normalize(frame)
 }
 
-/// Rows of a rendered `slt` buffer, trailing blanks trimmed.
+/// Rows of a rendered `slt` buffer, trailing blanks trimmed. Wide-char
+/// continuation cells are normalized to a space so the dumps compare
+/// byte-identically with the ratatui fixture captures (ratatui writes " "
+/// into skipped cells; slt leaves the symbol empty — visually identical).
 pub(crate) fn buffer_rows(buf: &slt::buffer::Buffer) -> String {
     (0..buf.area.height)
         .map(|r| {
             (0..buf.area.width)
-                .map(|c| buf.get(c, r).symbol.clone())
+                .map(|c| {
+                    let s = buf.get(c, r).symbol.to_string();
+                    if s.is_empty() {
+                        " ".to_string()
+                    } else {
+                        s
+                    }
+                })
                 .collect::<String>()
                 .trim_end()
                 .to_string()

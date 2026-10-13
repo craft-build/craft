@@ -433,12 +433,299 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt composer panel (stub until the chrome wave lands)
+// Wave 2a: the slt composer panel
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Render the composer box + status + footer hint rows into the slt
-/// frame's bottom block (`avail` = the chat column's width).
-pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, avail: u32) {
-    let (ui, _app, _avail) = (ui, app, avail);
-    // TODO(wave-2a chrome): port render_input/render_status/footer hints.
+/// frame's bottom block (the shared top border is drawn by `frame.rs`).
+///
+/// `avail` is frame.rs's `width - sidebar_width`, but the legacy column
+/// layout (`[Min(60), Length(34)]`) keeps the chat at least 60 wide and
+/// squeezes the sidebar instead — the composer recomputes that width so
+/// narrow terminals (the 80-col fixture terminal → chat 60) match.
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, _avail: u32) {
+    let t = theme::current();
+    const SIDEBAR_MIN_WIDTH: u32 = 80; // legacy gate (frame.rs)
+    const SIDEBAR_WIDTH: u32 = 34; // legacy `ui/mod.rs` SIDEBAR_WIDTH
+    const CHAT_MIN_WIDTH: u32 = 60; // legacy `Constraint::Min(60)`
+    let term_w = ui.width();
+    let avail = if app.session.sidebar_open && term_w >= SIDEBAR_MIN_WIDTH {
+        (term_w - SIDEBAR_WIDTH).max(CHAT_MIN_WIDTH)
+    } else {
+        term_w
+    }
+    .max(1);
+
+    // Height math mirrors `draw()`: wrap width → row count → capped rows.
+    let text_w = (avail as usize)
+        .saturating_sub(2 + TEXT_LEFT_PAD + TEXT_RIGHT_PAD)
+        .max(1);
+    let rows = super::messages::wrap_rows(&app.composer.text, text_w);
+    let view_rows = rows.len().min(MAX_TEXT_ROWS);
+    let box_h = (view_rows + 3) as u32; // pad + rows + pad + info line
+
+    // ── Composer box: 1 cell of app-bg margin each side of the surface ──
+    let box_resp = ui
+        .container()
+        .bg(t.bg_surface)
+        .ml(1)
+        .w(avail.saturating_sub(2))
+        .h(box_h)
+        .col(|ui| {
+            box_row(ui, &[]); // top padding row
+
+            if avail < 11 {
+                return; // legacy guard: inset too narrow for bar/text/info
+            }
+
+            let chars: Vec<char> = app.composer.text.chars().collect();
+            let cursor = app.composer.cursor.min(chars.len());
+            let (cursor_row, _cursor_col) = cursor_row_col(&rows, &chars, cursor);
+            let offset = cursor_row
+                .saturating_sub(view_rows.saturating_sub(1))
+                .min(rows.len().saturating_sub(view_rows));
+
+            let text_style = Style::default().fg(t.text_primary).bg(t.bg_surface);
+            let surf = Style::default().bg(t.bg_surface);
+            let placeholder = offset == 0 && app.composer.text.is_empty();
+
+            for i in offset..(offset + view_rows).min(rows.len()) {
+                let (s, e) = rows[i];
+                let line: String = chars[s..e].iter().collect();
+                // Padding is display cells (the wrap width is cells), so
+                // wide glyphs don't pull the composer row past the box
+                // edge.
+                let w = UnicodeWidthStr::width(line.as_str());
+
+                if placeholder {
+                    // Placeholder on the first visible row; the spoofed
+                    // caret sits on its first cell.
+                    let mut spans = apply_caret(
+                        vec![Span::styled(
+                            "Message Craft…".to_string(),
+                            Style::default().fg(t.text_tertiary).bg(t.bg_surface),
+                        )],
+                        0,
+                    );
+                    spans.push(Span::styled(
+                        " ".repeat(text_w.saturating_sub(w.max(13))),
+                        surf,
+                    ));
+                    box_row(ui, &spans);
+                    continue;
+                }
+
+                // Bang-prefix highlighting on the first wrapped row only.
+                let mut spans = if s == 0 {
+                    shell_spans(&line, text_style)
+                        .unwrap_or_else(|| vec![Span::styled(line.clone(), text_style)])
+                } else {
+                    vec![Span::styled(line.clone(), text_style)]
+                };
+
+                // Spoofed caret (wave 2a): the hardware cursor becomes a
+                // REVERSED cell over the char at the cursor position; the
+                // real caret returns with wave 2b's TextareaState.
+                let mut padded = false;
+                if i == cursor_row {
+                    let pos = cursor.saturating_sub(s);
+                    if pos < e - s {
+                        spans = apply_caret(spans, pos);
+                    } else if w < text_w {
+                        // Caret one cell past the text: reverse the first
+                        // padding cell (the hardware caret's position).
+                        spans.push(Span::styled(" ".repeat(text_w - w - 1), surf));
+                        spans.push(Span::styled(
+                            " ",
+                            Style::default()
+                                .bg(t.bg_surface)
+                                .add_modifier(Modifier::REVERSED),
+                        ));
+                        padded = true;
+                    } else {
+                        // Full row: the legacy caret x clamped to the last
+                        // cell, so the final char carries the caret.
+                        spans = apply_caret(spans, e - s - 1);
+                    }
+                }
+                if !padded && w < text_w {
+                    spans.push(Span::styled(" ".repeat(text_w - w), surf));
+                }
+                box_row(ui, &spans);
+            }
+
+            box_row(ui, &[]); // padding row between text and the info line
+
+            // Info line: `model · provider · thinking` left, context usage
+            // right-aligned (same math as `render_input`).
+            let tertiary = Style::default().fg(t.text_tertiary).bg(t.bg_surface);
+            let sep = || Span::styled(" · ", tertiary);
+            let (model, provider) = app.model();
+            let mut left = vec![
+                Span::styled(
+                    app.mode.label(),
+                    Style::default()
+                        .fg(app.mode.color())
+                        .bg(t.bg_surface)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                sep(),
+                Span::styled(
+                    model.to_string(),
+                    Style::default().fg(t.blue_400).bg(t.bg_surface),
+                ),
+                sep(),
+                Span::styled(provider.to_string(), tertiary),
+                sep(),
+            ];
+            // Attached images (F.6): a count chip, so staged attachments
+            // are visible before the message is sent.
+            if !app.images.attached.is_empty() {
+                left.push(Span::styled(
+                    format!(
+                        "[{} image{}] ",
+                        app.images.attached.len(),
+                        if app.images.attached.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ),
+                    Style::default().fg(t.accent).bg(t.bg_surface),
+                ));
+                left.push(sep());
+            }
+            left.push(Span::styled(
+                app.thinking_label(),
+                Style::default().fg(t.warning).bg(t.bg_surface),
+            ));
+            let right = format!("{}  ", app.session.token_label);
+            let info_w = (avail as usize).saturating_sub(6); // inset.width - pads
+            let right_w = right.chars().count();
+            let (left, left_w) = truncate_spans(left, info_w.saturating_sub(right_w + 1));
+            let gap = info_w.saturating_sub(left_w + right_w);
+            let mut info = left;
+            info.push(Span::styled(" ".repeat(gap), surf));
+            info.push(Span::styled(right, tertiary));
+            box_row(ui, &info);
+        });
+
+    // ── Status row (single bottom row, full width) ──
+    let tertiary = Style::default().fg(t.text_tertiary);
+    let sep = || Span::styled(" · ", tertiary);
+    // Two leading spaces line the indicator up under the composer's
+    // accent bar, which sits two cells in from the row's left edge.
+    let mut left = vec![Span::raw("  ")];
+    left.extend(status_indicator(app));
+    left.extend([
+        sep(),
+        Span::styled(abbreviated_cwd(&app.session.cwd), tertiary),
+    ]);
+    let right = if let Some(flash) = app.flash_text() {
+        format!("  {flash}  ")
+    } else {
+        "ctrl+p commands  ".to_string()
+    };
+    let width = avail as usize;
+    let right_w = right.chars().count();
+    let max_left = width.saturating_sub(right_w + 1);
+    let (left, left_w) = truncate_spans(left, max_left);
+    let gap = width.saturating_sub(left_w + right_w);
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(gap)));
+    let right_style = if app.flash_text().is_some() {
+        Style::default().fg(t.accent)
+    } else {
+        tertiary
+    };
+    spans.push(Span::styled(right, right_style));
+    ui.line(|ui| {
+        for span in &spans {
+            ui.styled(span.content.as_ref(), span.style);
+        }
+    });
+
+    // ── Footer hint row (draw()'s footer block) ──
+    if let Some(hint) = app.plan_mode.plan_form.hint_line() {
+        ui.line(|ui| {
+            for span in &hint.spans {
+                ui.styled(span.content.as_ref(), span.style);
+            }
+        });
+    } else if app.active_task.is_none() && app.any_task_working() {
+        // Main-chat hint while subagents run: how many, and the chord
+        // that opens their chats (task 96).
+        let n = app
+            .task_chats
+            .iter()
+            .filter(|c| c.outcome.is_none())
+            .count();
+        let hint = format!(
+            "{n} task{} running — Ctrl-N to view",
+            if n == 1 { "" } else { "s" }
+        );
+        ui.styled(hint, Style::default().fg(t.text_tertiary));
+    } else {
+        // The reserved blank row.
+        ui.styled(" ", Style::default().bg(t.bg_app));
+    }
+
+    // Publish the composer area for mouse selection confinement (the
+    // box container's rect — previous frame's, matching the one-frame
+    // handoff cadence the transcript regions use).
+    let paint = app.view.paint.clone();
+    let rect = box_resp.rect;
+    ui.container().draw(move |_buf, _area| {
+        if let Ok(mut p) = paint.lock() {
+            p.composer_area = crate::tui::geom::Rect::from_slt(rect);
+        }
+    });
+}
+
+/// One row inside the composer surface box: every row carries the accent
+/// bar at column 1 (it spans the full box height), then optional content
+/// starting after the `▎ ` prefix.
+fn box_row(ui: &mut slt::Context, spans: &[Span<'static>]) {
+    let t = theme::current();
+    let surf = Style::default().bg(t.bg_surface);
+    ui.line(|ui| {
+        ui.styled(" ", surf);
+        ui.styled("▎", Style::default().fg(t.accent).bg(t.bg_surface));
+        ui.styled(" ", surf);
+        for span in spans {
+            ui.styled(span.content.as_ref(), span.style);
+        }
+    });
+}
+
+/// Split the span list at char index `pos` and render that char
+/// REVERSED — the wave-2a spoofed caret idiom (query rows use the same).
+fn apply_caret(spans: Vec<Span<'static>>, pos: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    let mut used = 0usize;
+    let mut done = false;
+    for span in spans {
+        let len = span.content.chars().count();
+        if !done && len > 0 && pos < used + len {
+            let idx = pos - used;
+            let before: String = span.content.chars().take(idx).collect();
+            let ch = span.content.chars().nth(idx).unwrap_or(' ');
+            let after: String = span.content.chars().skip(idx + 1).collect();
+            if !before.is_empty() {
+                out.push(Span::styled(before, span.style));
+            }
+            out.push(Span::styled(
+                ch.to_string(),
+                span.style.add_modifier(Modifier::REVERSED),
+            ));
+            if !after.is_empty() {
+                out.push(Span::styled(after, span.style));
+            }
+            done = true;
+        } else {
+            out.push(span);
+        }
+        used += len;
+    }
+    out
 }

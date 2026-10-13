@@ -13,11 +13,15 @@ use crate::tui::parity;
 use crate::tui::ui::frame::{self, frame};
 
 /// Render a scene twice (prev-frame layout stabilizes scroll/bounds reads)
-/// and dump the finished buffer.
+/// and dump the finished buffer. `status_tick` is reset between the renders
+/// so per-frame mutations from the stabilizing pass don't leak into the
+/// compared frame — the legacy path renders once from a fresh app, so the
+/// final render must start from the same tick 0.
 fn render_slt(app: &mut App) -> String {
     let mut view = frame::View::default();
     let mut tb = slt::TestBackend::new(u32::from(parity::W), u32::from(parity::H));
     tb.render(|ui| frame(ui, app, &mut view));
+    app.status_tick = 0;
     tb.render(|ui| frame(ui, app, &mut view));
     parity::normalize(parity::buffer_rows(tb.buffer()))
 }
@@ -45,7 +49,9 @@ fn golden_fixture_parity_slt() {
                 .lines()
                 .zip(expected.lines().chain(std::iter::repeat("")))
                 .enumerate()
-                .filter_map(|(i, (got, want))| (got != want).then(|| format!("  row {i:>2}: got {got:?} want {want:?}")))
+                .filter_map(|(i, (got, want))| {
+                    (got != want).then(|| format!("  row {i:>2}: got {got:?} want {want:?}"))
+                })
                 .take(8)
                 .collect::<Vec<_>>()
                 .join("\n");

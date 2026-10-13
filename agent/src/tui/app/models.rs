@@ -402,9 +402,46 @@ mod reveal_tests {
     }
 }
 
+/// Painter-written frame handoff: the per-row text snapshot and hit regions
+/// the last paint produced, plus the transcript area's width. Painters run
+/// deferred (after the frame closure returns), so they hand data back
+/// through this shared lock instead of borrowing `App`; event handlers read
+/// it one frame later, exactly as the ratatui-era snapshot was read.
+pub struct PaintData {
+    /// Text of the last rendered frame, one entry per terminal row (used to
+    /// extract selection text on copy).
+    pub frame_text: Vec<String>,
+    /// Selectable regions of the last frame: chat messages and composer input.
+    pub msg_area: Rect,
+    pub composer_area: Rect,
+    /// Screen rects of collapsible tool cards in the last frame: (message
+    /// index, rect). Used for hover highlight and click-to-toggle.
+    pub tool_regions: Vec<(usize, Rect)>,
+    /// One-row screen rects of "click to expand" notice rows: (message
+    /// index, rect). Checked before card regions on click.
+    pub notice_regions: Vec<(usize, Rect)>,
+    /// Outer width of the transcript area in the last frame; the slt painter
+    /// reads it to pre-wrap rows before its own layout resolves (one frame
+    /// stale, 0 until the first paint).
+    pub width: u16,
+}
+
+impl Default for PaintData {
+    fn default() -> Self {
+        PaintData {
+            frame_text: Vec::new(),
+            msg_area: Rect::default(),
+            composer_area: Rect::default(),
+            tool_regions: Vec::new(),
+            notice_regions: Vec::new(),
+            width: 0,
+        }
+    }
+}
+
 /// Viewport state: the scrollback document (segments + the viewport's
-/// position in it) plus the renderer-written frame snapshot (message
-/// doc-row anchors, per-row text, hit regions) and pointer state.
+/// position in it) plus pointer state. The renderer-written frame snapshot
+/// lives behind [`ViewModel::paint`] (see [`PaintData`]).
 pub struct ViewModel {
     /// Top of the viewport as a place in the segment document. Width-
     /// independent, so a resize keeps the anchor segment.
@@ -419,19 +456,9 @@ pub struct ViewModel {
     pub view_width: u16,
     /// Doc row where each message starts (filled by the renderer).
     pub msg_starts: Vec<usize>,
-    /// Text of the last rendered frame, one entry per terminal row (filled by
-    /// the renderer; used to extract selection text on copy).
-    pub frame_text: Vec<String>,
-    /// Selectable regions of the last frame: chat messages and composer input.
-    pub msg_area: Rect,
-    pub composer_area: Rect,
+    /// Painter-written frame handoff (per-row text, hit regions, width).
+    pub paint: std::sync::Arc<std::sync::Mutex<PaintData>>,
     pub selection: Option<Selection>,
-    /// Screen rects of collapsible tool cards in the last frame: (message
-    /// index, rect). Used for hover highlight and click-to-toggle.
-    pub tool_regions: Vec<(usize, Rect)>,
-    /// One-row screen rects of "click to expand" notice rows: (message
-    /// index, rect). Checked before card regions on click.
-    pub notice_regions: Vec<(usize, Rect)>,
     pub hover_tool: Option<usize>,
     /// Click target the current press started on; a press without drag
     /// activates it.
@@ -459,12 +486,8 @@ impl ViewModel {
             view_height: 0,
             view_width: 0,
             msg_starts: Vec::new(),
-            frame_text: Vec::new(),
-            msg_area: Rect::default(),
-            composer_area: Rect::default(),
+            paint: std::sync::Arc::new(std::sync::Mutex::new(PaintData::default())),
             selection: None,
-            tool_regions: Vec::new(),
-            notice_regions: Vec::new(),
             hover_tool: None,
             pending_click: None,
             highlight_segment: None,
