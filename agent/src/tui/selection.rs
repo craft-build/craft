@@ -2,7 +2,7 @@
 //! copy. Terminal-native selection is disabled by mouse capture, so the app
 //! highlights and copies text itself, like opencode's TUI.
 
-use ratatui::layout::Rect;
+use crate::tui::geom::Rect;
 
 /// Glyphs that are UI chrome rather than content: accent bars, focus markers,
 /// box drawing. Never highlighted or copied as text.

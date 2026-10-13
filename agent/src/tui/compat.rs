@@ -114,6 +114,25 @@ pub fn rat_text<'a>(lines: &'a [Line<'a>]) -> ratatui::text::Text<'a> {
 // Events: crossterm 0.29 (legacy pump) → slt events
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Construct an slt `KeyEvent` from code + modifiers (kind `Press`).
+///
+/// slt's `KeyEvent` is `#[non_exhaustive]`, so it cannot be built with a
+/// struct literal outside the crate; this goes through the crate's own
+/// `Event::key` builder and patches the modifier bits.
+pub fn slt_key(
+    code: slt::event::KeyCode,
+    modifiers: slt::event::KeyModifiers,
+) -> slt::event::KeyEvent {
+    let mut ev = slt::Event::key(code);
+    if let slt::Event::Key(ref mut key) = ev {
+        key.modifiers = modifiers;
+    }
+    match ev {
+        slt::Event::Key(key) => key,
+        _ => unreachable!("Event::key always produces a Key event"),
+    }
+}
+
 /// Translate a raw crossterm event into the `slt` event the app handlers
 /// consume. Returns `None` for event kinds `slt` does not model.
 pub fn slt_event(raw: crossterm::event::Event) -> Option<slt::Event> {

@@ -1,0 +1,23 @@
+
+  No messages yet.                                            /craft
+                                                              main
+  Send a message — the mock provider will replay the scrip
+                                                              ────────────────
+
+                                                              PLAN
+
+
+ Q1. Which database should the app target?                    ────────────────
+
+  ❯   SQLite                                                  FILES TOUCHED
+      Postgres
+    ✓ Type your own answer
+  ↑↓ Move    Enter Select    Tab Next    Esc Dismiss
+
+
+────────────────────────────────────────────────────────────
+  ▎
+  ▎ Message Craft…
+  ▎
+  ▎ [BUILD] · GLM-5.3 · Zhipu AI Coding Plan · off     …
+  ········  esc interrupt · craft          ctrl+p commands

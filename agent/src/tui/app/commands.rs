@@ -775,6 +775,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    // Key events are built through the interim `compat::slt_key` shim
+    // (slt KeyEvent is non-exhaustive; no struct literals outside slt).
     #[test]
     fn thinking_slash_submits_settings_not_prompts() {
         use crate::thinking::ThinkingConfig;
@@ -825,7 +827,8 @@ mod tests {
     #[test]
     fn thinking_picker_and_cycle_use_selected_model_levels() {
         use crate::thinking::{Effort, ThinkingConfig};
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::tui::compat::slt_key;
+        use slt::event::{KeyCode, KeyModifiers};
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = super::App::new();
         let choices = vec![
@@ -844,7 +847,7 @@ mod tests {
             super::Modal::ThinkingPicker { selected: 2 }
         ));
         app.overlays.modal = super::Modal::None;
-        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &tx);
+        app.handle_key(slt_key(KeyCode::Char('e'), KeyModifiers::ALT), &tx);
         assert_eq!(app.session.thinking, ThinkingConfig::Effort(Effort::High));
         assert!(matches!(
             rx.try_recv(),
@@ -857,7 +860,8 @@ mod tests {
     #[test]
     fn thinking_picker_applies_only_on_enter_and_retains_custom_budget() {
         use crate::thinking::ThinkingConfig;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::tui::compat::slt_key;
+        use slt::event::{KeyCode, KeyModifiers};
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = super::App::new();
         app.handle_event(super::AgentEvent::ThinkingChanged(ThinkingConfig::Budget(
@@ -870,14 +874,14 @@ mod tests {
         assert!(
             matches!(app.overlays.modal, super::Modal::ThinkingPicker { selected: row } if row == selected)
         );
-        app.handle_modal_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Up, KeyModifiers::NONE), &tx);
         assert_eq!(app.session.thinking, ThinkingConfig::Budget(4096));
         assert!(rx.try_recv().is_err());
-        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Esc, KeyModifiers::NONE), &tx);
         assert_eq!(app.session.thinking, ThinkingConfig::Budget(4096));
         app.run_slash("/thinking", &tx);
-        app.handle_modal_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
-        app.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Up, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Enter, KeyModifiers::NONE), &tx);
         assert_eq!(app.session.thinking, choices[selected - 1]);
         assert!(
             matches!(rx.try_recv(), Ok(super::Command::SetThinking(value)) if value == choices[selected - 1])
@@ -888,6 +892,7 @@ mod tests {
     use super::super::testutil::usage_rows;
     use super::*;
     use crate::tui::app::{App, Message, Modal};
+    use crate::tui::compat::slt_key;
     use crate::tui::provider::UsageFetchState;
 
     /// W8: every command advertised in the slash popup or the palette
@@ -1006,6 +1011,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[test]
     fn auto_review_slash_sends_toggle_command() {
         let mut app = App::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1037,10 +1043,7 @@ mod tests {
         );
         // Any key dismisses the read-only overlay.
         app.handle_key(
-            crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Esc,
-                crossterm::event::KeyModifiers::NONE,
-            ),
+            slt_key(slt::event::KeyCode::Esc, slt::event::KeyModifiers::NONE),
             &tx,
         );
         assert!(matches!(app.overlays.modal, Modal::None));
@@ -1053,10 +1056,7 @@ mod tests {
         app.run_slash("/stats", &tx);
         assert!(matches!(app.overlays.modal, Modal::Stats(_)));
         app.handle_key(
-            crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Esc,
-                crossterm::event::KeyModifiers::NONE,
-            ),
+            slt_key(slt::event::KeyCode::Esc, slt::event::KeyModifiers::NONE),
             &tx,
         );
         assert!(matches!(app.overlays.modal, Modal::None));
@@ -1085,10 +1085,7 @@ mod tests {
             },
         )));
         app.handle_key(
-            crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Esc,
-                crossterm::event::KeyModifiers::NONE,
-            ),
+            slt_key(slt::event::KeyCode::Esc, slt::event::KeyModifiers::NONE),
             &mpsc::unbounded_channel().0,
         );
         assert!(matches!(app.overlays.modal, Modal::None));
@@ -1245,10 +1242,7 @@ mod tests {
         app.run_slash("/mcp", &tx);
         assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
         app.handle_key(
-            crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Esc,
-                crossterm::event::KeyModifiers::NONE,
-            ),
+            slt_key(slt::event::KeyCode::Esc, slt::event::KeyModifiers::NONE),
             &tx,
         );
         assert!(matches!(app.overlays.modal, Modal::None));

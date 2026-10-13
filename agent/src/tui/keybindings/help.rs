@@ -98,9 +98,9 @@ pub fn effective_label(kb: &Keybind, resolver: &KeybindingResolver) -> Option<Re
 /// The help modal's body, grouped by context (children nested under their
 /// parent) with the resolver's effective labels. Auto-generated from
 /// [`KEYBINDS`]; returns (lines, key-column width) so callers can pad.
-pub fn help_lines(resolver: &KeybindingResolver) -> (Vec<ratatui::text::Line<'static>>, usize) {
-    use ratatui::style::Style;
-    use ratatui::text::{Line, Span};
+pub fn help_lines(resolver: &KeybindingResolver) -> (Vec<crate::tui::text::Line<'static>>, usize) {
+    use crate::tui::style::Style;
+    use crate::tui::text::{Line, Span};
 
     let t = crate::tui::ui::theme::current();
     let key_style = Style::default().fg(t.cyan);

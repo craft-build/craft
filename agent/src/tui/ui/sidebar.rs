@@ -2,12 +2,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use super::theme;
 use crate::tui::app::App;
+use crate::tui::compat;
+use crate::tui::style::{Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 
 fn truncate(s: &str, width: usize) -> String {
     let n = s.chars().count();
@@ -40,7 +41,8 @@ fn heading(label: &str) -> Line<'static> {
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
     let t = theme::current();
 
-    let block = Block::default().style(Style::default().bg(t.bg_surface));
+    let block = Block::default()
+        .style(ratatui::style::Style::default().bg(compat::rat_color(t.bg_surface)));
     let inner = area;
     f.render_widget(block, area);
 
@@ -53,7 +55,9 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
 
     let put = |f: &mut Frame, line: Line<'static>, y: u16| {
         f.render_widget(
-            Paragraph::new(line),
+            // App lines convert to ratatui text at the paint site (interim
+            // compat shim until the paint layer moves to slt).
+            Paragraph::new(compat::rat_line(&line)),
             Rect {
                 x,
                 y,
@@ -117,9 +121,9 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
             ("[ ]", t.border_strong, t.text_secondary)
         };
         let label_style = Style::default().fg(text_color).add_modifier(if p.done {
-            Modifier::CROSSED_OUT
+            Modifier::STRIKETHROUGH
         } else {
-            Modifier::empty()
+            Modifier::NONE
         });
         put(
             f,

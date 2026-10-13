@@ -56,6 +56,7 @@ pub struct Line<'a> {
 
 impl<'a> Line<'a> {
     /// A line from a span list.
+    #[allow(dead_code)] // wave-2 painter API (kept for the paint pivot)
     pub fn from_spans(spans: Vec<Span<'a>>) -> Self {
         Self { spans }
     }
@@ -66,6 +67,7 @@ impl<'a> Line<'a> {
     }
 
     /// The line's concatenated content, unstyled.
+    #[allow(dead_code)] // wave-2 painter API (kept for the paint pivot)
     pub fn text(&self) -> String {
         let mut s = String::with_capacity(self.spans.iter().map(|s| s.content.len()).sum());
         for span in &self.spans {
@@ -75,6 +77,7 @@ impl<'a> Line<'a> {
     }
 
     /// True when the line has no spans or all spans are empty.
+    #[allow(dead_code)] // wave-2 painter API (kept for the paint pivot)
     pub fn is_empty(&self) -> bool {
         self.spans.iter().all(|s| s.content.is_empty())
     }
@@ -109,6 +112,7 @@ impl<'a> From<&'a str> for Line<'a> {
 /// Used after wrapping/slicing spans so the painter writes fewer, larger
 /// runs (this preserves the run-length coalescing the old renderer did when
 /// mutating `Cow` contents in place).
+#[allow(dead_code)] // consumed by the wave-2 transcript painter
 pub fn run_length_spans(spans: impl IntoIterator<Item = Span<'static>>) -> Vec<Span<'static>> {
     let mut merged: Vec<Span<'static>> = Vec::new();
     for span in spans {

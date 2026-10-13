@@ -6,13 +6,15 @@
 mod animation;
 mod app;
 mod compat;
-pub(crate) mod geom;
 mod composer;
 mod file_picker;
+pub(crate) mod geom;
 mod hyperlink;
 mod keybindings;
 mod modals;
 mod notify;
+#[cfg(test)]
+mod parity;
 mod permission_prompt;
 mod plan_form;
 pub mod provider;
@@ -32,13 +34,14 @@ use std::path::Path;
 use crossterm::ExecutableCommand;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use slt::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
 use app::App;
@@ -168,9 +171,14 @@ async fn drive<P: Provider>(
     let (cmd_tx, evt_rx): (mpsc::UnboundedSender<Command>, _) = provider.start();
 
     // Crossterm events are blocking reads -> pump them on a dedicated thread.
+    // They are translated to slt events immediately, the one conversion
+    // point in the app until the loop itself moves to slt.
     let (input_tx, input_rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
         while let Ok(ev) = event::read() {
+            let Some(ev) = compat::slt_event(ev) else {
+                continue;
+            };
             if input_tx.send(ev).is_err() {
                 break;
             }
@@ -477,7 +485,7 @@ async fn run_loop(
                         focus.on_resume();
                     } else if app
                         .overlays.keybinds
-                        .matches(keybindings::ActionId::EditInput, key)
+                        .matches(keybindings::ActionId::EditInput, &key)
                         && base_owns_keyboard(app)
                     {
                             if let Err(e) = edit_composer(app) {
@@ -587,8 +595,8 @@ async fn run_loop(
 mod tests {
     use super::*;
     use crate::tui::provider::Status;
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui::backend::TestBackend;
+    use slt::event::{KeyCode, KeyModifiers};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -613,12 +621,7 @@ mod tests {
         } else {
             KeyModifiers::NONE
         };
-        Event::Key(KeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        })
+        Event::Key(crate::tui::compat::slt_key(code, modifiers))
     }
 
     fn quit(input_tx: &mpsc::UnboundedSender<Event>) {
@@ -970,19 +973,19 @@ mod tests {
 
     #[test]
     fn only_ctrl_z_suspends() {
-        assert!(is_suspend_key(&KeyEvent::new(
+        assert!(is_suspend_key(&crate::tui::compat::slt_key(
             KeyCode::Char('z'),
             KeyModifiers::CONTROL
         )));
-        assert!(!is_suspend_key(&KeyEvent::new(
+        assert!(!is_suspend_key(&crate::tui::compat::slt_key(
             KeyCode::Char('z'),
             KeyModifiers::NONE
         )));
-        assert!(!is_suspend_key(&KeyEvent::new(
+        assert!(!is_suspend_key(&crate::tui::compat::slt_key(
             KeyCode::Char('z'),
             KeyModifiers::ALT
         )));
-        assert!(!is_suspend_key(&KeyEvent::new(
+        assert!(!is_suspend_key(&crate::tui::compat::slt_key(
             KeyCode::Char('v'),
             KeyModifiers::CONTROL
         )));
@@ -1329,15 +1332,12 @@ async fn startup_prompt_submits_before_the_loop_without_resume() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     let (_evt_tx, evt_rx) = mpsc::unbounded_channel();
     // Ctrl-C is a tri-state; press until the loop exits.
-    use crossterm::event::KeyEventState;
     for _ in 0..3 {
         input_tx
-            .send(Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-                kind: KeyEventKind::Press,
-                state: KeyEventState::NONE,
-            }))
+            .send(Event::Key(crate::tui::compat::slt_key(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )))
             .unwrap();
     }
     let mut app = App::new();

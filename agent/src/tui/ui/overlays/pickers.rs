@@ -2,14 +2,15 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use super::super::theme;
 use super::{boxed, centered, dim, render_rows};
 use crate::tui::app::App;
+use crate::tui::compat;
 use crate::tui::modals::Modal;
+use crate::tui::style::{Color, Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 
 /// `/thinking`: choose a mode or effort; custom budgets use the slash command.
 pub fn render_thinking_picker(f: &mut Frame, app: &App, area: Rect) {
@@ -28,12 +29,12 @@ pub fn render_thinking_picker(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+        Paragraph::new(compat::rat_line(&Line::from(Span::styled(
             "Thinking — enter to apply, esc to cancel",
             Style::default()
                 .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
-        ))),
+        )))),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,
@@ -72,7 +73,7 @@ pub fn render_thinking_picker(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(
         Paragraph::new("Custom token budget: /thinking <tokens>")
-            .style(Style::default().fg(t.text_tertiary)),
+            .style(compat::rat_style(Style::default().fg(t.text_tertiary))),
         Rect {
             x: inner.x + 1,
             y: inner.y + 2 + visible as u16,
@@ -98,12 +99,12 @@ pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+        Paragraph::new(compat::rat_line(&Line::from(Span::styled(
             "Sessions — enter to resume, esc to close",
             Style::default()
                 .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
-        ))),
+        )))),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,
@@ -174,12 +175,12 @@ pub fn render_task_picker(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+        Paragraph::new(compat::rat_line(&Line::from(Span::styled(
             "Task chats — enter to open, esc to close",
             Style::default()
                 .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
-        ))),
+        )))),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,
@@ -223,7 +224,7 @@ fn picker_row(
     status: &str,
     is_active: bool,
     content_w: usize,
-    status_color: ratatui::style::Color,
+    status_color: Color,
 ) -> Vec<Span<'static>> {
     let t = theme::current();
     let marker = if is_active { "●" } else { " " };
@@ -271,12 +272,12 @@ pub fn render_recipes(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+        Paragraph::new(compat::rat_line(&Line::from(Span::styled(
             "Recipes — enter to run, esc to close",
             Style::default()
                 .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
-        ))),
+        )))),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,
@@ -361,12 +362,12 @@ pub fn render_theme_picker(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+        Paragraph::new(compat::rat_line(&Line::from(Span::styled(
             "Themes — ↑↓ preview, enter apply, esc cancel",
             Style::default()
                 .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
-        ))),
+        )))),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,

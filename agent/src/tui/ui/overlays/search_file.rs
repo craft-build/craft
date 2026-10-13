@@ -2,13 +2,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use super::super::theme;
 use super::{boxed, centered, dim, render_rows};
 use crate::tui::app::App;
+use crate::tui::compat;
+use crate::tui::style::{Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 
 /// Search modal (F.3, Ctrl-F): fuzzy matches over the transcript's
 /// segments, list on top, query row below it.
@@ -45,10 +46,10 @@ pub fn render_search(f: &mut Frame, app: &mut App, area: Rect) {
     if search.matches.is_empty() {
         if !search.query().is_empty() {
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
+                Paragraph::new(compat::rat_line(&Line::from(Span::styled(
                     search_modal::no_matches_label(),
                     Style::default().fg(t.text_tertiary),
-                ))),
+                )))),
                 list_area,
             );
         }
@@ -78,7 +79,7 @@ pub fn render_search(f: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(" ".into());
     let after: String = query.chars().skip(cursor_char + 1).collect();
     f.render_widget(
-        Paragraph::new(Line::from(vec![
+        Paragraph::new(compat::rat_line(&Line::from(vec![
             Span::styled(
                 search_modal::search_prefix(),
                 Style::default().fg(t.text_tertiary),
@@ -86,7 +87,7 @@ pub fn render_search(f: &mut Frame, app: &mut App, area: Rect) {
             Span::raw(before),
             Span::styled(at, Style::default().bg(t.accent).fg(t.bg_app)),
             Span::raw(after),
-        ])),
+        ]))),
         query_area,
     );
 }
@@ -147,10 +148,10 @@ pub fn render_file_picker(f: &mut Frame, app: &mut App, area: Rect) {
     if s.matches.is_empty() {
         if !s.query.is_empty() {
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
+                Paragraph::new(compat::rat_line(&Line::from(Span::styled(
                     file_picker::no_matches_label(),
                     Style::default().fg(t.text_tertiary),
-                ))),
+                )))),
                 list_area,
             );
         }
@@ -161,10 +162,10 @@ pub fn render_file_picker(f: &mut Frame, app: &mut App, area: Rect) {
         let y = list_area.y + (end - s.scroll_offset) as u16;
         if y < list_area.bottom() {
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
+                Paragraph::new(compat::rat_line(&Line::from(Span::styled(
                     format!("{}+{n} more files (not shown)", file_picker::label_indent()),
                     Style::default().fg(t.text_tertiary),
-                ))),
+                )))),
                 Rect {
                     x: list_area.x,
                     y,
@@ -201,7 +202,10 @@ pub fn render_file_picker(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(at, Style::default().bg(t.accent).fg(t.bg_app)),
         Span::raw(after),
     ]);
-    f.render_widget(Paragraph::new(Line::from(spans)), query_area);
+    f.render_widget(
+        Paragraph::new(compat::rat_line(&Line::from(spans))),
+        query_area,
+    );
 }
 
 /// One path row: matched chars bolded in the accent color, the selected row

@@ -30,7 +30,12 @@ pub use table::{Bind, KEYBINDS, Keybind, KeybindContext, Platform, key};
 
 use std::collections::HashMap;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use slt::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Build a press-kind key event (slt's KeyEvent is non-exhaustive).
+fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    crate::tui::compat::slt_key(code, modifiers)
+}
 
 /// Every remappable action in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -142,9 +147,12 @@ impl ActionId {
 /// applied before chord matching only (never before composer insertion).
 pub fn normalize_key(key: KeyEvent) -> KeyEvent {
     match key.code {
-        KeyCode::BackTab => KeyEvent::new(KeyCode::Tab, key.modifiers | KeyModifiers::SHIFT),
+        KeyCode::BackTab => key_event(
+            KeyCode::Tab,
+            KeyModifiers(key.modifiers.0 | KeyModifiers::SHIFT.0),
+        ),
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), key.modifiers)
+            key_event(KeyCode::Char(c.to_ascii_lowercase()), key.modifiers)
         }
         _ => key,
     }
@@ -206,7 +214,7 @@ impl KeybindingResolver {
         self.overlay.contains_key(&id)
     }
 
-    pub fn matches(&self, id: ActionId, key: KeyEvent) -> bool {
+    pub fn matches(&self, id: ActionId, key: &KeyEvent) -> bool {
         self.binds(id).iter().any(|b| b.matches(key))
     }
 
@@ -220,14 +228,18 @@ impl KeybindingResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use slt::event::{KeyCode, KeyEvent, KeyModifiers};
     use test_case::test_case;
 
-    #[test_case(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT), KeyCode::Char('a'), KeyModifiers::SHIFT ; "shift_letter_lowercased")]
-    #[test_case(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), KeyCode::Tab, KeyModifiers::SHIFT ; "backtab_with_shift")]
-    #[test_case(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE), KeyCode::Tab, KeyModifiers::SHIFT ; "backtab_without_shift")]
-    #[test_case(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL), KeyCode::Char('a'), KeyModifiers::CONTROL ; "ctrl_letter_unchanged")]
-    #[test_case(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), KeyCode::Char('a'), KeyModifiers::NONE ; "plain_letter_unchanged")]
+    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        crate::tui::compat::slt_key(code, modifiers)
+    }
+
+    #[test_case(key_event(KeyCode::Char('A'), KeyModifiers::SHIFT), KeyCode::Char('a'), KeyModifiers::SHIFT ; "shift_letter_lowercased")]
+    #[test_case(key_event(KeyCode::BackTab, KeyModifiers::SHIFT), KeyCode::Tab, KeyModifiers::SHIFT ; "backtab_with_shift")]
+    #[test_case(key_event(KeyCode::BackTab, KeyModifiers::NONE), KeyCode::Tab, KeyModifiers::SHIFT ; "backtab_without_shift")]
+    #[test_case(key_event(KeyCode::Char('a'), KeyModifiers::CONTROL), KeyCode::Char('a'), KeyModifiers::CONTROL ; "ctrl_letter_unchanged")]
+    #[test_case(key_event(KeyCode::Char('a'), KeyModifiers::NONE), KeyCode::Char('a'), KeyModifiers::NONE ; "plain_letter_unchanged")]
     fn normalize_key_cases(input: KeyEvent, expected_code: KeyCode, expected_mods: KeyModifiers) {
         let normalized = normalize_key(input);
         assert_eq!(normalized.code, expected_code);
@@ -240,8 +252,8 @@ mod tests {
         let mut warnings = Vec::new();
         let resolver = KeybindingResolver::from_overlay(&entries, &mut warnings);
         assert!(warnings.is_empty());
-        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
-        assert!(resolver.matches(ActionId::Palette, normalize_key(backtab)));
+        let backtab = key_event(KeyCode::BackTab, KeyModifiers::NONE);
+        assert!(resolver.matches(ActionId::Palette, &normalize_key(backtab)));
     }
 
     #[test]
@@ -281,10 +293,10 @@ mod tests {
         let mut warnings = Vec::new();
         let resolver = KeybindingResolver::from_overlay(&entries, &mut warnings);
         assert!(warnings.is_empty());
-        let alt_m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT);
+        let alt_m = key_event(KeyCode::Char('m'), KeyModifiers::ALT);
         let ctrl_f = key::SEARCH.to_key_event();
-        assert!(resolver.matches(ActionId::Search, alt_m));
-        assert!(!resolver.matches(ActionId::Search, ctrl_f));
+        assert!(resolver.matches(ActionId::Search, &alt_m));
+        assert!(!resolver.matches(ActionId::Search, &ctrl_f));
     }
 
     #[test]
@@ -294,13 +306,13 @@ mod tests {
         let resolver = KeybindingResolver::from_overlay(&entries, &mut warnings);
         assert!(warnings.is_empty());
         assert!(resolver.binds(ActionId::Search).is_empty());
-        assert!(!resolver.matches(ActionId::Search, key::SEARCH.to_key_event()));
+        assert!(!resolver.matches(ActionId::Search, &key::SEARCH.to_key_event()));
     }
 
     #[test]
     fn resolver_default_when_no_overlay() {
         let resolver = KeybindingResolver::new();
-        assert!(resolver.matches(ActionId::Search, key::SEARCH.to_key_event()));
+        assert!(resolver.matches(ActionId::Search, &key::SEARCH.to_key_event()));
         assert!(!resolver.is_overridden(ActionId::Search));
     }
 
@@ -322,6 +334,6 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("ctrl+"));
         assert!(resolver.overlay_is_empty());
-        assert!(resolver.matches(ActionId::Search, key::SEARCH.to_key_event()));
+        assert!(resolver.matches(ActionId::Search, &key::SEARCH.to_key_event()));
     }
 }

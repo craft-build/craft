@@ -1007,6 +1007,10 @@ impl App {
 /// Shared fixtures for the submodule test modules.
 #[cfg(test)]
 pub(crate) mod testutil {
+    // Frozen this wave: the fixtures still drive the *legacy* ratatui
+    // TestBackend paint (`ui::draw`) and migrate with the paint wave, not
+    // this one. The stored-region literal below is already on the app
+    // `geom::Rect` type, so hit-testing state matches the geom swap.
     use super::*;
     use crate::tui::provider::AgentEvent;
     use crate::tui::ui;
@@ -1061,7 +1065,7 @@ pub(crate) mod testutil {
         // Card spans rows 2..6, columns 2..40 (as the renderer would report).
         app.view.tool_regions = vec![(
             0,
-            ratatui::layout::Rect {
+            crate::tui::geom::Rect {
                 x: 2,
                 y: 2,
                 width: 38,
@@ -1219,7 +1223,10 @@ mod tests {
         app.flash("Copied");
         let (tx, _rx) = mpsc::unbounded_channel();
         app.handle_key(
-            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('a')),
+            crate::tui::compat::slt_key(
+                slt::event::KeyCode::Char('a'),
+                slt::event::KeyModifiers::NONE,
+            ),
             &tx,
         );
         let text = screen_text(&mut app, 120, 24);

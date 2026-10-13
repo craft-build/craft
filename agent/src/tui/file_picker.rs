@@ -13,9 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 use tracing::warn;
 
 pub(crate) const MODAL_TITLE: &str = " Files ";
@@ -239,7 +239,7 @@ impl FilePicker {
             }
             KeyCode::Home => s.cursor = 0,
             KeyCode::End => s.cursor = s.query.chars().count(),
-            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let byte = byte_of_cursor(&s.query, s.cursor);
                 s.query.insert(byte, c);
                 s.cursor += 1;
@@ -587,7 +587,6 @@ pub(crate) fn spinner_frame(elapsed: std::time::Duration) -> char {
 mod tests {
     use super::*;
     use crate::tui::repaint::Dirty;
-    use crossterm::event::{KeyEventKind, KeyEventState};
     use std::time::Duration;
 
     const CONVERGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -595,12 +594,7 @@ mod tests {
     const NEVER_CONVERGED: &str = "picker never rebuilt its matches from later ticks";
 
     fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        }
+        crate::tui::compat::slt_key(code, KeyModifiers::NONE)
     }
 
     /// A picker with no walker thread at all: paths and endings are fed

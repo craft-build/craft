@@ -1,15 +1,15 @@
 use super::super::testutil::{app_with_collapsible_tool, draw_app, scrolled_app};
 use super::*;
+use crate::tui::geom::Rect;
 use crate::tui::provider::{AgentEvent, LineKind, Status, ToolCallData, ToolKind, ToolLine};
-use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
+    crate::tui::compat::slt_key(code, KeyModifiers::NONE)
 }
 
 fn ctrl(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    crate::tui::compat::slt_key(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
 /// Open the task picker (Ctrl-N), move to row `idx + 1`, Enter.
@@ -193,7 +193,10 @@ fn answering_the_question_routes_the_answered_command() {
     let mut app = App::new();
     open_question(&mut app);
     // Single-select: Enter picks A and submits immediately.
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     assert!(matches!(
         rx.try_recv(),
         Ok(Command::AnswerQuestion { id, answer })
@@ -201,7 +204,10 @@ fn answering_the_question_routes_the_answered_command() {
     ));
     // Dismissing routes a dismissed answer too.
     open_question(&mut app);
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Esc, KeyModifiers::NONE),
+        &tx,
+    );
     assert!(matches!(
         rx.try_recv(),
         Ok(Command::AnswerQuestion { id, answer }) if id == "q9" && answer.dismissed
@@ -214,11 +220,17 @@ fn question_form_owns_plain_keys_while_open() {
     let mut app = App::new();
     open_question(&mut app);
     // A plain char never reaches the composer.
-    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Char('h'), KeyModifiers::NONE),
+        &tx,
+    );
     assert!(app.composer.text.is_empty());
     // Enter picks the option instead of submitting the composer.
     let (tx2, mut rx2) = mpsc::unbounded_channel();
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx2);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx2,
+    );
     assert!(app.composer.text.is_empty());
     assert!(matches!(rx2.try_recv(), Ok(Command::AnswerQuestion { .. })));
 }
@@ -228,7 +240,10 @@ fn answering_the_prompt_routes_the_answered_command() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     open_permission(&mut app);
-    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Char('y'), KeyModifiers::NONE),
+        &tx,
+    );
     assert!(matches!(
         rx.try_recv(),
         Ok(Command::AnswerPermission { id, answer: crate::permissions::PermissionAnswer::AllowOnce })
@@ -242,14 +257,20 @@ fn prompt_owns_plain_keys_while_open() {
     let mut app = App::new();
     open_permission(&mut app);
     // A plain char never reaches the composer.
-    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Char('h'), KeyModifiers::NONE),
+        &tx,
+    );
     assert!(app.composer.text.is_empty());
     // Enter would submit the composer; here it does nothing.
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     assert!(app.composer.text.is_empty());
     // Ctrl-chords fall through (e.g. the palette still opens).
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('p'), KeyModifiers::CONTROL),
         &tx,
     );
     assert!(matches!(app.overlays.modal, Modal::Palette { .. }));
@@ -260,11 +281,17 @@ fn paste_lands_in_the_guidance_buffer_while_editing() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     open_permission(&mut app);
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Char('n'), KeyModifiers::NONE),
+        &tx,
+    );
     app.insert_paste("use cat");
     assert!(app.composer.text.is_empty());
     // Enter denies with the typed guidance.
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     // The overlay stays open until PermissionResolved arrives.
     assert!(app.overlays.permission_prompt.is_open());
 }
@@ -390,7 +417,10 @@ fn model_menu_replaces_open_palette() {
         query: "mo".into(),
         selected: 0,
     };
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     assert!(matches!(app.overlays.modal, Modal::ModelMenu(_)));
 }
 
@@ -400,13 +430,19 @@ fn tab_cycles_modes_and_backtab_keeps_focus_cycling() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     assert_eq!(app.mode, crate::tui::app::Mode::Build);
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Tab, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.mode, crate::tui::app::Mode::Plan);
     assert!(
         app.plan_mode.plan_path.is_some(),
         "plan path allocated on entry"
     );
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Tab, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.mode, crate::tui::app::Mode::Build);
 }
 
@@ -419,41 +455,39 @@ fn esc_closes_the_command_palette() {
         query: "mo".into(),
         selected: 0,
     };
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Esc, KeyModifiers::NONE),
+        &tx,
+    );
     assert!(matches!(app.overlays.modal, Modal::None));
 }
 
-fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
-    MouseEvent {
-        kind,
-        column: col,
-        row,
-        modifiers: KeyModifiers::NONE,
-    }
+fn mouse(kind: MouseKind, row: u16, col: u16) -> MouseEvent {
+    slt::event::MouseEvent::new(kind, col as u32, row as u32, KeyModifiers::NONE, None, None)
 }
 
 #[test]
 fn hover_tracks_tool_card() {
     let mut app = app_with_collapsible_tool();
-    app.handle_mouse(mouse(MouseEventKind::Moved, 3, 10));
+    app.handle_mouse(mouse(MouseKind::Moved, 3, 10));
     assert_eq!(app.view.hover_tool, Some(0));
-    app.handle_mouse(mouse(MouseEventKind::Moved, 3, 80));
+    app.handle_mouse(mouse(MouseKind::Moved, 3, 80));
     assert_eq!(app.view.hover_tool, None);
 }
 
 #[test]
 fn click_toggles_collapsible_card() {
     let mut app = app_with_collapsible_tool();
-    let down = mouse(MouseEventKind::Down(MouseButton::Left), 3, 10);
-    let up = mouse(MouseEventKind::Up(MouseButton::Left), 3, 10);
-    app.handle_mouse(down);
-    app.handle_mouse(up);
+    let down = || mouse(MouseKind::Down(MouseButton::Left), 3, 10);
+    let up = || mouse(MouseKind::Up(MouseButton::Left), 3, 10);
+    app.handle_mouse(down());
+    app.handle_mouse(up());
     assert!(
         !app.conversation.collapsed.contains(&"r1".to_string()),
         "press expands"
     );
-    app.handle_mouse(down);
-    app.handle_mouse(up);
+    app.handle_mouse(down());
+    app.handle_mouse(up());
     assert!(
         app.conversation.collapsed.contains(&"r1".to_string()),
         "press again collapses"
@@ -469,9 +503,9 @@ fn drag_selects_instead_of_toggling() {
         width: 80,
         height: 24,
     };
-    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3, 10));
-    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 4, 20));
-    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 20));
+    app.handle_mouse(mouse(MouseKind::Down(MouseButton::Left), 3, 10));
+    app.handle_mouse(mouse(MouseKind::Drag(MouseButton::Left), 4, 20));
+    app.handle_mouse(mouse(MouseKind::Up(MouseButton::Left), 4, 20));
     // Still collapsed: the drag became a selection, not a card press.
     assert!(app.conversation.collapsed.contains(&"r1".to_string()));
 }
@@ -498,8 +532,8 @@ fn click_notice_row_expands_and_retruncates_body() {
     }));
     draw_app(&mut app, 80, 24);
     let press = |app: &mut App, row, col| {
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), row, col));
-        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), row, col));
+        app.handle_mouse(mouse(MouseKind::Down(MouseButton::Left), row, col));
+        app.handle_mouse(mouse(MouseKind::Up(MouseButton::Left), row, col));
     };
     let notice = |app: &App| app.view.notice_regions.first().copied();
     let (idx, rect) = notice(&app).expect("truncated body carries a notice");
@@ -530,7 +564,7 @@ fn composer_chords_edit_words_and_lines() {
     let mut app = App::new();
     app.composer.set_text("foo bar".into());
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('w'), KeyModifiers::CONTROL),
         &tx,
     );
     assert_eq!(app.composer.text, "foo ");
@@ -538,15 +572,21 @@ fn composer_chords_edit_words_and_lines() {
     app.composer.set_text("keep\nkill this".into());
     app.composer.cursor = "keep\n".chars().count();
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('k'), KeyModifiers::CONTROL),
         &tx,
     );
     assert_eq!(app.composer.text, "keep\n");
 
     app.composer.set_text("one two".into());
-    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Left, KeyModifiers::ALT),
+        &tx,
+    );
     assert_eq!(app.composer.cursor, 4);
-    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Right, KeyModifiers::ALT),
+        &tx,
+    );
     assert_eq!(app.composer.cursor, 7);
 }
 
@@ -556,11 +596,23 @@ fn vim_scroll_keys_type_when_composer_has_text() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     app.composer.insert_char('a');
-    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &tx);
-    app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Char('g'), KeyModifiers::NONE),
+        &tx,
+    );
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Char('G'), KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "agG");
-    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &tx);
-    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Backspace, KeyModifiers::NONE),
+        &tx,
+    );
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Backspace, KeyModifiers::NONE),
+        &tx,
+    );
 }
 
 /// ↑ recalls older entries, clamps at the oldest, ↓ walks back toward the
@@ -573,16 +625,31 @@ fn history_recall_navigates_and_restores_draft() {
     app.input_history.push("second".into());
     app.composer.set_text("draft".into());
 
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Up, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "second");
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Up, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "first");
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Up, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "first", "clamped at the oldest entry");
 
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Down, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "second");
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Down, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "draft", "draft restored past newest");
     assert!(app.history_recall.history_index.is_none());
 }
@@ -598,20 +665,35 @@ fn history_recall_skips_slash_commands() {
     app.input_history.push("new text".into());
     app.composer.set_text("draft".into());
 
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Up, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "new text");
     assert!(!app.slash_open(), "slash menu stays closed while recalling");
 
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Up, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "old text", "skipped over /help");
     assert!(!app.slash_open());
 
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Up, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "old text", "clamped at the oldest entry");
 
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Down, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "new text", "skipped over /help");
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Down, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "draft", "draft restored past newest");
     assert!(app.history_recall.history_index.is_none());
 }
@@ -625,7 +707,10 @@ fn history_up_ignores_a_newest_slash_command() {
     app.input_history.push("/stats".into());
     app.composer.set_text("draft".into());
 
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Up, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "draft", "nothing but slash commands");
     assert!(app.history_recall.history_index.is_none());
     assert!(!app.slash_open());
@@ -642,11 +727,17 @@ fn arrows_drive_history_from_an_empty_composer() {
     assert!(!app.view.follow);
     app.input_history.push("earlier".into());
 
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Up, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "earlier");
     assert!(!app.view.follow, "Up recalled history instead of scrolling");
 
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Down, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.composer.text, "", "draft (empty) restored past newest");
     assert!(app.history_recall.history_index.is_none());
 }
@@ -660,7 +751,7 @@ fn ctrl_e_is_both_line_end_and_jump_to_bottom() {
     app.composer.set_text("hello".into());
     app.composer.cursor = 0;
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('e'), KeyModifiers::CONTROL),
         &tx,
     );
     assert_eq!(app.composer.cursor, 5, "line-end with text");
@@ -670,7 +761,7 @@ fn ctrl_e_is_both_line_end_and_jump_to_bottom() {
     app.scroll_by(-5);
     assert!(!app.view.follow, "scrolled off the bottom");
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('e'), KeyModifiers::CONTROL),
         &tx,
     );
     assert!(app.view.follow, "Ctrl-E on empty composer jumps to bottom");
@@ -687,7 +778,10 @@ fn submit_records_history() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     app.composer.set_text("hello world".into());
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(app.input_history.len(), 1);
     assert_eq!(app.input_history.get(0), Some("hello world"));
     assert!(app.composer.text.is_empty());
@@ -701,7 +795,7 @@ fn ctrl_c_tri_state_clears_then_cancels_then_quits() {
     let mut app = App::new();
     app.composer.set_text("draft".into());
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
         &tx,
     );
     assert!(app.composer.text.is_empty(), "first press clears input");
@@ -710,7 +804,7 @@ fn ctrl_c_tri_state_clears_then_cancels_then_quits() {
 
     app.handle_event(AgentEvent::StatusChanged(Status::Running));
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
         &tx,
     );
     assert!(
@@ -721,7 +815,7 @@ fn ctrl_c_tri_state_clears_then_cancels_then_quits() {
 
     app.handle_event(AgentEvent::StatusChanged(Status::Done));
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('q'), KeyModifiers::CONTROL),
         &tx,
     );
     assert!(app.should_quit, "idle press quits");
@@ -734,7 +828,10 @@ fn submit_bang_sends_visible_shell_command() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     app.composer.set_text("! echo hi".into());
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     assert!(matches!(
         rx.try_recv(),
         Ok(Command::Shell { command, visible }) if command == "echo hi" && visible
@@ -755,7 +852,10 @@ fn submit_double_bang_sends_hidden_shell_command() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     app.composer.set_text("!! make".into());
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     assert!(matches!(
         rx.try_recv(),
         Ok(Command::Shell { command, visible }) if command == "make" && !visible
@@ -772,7 +872,10 @@ fn submit_lone_bang_is_a_normal_message() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     app.composer.set_text("!".into());
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     assert!(matches!(rx.try_recv(), Ok(Command::SendMessage(text, _, _)) if text == "!"));
 }
 
@@ -783,7 +886,10 @@ fn submit_bang_cd_flashes() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut app = App::new();
     app.composer.set_text("! cd /tmp".into());
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    );
     assert_eq!(
         app.flash_text(),
         Some("Only /cd can change the working directory")
@@ -800,17 +906,23 @@ fn alt_e_cycles_effort_and_ctrl_e_moves_to_line_end() {
     app.composer.cursor = 0;
     let before = app.session.thinking;
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('f'), KeyModifiers::CONTROL),
         &tx,
     );
     assert_eq!(app.session.thinking, before, "ctrl-f opens search");
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
-    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Esc, KeyModifiers::NONE),
+        &tx,
+    );
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Char('e'), KeyModifiers::ALT),
+        &tx,
+    );
     assert_eq!(app.session.thinking, before.cycle());
     assert!(matches!(rx.try_recv(), Ok(Command::SetThinking(value)) if value == before.cycle()));
     assert_eq!(app.composer.text, "hello", "alt-e does not type");
     app.handle_key(
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        crate::tui::compat::slt_key(KeyCode::Char('e'), KeyModifiers::CONTROL),
         &tx,
     );
     assert_eq!(app.composer.cursor, 5);
@@ -850,7 +962,10 @@ fn keybinding_overlay_replaces_the_palette_chord() {
     app.overlays.keybinds = KeybindingResolver::from_overlay(&entries, &mut warnings);
     assert!(warnings.is_empty());
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT), &tx);
+    app.handle_key(
+        crate::tui::compat::slt_key(KeyCode::Char('m'), KeyModifiers::ALT),
+        &tx,
+    );
     assert!(
         matches!(app.overlays.modal, Modal::Palette { .. }),
         "alt-m opens it"

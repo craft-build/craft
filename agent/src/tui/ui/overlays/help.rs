@@ -2,13 +2,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::Span;
 
 use super::super::theme;
 use super::usage::render_usage_sheet;
 use crate::tui::app::App;
 use crate::tui::modals::Modal;
+use crate::tui::style::Style;
+use crate::tui::text::Span;
 
 /// `/help`: keybinding sheet, generated from the data-driven `KEYBINDS`
 /// table grouped by context (F.1); user overrides show their effective

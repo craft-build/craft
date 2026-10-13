@@ -1,0 +1,23 @@
+
+
+
+
+
+
+
+           > mo
+           ──────────────────────────────────────────────────────────
+            Change model                                      ctrl+l
+            Dream (consolidate memory)                        /dream
+            Search memory                                    /memory
+
+
+
+
+
+
+
+
+
+
+

@@ -1,6 +1,6 @@
 //! View models: the message list, viewport state, and session chrome.
 
-use ratatui::layout::Rect;
+use crate::tui::geom::Rect;
 
 use crate::tui::provider::{AgentEvent, ModelChoice, Tone, ToolCallData, ToolKind, ToolLine};
 use crate::tui::selection::Selection;

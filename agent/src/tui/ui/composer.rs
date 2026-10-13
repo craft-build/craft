@@ -2,16 +2,17 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme;
 use crate::markdown::highlight::{Highlighter, SegmentColor};
 use crate::tui::app::App;
+use crate::tui::compat;
 use crate::tui::provider::Status;
 use crate::tui::shell::parse_shell_prefix;
+use crate::tui::style::{Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 
 /// Max text rows the composer grows to before it scrolls instead of expanding.
 pub const MAX_TEXT_ROWS: usize = 12;
@@ -33,7 +34,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         height: area.height,
     };
     f.render_widget(
-        Block::default().style(Style::default().bg(t.bg_surface)),
+        Block::default().style(compat::rat_style(Style::default().bg(t.bg_surface))),
         inset,
     );
 
@@ -50,10 +51,10 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     // Accent bar spanning the full box height, like posted user messages.
     for i in 0..inset.height {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
+            Paragraph::new(compat::rat_line(&Line::from(Span::styled(
                 "▎",
                 Style::default().fg(t.accent).bg(t.bg_surface),
-            ))),
+            )))),
             Rect {
                 x: bar_x,
                 y: inset.y + i,
@@ -97,7 +98,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
             ));
         }
         f.render_widget(
-            Paragraph::new(Line::from(spans)),
+            Paragraph::new(compat::rat_line(&Line::from(spans))),
             Rect {
                 x: text_x,
                 y,
@@ -110,10 +111,10 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     // Placeholder on the first visible row.
     if offset == 0 && app.composer.text.is_empty() {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
+            Paragraph::new(compat::rat_line(&Line::from(Span::styled(
                 "Message Craft…",
                 Style::default().fg(t.text_tertiary).bg(t.bg_surface),
-            ))),
+            )))),
             Rect {
                 x: text_x,
                 y: inset.y + 1,
@@ -152,7 +153,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
                 .fg(app.mode.color())
                 .bg(t.bg_surface)
-                .add_modifier(ratatui::style::Modifier::BOLD),
+                .add_modifier(Modifier::BOLD),
         ),
         sep(),
         Span::styled(model, Style::default().fg(t.blue_400).bg(t.bg_surface)),
@@ -189,7 +190,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = left;
     spans.push(Span::styled(" ".repeat(gap), surf));
     spans.push(Span::styled(right, tertiary));
-    f.render_widget(Paragraph::new(Line::from(spans)), info);
+    f.render_widget(Paragraph::new(compat::rat_line(&Line::from(spans))), info);
 }
 
 /// Display-cell width of a char slice. The composer wraps in cells (see
@@ -241,20 +242,20 @@ fn shell_spans(line: &str, base: Style) -> Option<Vec<Span<'static>>> {
             style = style.fg(color);
         }
         if seg.bold {
-            style = style.add_modifier(ratatui::style::Modifier::BOLD);
+            style = style.add_modifier(Modifier::BOLD);
         }
         if seg.italic {
-            style = style.add_modifier(ratatui::style::Modifier::ITALIC);
+            style = style.add_modifier(Modifier::ITALIC);
         }
         spans.push(Span::styled(seg.text, style));
     }
     Some(spans)
 }
 
-fn seg_color(c: SegmentColor) -> Option<ratatui::style::Color> {
+fn seg_color(c: SegmentColor) -> Option<crate::tui::style::Color> {
     match c {
-        SegmentColor::Rgb(r, g, b) => Some(ratatui::style::Color::Rgb(r, g, b)),
-        SegmentColor::Ansi(i) => Some(ratatui::style::Color::Indexed(i)),
+        SegmentColor::Rgb(r, g, b) => Some(crate::tui::style::Color::Rgb(r, g, b)),
+        SegmentColor::Ansi(i) => Some(crate::tui::style::Color::Indexed(i)),
         SegmentColor::Default => None,
     }
 }
@@ -325,7 +326,7 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
         tertiary
     };
     spans.push(Span::styled(right, right_style));
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    f.render_widget(Paragraph::new(compat::rat_line(&Line::from(spans))), area);
 }
 
 /// Abbreviate a cwd for the status row: keep the last two components, `…`

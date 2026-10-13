@@ -4,9 +4,8 @@
 
 use std::path::PathBuf;
 
-use ratatui::style::Color;
-
 use crate::run::AgentMode;
+use crate::tui::style::Color;
 use crate::tui::ui::theme;
 
 use super::App;
@@ -376,10 +375,11 @@ mod tests {
     /// Ctrl-T toggles the form in Plan mode; Ctrl-O requests the editor.
     #[test]
     fn ctrl_t_and_ctrl_o_wiring() {
+        use slt::event::{KeyCode, KeyModifiers};
+
         let (tx, _rx) = mpsc::unbounded_channel();
         let (mut app, _dir) = plan_mode_app_with_written_plan();
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let ctrl = |c: char| crate::tui::compat::slt_key(KeyCode::Char(c), KeyModifiers::CONTROL);
         app.handle_key(ctrl('t'), &tx);
         assert!(
             app.plan_mode.plan_form.is_visible(),
@@ -401,10 +401,11 @@ mod tests {
     /// Ctrl-O without a plan flashes instead of requesting an editor.
     #[test]
     fn build_mode_panel_and_missing_plan() {
+        use slt::event::{KeyCode, KeyModifiers};
+
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let ctrl = |c: char| crate::tui::compat::slt_key(KeyCode::Char(c), KeyModifiers::CONTROL);
         let sidebar = app.session.sidebar_open;
         app.handle_key(ctrl('t'), &tx);
         assert_eq!(app.session.sidebar_open, !sidebar);

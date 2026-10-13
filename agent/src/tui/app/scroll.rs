@@ -84,10 +84,14 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    // These tests paint through the frozen `app/mod.rs` testutil fixtures
+    // (draw_app/scrolled_app still ride the legacy ratatui TestBackend
+    // until the paint wave); their key events go through `compat::slt_key`.
     use super::super::testutil::{draw_app, scrolled_app};
     use super::*;
+    use crate::tui::compat::slt_key;
     use crate::tui::provider::AgentEvent;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use slt::event::{KeyCode, KeyModifiers};
     use tokio::sync::mpsc;
 
     /// While following, the viewport sits at the document bottom every
@@ -166,14 +170,14 @@ mod tests {
         draw_app(&mut app, 80, 24);
 
         // Top: Home and g.
-        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &tx);
+        app.handle_key(slt_key(KeyCode::Home, KeyModifiers::NONE), &tx);
         assert_eq!(app.view.scroll, ScrollPos::default());
         app.scroll_by(2);
-        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &tx);
+        app.handle_key(slt_key(KeyCode::Char('g'), KeyModifiers::NONE), &tx);
         assert_eq!(app.view.scroll, ScrollPos::default());
 
         // Bottom: End and G re-pin follow.
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &tx);
+        app.handle_key(slt_key(KeyCode::End, KeyModifiers::NONE), &tx);
         assert!(app.view.follow);
         let layout = Layout::new(&app.view.segments, app.view.view_width);
         assert_eq!(
@@ -182,27 +186,24 @@ mod tests {
         );
         app.scroll_by(-2);
         assert!(!app.view.follow);
-        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), &tx);
+        app.handle_key(slt_key(KeyCode::Char('G'), KeyModifiers::NONE), &tx);
         assert!(app.view.follow, "G lands at the bottom and re-pins");
 
         // Line, half page, page: positions move by the expected row counts.
         // The arrows are history keys now, so the one-row step goes through
         // the public API instead of a keypress.
-        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &tx);
+        app.handle_key(slt_key(KeyCode::Home, KeyModifiers::NONE), &tx);
         app.scroll_by(1);
         let layout = Layout::new(&app.view.segments, app.view.view_width);
         assert_eq!(layout.doc_row(app.view.scroll), 1, "one row down");
-        app.handle_key(
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            &tx,
-        );
+        app.handle_key(slt_key(KeyCode::Char('d'), KeyModifiers::CONTROL), &tx);
         let layout = Layout::new(&app.view.segments, app.view.view_width);
         assert_eq!(
             layout.doc_row(app.view.scroll),
             1 + u32::from(app.view.view_height) / 2,
             "Ctrl-D scrolls half a page"
         );
-        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &tx);
+        app.handle_key(slt_key(KeyCode::PageDown, KeyModifiers::NONE), &tx);
         let layout = Layout::new(&app.view.segments, app.view.view_width);
         assert_eq!(
             layout.doc_row(app.view.scroll),

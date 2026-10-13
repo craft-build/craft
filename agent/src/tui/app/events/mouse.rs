@@ -53,42 +53,42 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // slt mouse coordinates are u32; hit-testing math is u16 like the
+        // buffer grid.
+        let (row, col) = (mouse.y as u16, mouse.x as u16);
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.scroll_by(-3),
-            MouseEventKind::ScrollDown => self.scroll_by(3),
-            MouseEventKind::Moved => {
-                self.view.hover_tool = self.tool_at(mouse.row, mouse.column);
+            MouseKind::ScrollUp => self.scroll_by(-3),
+            MouseKind::ScrollDown => self.scroll_by(3),
+            MouseKind::Moved => {
+                self.view.hover_tool = self.tool_at(row, col);
             }
-            MouseEventKind::Down(MouseButton::Left) => {
+            MouseKind::Down(MouseButton::Left) => {
                 // A selection starts only inside a selectable region (chat
                 // messages or the composer input) and is confined to it; a
                 // click elsewhere (sidebar, chrome) just clears the highlight.
-                let pos = (mouse.row, mouse.column);
+                let pos = (row, col);
                 self.view.selection = [self.view.msg_area, self.view.composer_area]
                     .iter()
                     .copied()
-                    .find(|r| rect_contains(*r, mouse.row, mouse.column))
+                    .find(|r| rect_contains(*r, row, col))
                     .map(|region| crate::tui::selection::Selection {
                         anchor: pos,
                         head: pos,
                         region,
                     });
                 self.view.pending_click = self
-                    .notice_at(mouse.row, mouse.column)
+                    .notice_at(row, col)
                     .map(PendingClick::Notice)
-                    .or_else(|| {
-                        self.tool_at(mouse.row, mouse.column)
-                            .map(PendingClick::Card)
-                    });
+                    .or_else(|| self.tool_at(row, col).map(PendingClick::Card));
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
+            MouseKind::Drag(MouseButton::Left) => {
                 // A drag is a text selection, not a card press.
                 self.view.pending_click = None;
                 if let Some(sel) = &mut self.view.selection {
-                    sel.head = clamp_to(sel.region, mouse.row, mouse.column);
+                    sel.head = clamp_to(sel.region, row, col);
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) => {
+            MouseKind::Up(MouseButton::Left) => {
                 let no_drag = self.view.selection.map(|s| s.is_empty()).unwrap_or(true);
                 match (self.view.pending_click.take(), no_drag) {
                     // Press without drag on a card: toggle it. A notice-row

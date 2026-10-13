@@ -5,13 +5,14 @@
 //! Dismiss and open-editor chords resolve through the data-driven
 //! keybinding resolver, so user rebinds apply inside the form.
 
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use slt::event::{KeyCode, KeyEvent};
 
+use crate::tui::compat;
+use crate::tui::style::{Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 use crate::tui::ui::theme;
 
 const FORM_LABEL: &str = " Plan complete ";
@@ -178,10 +179,10 @@ impl PlanForm {
         keybinds: &crate::tui::keybindings::KeybindingResolver,
     ) -> PlanFormAction {
         use crate::tui::keybindings::ActionId;
-        if key_event.code == KeyCode::Esc || keybinds.matches(ActionId::PlanToggle, key_event) {
+        if key_event.code == KeyCode::Esc || keybinds.matches(ActionId::PlanToggle, &key_event) {
             return PlanFormAction::Hide;
         }
-        if keybinds.matches(ActionId::OpenEditor, key_event) {
+        if keybinds.matches(ActionId::OpenEditor, &key_event) {
             return PlanFormAction::OpenEditor;
         }
         match key_event.code {
@@ -216,7 +217,7 @@ impl PlanForm {
             let style = style.add_modifier(if i == self.selected {
                 Modifier::BOLD
             } else {
-                Modifier::empty()
+                Modifier::NONE
             });
             let mut spans = vec![
                 Span::styled(prefix, Style::default().fg(t.text_tertiary)),
@@ -239,17 +240,20 @@ impl PlanForm {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(t.border_strong))
-            .title_top(Line::from(FORM_LABEL.to_string()).left_aligned())
-            .title_style(
+            .border_style(compat::rat_style(Style::default().fg(t.border_strong)))
+            // The Block title is ratatui-native (see the migration spec:
+            // a Line used only as a Block title is built as ratatui text
+            // instead of converting the app type).
+            .title_top(ratatui::text::Line::from(FORM_LABEL.to_string()).left_aligned())
+            .title_style(compat::rat_style(
                 Style::default()
                     .fg(t.text_primary)
                     .add_modifier(Modifier::BOLD),
-            );
+            ));
 
         frame.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().fg(t.text_primary))
+            Paragraph::new(compat::rat_text(&lines))
+                .style(compat::rat_style(Style::default().fg(t.text_primary)))
                 .wrap(Wrap { trim: false })
                 .block(block),
             area,
@@ -260,22 +264,14 @@ impl PlanForm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyModifiers;
+    use slt::event::KeyModifiers;
 
     fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
-        }
+        crate::tui::compat::slt_key(code, KeyModifiers::NONE)
     }
 
     fn ctrl(c: char) -> KeyEvent {
-        KeyEvent {
-            modifiers: KeyModifiers::CONTROL,
-            ..key(KeyCode::Char(c))
-        }
+        crate::tui::compat::slt_key(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     fn kb() -> crate::tui::keybindings::KeybindingResolver {

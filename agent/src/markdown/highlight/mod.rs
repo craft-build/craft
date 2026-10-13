@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use syntect::highlighting::{
     FontStyle, HighlightIterator, HighlightState, Highlighter as SynHighlighter, Style as SynStyle,
@@ -112,6 +112,13 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<RwLock<Arc<Theme>>> = OnceLock::new();
 static BLOCK_CACHE: OnceLock<RwLock<BlockCache>> = OnceLock::new();
 static THEME_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Tests that mutate the global theme (or assert render output that a
+/// concurrent swap would change) share this lock so parallel test threads
+/// can't observe each other's swaps. The lock lives here, next to
+/// `THEME_GEN`, the resource it guards; the TUI theme tests re-export it.
+#[cfg(test)]
+pub(crate) static THEME_SWAP_LOCK: Mutex<()> = Mutex::new(());
 
 /// The built-in theme so code blocks are colored before any user theme is
 /// installed. Base16 Ocean Dark matches the ink-toned TUI palette.

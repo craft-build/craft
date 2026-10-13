@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
-use ratatui::style::Color;
 use serde::Deserialize;
 
 use crate::tui::provider::Tone;
+use crate::tui::style::{Color, Style, StyleExt};
 
 pub const DEFAULT_THEME: &str = "craft";
 const RESERVED_KEYS: &[&str] = &["palette", "ui", "inherits"];
@@ -18,7 +18,7 @@ const RESERVED_KEYS: &[&str] = &["palette", "ui", "inherits"];
 // Fallback values: the pre-theme-picker hardcoded palette. Derivation falls
 // back to these so a thin theme TOML degrades to the old look, not to black.
 mod fallback {
-    use ratatui::style::Color;
+    use crate::tui::style::Color;
 
     pub const BG_APP: Color = Color::Rgb(0x06, 0x09, 0x11);
     pub const BG_SURFACE: Color = Color::Rgb(0x0a, 0x0e, 0x1a);
@@ -95,9 +95,11 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 static CURRENT_NAME: Mutex<Option<String>> = Mutex::new(None);
 
 /// Tests that mutate the global theme share this lock so parallel test
-/// threads can't observe each other's swaps.
+/// threads can't observe each other's swaps. The guarded resource is the
+/// highlighter's theme generation, so the lock lives in
+/// `markdown::highlight` and is re-exported here for the swapping tests.
 #[cfg(test)]
-pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) use crate::markdown::highlight::THEME_SWAP_LOCK as TEST_LOCK;
 
 /// The active theme. Clone the `Arc` once per render pass; never hold the
 /// guard across a frame.
@@ -246,8 +248,10 @@ fn fallback_theme() -> Theme {
 // `mode_build` in `fallback_theme` needs the const-to-const aliasing the old
 // module had; replicate it here.
 mod mode_aliases {
-    pub const MODE_BUILD: ratatui::style::Color = super::fallback::ACCENT;
-    pub const MODE_PLAN: ratatui::style::Color = super::fallback::CYAN;
+    use crate::tui::style::Color;
+
+    pub const MODE_BUILD: Color = super::fallback::ACCENT;
+    pub const MODE_PLAN: Color = super::fallback::CYAN;
 }
 use mode_aliases::{MODE_BUILD, MODE_PLAN};
 
@@ -319,21 +323,21 @@ fn blend_to_black(c: Color, t: f32) -> Color {
     }
 }
 
-fn resolve_modifier(name: &str) -> ratatui::style::Modifier {
-    use ratatui::style::Modifier;
+fn resolve_modifier(name: &str) -> crate::tui::style::Modifier {
+    use crate::tui::style::Modifier;
     match name {
         "bold" => Modifier::BOLD,
         "italic" => Modifier::ITALIC,
-        "underlined" => Modifier::UNDERLINED,
-        "crossed_out" => Modifier::CROSSED_OUT,
+        "underlined" => Modifier::UNDERLINE,
+        "crossed_out" => Modifier::STRIKETHROUGH,
         "dim" => Modifier::DIM,
         "reversed" => Modifier::REVERSED,
-        _ => Modifier::empty(),
+        _ => Modifier::NONE,
     }
 }
 
-fn resolve_style(def: &StyleDef, palette: &HashMap<String, Color>) -> ratatui::style::Style {
-    let mut style = ratatui::style::Style::new();
+fn resolve_style(def: &StyleDef, palette: &HashMap<String, Color>) -> Style {
+    let mut style = Style::new();
     if let Some(fg) = def.fg.as_ref().and_then(|n| resolve_color(n, palette)) {
         style = style.fg(fg);
     }

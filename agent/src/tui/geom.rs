@@ -27,11 +27,13 @@ impl Rect {
     }
 
     /// Cell count of the region.
+    #[allow(dead_code)] // foundation API; consumed by the paint pivot
     pub const fn area(&self) -> u16 {
         self.width.saturating_mul(self.height)
     }
 
     /// One past the rightmost column (clamped; mirrors ratatui semantics).
+    #[allow(dead_code)] // foundation API; consumed by the paint pivot
     pub const fn right(&self) -> u16 {
         self.x.saturating_add(self.width)
     }
@@ -42,6 +44,7 @@ impl Rect {
     }
 
     /// True when the region has no area.
+    #[allow(dead_code)] // foundation API; consumed by the paint pivot
     pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
     }
@@ -54,6 +57,7 @@ impl Rect {
 
     /// Shrink by removing `dx` columns on each side and `dy` rows top+bottom,
     /// clamped at zero.
+    #[allow(dead_code)] // foundation API; consumed by the paint pivot
     pub fn shrink(&self, dx: u16, dy: u16) -> Self {
         let x = self.x.saturating_add(dx);
         let y = self.y.saturating_add(dy);
@@ -84,11 +88,6 @@ impl Rect {
             r.height.min(u16::MAX as u32) as u16,
         )
     }
-}
-
-/// True when `(row, col)` lies within `r`.
-pub(crate) fn rect_contains(r: Rect, row: u16, col: u16) -> bool {
-    r.contains(row, col)
 }
 
 #[cfg(test)]

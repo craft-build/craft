@@ -1,6 +1,6 @@
 //! User chord-string parsing: [`parse_chord`] and its modifier prefixes.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use slt::event::{KeyCode, KeyModifiers};
 
 use super::table::Bind;
 
@@ -59,7 +59,8 @@ pub fn parse_chord(chord: &str) -> Option<Bind> {
         changed = false;
         for (prefix, flag) in MOD_PREFIXES {
             if let Some(stripped) = rest.strip_prefix(prefix) {
-                modifiers |= *flag;
+                // slt's KeyModifiers has no BitOr: union through the raw bits.
+                modifiers = KeyModifiers(modifiers.0 | flag.0);
                 rest = stripped.to_string();
                 changed = true;
                 break;
@@ -78,7 +79,7 @@ pub fn parse_chord(chord: &str) -> Option<Bind> {
     } else {
         parse_special_key(rest)?
     };
-    let label: &'static str = Box::leak(render_label(code, modifiers).into_boxed_str());
+    let label: &'static str = Box::leak(render_label(&code, modifiers).into_boxed_str());
     Some(Bind {
         code,
         modifiers,
@@ -88,7 +89,7 @@ pub fn parse_chord(chord: &str) -> Option<Bind> {
 
 /// Render a canonical display label for a parsed key, in fixed modifier order
 /// (Ctrl, Alt, Shift, Cmd) so it is independent of the input chord's ordering.
-fn render_label(code: KeyCode, modifiers: KeyModifiers) -> String {
+fn render_label(code: &KeyCode, modifiers: KeyModifiers) -> String {
     let mut out = String::new();
     if modifiers.contains(KeyModifiers::CONTROL) {
         out.push_str("Ctrl+");
@@ -106,7 +107,7 @@ fn render_label(code: KeyCode, modifiers: KeyModifiers) -> String {
     out
 }
 
-fn key_code_label(code: KeyCode) -> &'static str {
+fn key_code_label(code: &KeyCode) -> &'static str {
     match code {
         KeyCode::Enter => "Enter",
         KeyCode::Esc => "Esc",
@@ -136,7 +137,7 @@ mod tests {
 
     #[test_case("Ctrl+P", KeyCode::Char('p'), KeyModifiers::CONTROL ; "ctrl_p")]
     #[test_case("Alt+M", KeyCode::Char('m'), KeyModifiers::ALT ; "alt_m")]
-    #[test_case("ctrl+shift+t", KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT ; "ctrl_shift_t")]
+    #[test_case("ctrl+shift+t", KeyCode::Char('t'), KeyModifiers(KeyModifiers::CONTROL.0 | KeyModifiers::SHIFT.0) ; "ctrl_shift_t")]
     #[test_case("F5", KeyCode::F(5), KeyModifiers::NONE ; "f5")]
     #[test_case("shift+tab", KeyCode::Tab, KeyModifiers::SHIFT ; "shift_tab")]
     fn parse_chord_cases(chord: &str, code: KeyCode, mods: KeyModifiers) {

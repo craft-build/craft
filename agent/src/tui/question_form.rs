@@ -6,13 +6,14 @@
 //! the question is multi-select, matching the reference); multi-select
 //! toggles; Esc/Ctrl-C dismisses.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::tui::compat;
+use crate::tui::style::{Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 use crate::tui::ui::theme;
 
 use super::permission_prompt::PromptBuffer;
@@ -167,10 +168,9 @@ impl QuestionForm {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(dismissed());
         }
-        if key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
+        // slt's KeyModifiers has no `intersects`; the raw-bit test below is
+        // the same any-bit check crossterm's `intersects` performed.
+        if key.modifiers.0 & (KeyModifiers::CONTROL.0 | KeyModifiers::ALT.0) != 0 {
             return None; // global chords keep working
         }
         match state.mode {
@@ -285,7 +285,7 @@ impl QuestionForm {
         let primary = Style::default().fg(t.text_primary);
         let success = Style::default().fg(t.success);
 
-        let mut lines = vec![Line::raw("")];
+        let mut lines = vec![Line::from("")];
         // Tab bar (only meaningful with a confirm stage; still shows
         // answered state at a glance for multi-question forms).
         if questions.len() > 1 {
@@ -309,7 +309,7 @@ impl QuestionForm {
                 spans.push(Span::styled(format!(" {label} "), style));
             }
             lines.push(Line::from(spans));
-            lines.push(Line::raw(""));
+            lines.push(Line::from(""));
         }
 
         if state.mode == Mode::Confirming {
@@ -335,7 +335,7 @@ impl QuestionForm {
                 ("←", "Back"),
                 ("Esc", "Dismiss"),
             ]));
-            lines.push(Line::raw(""));
+            lines.push(Line::from(""));
             return lines;
         }
 
@@ -344,7 +344,7 @@ impl QuestionForm {
             format!(" Q{}. {}", state.tab + 1, q.question),
             primary.add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::raw(""));
+        lines.push(Line::from(""));
 
         for (i, option) in q.options.iter().enumerate() {
             let cursor_row = i == state.cursor && state.mode == Mode::Selecting;
@@ -414,7 +414,7 @@ impl QuestionForm {
                 ("Esc", "Dismiss"),
             ]));
         }
-        lines.push(Line::raw(""));
+        lines.push(Line::from(""));
         lines
     }
 
@@ -426,13 +426,14 @@ impl QuestionForm {
         let lines = self.build_lines();
         f.render_widget(ratatui::widgets::Clear, area);
         f.render_widget(
-            ratatui::widgets::Block::default().style(Style::default().bg(t.bg_raised)),
+            ratatui::widgets::Block::default()
+                .style(compat::rat_style(Style::default().bg(t.bg_raised))),
             area,
         );
         f.render_widget(
-            Paragraph::new(lines)
+            Paragraph::new(compat::rat_text(&lines))
                 .wrap(Wrap { trim: false })
-                .style(Style::default().bg(t.bg_raised)),
+                .style(compat::rat_style(Style::default().bg(t.bg_raised))),
             area,
         );
     }
@@ -525,14 +526,14 @@ fn hint_line(hints: &[(&str, &str)]) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::tools::QuestionOption;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+        crate::tui::compat::slt_key(code, KeyModifiers::NONE)
     }
 
     fn ctrl_c() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        crate::tui::compat::slt_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
     }
 
     fn spec(multi: bool, options: &[&str]) -> QuestionSpec {

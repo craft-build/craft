@@ -1,6 +1,13 @@
 //! Keyboard and mouse dispatch for the normal (modal-free) surface.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use slt::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseKind};
+
+/// True when any of `mask`'s modifier bits (a raw u16-of-modifiers union)
+/// are set in `mods`. slt's `KeyModifiers` has no `intersects`, so callers
+/// union raw bits.
+pub(super) fn modifiers_intersect(mods: KeyModifiers, mask: u8) -> bool {
+    mods.0 & mask != 0
+}
 use tokio::sync::mpsc;
 
 use super::{App, Message, Modal, Mode, PendingClick};

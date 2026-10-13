@@ -2,11 +2,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::theme;
+use crate::tui::compat;
+use crate::tui::style::Style;
+use crate::tui::text::{Line, Span};
 
 mod help;
 mod mcp;
@@ -29,14 +30,18 @@ fn dim(f: &mut Frame, area: Rect) {
     // Clear first: a bg-only Block would leave the underlying characters visible.
     f.render_widget(Clear, area);
     f.render_widget(
-        Block::default().style(Style::default().bg(theme::current().bg_sunken)),
+        Block::default().style(compat::rat_style(
+            Style::default().bg(theme::current().bg_sunken),
+        )),
         area,
     );
 }
 
 /// Borderless raised-surface block shared by all overlays.
 fn boxed(_area: Rect) -> Block<'static> {
-    Block::default().style(Style::default().bg(theme::current().bg_raised))
+    Block::default().style(compat::rat_style(
+        Style::default().bg(theme::current().bg_raised),
+    ))
 }
 
 fn centered(width: u16, height: u16, area: Rect) -> Rect {
@@ -73,7 +78,7 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
         }
         let style = Style::default().bg(bg);
         f.render_widget(
-            Paragraph::new(Line::from(spans)).style(style),
+            Paragraph::new(compat::rat_line(&Line::from(spans))).style(compat::rat_style(style)),
             Rect {
                 x: area.x,
                 y: area.y + i as u16,

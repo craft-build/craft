@@ -11,19 +11,23 @@ pub mod theme;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders};
 
 use crate::tui::app::App;
+use crate::tui::compat;
+use crate::tui::geom;
+use crate::tui::style::Style;
 
 const SIDEBAR_WIDTH: u16 = 34;
 
-pub fn draw(f: &mut Frame, app: &mut App) {
+pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     app.status_tick = app.status_tick.wrapping_add(1);
     app.clear_expired_flash();
     let area = f.area();
     f.render_widget(
-        Block::default().style(Style::default().bg(theme::current().bg_app)),
+        Block::default().style(compat::rat_style(
+            Style::default().bg(theme::current().bg_app),
+        )),
         area,
     );
 
@@ -112,7 +116,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(
         Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(theme::current().border_subtle)),
+            .border_style(compat::rat_style(
+                Style::default().fg(theme::current().border_subtle),
+            )),
         bottom,
     );
     // Nested layout (instead of manual offsets) so tiny terminals that shrink
@@ -148,7 +154,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // One-row " Plan Ctrl+T " reminder in the blank footer row while a
     // ready plan's form is dismissed (reference `PlanForm::hint_line`).
     if let Some(hint) = app.plan_mode.plan_form.hint_line() {
-        f.render_widget(ratatui::widgets::Paragraph::new(hint), footer_area);
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(compat::rat_line(&hint)),
+            footer_area,
+        );
     } else if app.active_task.is_none() && app.any_task_working() {
         // Main-chat hint while subagents run: how many, and the chord
         // that opens their chats (task 96).
@@ -162,8 +171,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             if n == 1 { "" } else { "s" }
         );
         f.render_widget(
-            ratatui::widgets::Paragraph::new(hint)
-                .style(Style::default().fg(theme::current().text_tertiary)),
+            ratatui::widgets::Paragraph::new(hint).style(compat::rat_style(
+                Style::default().fg(theme::current().text_tertiary),
+            )),
             footer_area,
         );
     }
@@ -190,8 +200,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Snapshot the frame as plain text (selection copy extracts from this),
     // then draw the current text selection as reversed cells.
-    app.view.msg_area = msg_area;
-    app.view.composer_area = composer_area;
+    // Paint rects convert to the app's geometry at the storage boundary.
+    app.view.msg_area = geom::Rect::new(msg_area.x, msg_area.y, msg_area.width, msg_area.height);
+    app.view.composer_area = geom::Rect::new(
+        composer_area.x,
+        composer_area.y,
+        composer_area.width,
+        composer_area.height,
+    );
     snapshot_frame(f, app);
     render_selection(f, app);
 }
@@ -199,7 +215,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// One-line header above a focused task chat's transcript (task 96):
 /// task name, status, and the dim Esc-Esc hint while it works.
 fn render_task_header(f: &mut Frame, app: &App, idx: usize, area: Rect) {
-    use ratatui::text::{Line, Span};
+    use crate::tui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
 
     let t = theme::current();
@@ -231,7 +247,7 @@ fn render_task_header(f: &mut Frame, app: &App, idx: usize, area: Rect) {
         width: area.width.saturating_sub(4),
         height: 1,
     };
-    f.render_widget(Paragraph::new(Line::from(spans)), header);
+    f.render_widget(Paragraph::new(compat::rat_line(&Line::from(spans))), header);
 }
 
 fn snapshot_frame(f: &mut Frame, app: &mut App) {
@@ -307,13 +323,13 @@ fn render_selection(f: &mut Frame, app: &App) {
 mod tests {
     use super::*;
     use crate::tui::app::App;
+    use crate::tui::geom::Rect;
     use crate::tui::provider::{
         AgentEvent, LineKind, ModelChoice, PlanItem, Status, Tone, ToolCallData, ToolKind,
         ToolLine, TouchedFile,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::layout::Rect;
 
     fn seeded_app() -> App {
         let mut app = App::new();

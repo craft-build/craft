@@ -5,14 +5,15 @@
 //! reference `craft-ui/src/components/permission_prompt.rs`; `subagent_id`
 //! routing is deferred until subagents land (task 95).
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::permissions::{DEFAULT_DENY_GUIDANCE, PermissionAnswer};
+use crate::tui::compat;
+use crate::tui::style::{Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 use crate::tui::ui::theme;
 
 const HINT_ALLOW_ROW: &[(&str, &str)] = &[
@@ -271,10 +272,9 @@ impl PermissionPrompt {
                 }
             };
         }
-        if key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
+        // slt's KeyModifiers has no `intersects`; the raw-bit test below is
+        // the same any-bit check crossterm's `intersects` performed.
+        if key.modifiers.0 & (KeyModifiers::CONTROL.0 | KeyModifiers::ALT.0) != 0 {
             return None;
         }
         let confirm_answer = match *state {
@@ -366,14 +366,14 @@ impl PermissionPrompt {
         };
 
         let mut lines = vec![
-            Line::raw(""),
+            Line::from(""),
             Line::from(Span::styled(
                 " Permission Required".to_string(),
                 Style::default()
                     .fg(theme::current().text_primary)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::raw(""),
+            Line::from(""),
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled(tool.clone(), value_style),
@@ -460,13 +460,14 @@ impl PermissionPrompt {
         let lines = self.build_lines();
         f.render_widget(ratatui::widgets::Clear, area);
         f.render_widget(
-            ratatui::widgets::Block::default().style(Style::default().bg(t.bg_raised)),
+            ratatui::widgets::Block::default()
+                .style(compat::rat_style(Style::default().bg(t.bg_raised))),
             area,
         );
         f.render_widget(
-            Paragraph::new(lines)
+            Paragraph::new(compat::rat_text(&lines))
                 .wrap(Wrap { trim: false })
-                .style(Style::default().bg(t.bg_raised)),
+                .style(compat::rat_style(Style::default().bg(t.bg_raised))),
             area,
         );
     }
@@ -497,7 +498,7 @@ impl Default for PermissionPrompt {
 mod tests {
     use super::{PermissionPrompt, PromptState};
     use crate::permissions::PermissionAnswer;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn open_prompt() -> PermissionPrompt {
         let mut prompt = PermissionPrompt::new();
@@ -512,11 +513,11 @@ mod tests {
     }
 
     fn ctrl_c() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        crate::tui::compat::slt_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+        crate::tui::compat::slt_key(code, KeyModifiers::NONE)
     }
 
     fn state(prompt: &PermissionPrompt) -> PromptState {

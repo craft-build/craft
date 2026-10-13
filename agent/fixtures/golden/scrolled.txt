@@ -1,0 +1,23 @@
+
+  message number 26 with some wrapping text to fill rows      /craft
+                                                              main
+   …
+                                                              ────────────────
+  message number 27 with some wrapping text to fill rows
+                                                              PLAN
+   …
+
+  message number 28 with some wrapping text to fill rows      ────────────────
+
+   …                                                          FILES TOUCHED
+
+  message number 29 with some wrapping text to fill rows
+
+   …
+
+────────────────────────────────────────────────────────────
+  ▎
+  ▎ Message Craft…
+  ▎
+  ▎ [BUILD] · GLM-5.3 · Zhipu AI Coding Plan · off     …
+  ········  esc interrupt · craft          ctrl+p commands

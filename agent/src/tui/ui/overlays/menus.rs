@@ -3,14 +3,15 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::super::theme;
 use super::{boxed, dim, render_rows};
 use crate::tui::app::App;
+use crate::tui::compat;
 use crate::tui::modals::Modal;
+use crate::tui::style::Style;
+use crate::tui::text::{Line, Span};
 
 /// Slash-command popup above the composer. `chat` is the whole chat column and
 /// `bottom` the 7-row composer/status/footer region it sits above.
@@ -31,7 +32,7 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     };
     f.render_widget(Clear, area);
     f.render_widget(
-        Block::default().style(Style::default().bg(t.bg_raised)),
+        Block::default().style(compat::rat_style(Style::default().bg(t.bg_raised))),
         area,
     );
     // Scroll the window so the highlighted row stays visible past the edge.
@@ -148,13 +149,13 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
         ..inner
     };
     f.render_widget(
-        Paragraph::new(Line::from(vec![
+        Paragraph::new(compat::rat_line(&Line::from(vec![
             Span::styled(" Enter select", Style::default().fg(t.cyan)),
             Span::styled("  ! strong", Style::default().fg(t.accent)),
             Span::styled("  @ medium", Style::default().fg(t.accent)),
             Span::styled("  # weak", Style::default().fg(t.accent)),
             Span::styled("  $ compaction", Style::default().fg(t.accent)),
-        ])),
+        ]))),
         footer,
     );
 }
@@ -192,7 +193,7 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
         height: 1,
     };
     f.render_widget(
-        Paragraph::new(Line::from(vec![
+        Paragraph::new(compat::rat_line(&Line::from(vec![
             Span::styled("> ", Style::default().fg(t.cyan)),
             Span::styled(
                 if query.is_empty() {
@@ -206,7 +207,7 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
                     t.text_primary
                 }),
             ),
-        ])),
+        ]))),
         qrow,
     );
     f.set_cursor_position((qrow.x + 2 + query.chars().count() as u16, qrow.y));
@@ -222,10 +223,10 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
     // divider
     let div_y = qrow.y + 1;
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+        Paragraph::new(compat::rat_line(&Line::from(Span::styled(
             "─".repeat(content.width as usize),
             Style::default().fg(t.border_subtle),
-        ))),
+        )))),
         Rect {
             x: content.x,
             y: div_y,

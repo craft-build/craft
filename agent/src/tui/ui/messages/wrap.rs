@@ -1,8 +1,8 @@
 //! Width measurement and the three line-wrap algorithms (offset rows,
 //! plain text, styled spans) shared by every message block.
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use crate::tui::style::Style;
+use crate::tui::text::{Line, Span};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -167,8 +167,8 @@ mod tests {
 
     #[test]
     fn double_width_glyphs_pad_to_cell_width() {
-        use ratatui::style::Style;
-        use ratatui::text::Span;
+        use crate::tui::style::Style;
+        use crate::tui::text::Span;
         use unicode_width::UnicodeWidthStr;
         // CJK chars are 2 cells each, the emoji 2 as well: 6+2 = 8 cells
         // from 4 chars. Padding must count cells, not chars, so an ASCII
@@ -190,8 +190,8 @@ mod tests {
     /// spaces when possible.
     #[test]
     fn wrap_spans_preserves_styles_across_rows() {
-        use ratatui::style::{Color, Style};
-        use ratatui::text::Span;
+        use crate::tui::style::{Color, Style};
+        use crate::tui::text::Span;
         let spans = vec![
             Span::styled("aaaa ".to_string(), Style::default().fg(Color::Red)),
             Span::styled("bbbb".to_string(), Style::default().fg(Color::Blue)),

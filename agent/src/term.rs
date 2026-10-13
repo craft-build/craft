@@ -375,6 +375,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn with_not_found_appends_the_handler() {
         for shell in [&ShellKind::Bash, &ShellKind::Zsh, &ShellKind::Fish] {
             assert!(init_script(shell, true).contains("craft term run \"The command '$"));

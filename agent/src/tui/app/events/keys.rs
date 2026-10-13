@@ -23,7 +23,7 @@ impl App {
                     return;
                 }
                 KeyboardOwner::PermissionPrompt => {
-                    if self.handle_permission_key(key, tx) {
+                    if self.handle_permission_key(key.clone(), tx) {
                         return;
                     }
                     owner = if self.overlays.question_form.is_open() {
@@ -33,7 +33,7 @@ impl App {
                     };
                 }
                 KeyboardOwner::QuestionForm => {
-                    if self.handle_question_key(key, tx) {
+                    if self.handle_question_key(key.clone(), tx) {
                         return;
                     }
                     owner = self.owner_below();
@@ -59,7 +59,7 @@ impl App {
                     let action = self
                         .plan_mode
                         .plan_form
-                        .handle_key(key, &self.overlays.keybinds);
+                        .handle_key(key.clone(), &self.overlays.keybinds);
                     if action != PlanFormAction::Passthrough {
                         self.handle_plan_form_action(action, tx);
                         return;
@@ -111,7 +111,7 @@ impl App {
         let Some(id) = self.overlays.permission_prompt.id().map(str::to_owned) else {
             return false;
         };
-        match self.overlays.permission_prompt.handle_key(key) {
+        match self.overlays.permission_prompt.handle_key(key.clone()) {
             Some(answer) => {
                 let _ = tx.send(Command::AnswerPermission { id, answer });
                 true
@@ -120,8 +120,7 @@ impl App {
                 // Unhandled ctrl chords keep working (palette, quit path,
                 // ...); plain keys never reach the composer while the
                 // prompt is open.
-                !key.modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                !modifiers_intersect(key.modifiers, KeyModifiers::CONTROL.0 | KeyModifiers::ALT.0)
             }
         }
     }
@@ -133,30 +132,32 @@ impl App {
         let Some(id) = self.overlays.question_form.id().map(str::to_owned) else {
             return false;
         };
-        match self.overlays.question_form.handle_key(key) {
+        match self.overlays.question_form.handle_key(key.clone()) {
             Some(answer) => {
                 let _ = tx.send(Command::AnswerQuestion { id, answer });
                 true
             }
-            None => !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
+            None => {
+                !modifiers_intersect(key.modifiers, KeyModifiers::CONTROL.0 | KeyModifiers::ALT.0)
+            }
         }
     }
 
     /// Keys for the normal (modal-free) surface: global chords, then
     /// navigation and composer editing.
     fn handle_base_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
-        if self.handle_chord_key(key, tx) {
+        // slt's KeyEvent is Clone-but-not-Copy, so each fallthrough helper
+        // receives a clone and only the final handler consumes the key.
+        if self.handle_chord_key(key.clone(), tx) {
             return;
         }
-        if self.handle_editing_chord_key(key, tx) {
+        if self.handle_editing_chord_key(key.clone(), tx) {
             return;
         }
-        if self.handle_navigation_key(key, tx) {
+        if self.handle_navigation_key(key.clone(), tx) {
             return;
         }
-        if self.handle_history_key(key) {
+        if self.handle_history_key(&key) {
             return;
         }
         self.handle_submit_or_edit_key(key, tx);
@@ -168,7 +169,7 @@ impl App {
     fn handle_chord_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) -> bool {
         let key = crate::tui::keybindings::normalize_key(key);
         let keybinds = &self.overlays.keybinds;
-        let m = |id: ActionId| keybinds.matches(id, key);
+        let m = |id: ActionId| keybinds.matches(id, &key);
         if m(ActionId::Quit) {
             if !self.composer.text.is_empty() {
                 self.composer.clear();
@@ -261,11 +262,11 @@ impl App {
         let key = crate::tui::keybindings::normalize_key(key);
         let keybinds = &self.overlays.keybinds;
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if keybinds.matches(ActionId::LineStart, key) {
+            if keybinds.matches(ActionId::LineStart, &key) {
                 self.composer.move_home();
                 return true;
             }
-            if keybinds.matches(ActionId::LineEnd, key) {
+            if keybinds.matches(ActionId::LineEnd, &key) {
                 if self.composer.text.is_empty() {
                     self.scroll_to_bottom();
                 } else {
@@ -273,13 +274,13 @@ impl App {
                 }
                 return true;
             }
-            if keybinds.matches(ActionId::DeleteWord, key)
+            if keybinds.matches(ActionId::DeleteWord, &key)
                 || (key.code == KeyCode::Backspace && key.modifiers == KeyModifiers::CONTROL)
             {
                 self.composer.delete_word_back();
                 return true;
             }
-            if keybinds.matches(ActionId::KillLine, key) {
+            if keybinds.matches(ActionId::KillLine, &key) {
                 self.composer.kill_to_end_of_line();
                 return true;
             }
@@ -305,7 +306,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT)
             && !key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            if keybinds.matches(ActionId::CycleEffort, key) {
+            if keybinds.matches(ActionId::CycleEffort, &key) {
                 let choices = self.thinking_choices();
                 let current = crate::thinking::selected_choice(self.session.thinking, &choices);
                 let next = choices
@@ -424,7 +425,7 @@ impl App {
     /// History keys: on the first/last composer line the arrows recall the
     /// input history; elsewhere they stay cursor motions. The arrows never
     /// scroll the transcript (PageUp/Down, Ctrl-U/D, and the wheel do that).
-    fn handle_history_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_history_key(&mut self, key: &KeyEvent) -> bool {
         match key.code {
             KeyCode::Up => {
                 if self.slash_open() {

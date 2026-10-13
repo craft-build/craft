@@ -4,9 +4,9 @@
 //! adapted to this repo: the corpus is this repo's segment cache and the
 //! modal's render lives with the other overlays (`ui::overlays`).
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::ui::scrollback::ScrollPos;
 
@@ -167,7 +167,7 @@ impl SearchModal {
 
     fn edit(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let byte = self.byte_of_cursor();
                 self.query.insert(byte, c);
                 self.cursor += 1;
@@ -308,14 +308,16 @@ fn pick_display_line(text: &str, indices: &[u32]) -> (String, usize, Vec<u32>) {
 }
 
 /// One result row: the matched chars bolded in the accent color, the
-/// selected row on the overlay background.
+/// selected row on the overlay background. Rows are app
+/// ([`crate::tui::text`]) spans; the paint site converts them via
+/// `crate::tui::compat`.
 pub(crate) fn highlighted_row(
     m: &SearchMatch,
     max_width: usize,
     is_selected: bool,
-) -> Vec<ratatui::text::Span<'static>> {
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::Span;
+) -> Vec<crate::tui::text::Span<'static>> {
+    use crate::tui::style::{Modifier, Style, StyleExt};
+    use crate::tui::text::Span;
 
     let t = crate::tui::ui::theme::current();
     let index_set: std::collections::HashSet<u32> = m.display_indices.iter().copied().collect();
@@ -368,15 +370,10 @@ pub(crate) fn search_row_height() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyEventKind, KeyEventState};
+    use crate::tui::compat::slt_key;
 
     fn key_event(code: KeyCode) -> KeyEvent {
-        KeyEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        }
+        slt_key(code, KeyModifiers::NONE)
     }
 
     fn modal_with_query(query: &str, texts: &[&str]) -> SearchModal {

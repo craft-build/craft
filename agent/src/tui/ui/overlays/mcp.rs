@@ -2,15 +2,16 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use super::super::theme;
 use super::{boxed, centered, dim, render_rows};
 use crate::mcp::config::{McpServerInfo, McpServerStatus};
 use crate::tui::app::App;
+use crate::tui::compat;
 use crate::tui::modals::Modal;
+use crate::tui::style::{Color, Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 
 /// `/mcp`: MCP server status screen (B.11). One row per server from the
 /// live snapshot — name, transport, tool/prompt counts on the left, status
@@ -100,12 +101,12 @@ fn render_mcp_sheet(
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+        Paragraph::new(compat::rat_line(&Line::from(Span::styled(
             "MCP servers — t toggle, r reconnect, enter resources, esc close",
             Style::default()
                 .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
-        ))),
+        )))),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,
@@ -134,7 +135,7 @@ fn render_mcp_sheet(
 
 /// Status label and theme color for one server row: Running rides success,
 /// Connecting warning, Failed and NeedsAuth danger, Disabled the dim text.
-fn mcp_status_style(info: &McpServerInfo) -> (&'static str, ratatui::style::Color) {
+fn mcp_status_style(info: &McpServerInfo) -> (&'static str, Color) {
     let t = theme::current();
     match &info.status {
         McpServerStatus::Running => ("running", t.success),

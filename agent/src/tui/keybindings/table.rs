@@ -3,10 +3,11 @@
 
 use super::help::KeyLabel;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// One concrete chord: code + exact modifiers + a display label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// (`slt`'s key types are not `Copy`, so neither is this.)
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bind {
     pub code: KeyCode,
     pub modifiers: KeyModifiers,
@@ -14,18 +15,13 @@ pub struct Bind {
 }
 
 impl Bind {
-    pub fn matches(&self, key: KeyEvent) -> bool {
+    pub fn matches(&self, key: &KeyEvent) -> bool {
         key.code == self.code && key.modifiers == self.modifiers
     }
 
     #[cfg(test)]
-    pub const fn to_key_event(self) -> KeyEvent {
-        KeyEvent {
-            code: self.code,
-            modifiers: self.modifiers,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
-        }
+    pub fn to_key_event(self) -> KeyEvent {
+        crate::tui::compat::slt_key(self.code, self.modifiers)
     }
 }
 
@@ -42,7 +38,7 @@ const fn ctrl(c: char, upper: &'static str) -> Bind {
 /// overlay can replace them wholesale.
 pub mod key {
     use super::{Bind, ctrl};
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use slt::event::{KeyCode, KeyModifiers};
 
     pub const QUIT: Bind = ctrl('c', "Ctrl+C");
     pub const QUIT_ALT: Bind = ctrl('q', "Ctrl+Q");
@@ -472,21 +468,20 @@ pub const KEYBINDS: &[Keybind] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers};
-
     #[test]
     fn bind_requires_exact_modifiers() {
+        use slt::event::{KeyCode, KeyModifiers};
         let bind = key::OPEN_EDITOR; // Ctrl+O
-        let exact = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
-        let extra = KeyEvent::new(
+        let exact = crate::tui::compat::slt_key(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let extra = crate::tui::compat::slt_key(
             KeyCode::Char('o'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers(KeyModifiers::CONTROL.0 | KeyModifiers::SHIFT.0),
         );
-        let wrong = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT);
+        let wrong = crate::tui::compat::slt_key(KeyCode::Char('o'), KeyModifiers::ALT);
 
-        assert!(bind.matches(exact));
-        assert!(!bind.matches(extra), "extra modifiers should not match");
-        assert!(!bind.matches(wrong), "wrong modifier should not match");
+        assert!(bind.matches(&exact));
+        assert!(!bind.matches(&extra), "extra modifiers should not match");
+        assert!(!bind.matches(&wrong), "wrong modifier should not match");
     }
 
     #[test]

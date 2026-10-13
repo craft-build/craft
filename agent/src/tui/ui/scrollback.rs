@@ -9,7 +9,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use ratatui::text::Line;
+use crate::tui::text::Line;
 
 /// Top of the viewport as a place in the document: index into the segment
 /// cache plus the row within that segment.
@@ -352,7 +352,7 @@ mod tests {
     fn cache(heights: &[u16]) -> SegmentCache {
         let mut cache = SegmentCache::new();
         for &h in heights {
-            let lines = (0..h).map(|i| Line::raw(format!("l{i}"))).collect();
+            let lines = (0..h).map(|i| Line::from(format!("l{i}"))).collect();
             cache.push(Segment::with_lines(lines));
         }
         cache
@@ -367,7 +367,7 @@ mod tests {
         use base64::Engine;
 
         let lines: Arc<[Line<'static>]> =
-            vec![Line::raw(String::from("a")), Line::raw(String::from("b"))].into();
+            vec![Line::from(String::from("a")), Line::from(String::from("b"))].into();
         let shared = SharedLines::from_chunks(vec![Arc::clone(&lines)]);
         let mut segment = Segment::with_shared_lines(shared.clone());
         let other = Segment::with_shared_lines(shared);
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(segment.height(WIDTH), 2 + image_rows);
         assert!(Arc::ptr_eq(&lines, &segment.lines.stable.chunks[0].lines));
 
-        segment.set_lines(vec![Line::raw("replacement")]);
+        segment.set_lines(vec![Line::from("replacement")]);
         assert!(segment.cached_height.get().is_none());
         assert_eq!(segment.height(WIDTH), 1 + image_rows);
         assert_eq!(other.height(WIDTH), 2);
@@ -405,8 +405,8 @@ mod tests {
 
     #[test]
     fn shared_line_ranges_cross_chunks_and_skip_empty_chunks() {
-        let first: Arc<[Line<'static>]> = vec![Line::raw("a"), Line::raw("b")].into();
-        let last: Arc<[Line<'static>]> = vec![Line::raw("c"), Line::raw("d")].into();
+        let first: Arc<[Line<'static>]> = vec![Line::from("a"), Line::from("b")].into();
+        let last: Arc<[Line<'static>]> = vec![Line::from("c"), Line::from("d")].into();
         let shared = SharedLines::from_chunks(vec![first.clone(), Arc::from([]), last.clone()]);
         assert_eq!(shared.len(), 4);
         assert_eq!(shared.iter().count(), 4);
@@ -421,10 +421,10 @@ mod tests {
         assert_eq!(
             shared,
             SharedLines::from(vec![
-                Line::raw("a"),
-                Line::raw("b"),
-                Line::raw("c"),
-                Line::raw("d"),
+                Line::from("a"),
+                Line::from("b"),
+                Line::from("c"),
+                Line::from("d"),
             ])
         );
         assert_eq!(Segment::with_shared_lines(shared).height(WIDTH), 4);
@@ -432,10 +432,10 @@ mod tests {
 
     #[test]
     fn shared_tails_reuse_index_and_ranges_cross_into_tail() {
-        let stable = SharedLines::from(vec![Line::raw("a"), Line::raw("b")]);
-        let tail: Arc<[Line<'static>]> = vec![Line::raw("c"), Line::raw("d")].into();
+        let stable = SharedLines::from(vec![Line::from("a"), Line::from("b")]);
+        let tail: Arc<[Line<'static>]> = vec![Line::from("c"), Line::from("d")].into();
         let first = stable.with_tail(tail.clone());
-        let replacement = first.with_tail(vec![Line::raw("e")].into());
+        let replacement = first.with_tail(vec![Line::from("e")].into());
         assert!(Arc::ptr_eq(&stable.stable, &first.stable));
         assert!(Arc::ptr_eq(&first.stable, &replacement.stable));
         assert!(first.ptr_eq(&first.clone()));
@@ -456,29 +456,29 @@ mod tests {
         assert_eq!(
             first,
             SharedLines::from(vec![
-                Line::raw("a"),
-                Line::raw("b"),
-                Line::raw("c"),
-                Line::raw("d"),
+                Line::from("a"),
+                Line::from("b"),
+                Line::from("c"),
+                Line::from("d"),
             ])
         );
     }
 
     #[test]
     fn shared_chunk_append_preserves_snapshots_and_reuses_unique_index() {
-        let mut stable = SharedLines::from(vec![Line::raw("a")]);
+        let mut stable = SharedLines::from(vec![Line::from("a")]);
         let index = Arc::as_ptr(&stable.stable);
-        stable.push_chunk(vec![Line::raw("b")].into());
+        stable.push_chunk(vec![Line::from("b")].into());
         assert_eq!(index, Arc::as_ptr(&stable.stable));
-        let snapshot = stable.with_tail(vec![Line::raw("tail")].into());
-        let chunk: Arc<[Line<'static>]> = vec![Line::raw("c")].into();
+        let snapshot = stable.with_tail(vec![Line::from("tail")].into());
+        let chunk: Arc<[Line<'static>]> = vec![Line::from("c")].into();
         stable.push_chunk(chunk.clone());
         assert!(!Arc::ptr_eq(&stable.stable, &snapshot.stable));
         assert!(Arc::ptr_eq(&chunk, &stable.stable.chunks[2].lines));
         assert_eq!(stable.len(), 3);
         assert_eq!(
             snapshot,
-            SharedLines::from(vec![Line::raw("a"), Line::raw("b"), Line::raw("tail"),])
+            SharedLines::from(vec![Line::from("a"), Line::from("b"), Line::from("tail"),])
         );
         assert_eq!(
             stable
@@ -495,12 +495,12 @@ mod tests {
     fn height_is_the_line_count_and_caches_per_width() {
         let mut c = SegmentCache::new();
         assert!(c.is_empty());
-        c.push(Segment::with_lines(vec![Line::raw("a"), Line::raw("b")]));
+        c.push(Segment::with_lines(vec![Line::from("a"), Line::from("b")]));
         assert_eq!(c.get(0).unwrap().height(80), 2);
         // Same width hits the cache; the number is width-independent here
         // only because lines arrive pre-wrapped for that width.
         assert_eq!(c.get(0).unwrap().height(80), 2);
-        c.get_mut(0).unwrap().set_lines(vec![Line::raw("x")]);
+        c.get_mut(0).unwrap().set_lines(vec![Line::from("x")]);
         assert_eq!(c.get(0).unwrap().height(80), 1, "set_lines invalidates");
     }
 
@@ -585,7 +585,7 @@ mod tests {
         // taller; the stored position stays on the same segment.
         c.get_mut(1)
             .unwrap()
-            .set_lines((0..5).map(|i| Line::raw(format!("n{i}"))).collect());
+            .set_lines((0..5).map(|i| Line::from(format!("n{i}"))).collect());
         let narrow = Layout::new(&c, 40);
         assert_eq!(narrow.clamp(stored).seg, 1);
         assert_eq!(narrow.clamp(stored).row, 0);

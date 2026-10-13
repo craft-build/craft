@@ -6,10 +6,10 @@
 //! [`StyleExt`] adds the few builder helpers the code base relies on
 //! (`add_modifier`, `remove_modifier`, `patch`).
 
-pub use slt::style::{Color, Style, UnderlineStyle};
 /// Text-modifier bitflags. Aliased as `Modifier` because most of the code
 /// base spells it that way (ratatui heritage).
 pub use slt::style::Modifiers;
+pub use slt::style::{Color, Style, UnderlineStyle};
 
 mod sealed {
     pub trait Sealed {}
@@ -27,6 +27,7 @@ pub trait StyleExt: sealed::Sealed + Sized {
     fn add_modifier(self, modifier: Modifiers) -> Style;
 
     /// Remove `modifier` from the style's modifier bits.
+    #[allow(dead_code)] // kept for parity with the ratatui-era API surface
     fn remove_modifier(self, modifier: Modifiers) -> Style;
 
     /// Overlay `other` on `self`, ratatui `Style::patch` semantics: `other`'s
@@ -81,7 +82,9 @@ mod tests {
     #[test]
     fn patch_overlays_set_fields_only() {
         let base = Style::default().fg(Color::Red).bg(Color::Blue);
-        let over = Style::default().bg(Color::Green).add_modifier(Modifiers::BOLD);
+        let over = Style::default()
+            .bg(Color::Green)
+            .add_modifier(Modifiers::BOLD);
         let p = base.patch(over);
         // fg kept from base, bg replaced, modifier unioned.
         assert_eq!(p.fg, Some(Color::Red));

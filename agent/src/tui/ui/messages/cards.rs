@@ -1,8 +1,8 @@
 //! Tool-card layout: header row with wrapping label and right-aligned
 //! badge, then the (optionally truncated) body rows inside the card frame.
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use crate::tui::style::{Color, Style};
+use crate::tui::text::{Line, Span};
 
 use super::super::theme;
 use super::text::surface_style_with;
@@ -146,7 +146,7 @@ pub(super) fn tool_block(
         return (lines, None, link);
     }
 
-    fn gutter_span(nr: usize, w: usize, bg: ratatui::style::Color) -> Span<'static> {
+    fn gutter_span(nr: usize, w: usize, bg: Color) -> Span<'static> {
         let t = theme::current();
         let text = if nr == 0 {
             " ".repeat(w)
@@ -169,7 +169,7 @@ pub(super) fn tool_block(
         gutter_w: usize,
         hl: &mut Option<Highlighter>,
         width: usize,
-        card_bg: ratatui::style::Color,
+        card_bg: Color,
         surf: Style,
     ) -> Vec<Line<'static>> {
         let t = theme::current();
@@ -383,7 +383,7 @@ pub(super) fn tool_block(
 mod tests {
     use super::{Line, tool_block};
     use crate::tui::provider::ToolLine;
-    use ratatui::style::Modifier;
+    use crate::tui::style::Modifier;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.clone()).collect()
@@ -434,9 +434,11 @@ mod tests {
             .iter()
             .find(|l| line_text(l).contains("- fn a() { one }"))
             .unwrap();
-        assert!(del_line.spans.iter().any(|s| {
-            s.content.contains("one") && s.style.add_modifier.contains(Modifier::BOLD)
-        }));
+        assert!(
+            del_line.spans.iter().any(|s| {
+                s.content.contains("one") && s.style.modifiers.contains(Modifier::BOLD)
+            })
+        );
     }
 
     /// Unchanged (context) rows inside an edit diff are syntax highlighted like

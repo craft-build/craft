@@ -3,7 +3,6 @@
 //! keyboard while open — keys never fall through to base chords, so e.g.
 //! ctrl+q does not quit under an open palette.
 
-use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 
 use crate::mcp::McpCommand;
@@ -13,6 +12,7 @@ use crate::storage::StateDir;
 use crate::tui::app::App;
 use crate::tui::provider::Command;
 use crate::tui::ui::theme;
+use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// The one modal that may be open at a time. Variants are mutually exclusive
 /// by construction: opening one replaces whatever was open.
@@ -136,9 +136,7 @@ impl App {
                     self.overlays.modal = Modal::None;
                 }
                 KeyCode::Esc => self.overlays.modal = Modal::None,
-                _ if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                _ if key.modifiers.contains(KeyModifiers::CONTROL)
                     && key.code == KeyCode::Char('c') =>
                 {
                     self.overlays.modal = Modal::None;
@@ -198,8 +196,8 @@ impl App {
     fn handle_help_key(&mut self, key: KeyEvent) {
         use crate::tui::keybindings::ActionId;
         if key.code == KeyCode::Esc
-            || self.overlays.keybinds.matches(ActionId::Help, key)
-            || self.overlays.keybinds.matches(ActionId::Quit, key)
+            || self.overlays.keybinds.matches(ActionId::Help, &key)
+            || self.overlays.keybinds.matches(ActionId::Quit, &key)
         {
             self.overlays.modal = Modal::None;
             return;
@@ -229,9 +227,7 @@ impl App {
     /// Theme picker keys: arrows preview live, Enter applies + persists,
     /// Esc/Ctrl-C restores the theme active on open. All keys are consumed.
     fn handle_theme_picker_key(&mut self, key: KeyEvent) {
-        let ctrl = key
-            .modifiers
-            .contains(crossterm::event::KeyModifiers::CONTROL);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let Modal::ThemePicker {
             entries,
             selected,
@@ -386,9 +382,7 @@ impl App {
         tx: &mpsc::UnboundedSender<Command>,
         allow_refresh: bool,
     ) {
-        let ctrl = key
-            .modifiers
-            .contains(crossterm::event::KeyModifiers::CONTROL);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => self.overlays.modal = Modal::None,
             KeyCode::Char('c') | KeyCode::Char('C') if ctrl => self.overlays.modal = Modal::None,
@@ -601,10 +595,12 @@ fn mcp_command_for(infos: &[McpServerInfo], selected: usize, code: KeyCode) -> O
 /// protocol), or a layout-specific variant. Identical to the reference's
 /// `tier_for_shortcut`.
 fn tier_for_key(key: &KeyEvent) -> Option<ModelTier> {
-    let KeyCode::Char(c) = key.code else {
+    // slt's KeyCode is not Copy: bind through the reference instead of
+    // moving the field out of the borrowed event.
+    let KeyCode::Char(c) = &key.code else {
         return None;
     };
-    match c {
+    match *c {
         '1' | '!' | '¡' => Some(ModelTier::Strong),
         '2' | '@' | '"' | '™' => Some(ModelTier::Medium),
         '3' | '#' | '§' | '£' => Some(ModelTier::Weak),
@@ -661,7 +657,8 @@ fn theme_state_dir() -> Option<StateDir> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyModifiers;
+    use crate::tui::compat::slt_key;
+    use slt::event::KeyModifiers;
 
     fn temp_state_dir() -> (tempfile::TempDir, StateDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -670,7 +667,7 @@ mod tests {
     }
 
     fn key(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+        slt_key(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
     /// `/recipe` with parameters prefills the `key=` stubs and leaves the
@@ -690,7 +687,7 @@ mod tests {
             }],
             selected: 0,
         };
-        app.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Enter, KeyModifiers::NONE), &tx);
         assert_eq!(app.composer.text, "/recipe deploy env= tag=");
         assert_eq!(
             app.composer.cursor,
@@ -774,7 +771,7 @@ mod tests {
         let mut app = App::new();
         app.overlays.modal = Modal::Mcp { selected: 0 };
         // No handle: the row list is empty, so Down clamps to 0.
-        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
         app.handle_modal_key(key('t'), &tx);
         assert!(
@@ -784,9 +781,9 @@ mod tests {
         app.handle_modal_key(key('q'), &tx);
         assert!(matches!(app.overlays.modal, Modal::None));
         app.overlays.modal = Modal::Mcp { selected: 3 };
-        app.handle_modal_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Up, KeyModifiers::NONE), &tx);
         assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 2 }));
-        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Esc, KeyModifiers::NONE), &tx);
         assert!(matches!(app.overlays.modal, Modal::None));
     }
     /// Phase 5: Enter expands the selected server's resource list, a
@@ -798,7 +795,7 @@ mod tests {
         app.overlays.modal = Modal::Mcp { selected: 0 };
         assert!(app.overlays.mcp_expanded.is_none());
 
-        app.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Enter, KeyModifiers::NONE), &tx);
         // No handle: infos is empty, so the out-of-range selection does not
         // expand.
         assert!(app.overlays.mcp_expanded.is_none());
@@ -818,7 +815,7 @@ mod tests {
         assert_eq!(app.overlays.mcp_expanded, Some(0));
         assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
 
-        app.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Enter, KeyModifiers::NONE), &tx);
         assert_eq!(app.overlays.mcp_expanded, None);
         assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
     }
@@ -899,12 +896,12 @@ mod tests {
         assert_eq!(tier_for_key(&key('¤')), Some(ModelTier::Compaction));
         // kitty reports Shift+2 as digit+SHIFT; the digit arm catches it.
         assert_eq!(
-            tier_for_key(&KeyEvent::new(KeyCode::Char('2'), KeyModifiers::SHIFT)),
+            tier_for_key(&slt_key(KeyCode::Char('2'), KeyModifiers::SHIFT)),
             Some(ModelTier::Medium)
         );
         assert_eq!(tier_for_key(&key('x')), None);
         assert_eq!(
-            tier_for_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            tier_for_key(&slt_key(KeyCode::Enter, KeyModifiers::NONE)),
             None
         );
     }
@@ -951,12 +948,12 @@ mod tests {
         assert_eq!(app.session.model_idx, 0, "tier keys never select a model");
         assert!(rx.try_recv().is_err(), "no SelectModel command is sent");
         // Non-tier keys (Esc) still close.
-        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Esc, KeyModifiers::NONE), &tx);
         assert!(matches!(app.overlays.modal, Modal::None));
     }
 
     fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+        slt_key(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     #[test]
@@ -977,7 +974,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.overlays.modal = Modal::Usage(Vec::new());
-        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Esc, KeyModifiers::NONE), &tx);
         assert!(matches!(app.overlays.modal, Modal::None));
         app.overlays.modal = Modal::Usage(Vec::new());
         app.handle_modal_key(ctrl('c'), &tx);
@@ -990,10 +987,10 @@ mod tests {
         let mut app = App::new();
         app.overlays.modal = Modal::Usage(Vec::new());
         for _ in 0..3 {
-            app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+            app.handle_modal_key(slt_key(KeyCode::Down, KeyModifiers::NONE), &tx);
         }
         assert_eq!(app.overlays.usage_scroll, 3);
-        app.handle_modal_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::PageUp, KeyModifiers::NONE), &tx);
         assert_eq!(app.overlays.usage_scroll, 0);
         // Plain 'q' is consumed: modal stays open, no quit.
         app.handle_modal_key(key('q'), &tx);
@@ -1006,7 +1003,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.overlays.modal = Modal::Stats(StatsView::default());
-        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_eq!(app.overlays.usage_scroll, 1);
         assert!(
             matches!(app.overlays.modal, Modal::Stats(_)),
@@ -1052,7 +1049,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.run_command("theme", &tx);
-        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert!(
             matches!(&app.overlays.modal, Modal::ThemePicker { selected, .. } if *selected == idx + 1),
             "Down moved the cursor one row"
@@ -1079,9 +1076,9 @@ mod tests {
         theme::set_named(theme::DEFAULT_THEME).unwrap();
         let mut app = App::new();
         app.run_command("theme", &tx);
-        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_ne!(theme::current_theme_name(), theme::DEFAULT_THEME);
-        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Esc, KeyModifiers::NONE), &tx);
         assert!(matches!(app.overlays.modal, Modal::None));
         assert_eq!(theme::current_theme_name(), theme::DEFAULT_THEME);
     }
@@ -1093,7 +1090,7 @@ mod tests {
         theme::set_named(theme::DEFAULT_THEME).unwrap();
         let mut app = App::new();
         app.run_command("theme", &tx);
-        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(slt_key(KeyCode::Down, KeyModifiers::NONE), &tx);
         app.handle_modal_key(ctrl('c'), &tx);
         assert!(matches!(app.overlays.modal, Modal::None));
         assert_eq!(theme::current_theme_name(), theme::DEFAULT_THEME);

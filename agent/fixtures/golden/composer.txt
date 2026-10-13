@@ -1,0 +1,23 @@
+
+  No messages yet.                                            /craft
+                                                              main
+  Send a message — the mock provider will replay the scrip
+                                                              ────────────────
+
+                                                              PLAN
+
+
+                                                              ────────────────
+
+                                                              FILES TOUCHED
+
+
+
+
+────────────────────────────────────────────────────────────
+  ▎
+  ▎ ! git status && git diff --stat  zweite Zeile
+  ▎ 中 文 输 入 测 试  wrappable tail
+  ▎
+  ▎ [BUILD] · GLM-5.3 · Zhipu AI Coding Plan · off     …
+  ········  esc interrupt · craft          ctrl+p commands

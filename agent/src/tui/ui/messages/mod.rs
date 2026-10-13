@@ -2,13 +2,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::theme;
 use crate::tui::app::{App, Message};
+use crate::tui::compat;
 use crate::tui::hyperlink;
+use crate::tui::style::Style;
+use crate::tui::text::{Line, Span};
 use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
 
 mod cards;
@@ -278,12 +279,14 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Some((
                     idx,
-                    Rect {
-                        x: inner.x,
-                        y: inner.y + vis_start,
-                        width: inner.width,
-                        height: vis_end - vis_start,
-                    },
+                    // Stored regions use the app rect; paint-time rects stay
+                    // ratatui (converted where they are painted).
+                    crate::tui::geom::Rect::new(
+                        inner.x,
+                        inner.y + vis_start,
+                        inner.width,
+                        vis_end - vis_start,
+                    ),
                 ))
             }
         })
@@ -304,17 +307,14 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             );
             (vis < inner.height).then_some((
                 idx,
-                Rect {
-                    x: inner.x,
-                    y: inner.y + vis,
-                    width: inner.width,
-                    height: 1,
-                },
+                crate::tui::geom::Rect::new(inner.x, inner.y + vis, inner.width, 1),
             ))
         })
         .collect();
 
-    let para = Paragraph::new(lines);
+    // App lines meet the legacy ratatui painter here; the compat shim
+    // borrows them as ratatui text at the paint boundary.
+    let para = Paragraph::new(compat::rat_text(&lines));
     f.render_widget(para, inner);
 
     // Draw inline images over their reserved rows. Like the hyperlink
@@ -630,11 +630,16 @@ mod tests {
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
             .collect();
 
+        // Theme colors are app-typed now; convert at the buffer boundary.
+        let accent = crate::tui::compat::rat_color(t.accent);
+        let text_secondary = crate::tui::compat::rat_color(t.text_secondary);
+        let text_tertiary = crate::tui::compat::rat_color(t.text_tertiary);
+
         // Agent text is markdown: heading rendered in accent bold.
         let hy = rows.iter().position(|r| r.contains("Title")).unwrap();
         let hx = rows[hy].find("Title").unwrap() as u16;
         let c = &buf[(hx, hy as u16)];
-        assert_eq!(c.fg, t.accent, "heading fg");
+        assert_eq!(c.fg, accent, "heading fg");
         assert!(c.modifier.contains(Modifier::BOLD), "heading bold");
 
         // Read card body is syntax highlighted: some source cell carries a
@@ -644,8 +649,8 @@ mod tests {
             let c = &buf[(x, cy as u16)];
             matches!(c.symbol(), "f" | "m" | "(" | ")")
                 && c.fg != Color::Reset
-                && c.fg != t.text_secondary
-                && c.fg != t.text_tertiary
+                && c.fg != text_secondary
+                && c.fg != text_tertiary
         });
         assert!(
             hl_found,

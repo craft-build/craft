@@ -3,14 +3,15 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use super::super::theme;
 use super::{boxed, centered, dim};
 use crate::tui::app::App;
+use crate::tui::compat;
 use crate::tui::modals::Modal;
+use crate::tui::style::{Modifier, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 
 /// Shared scrollable sheet renderer for the `/usage` and `/stats` overlays
 /// (F.5): boxed title, a body of pre-built lines clipped by `scroll`, and a
@@ -38,9 +39,11 @@ pub(super) fn render_usage_sheet(
     let visible = (inner.height.saturating_sub(3)) as usize;
     let scroll = scroll.min(lines.len().saturating_sub(visible.min(lines.len())));
     let max_scroll = lines.len().saturating_sub(visible.min(lines.len()));
-    let line = |l: Line<'static>| Paragraph::new(l);
+    // App lines reach the ratatui Paragraph one row at a time through the
+    // compat shim; each paint borrows its line for the render call.
+    let line = |l: &Line<'static>| Paragraph::new(compat::rat_line(l));
     f.render_widget(
-        line(Line::from(Span::styled(
+        line(&Line::from(Span::styled(
             title.to_string(),
             Style::default()
                 .fg(theme::current().text_primary)
@@ -55,7 +58,7 @@ pub(super) fn render_usage_sheet(
     );
     for (row, body) in lines.iter().skip(scroll).take(visible).enumerate() {
         f.render_widget(
-            line(body.clone()),
+            line(body),
             Rect {
                 x: inner.x + 1,
                 y: inner.y + 2 + row as u16,
@@ -65,7 +68,7 @@ pub(super) fn render_usage_sheet(
         );
     }
     f.render_widget(
-        line(Line::from(footer)),
+        line(&Line::from(footer)),
         Rect {
             x: inner.x + 1,
             y: inner.y + inner.height.saturating_sub(1),
@@ -251,7 +254,7 @@ pub fn render_usage(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let quota = quota_lines(&app.overlays.usage_quota);
     if !quota.is_empty() {
-        lines.push(Line::raw(""));
+        lines.push(Line::from(""));
         lines.extend(quota);
     }
     let total_tokens: u64 = rows.iter().map(|r| r.tokens).sum();
@@ -320,7 +323,7 @@ pub fn render_stats(f: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
     if !view.by_session.is_empty() {
-        lines.push(Line::raw(""));
+        lines.push(Line::from(""));
         lines.push(section_label("Top sessions:"));
         lines.extend(view.by_session.iter().map(session_line));
     }

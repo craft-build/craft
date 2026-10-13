@@ -814,6 +814,13 @@ mod tests {
     #[test_case(SAME_BODY_AS_RUST, SAME_BODY_AS_PYTHON; "content_cache_ignores_width")]
     #[test_case(LONG_RUST_BLOCK, SHORT_RUST_BLOCK; "code_body_shrinks_at_the_same_block_index")]
     fn a_reused_renderer_renders_each_text_like_a_fresh_one(first: &str, second: &str) {
+        // Reused-vs-fresh equivalence compares highlight output of two
+        // separately timed renders; guard against a parallel TUI theme test
+        // swapping the global highlighter theme between them (the lock lives
+        // next to the generation counter it protects).
+        let _guard = crate::markdown::highlight::THEME_SWAP_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fresh = |text: &str, width| Renderer::unwrapped().render(text, width);
         assert!(
             fresh(first, NARROW_WIDTH).len() > fresh(first, TEST_WIDTH).len(),

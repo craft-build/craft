@@ -1,8 +1,8 @@
 //! Tool metadata renderers: header labels, summaries, diff badges, and
 //! diff-body span splitting with syntax colors.
 
-use ratatui::style::Style;
-use ratatui::text::Span;
+use crate::tui::style::{Color, Style};
+use crate::tui::text::Span;
 
 use super::super::theme;
 use crate::markdown::highlight::{SegmentColor, StyledSegment};
@@ -29,7 +29,7 @@ pub(super) fn tool_summary(kind: &ToolKind) -> String {
     }
 }
 
-pub(super) fn diff_badge(diff: Option<DiffState>) -> Option<(&'static str, ratatui::style::Color)> {
+pub(super) fn diff_badge(diff: Option<DiffState>) -> Option<(&'static str, Color)> {
     let t = theme::current();
 
     match diff {
@@ -38,10 +38,10 @@ pub(super) fn diff_badge(diff: Option<DiffState>) -> Option<(&'static str, ratat
     }
 }
 
-pub(super) fn seg_color(c: SegmentColor) -> Option<ratatui::style::Color> {
+pub(super) fn seg_color(c: SegmentColor) -> Option<Color> {
     match c {
-        SegmentColor::Rgb(r, g, b) => Some(ratatui::style::Color::Rgb(r, g, b)),
-        SegmentColor::Ansi(i) => Some(ratatui::style::Color::Indexed(i)),
+        SegmentColor::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
+        SegmentColor::Ansi(i) => Some(Color::Indexed(i)),
         SegmentColor::Default => None,
     }
 }

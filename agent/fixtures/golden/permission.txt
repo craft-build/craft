@@ -1,0 +1,23 @@
+
+  No messages yet.                                            /craft
+                                                              main
+  Send a message — the mock provider will replay the scrip
+                                                              ────────────────
+
+                                                              PLAN
+
+
+ Permission Required                                          ────────────────
+
+  Bash                                                        FILES TOUCHED
+  rm -rf /tmp/scratch && echo done
+  y Allow  a Always (project)       A Always (all projects)
+s Session
+  n Deny   d Deny-always (project)  D Deny-always (all)
+
+────────────────────────────────────────────────────────────
+  ▎
+  ▎ Message Craft…
+  ▎
+  ▎ [BUILD] · GLM-5.3 · Zhipu AI Coding Plan · off     …
+  ⠙ awaiting approval 0s  esc interrupt · …ctrl+p commands

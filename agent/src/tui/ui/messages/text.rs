@@ -1,7 +1,7 @@
 //! Per-kind text renderers: user / assistant / thinking / notice blocks.
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use crate::tui::style::{Color, Style, StyleExt};
+use crate::tui::text::{Line, Span};
 
 use super::super::scrollback::SharedLines;
 use super::super::theme;
@@ -15,7 +15,7 @@ fn surface_style() -> Style {
     Style::default().bg(theme::current().bg_surface)
 }
 
-pub(super) fn surface_style_with(bg: ratatui::style::Color) -> Style {
+pub(super) fn surface_style_with(bg: Color) -> Style {
     Style::default().bg(bg)
 }
 
@@ -71,7 +71,7 @@ fn md_style(token: &StyleToken, emph: &Emphasis) -> Style {
                 s = s.italic();
             }
             if *underline {
-                s = s.underlined();
+                s = s.underline();
             }
             s
         }
@@ -88,10 +88,10 @@ fn md_style(token: &StyleToken, emph: &Emphasis) -> Style {
         style = style.italic();
     }
     if emph.strike {
-        style = style.crossed_out();
+        style = style.strikethrough();
     }
     if emph.underline {
-        style = style.underlined();
+        style = style.underline();
     }
     style
 }
@@ -257,6 +257,10 @@ mod tests {
 
     #[test]
     fn assistant_cache_hits_and_retains_incremental_renderer() {
+        // The streaming renderer resets on a live highlight-generation bump,
+        // and other tests swap the global theme in parallel; this suite's
+        // render/reset/ptr assertions only hold with those swaps locked out.
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cache = AssistantCache::default();
         let text =
             "A paragraph with **bold** words and enough text to wrap.\n\n```rust\nfn main() {\n";
@@ -292,6 +296,7 @@ mod tests {
 
     #[test]
     fn resize_above_render_width_cap_keeps_the_cache() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cache = AssistantCache::default();
         let first = cache.render_with_theme(0, "Unchanged Markdown.", 100, (0, 0));
         let resized = cache.render_with_theme(0, "Unchanged Markdown.", 101, (0, 0));
@@ -302,6 +307,7 @@ mod tests {
 
     #[test]
     fn growing_tail_reuses_completed_styled_lines() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cache = AssistantCache::default();
         let first = cache.render_with_theme(0, "Completed paragraph.\n\nGrowing", 40, (0, 0));
         let grown =
@@ -318,6 +324,10 @@ mod tests {
 
     #[test]
     fn styled_streaming_chunks_match_the_existing_renderer_at_every_prefix() {
+        // Stable chunks keep their styled lines across prefixes; a parallel
+        // theme swap would restyle one side of the comparison but not the
+        // other, so this comparison is only stable with swaps locked out.
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let text = "Intro **bold** and `code` 🌸.\n\n| a | b |\n|---|---|\n| é | 中 |\n\n\
                     ```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nFinal paragraph.";
         for width in [8, 24, 80] {
@@ -336,6 +346,7 @@ mod tests {
 
     #[test]
     fn assistant_cache_invalidates_replacement_resize_and_themes() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cache = AssistantCache::default();
         cache.render_with_theme(0, "old message", 18, (0, 0));
         for (text, width, theme) in [
@@ -392,6 +403,9 @@ mod tests {
     /// W1: a notice is one muted line with a tone-colored prefix glyph.
     #[test]
     fn notice_renders_tone_glyph_and_muted_text() {
+        // Snapshot the theme under the same lock the swapping tests hold, so
+        // the span/painted-color assertions below stay self-consistent.
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t = theme::current();
 
         use super::{notice_block, theme};
@@ -435,6 +449,11 @@ mod tests {
             .expect("notice text rendered");
         assert!(rows[y].contains('◆'), "tone glyph rendered: {:?}", rows[y]);
         let gx = rows[y].find('◆').unwrap() as u16;
-        assert_eq!(buf[(gx, y as u16)].fg, t.danger);
+        // The paint layer is still ratatui this wave; theme colors are app
+        // colors, so convert at the buffer boundary.
+        assert_eq!(
+            buf[(gx, y as u16)].fg,
+            crate::tui::compat::rat_color(t.danger)
+        );
     }
 }
