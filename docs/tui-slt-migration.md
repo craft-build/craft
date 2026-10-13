@@ -1,10 +1,10 @@
 # TUI migration: ratatui → `superlighttui` (`slt`)
 
-**Status: wave 2a is DONE.** The ratatui/crossterm/ratatui-image paint path,
-the legacy run loop, `tui/compat.rs` (except `slt_key`), and `tui/hyperlink.rs`
-are deleted; `run()` drives `slt::run_async_with` and `ui::frame::frame`
-paints. The golden-fixture suite (`tui::parity_slt`) holds the 8 scenes
-byte-identical. What remains is wave 2b (bottom of this doc).
+**Status: the port is complete.** Waves 1 (app-wide type swap), 2a (paint
+pivot + `slt::run_async_with` loop, legacy path deleted), and 2b (input
+widgets) are done; the golden-fixture suite (`tui::parity_slt`) gates the 8
+scenes. What remains before merging to main is manual QA + the optional
+cleanups at the bottom of this doc.
 
 ## Historical: wave 1 (app-wide type swap) — complete
 
@@ -74,8 +74,10 @@ palette values.
 
 **Event flow**: frame.rs only paints. Input stays in `tui/mod.rs`, which
 each frame hands to `app.handle_key/handle_mouse/insert_paste` via
-`ui.events()` (translate nothing — they are already slt types). The paint
-files therefore take `&App` / `&mut App` but never read input.
+`ui.raw_events()` (translate nothing — they are already slt types; the raw
+stream bypasses slt's modal guard, which would otherwise hide keys while
+the editor modal is open). The paint files therefore take `&App` /
+`&mut App` but never read input.
 
 **Fixtures**: `tui::parity.rs` defines the scenes;
 `tui::parity_slt.rs` renders them through `ui::frame::frame` on
