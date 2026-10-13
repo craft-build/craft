@@ -141,6 +141,21 @@ caret), `palette.txt` (+`▎` on the query row).
 
 * Resize + suspend/resume (Ctrl-Z), CJK paste into composer/editor,
   mouse-copy, images on kitty/iTerm/tmux, hyperlink clicks, focus bells.
-* Editor modal round trip: Alt-O from a non-empty composer, Ctrl-S back.
+* Editor modal round trip: Alt-O from a non-empty composer, Ctrl-S back —
+  verified under a py pty against `mock_tui` (typing, save, cancel).
 * A `plan`-form fixture scene (title-cell nuance: slt pins titles 2 cells
   in vs ratatui's 1) — candidate for the next capture.
+
+## Notable slt behaviors found during 2b (bit us once each)
+
+* `ui.events()` is blocked while a modal was active the previous frame
+  (the closure runs outside the modal scope). A global input router must
+  use `ui.raw_events()` — otherwise every key dies while the editor modal
+  is open.
+* Container `Response::rect` predictions: a fixed-width wrapper predicts
+  reliably frame-over-frame; the composer box container (margin + fixed
+  w/h) came back 1-row-tall. Derive overlay geometry from fixed-width
+  wrappers only.
+* While any slt modal is active, non-modal overlay draws collapse to
+  0×0 (deferred draws skip zero rects) — the composer's overlay pass
+  pauses under the editor modal. Cosmetic only (dimmed background).
