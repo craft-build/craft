@@ -1,52 +1,27 @@
-//! Golden-fixture parity harness for the ratatui → superlighttui migration.
+//! Golden-fixture scenes for the paint path.
 //!
-//! Renders a fixed set of scenes through the current paint path and either
-//! writes (`UPDATE_FIXTURES=1`) or compares against the checked-in fixture
-//! files in `agent/fixtures/golden/`. The scenes are deterministic: sessions
-//! are seeded with fixed cwd/branch/model strings and transcript content.
-//!
-//! Wave 1 (type swap) fixtures are captured from the ratatui paint path
-//! through the compat shims; the paint-layer wave re-captures by rendering
-//! the same scenes through slt, and this file is where the render backend
-//! call lives, so only this module changes at that point.
+//! A fixed set of deterministic apps (fixed cwd/branch/model strings and
+//! transcript content) rendered through the slt paint path by
+//! [`crate::tui::parity_slt`], which either writes (`UPDATE_FIXTURES=1`)
+//! or compares against the checked-in fixture files in
+//! `agent/fixtures/golden/`.
 
 #![cfg(test)]
 
 use std::path::PathBuf;
 
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
-
 use crate::tui::app::App;
 use crate::tui::provider::{AgentEvent, Status, ToolCallData, ToolKind};
-use crate::tui::ui;
 
 /// Terminal size for every scene.
 pub(crate) const W: u16 = 80;
 pub(crate) const H: u16 = 24;
 
-/// Render one scene through the legacy ratatui paint path.
-pub(crate) fn render_screen(app: &mut App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(W, H)).unwrap();
-    terminal.draw(|f| ui::draw(f, app)).unwrap();
-    let buf = terminal.backend().buffer().clone();
-    let frame = (0..buf.area.height)
-        .map(|r| {
-            (0..buf.area.width)
-                .map(|c| buf[(c, r)].symbol().to_string())
-                .collect::<String>()
-                .trim_end()
-                .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    normalize(frame)
-}
-
 /// Rows of a rendered `slt` buffer, trailing blanks trimmed. Wide-char
 /// continuation cells are normalized to a space so the dumps compare
-/// byte-identically with the ratatui fixture captures (ratatui writes " "
-/// into skipped cells; slt leaves the symbol empty — visually identical).
+/// byte-identically with the historical fixture captures (ratatui wrote
+/// " " into skipped cells; slt leaves the symbol empty — visually
+/// identical).
 pub(crate) fn buffer_rows(buf: &slt::buffer::Buffer) -> String {
     (0..buf.area.height)
         .map(|r| {
@@ -213,33 +188,4 @@ pub(crate) fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/golden")
         .join(format!("{name}.txt"))
-}
-
-#[test]
-fn golden_fixture_parity() {
-    let update = std::env::var("UPDATE_FIXTURES").is_ok_and(|v| v == "1");
-    if update {
-        std::fs::create_dir_all(fixture_path("empty").parent().unwrap()).unwrap();
-    }
-    let mut failures = Vec::new();
-    for (name, mut app) in scenes() {
-        let frame = render_screen(&mut app);
-        let path = fixture_path(name);
-        if update {
-            std::fs::write(&path, &frame).unwrap();
-            continue;
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!("missing fixture {name} (run with UPDATE_FIXTURES=1 to capture): {e}")
-        });
-        if frame != expected {
-            failures.push(format!(
-                "scene `{name}` drifted from fixture {}\n--- fixture (first 5 lines)\n{}\n--- rendered (first 5 lines)\n{}",
-                path.display(),
-                expected.lines().take(5).collect::<Vec<_>>().join("\n"),
-                frame.lines().take(5).collect::<Vec<_>>().join("\n"),
-            ));
-        }
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

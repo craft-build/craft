@@ -1,141 +1,11 @@
 //! `/mcp`: the MCP server status sheet.
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::{Clear, Paragraph};
-
 use super::super::theme;
-use super::{boxed, centered, dim, render_rows};
 use crate::mcp::config::{McpServerInfo, McpServerStatus};
 use crate::tui::app::App;
-use crate::tui::compat;
 use crate::tui::modals::Modal;
-use crate::tui::style::{Color, Modifier, Style, StyleExt};
-use crate::tui::text::{Line, Span};
-
-/// `/mcp`: MCP server status screen (B.11). One row per server from the
-/// live snapshot — name, transport, tool/prompt counts on the left, status
-/// (color-coded) on the right — plus a detail line for the auth URL of a
-/// NeedsAuth server or a failure reason.
-pub fn render_mcp(f: &mut Frame, app: &App, area: Rect) {
-    let Modal::Mcp { selected } = &app.overlays.modal else {
-        return;
-    };
-    let reader = app
-        .mcp
-        .as_ref()
-        .map(|handle| handle.reader())
-        .unwrap_or_else(crate::mcp::McpSnapshotReader::empty);
-    render_mcp_sheet(f, &reader, *selected, app.overlays.mcp_expanded, area);
-}
-
-/// The `/mcp` sheet itself, drawn from any snapshot reader so tests can
-/// feed it a hand-built snapshot. One row per server — name, transport,
-/// tool/prompt/resource counts on the left, status (color-coded) on the
-/// right — plus a detail line carrying the auth URL of a NeedsAuth server,
-/// and the expanded server's resources (name + uri) under its row.
-fn render_mcp_sheet(
-    f: &mut Frame,
-    reader: &crate::mcp::McpSnapshotReader,
-    selected: usize,
-    expanded: Option<usize>,
-    area: Rect,
-) {
-    let t = theme::current();
-    dim(f, area);
-    let snapshot = reader.load();
-    let infos = snapshot.infos.clone();
-    let resources = snapshot.resources.clone();
-
-    // Row plan: every server's header row (the one the selection marks),
-    // plus a detail row for NeedsAuth / Failed servers.
-    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut header_rows: Vec<usize> = Vec::new();
-    for (i, info) in infos.iter().enumerate() {
-        header_rows.push(rows.len());
-        let (status_label, status_color) = mcp_status_style(info);
-        let left = format!(
-            " {} · {} · {} tools · {} prompts · {} resources",
-            info.name, info.transport_kind, info.tool_count, info.prompt_count, info.resource_count
-        );
-        let status = status_label.to_string();
-        let gap = 76usize.saturating_sub(left.chars().count() + status.chars().count());
-        rows.push(vec![
-            Span::styled(left, Style::default().fg(t.text_primary)),
-            Span::raw(" ".repeat(gap)),
-            Span::styled(status, Style::default().fg(status_color)),
-        ]);
-        if let McpServerStatus::NeedsAuth { url } = &info.status
-            && let Some(url) = url
-        {
-            rows.push(vec![Span::styled(
-                format!("   login required: {url} (l to log in)"),
-                Style::default().fg(t.danger),
-            )]);
-        }
-        if expanded == Some(i) {
-            let server_resources: Vec<_> =
-                resources.iter().filter(|r| r.server == info.name).collect();
-            if server_resources.is_empty() {
-                rows.push(vec![Span::styled(
-                    "   (no resources)".to_string(),
-                    Style::default().fg(t.text_tertiary),
-                )]);
-            } else {
-                for resource in server_resources {
-                    rows.push(vec![Span::styled(
-                        format!("   {} — {}", resource.name, resource.uri),
-                        Style::default().fg(t.text_secondary),
-                    )]);
-                }
-            }
-        }
-    }
-
-    let width = 78.min(area.width.saturating_sub(4));
-    // 16 not 10: an expanded resource list adds rows under its server.
-    let n = rows.len().clamp(1, 16) as u16;
-    let rect = centered(width, n + 4, area);
-    f.render_widget(Clear, rect);
-    let block = boxed(rect);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    f.render_widget(
-        Paragraph::new(compat::rat_line(&Line::from(Span::styled(
-            "MCP servers — t toggle, r reconnect, enter resources, esc close",
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD),
-        )))),
-        Rect {
-            x: inner.x + 1,
-            y: inner.y + 1,
-            width: inner.width.saturating_sub(2),
-            height: 1,
-        },
-    );
-    if rows.is_empty() {
-        rows.push(vec![Span::styled(
-            " no MCP servers configured".to_string(),
-            Style::default().fg(t.text_tertiary),
-        )]);
-    }
-    render_rows(
-        f,
-        &rows,
-        header_rows.get(selected).copied().unwrap_or(usize::MAX),
-        Rect {
-            x: inner.x + 1,
-            y: inner.y + 2,
-            width: inner.width.saturating_sub(2),
-            height: n,
-        },
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt MCP sheet
-// ─────────────────────────────────────────────────────────────────────────
+use crate::tui::style::{Color, Style};
+use crate::tui::text::Span;
 
 use super::{SheetRow, centered_slt, row_spans, sheet_slt};
 
@@ -153,7 +23,7 @@ pub(super) fn render_mcp_slt(ui: &mut slt::Context, app: &App) {
 }
 
 /// The `/mcp` sheet on the slt frame, drawn from any snapshot reader so
-/// tests can feed it a hand-built snapshot (mirrors `render_mcp_sheet`).
+/// tests can feed it a hand-built snapshot.
 fn render_mcp_sheet_slt(
     ui: &mut slt::Context,
     reader: &crate::mcp::McpSnapshotReader,
@@ -255,18 +125,13 @@ mod tests {
     use super::*;
     use crate::mcp::config::{McpServerInfo, McpServerStatus};
     use crate::mcp::{McpSnapshot, McpSnapshotReader};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
     use std::path::PathBuf;
 
-    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
+    /// Render the sheet on an slt TestBackend and return the joined rows.
+    fn sheet_text(reader: &McpSnapshotReader, selected: usize, expanded: Option<usize>) -> String {
+        let mut tb = slt::TestBackend::new(100, 30);
+        tb.render(|ui| render_mcp_sheet_slt(ui, reader, selected, expanded));
+        (0..tb.height()).map(|y| tb.line(y)).collect::<Vec<_>>().join("\n")
     }
 
     fn server_info(name: &str, status: McpServerStatus) -> McpServerInfo {
@@ -305,11 +170,7 @@ mod tests {
             resources: Vec::new(),
             generation: 1,
         });
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal
-            .draw(|f| render_mcp_sheet(f, &reader, 0, None, f.area()))
-            .unwrap();
-        let text = buffer_text(&terminal);
+        let text = sheet_text(&reader, 0, None);
         for needle in [
             "MCP servers",
             "running-srv",
@@ -357,20 +218,13 @@ mod tests {
             ],
             generation: 1,
         });
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal
-            .draw(|f| render_mcp_sheet(f, &reader, 0, Some(0), f.area()))
-            .unwrap();
-        let text = buffer_text(&terminal);
+        let text = sheet_text(&reader, 0, Some(0));
         assert!(text.contains("2 resources"), "{text}");
         assert!(text.contains("notes — file:///notes.txt"), "{text}");
         assert!(text.contains("users — db://users"), "{text}");
 
         // Collapsed: the resource rows are absent but the count remains.
-        terminal
-            .draw(|f| render_mcp_sheet(f, &reader, 0, None, f.area()))
-            .unwrap();
-        let collapsed = buffer_text(&terminal);
+        let collapsed = sheet_text(&reader, 0, None);
         assert!(collapsed.contains("2 resources"));
         assert!(!collapsed.contains("file:///notes.txt"));
     }
@@ -380,10 +234,6 @@ mod tests {
     #[test]
     fn mcp_sheet_renders_an_empty_placeholder() {
         let reader = McpSnapshotReader::empty();
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal
-            .draw(|f| render_mcp_sheet(f, &reader, 0, None, f.area()))
-            .unwrap();
-        assert!(buffer_text(&terminal).contains("no MCP servers configured"));
+        assert!(sheet_text(&reader, 0, None).contains("no MCP servers configured"));
     }
 }

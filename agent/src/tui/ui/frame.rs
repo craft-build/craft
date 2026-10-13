@@ -18,7 +18,6 @@
 //!    + modal overlays declared after the base UI
 //! ```
 
-use std::sync::{Arc, Mutex};
 
 use crate::tui::app::App;
 use crate::tui::ui::theme;
@@ -194,10 +193,10 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
     let width = ui.width();
 
     // Root: one full-size column with the app background.
-    ui.container().bg(t.bg_app).grow(1).col(|ui| {
+    let _ = ui.container().bg(t.bg_app).grow(1).col(|ui| {
         let show_sidebar = app.session.sidebar_open && width >= SIDEBAR_MIN_WIDTH;
         if show_sidebar {
-            ui.container().grow(1).row(|ui| {
+            let _ = ui.container().grow(1).row(|ui| {
                 chat_column(ui, app, width - SIDEBAR_WIDTH);
                 sidebar::render_slt(ui, app);
             });
@@ -223,7 +222,7 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
 /// The chat half: transcript on top, forms stacked above the composer
 /// block, all pinned to the bottom. `avail` is the chat column's width.
 fn chat_column(ui: &mut slt::Context, app: &mut App, avail: u32) {
-    ui.container().grow(1).col(|ui| {
+    let _ = ui.container().grow(1).col(|ui| {
         // Task-chat header (task 96): one line above the transcript.
         if app.active_task.is_some() {
             render_task_header_slt(ui, app);
@@ -247,7 +246,8 @@ fn chat_column(ui: &mut slt::Context, app: &mut App, avail: u32) {
 /// the blank footer hint row.
 fn bottom_block(ui: &mut slt::Context, app: &mut App, avail: u32) {
     let t = theme::current();
-    ui.container()
+    let _ = ui
+        .container()
         .border(slt::Border::Single)
         .border_sides(slt::style::BorderSides {
             top: true,
@@ -295,8 +295,9 @@ fn render_editor_modal(ui: &mut slt::Context, editor: &mut EditorForm) {
     let rows = editor.rows.len().min(24) as u32;
     let box_h = (rows + 3).min(height.saturating_sub(2));
 
-    ui.modal(|ui| {
-        ui.container()
+    let _ = ui.modal(|ui| {
+        let _ = ui
+            .container()
             .bg(t.bg_overlay)
             .border(slt::Border::Rounded)
             .border_fg(t.border_strong)
@@ -306,7 +307,7 @@ fn render_editor_modal(ui: &mut slt::Context, editor: &mut EditorForm) {
             .h(box_h)
             .col(|ui| {
                 ui.text(" ✎ edit").bold().fg(t.text_secondary);
-                ui.container().grow(1).py(0).col(|ui| {
+                let _ = ui.container().grow(1).py(0).col(|ui| {
                     editor_rows(ui, editor);
                 });
                 ui.line(|ui| {

@@ -1,10 +1,9 @@
-//! Golden-fixture parity for the `slt` paint path (wave 2a).
+//! Golden-fixture parity for the `slt` paint path.
 //!
-//! Renders the exact same scenes as [`crate::tui::parity`] through
-//! `ui::frame::frame` on `slt::TestBackend` and compares against the SAME
-//! fixture files. While wave 2a is in flight this test documents the
-//! remaining gap per scene; it must be byte-identical before the ratatui
-//! path is deleted and the run loop swaps to slt.
+//! Renders the fixed scenes from [`crate::tui::parity`] through
+//! `ui::frame::frame` on `slt::TestBackend` and compares against the
+//! checked-in fixture files. `UPDATE_FIXTURES=1` re-captures the fixtures
+//! from this path; a scene that drifts means something shared broke.
 
 #![cfg(test)]
 
@@ -15,8 +14,7 @@ use crate::tui::ui::frame::{self, frame};
 /// Render a scene twice (prev-frame layout stabilizes scroll/bounds reads)
 /// and dump the finished buffer. `status_tick` is reset between the renders
 /// so per-frame mutations from the stabilizing pass don't leak into the
-/// compared frame — the legacy path renders once from a fresh app, so the
-/// final render must start from the same tick 0.
+/// compared frame — the paint must be deterministic from tick 0.
 fn render_slt(app: &mut App) -> String {
     let mut view = frame::View::default();
     let mut tb = slt::TestBackend::new(u32::from(parity::W), u32::from(parity::H));
@@ -29,16 +27,15 @@ fn render_slt(app: &mut App) -> String {
 #[test]
 fn golden_fixture_parity_slt() {
     let update = std::env::var("UPDATE_FIXTURES").is_ok_and(|v| v == "1");
-    let update_slt = std::env::var("UPDATE_FIXTURES_SLT").is_ok_and(|v| v == "1");
+    if update {
+        std::fs::create_dir_all(parity::fixture_path("empty").parent().unwrap()).unwrap();
+    }
     let mut failures = Vec::new();
     for (name, mut app) in parity::scenes() {
         let rendered = render_slt(&mut app);
         let path = parity::fixture_path(name);
-        if update && !update_slt {
-            // Capturing only the ratatui side via `UPDATE_FIXTURES=1`
-            // shouldn't silently bless a drifted slt paint; opt in with
-            // `UPDATE_FIXTURES=1 UPDATE_FIXTURES_SLT=1` to overwrite from
-            // the slt path instead.
+        if update {
+            std::fs::write(&path, &rendered).unwrap();
             continue;
         }
         let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {

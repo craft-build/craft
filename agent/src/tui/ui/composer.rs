@@ -1,197 +1,20 @@
 //! Composer (input box), status bar and footer hint row.
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme;
 use crate::markdown::highlight::{Highlighter, SegmentColor};
 use crate::tui::app::App;
-use crate::tui::compat;
 use crate::tui::provider::Status;
 use crate::tui::shell::parse_shell_prefix;
 use crate::tui::style::{Modifier, Style, StyleExt};
-use crate::tui::text::{Line, Span};
+use crate::tui::text::Span;
 
 /// Max text rows the composer grows to before it scrolls instead of expanding.
 pub const MAX_TEXT_ROWS: usize = 12;
 /// Inner left/right padding of the text area (left includes the accent bar).
 pub const TEXT_LEFT_PAD: usize = 3; // 1 pad + ▎ bar + 1 space
 pub const TEXT_RIGHT_PAD: usize = 2;
-
-/// The `> ` prompt input. Multi-line: content is word-wrapped and the box
-/// (sized by the caller from [`wrap_rows`]) grows as text wraps, so all typed
-/// text stays on screen.
-pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
-    let t = theme::current();
-
-    // 1-cell app-bg padding on each side of the surface box.
-    let inset = Rect {
-        x: area.x + 1,
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
-    };
-    f.render_widget(
-        Block::default().style(compat::rat_style(Style::default().bg(t.bg_surface))),
-        inset,
-    );
-
-    if inset.height < 4 || inset.width < 9 {
-        return;
-    }
-    let bar_x = inset.x + 1;
-    let text_x = inset.x + TEXT_LEFT_PAD as u16;
-    let text_w = inset
-        .width
-        .saturating_sub((TEXT_LEFT_PAD + TEXT_RIGHT_PAD) as u16) as usize;
-    let view_rows = (inset.height - 3) as usize; // padding top/bottom + info row
-
-    // Accent bar spanning the full box height, like posted user messages.
-    for i in 0..inset.height {
-        f.render_widget(
-            Paragraph::new(compat::rat_line(&Line::from(Span::styled(
-                "▎",
-                Style::default().fg(t.accent).bg(t.bg_surface),
-            )))),
-            Rect {
-                x: bar_x,
-                y: inset.y + i,
-                width: 1,
-                height: 1,
-            },
-        );
-    }
-
-    let chars: Vec<char> = app.composer.text.chars().collect();
-    let cursor = app.composer.cursor.min(chars.len());
-    let rows = super::messages::wrap_rows(&app.composer.text, text_w);
-
-    // (row, cell-column) of the cursor within the wrapped layout.
-    let (cursor_row, cursor_col) = cursor_row_col(&rows, &chars, cursor);
-
-    // Scroll so the cursor row stays visible when there are more rows than fit.
-    let offset = cursor_row
-        .saturating_sub(view_rows.saturating_sub(1))
-        .min(rows.len().saturating_sub(view_rows));
-
-    let text_style = Style::default().fg(t.text_primary).bg(t.bg_surface);
-    for (i, &(s, e)) in rows.iter().enumerate().skip(offset).take(view_rows) {
-        let y = inset.y + 1 + (i - offset) as u16;
-        let line: String = chars[s..e].iter().collect();
-        // Padding is display cells (the wrap width is cells), so wide
-        // glyphs don't pull the composer row past the box edge.
-        let w = UnicodeWidthStr::width(line.as_str());
-        // Bang-prefix highlighting (task 96): only the first wrapped row
-        // of a `!` / `!!` line gets the styled sigil and bash colors.
-        let mut spans = if s == 0 {
-            shell_spans(&line, text_style)
-                .unwrap_or_else(|| vec![Span::styled(line.clone(), text_style)])
-        } else {
-            vec![Span::styled(line.clone(), text_style)]
-        };
-        if w < text_w {
-            spans.push(Span::styled(
-                " ".repeat(text_w - w),
-                Style::default().bg(t.bg_surface),
-            ));
-        }
-        f.render_widget(
-            Paragraph::new(compat::rat_line(&Line::from(spans))),
-            Rect {
-                x: text_x,
-                y,
-                width: text_w as u16,
-                height: 1,
-            },
-        );
-    }
-
-    // Placeholder on the first visible row.
-    if offset == 0 && app.composer.text.is_empty() {
-        f.render_widget(
-            Paragraph::new(compat::rat_line(&Line::from(Span::styled(
-                "Message Craft…",
-                Style::default().fg(t.text_tertiary).bg(t.bg_surface),
-            )))),
-            Rect {
-                x: text_x,
-                y: inset.y + 1,
-                width: text_w as u16,
-                height: 1,
-            },
-        );
-    }
-
-    if !matches!(
-        app.overlays.modal,
-        crate::tui::modals::Modal::Palette { .. }
-    ) {
-        f.set_cursor_position((
-            text_x + cursor_col.min(text_w.saturating_sub(1)) as u16,
-            inset.y + 1 + (cursor_row - offset) as u16,
-        ));
-    }
-
-    // Fourth line of the input box: `model · provider · thinking` on the
-    // left, context usage right-aligned. Starts after the accent bar so
-    // the box's left border keeps running through this row.
-    let info = Rect {
-        x: text_x,
-        y: inset.y + inset.height - 1,
-        width: inset.width.saturating_sub(TEXT_LEFT_PAD as u16 + 1),
-        height: 1,
-    };
-    let surf = Style::default().bg(t.bg_surface);
-    let tertiary = Style::default().fg(t.text_tertiary).bg(t.bg_surface);
-    let sep = || Span::styled(" · ", tertiary);
-    let (model, provider) = app.model();
-    let mut left = vec![
-        Span::styled(
-            app.mode.label(),
-            Style::default()
-                .fg(app.mode.color())
-                .bg(t.bg_surface)
-                .add_modifier(Modifier::BOLD),
-        ),
-        sep(),
-        Span::styled(model, Style::default().fg(t.blue_400).bg(t.bg_surface)),
-        sep(),
-        Span::styled(provider, tertiary),
-        sep(),
-    ];
-    // Attached images (F.6): a count chip, so staged attachments are
-    // visible before the message is sent.
-    if !app.images.attached.is_empty() {
-        left.push(Span::styled(
-            format!(
-                "[{} image{}] ",
-                app.images.attached.len(),
-                if app.images.attached.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            ),
-            Style::default().fg(t.accent).bg(t.bg_surface),
-        ));
-        left.push(sep());
-    }
-    left.push(Span::styled(
-        app.thinking_label(),
-        Style::default().fg(t.warning).bg(t.bg_surface),
-    ));
-    let right = format!("{}  ", app.session.token_label);
-    let width = info.width as usize;
-    let right_w = right.chars().count();
-    let (left, left_w) = truncate_spans(left, width.saturating_sub(right_w + 1));
-    let gap = width.saturating_sub(left_w + right_w);
-    let mut spans = left;
-    spans.push(Span::styled(" ".repeat(gap), surf));
-    spans.push(Span::styled(right, tertiary));
-    f.render_widget(Paragraph::new(compat::rat_line(&Line::from(spans))), info);
-}
 
 /// Display-cell width of a char slice. The composer wraps in cells (see
 /// `wrap_rows`), so cursor columns and row padding must be cells too:
@@ -291,42 +114,6 @@ fn status_indicator(app: &App) -> Vec<Span<'static>> {
         ],
         Status::Done => vec![Span::styled("········  esc interrupt", tertiary)],
     }
-}
-
-/// Single bottom row: active status indicator (spinner, elapsed timer,
-/// interrupt hint) and cwd on the left, a live flash toast or
-/// `ctrl+p commands` right-aligned. The model/provider/thinking level and
-/// context usage moved up into the composer's info line.
-pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
-    let tertiary = Style::default().fg(theme::current().text_tertiary);
-    let sep = || Span::styled(" · ", tertiary);
-    // Two leading spaces line the indicator up under the composer's accent
-    // bar, which sits two cells in from the row's left edge.
-    let mut left = vec![Span::raw("  ")];
-    left.extend(status_indicator(app));
-    left.extend([
-        sep(),
-        Span::styled(abbreviated_cwd(&app.session.cwd), tertiary),
-    ]);
-    let right = if let Some(flash) = app.flash_text() {
-        format!("  {flash}  ")
-    } else {
-        "ctrl+p commands  ".to_string()
-    };
-    let width = area.width as usize;
-    let right_w = right.chars().count();
-    let max_left = width.saturating_sub(right_w + 1);
-    let (left, left_w) = truncate_spans(left, max_left);
-    let gap = width.saturating_sub(left_w + right_w);
-    let mut spans = left;
-    spans.push(Span::raw(" ".repeat(gap)));
-    let right_style = if app.flash_text().is_some() {
-        Style::default().fg(theme::current().accent)
-    } else {
-        tertiary
-    };
-    spans.push(Span::styled(right, right_style));
-    f.render_widget(Paragraph::new(compat::rat_line(&Line::from(spans))), area);
 }
 
 /// Abbreviate a cwd for the status row: keep the last two components, `…`
@@ -677,8 +464,8 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, _avail: u32) {
     // bookkeeping regions never run reliably.
     let paint = app.view.paint.clone();
     let rect = box_resp.rect;
-    ui.overlay(|ui| {
-        ui.container().w(1).h(1).draw(move |_buf, _area| {
+    let _ = ui.overlay(|ui| {
+        let _ = ui.container().w(1).h(1).draw(move |_buf, _area| {
             if let Ok(mut p) = paint.lock() {
                 p.composer_area = crate::tui::geom::Rect::from_slt(rect);
             }

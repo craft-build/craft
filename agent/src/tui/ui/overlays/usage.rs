@@ -1,83 +1,11 @@
 //! Scrollable-sheet overlays: the shared sheet renderer plus the `/usage`
 //! and `/stats` cost overlays.
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::{Clear, Paragraph};
-
 use super::super::theme;
-use super::{boxed, centered, dim};
 use crate::tui::app::App;
-use crate::tui::compat;
 use crate::tui::modals::Modal;
-use crate::tui::style::{Modifier, Style, StyleExt};
+use crate::tui::style::Style;
 use crate::tui::text::{Line, Span};
-
-/// Shared scrollable sheet renderer for the `/usage` and `/stats` overlays
-/// (F.5): boxed title, a body of pre-built lines clipped by `scroll`, and a
-/// footer. Body lines are built by pure helpers so layout stays testable.
-pub(super) fn render_usage_sheet(
-    f: &mut Frame,
-    area: Rect,
-    title: &str,
-    lines: &[Line<'static>],
-    footer: Vec<Span<'static>>,
-    scroll: usize,
-) -> usize {
-    dim(f, area);
-    let height = (lines.len() as u16 + 4).min(area.height);
-    let width = 64.min(area.width.saturating_sub(4));
-    let rect = centered(width, height, area);
-    f.render_widget(Clear, rect);
-    let block = boxed(rect);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-
-    let w = inner.width.saturating_sub(2);
-    // Title and footer claim two lines of `inner`; the body must fit in the
-    // rest or it would spill over the dimmed chat on short terminals.
-    let visible = (inner.height.saturating_sub(3)) as usize;
-    let scroll = scroll.min(lines.len().saturating_sub(visible.min(lines.len())));
-    let max_scroll = lines.len().saturating_sub(visible.min(lines.len()));
-    // App lines reach the ratatui Paragraph one row at a time through the
-    // compat shim; each paint borrows its line for the render call.
-    let line = |l: &Line<'static>| Paragraph::new(compat::rat_line(l));
-    f.render_widget(
-        line(&Line::from(Span::styled(
-            title.to_string(),
-            Style::default()
-                .fg(theme::current().text_primary)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        Rect {
-            x: inner.x + 1,
-            y: inner.y + 1,
-            width: w,
-            height: 1,
-        },
-    );
-    for (row, body) in lines.iter().skip(scroll).take(visible).enumerate() {
-        f.render_widget(
-            line(body),
-            Rect {
-                x: inner.x + 1,
-                y: inner.y + 2 + row as u16,
-                width: w,
-                height: 1,
-            },
-        );
-    }
-    f.render_widget(
-        line(&Line::from(footer)),
-        Rect {
-            x: inner.x + 1,
-            y: inner.y + inner.height.saturating_sub(1),
-            width: w,
-            height: 1,
-        },
-    );
-    max_scroll
-}
 
 /// One `model  tokens  cost` body line (styled like the old table rows).
 fn usage_row_line(row: &crate::tui::provider::UsageRow, w: usize) -> Line<'static> {
@@ -212,8 +140,7 @@ pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<
 }
 
 /// One `session  cost  tokens` row of the `/stats` top-sessions section.
-fn session_line(entry: &(String, f64, u64)) -> Line<'static> {
-    let t = theme::current();
+fn session_line(entry: &(String, f64, u64)) -> Line<'static> {    let t = theme::current();
 
     use crate::storage::stats::format_usd;
     use crate::usage::format_tokens;
@@ -233,132 +160,8 @@ fn session_line(entry: &(String, f64, u64)) -> Line<'static> {
     ])
 }
 
-/// `/usage`: this session's per-model tokens and cost, plus the live
-/// provider quota section (F.5).
-pub fn render_usage(f: &mut Frame, app: &mut App, area: Rect) {
-    let t = theme::current();
-
-    let Modal::Usage(rows) = &app.overlays.modal else {
-        return;
-    };
-    let w = 56usize; // body column width, as the old table used
-    let mut lines = Vec::new();
-    if rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " no usage recorded yet",
-            Style::default().fg(t.text_tertiary),
-        )));
-    } else {
-        lines.push(section_label("Per model:"));
-        lines.extend(rows.iter().map(|row| usage_row_line(row, w)));
-    }
-    let quota = quota_lines(&app.overlays.usage_quota);
-    if !quota.is_empty() {
-        lines.push(Line::from(""));
-        lines.extend(quota);
-    }
-    let total_tokens: u64 = rows.iter().map(|r| r.tokens).sum();
-    // Costs sum like the session ledger: `None` until a priced model shows up.
-    let total_cost = rows.iter().filter_map(|r| r.cost).reduce(|a, b| a + b);
-    let footer_cost = match total_cost {
-        Some(cost) => crate::storage::stats::format_usd(cost),
-        None => "—".to_string(),
-    };
-    let scroll = app.overlays.usage_scroll;
-    app.overlays.usage_scroll_max = render_usage_sheet(
-        f,
-        area,
-        "Session usage",
-        &lines,
-        vec![
-            Span::styled(
-                format!(" total {}", crate::usage::format_tokens(total_tokens)),
-                Style::default().fg(t.text_secondary),
-            ),
-            Span::styled(
-                format!("  {}", footer_cost),
-                Style::default().fg(t.text_secondary),
-            ),
-            Span::styled(
-                "  ctrl+r reload · esc to close",
-                Style::default().fg(t.text_tertiary),
-            ),
-        ],
-        scroll,
-    );
-}
-
-/// `/stats`: cross-session cost totals from the cost ledger, with the
-/// by-model table and top-sessions sections (F.5).
-pub fn render_stats(f: &mut Frame, app: &mut App, area: Rect) {
-    let t = theme::current();
-
-    let Modal::Stats(view) = &app.overlays.modal else {
-        return;
-    };
-    if view.empty {
-        render_usage_sheet(
-            f,
-            area,
-            "Cost stats",
-            &[Line::from(Span::styled(
-                " no runs recorded",
-                Style::default().fg(t.text_tertiary),
-            ))],
-            vec![Span::styled(
-                " esc to close",
-                Style::default().fg(t.text_tertiary),
-            )],
-            0,
-        );
-        return;
-    }
-    let w = 56usize;
-    let mut lines = vec![section_label("By model:")];
-    lines.extend(view.rows.iter().map(|row| usage_row_line(row, w)));
-    if view.models_overflow > 0 {
-        lines.push(Line::from(Span::styled(
-            format!(" +{} more models", view.models_overflow),
-            Style::default().fg(t.text_tertiary),
-        )));
-    }
-    if !view.by_session.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(section_label("Top sessions:"));
-        lines.extend(view.by_session.iter().map(session_line));
-    }
-    let scroll = app.overlays.usage_scroll;
-    app.overlays.usage_scroll_max = render_usage_sheet(
-        f,
-        area,
-        "Cost stats",
-        &lines,
-        vec![
-            Span::styled(
-                format!(" total {}", crate::usage::format_tokens(view.total_tokens)),
-                Style::default().fg(t.text_secondary),
-            ),
-            Span::styled(
-                format!(
-                    "  {}",
-                    crate::storage::stats::format_total_cost(
-                        view.total_cost,
-                        view.unpriced_records
-                    )
-                ),
-                Style::default().fg(t.text_secondary),
-            ),
-            Span::styled(
-                format!("  {} sessions  esc to close", view.sessions),
-                Style::default().fg(t.text_tertiary),
-            ),
-        ],
-        scroll,
-    );
-}
-
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt cost sheets
+// The slt cost sheets
 // ─────────────────────────────────────────────────────────────────────────
 
 use super::{SheetRow, centered_slt, clip_spans, sheet_slt};

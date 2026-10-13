@@ -411,8 +411,6 @@ mod tests {
         use super::{notice_block, theme};
         use crate::tui::app::{App, Message};
         use crate::tui::provider::{AgentEvent, Tone};
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         // Unit shape: glyph + muted text, continuation lines keep the indent.
         let lines = notice_block(Tone::Warning, "retrying (attempt 1)", 80);
@@ -435,25 +433,18 @@ mod tests {
                 ..
             })
         ));
-        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
-        terminal
-            .draw(|f| super::super::render(f, &mut app, f.area()))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let rows: Vec<String> = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect();
+        let mut view = crate::tui::ui::frame::View::default();
+        let mut tb = slt::TestBackend::new(60, 12);
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view));
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view));
+        let rows: Vec<String> = (0..tb.height()).map(|y| tb.line(y)).collect();
         let y = rows
             .iter()
             .position(|r| r.contains("stuck in a loop"))
             .expect("notice text rendered");
         assert!(rows[y].contains('◆'), "tone glyph rendered: {:?}", rows[y]);
-        let gx = rows[y].find('◆').unwrap() as u16;
-        // The paint layer is still ratatui this wave; theme colors are app
-        // colors, so convert at the buffer boundary.
-        assert_eq!(
-            buf[(gx, y as u16)].fg,
-            crate::tui::compat::rat_color(t.danger)
-        );
+        let gx = rows[y].find('◆').unwrap() as u32;
+        // Colors are app colors on the slt buffer; compare directly.
+        assert_eq!(tb.buffer().get(gx, y as u32).style.fg, Some(t.danger));
     }
 }

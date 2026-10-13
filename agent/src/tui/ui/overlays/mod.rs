@@ -1,13 +1,8 @@
 //! Overlays: slash menu, model menu, command palette, confirm dialog.
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Clear, Paragraph};
-
 use super::theme;
-use crate::tui::compat;
 use crate::tui::style::Style;
-use crate::tui::text::{Line, Span};
+use crate::tui::text::Span;
 
 mod help;
 mod mcp;
@@ -16,86 +11,12 @@ mod pickers;
 mod search_file;
 mod usage;
 
-pub(super) use help::render_help;
-pub(super) use mcp::render_mcp;
-pub(super) use menus::{render_model_menu, render_palette, render_slash};
-pub(super) use pickers::{
-    render_recipes, render_sessions, render_task_picker, render_theme_picker,
-    render_thinking_picker,
-};
-pub(super) use search_file::{render_file_picker, render_search};
-pub(super) use usage::{render_stats, render_usage};
-
-fn dim(f: &mut Frame, area: Rect) {
-    // Clear first: a bg-only Block would leave the underlying characters visible.
-    f.render_widget(Clear, area);
-    f.render_widget(
-        Block::default().style(compat::rat_style(
-            Style::default().bg(theme::current().bg_sunken),
-        )),
-        area,
-    );
-}
-
-/// Borderless raised-surface block shared by all overlays.
-fn boxed(_area: Rect) -> Block<'static> {
-    Block::default().style(compat::rat_style(
-        Style::default().bg(theme::current().bg_raised),
-    ))
-}
-
-fn centered(width: u16, height: u16, area: Rect) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    }
-}
-
-fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area: Rect) {
-    for (i, spans) in rows.iter().enumerate() {
-        if i as u16 >= area.height {
-            break;
-        }
-        let bg = if i == selected {
-            theme::current().bg_overlay
-        } else {
-            theme::current().bg_raised
-        };
-        let mut spans = spans.clone();
-        let w: usize = spans
-            .iter()
-            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
-        if w < area.width as usize {
-            spans.push(Span::styled(
-                " ".repeat(area.width as usize - w),
-                Style::default().bg(bg),
-            ));
-        }
-        let style = Style::default().bg(bg);
-        f.render_widget(
-            Paragraph::new(compat::rat_line(&Line::from(spans))).style(compat::rat_style(style)),
-            Rect {
-                x: area.x,
-                y: area.y + i as u16,
-                width: area.width,
-                height: 1,
-            },
-        );
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt overlay stack
+// The slt overlay stack
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Render every open overlay, back to front, into the slt frame — the
-/// same sheets and the same order as the overlay calls of the legacy
-/// `ui::draw()`.
+/// same sheets and the same order as the overlay stack.
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut crate::tui::app::App) {
     search_file::render_search_slt(ui, app);
     search_file::render_file_picker_slt(ui, app);

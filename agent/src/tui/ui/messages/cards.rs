@@ -10,7 +10,7 @@ use super::tools::{diff_badge, styled_diff_spans, tool_label, tool_summary};
 use super::wrap::{cell_len, pad_row, spans_width, wrap_spans, wrap_text};
 use crate::markdown::highlight::Highlighter;
 use crate::tui::app::DiffState;
-use crate::tui::hyperlink;
+use super::Hyperlink;
 use crate::tui::provider::{LineKind, ToolKind};
 
 const BODY_INDENT: usize = 4;
@@ -33,7 +33,7 @@ pub(super) fn tool_block(
 ) -> (
     Vec<Line<'static>>,
     Option<usize>,
-    Option<hyperlink::Hyperlink>,
+    Option<Hyperlink>,
 ) {
     let t = theme::current();
 
@@ -98,9 +98,9 @@ pub(super) fn tool_block(
                     .find(path.as_str())
                     .map(|byte| label[..byte].chars().count())
             };
-            hyperlink::file_uri(path).zip(path_off).map(|(uri, off)| {
+            super::file_uri(path).zip(path_off).map(|(uri, off)| {
                 let start = prefix_w + off;
-                hyperlink::Hyperlink::new(0, start as u16, (start + cell_len(path)) as u16, uri)
+                Hyperlink::new(0, start as u16, (start + cell_len(path)) as u16, uri)
             })
         }
         ToolKind::Grep { .. } | ToolKind::Bash { .. } | ToolKind::Card { .. } => None,

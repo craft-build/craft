@@ -125,12 +125,6 @@ impl Focus {
             Self::Focused => {}
         }
     }
-
-    /// An editor, a shell or a suspend eats the focus reports we would have
-    /// seen, so assume the user may have walked away.
-    pub(crate) fn on_resume(&mut self) {
-        *self = Self::Unproven { last_input: None };
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,9 +294,6 @@ mod tests {
         focus.note_input();
         assert!(!focus.allows(&turn_complete()));
         focus.report(Focus::Unfocused);
-        assert!(focus.allows(&turn_complete()));
-        // Resume after an editor: assume the user may have walked away.
-        focus.on_resume();
         assert!(focus.allows(&turn_complete()));
     }
 

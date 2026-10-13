@@ -1,23 +1,21 @@
-//! Inline image rendering via `ratatui-image`.
+//! Inline image rendering.
 //!
-//! A `Picker` is built once at UI startup, querying the terminal for its
-//! graphics protocol and font size. Kitty/Ghostty/iTerm2 get native protocol
-//! sequences; everything else (and any multiplexer, since kitty escapes
-//! don't survive tmux/screen DCS passthrough) falls back to unicode
-//! halfblocks so *something* always renders.
+//! Decoded payloads are handed to slt's image widgets (`kitty_image` /
+//! `iterm_image`, with a unicode-halfblock fallback), so protocol
+//! detection and encoding live in slt. This module owns the decode gates
+//! (the 8-MP pixel cap, the 20 MB byte cap) and the cell math: image
+//! heights are terminal rows, derived from the font's pixel cell size
+//! probed once at startup.
 //!
-//! Ported from the reference `craft-ui/src/image_render.rs`. Where the
-//! reference carries a `craft_agent::ImageSource`, this repo's images are
-//! the `history::ImageBlock` base64 payloads produced by `view_image` and
-//! composer attachments.
+//! Where the reference carries a `craft_agent::ImageSource`, this repo's
+//! images are the `history::ImageBlock` base64 payloads produced by
+//! `view_image` and composer attachments.
 
-use std::sync::{Arc, OnceLock};
+use std::io::{IsTerminal, Read, Write};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use base64::Engine;
-use ratatui::layout::Size;
-use ratatui_image::picker::Picker;
-use ratatui_image::protocol::Protocol;
-use ratatui_image::{Image, Resize};
 
 /// Cap on image height in terminal rows so a tall screenshot doesn't
 /// consume the whole scrollback.
@@ -31,44 +29,123 @@ fn exceeds_pixel_cap(w: u32, h: u32) -> bool {
         .is_none_or(|p| p as usize > MAX_IMAGE_PIXELS)
 }
 
-/// The single probed `Picker`. `Picker::from_query_stdio` sends kitty/DA/DSR
-/// queries and reads the replies straight from stdin, so it must run before
-/// the input reader thread starts (see [`probe`]); probing later races the
-/// reader and leaks the `Gi=31;OK` graphics reply into the input bar. The
-/// protocol and font size never change for the life of the process, so probe
-/// once and clone.
-static PICKER: OnceLock<Picker> = OnceLock::new();
+/// The probed font cell size in pixels. The probe reads its reply straight
+/// from stdin (`CSI 16 t` → `CSI 6 ; height ; width t`), so it must run
+/// before slt's input pump takes over the terminal (see [`probe`]); the
+/// cell size never changes for the life of the process, so probe once.
+static CELL_SIZE: OnceLock<(u32, u32)> = OnceLock::new();
 
-/// Probe the terminal's graphics protocol and font size. Must be called
-/// before the input reader thread starts; under test (or a muxed terminal)
-/// halfblocks are forced without touching stdio.
-pub fn probe() {
-    let _ = shared_picker();
+/// Probe the terminal's font cell size and cache it. Must be called before
+/// slt takes over the terminal; under tests (or a muxed / non-tty session)
+/// the (8, 16) default applies without touching stdio.
+pub fn probe() -> (u32, u32) {
+    *CELL_SIZE.get_or_init(|| query_cell_pixel_size().unwrap_or((8, 16)))
 }
 
-fn shared_picker() -> Picker {
-    PICKER
-        .get_or_init(|| {
-            if cfg!(test) || crate::tui::hyperlink::is_muxed() {
-                return Picker::halfblocks();
+/// Send `CSI 16 t` and parse the `CSI 6 ; height ; width t` reply. `None`
+/// keeps the (8, 16) default: tests, tmux (whose passthrough would eat the
+/// reply), pipes, or a terminal that does not answer within the timeout.
+fn query_cell_pixel_size() -> Option<(u32, u32)> {
+    if cfg!(test) || crate::tui::ui::messages::is_muxed() {
+        return None;
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return None;
+    }
+    let reply = read_stdin_reply("\x1b[16t", Duration::from_millis(100), |buf| {
+        parse_cell_pixel_size(buf).is_some()
+    })?;
+    parse_cell_pixel_size(reply.as_bytes())
+}
+
+/// Read a terminal reply from stdin for up to `timeout`, with raw mode (and
+/// its restore) owned by this call so nothing the pump owns is disturbed.
+fn read_stdin_reply(
+    query: &str,
+    timeout: Duration,
+    complete: impl Fn(&[u8]) -> bool,
+) -> Option<String> {
+    use std::os::fd::AsRawFd;
+
+    let stdin = std::io::stdin();
+    let fd = stdin.as_raw_fd();
+    // Park the line discipline: the reply must be readable byte by byte.
+    let mut saved = unsafe { std::mem::zeroed::<libc::termios>() };
+    let raw_ok = unsafe { libc::tcgetattr(fd, &mut saved) } == 0;
+    if raw_ok {
+        let mut raw = saved;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+            return None;
+        }
+    }
+
+    let mut out = std::io::stdout();
+    let wrote = out
+        .write_all(query.as_bytes())
+        .and_then(|()| out.flush())
+        .is_ok();
+
+    let mut buf: Vec<u8> = Vec::new();
+    let deadline = std::time::Instant::now() + timeout;
+    if wrote {
+        let mut stdin = stdin.lock();
+        let mut byte = [0u8; 1];
+        while deadline.duration_since(std::time::Instant::now()) > Duration::ZERO {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe {
+                libc::poll(&mut pfd, 1, remaining.as_millis().min(i32::MAX as u128) as i32)
+            };
+            if ready <= 0 {
+                break; // timeout or poll error
             }
-            Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
-        })
-        .clone()
+            match stdin.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    buf.push(byte[0]);
+                    if complete(&buf) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if raw_ok {
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
+    }
+    String::from_utf8(buf).ok()
+}
+
+/// Parse: `ESC [ 6 ; <height> ; <width> t`.
+fn parse_cell_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    // Locate the reply anywhere in the buffer rather than anchoring to its
+    // start: interleaved replies from earlier queries may surround it.
+    let start = bytes
+        .windows(4)
+        .position(|w| w == b"\x1b[6;")
+        .map(|pos| pos + 4)?;
+    let tail = std::str::from_utf8(bytes.get(start..)?).ok()?;
+    let body = &tail[..tail.find('t')?];
+    let mut parts = body.split(';');
+    let ch: u32 = parts.next()?.parse().ok()?;
+    let cw: u32 = parts.next()?.parse().ok()?;
+    (cw > 0 && ch > 0 && parts.next().is_none()).then_some((cw, ch))
 }
 
 /// Resolved once at startup; cheaply cloneable for sharing across renders.
 #[derive(Clone)]
-pub struct ImagePicker {
-    picker: Picker,
-}
+pub struct ImagePicker;
 
 impl ImagePicker {
-    /// Use the shared probed picker (halfblocks until [`probe`] ran).
+    /// Use the shared probed cell size ((8, 16) until [`probe`] ran).
     pub fn new() -> Self {
-        Self {
-            picker: shared_picker(),
-        }
+        Self
     }
 
     /// Build a renderable image state from a base64-encoded image payload,
@@ -95,9 +172,7 @@ impl ImagePicker {
         if exceeds_pixel_cap(px_w, px_h) {
             return None;
         }
-        let font = self.picker.font_size();
-        let fw = font.width.max(1) as u32;
-        let fh = font.height.max(1) as u32;
+        let (fw, fh) = probe();
 
         let natural_cols = px_w.div_ceil(fw);
         let natural_rows = px_h.div_ceil(fh);
@@ -107,16 +182,7 @@ impl ImagePicker {
         let scaled_rows = ((natural_rows as f64) * scale).ceil() as u16;
         let target_rows = scaled_rows.clamp(1, MAX_IMAGE_ROWS);
 
-        let area = Size {
-            width: avail_width.max(1),
-            height: target_rows,
-        };
-        let protocol = self
-            .picker
-            .new_protocol(dyn_img.clone(), area, Resize::Fit(None))
-            .ok()?;
         Some(ImageRenderState {
-            protocol: Arc::new(protocol),
             rows: target_rows,
             slt: Some(SltPixels {
                 file: raw,
@@ -125,6 +191,12 @@ impl ImagePicker {
                 pixel_height: px_h,
             }),
         })
+    }
+}
+
+impl Default for ImagePicker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -138,10 +210,9 @@ pub struct SltPixels {
     pub pixel_height: u32,
 }
 
-/// A decoded image ready to render into a frame area, plus its computed
+/// A decoded image ready to render into the frame, plus its computed
 /// cell height for scroll/height math.
 pub struct ImageRenderState {
-    protocol: Arc<Protocol>,
     pub rows: u16,
     /// Payload for the slt image widgets; `None` for states built without
     /// pixel data (none today — the field keeps the painter honest).
@@ -149,12 +220,6 @@ pub struct ImageRenderState {
 }
 
 impl ImageRenderState {
-    /// Render the image widget into `area`. The area's height should be
-    /// `<= self.rows`; width should be `<=` the available columns.
-    pub fn render(&self, area: ratatui::layout::Rect, frame: &mut ratatui::Frame) {
-        frame.render_widget(Image::new(&self.protocol), area);
-    }
-
     /// Decoded payload for the slt image widgets (`kitty_image` /
     /// `iterm_image` / halfblock fallback), sized by this state's row count.
     pub fn slt_pixels(&self) -> Option<&SltPixels> {

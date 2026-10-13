@@ -1,5 +1,7 @@
 //! Layout composition: chat column (messages / composer / status / footer)
-//! plus the optional right sidebar, with overlays on top.
+//! plus the optional right sidebar, with overlays on top. Painting lives in
+//! [`frame::frame` (the slt path)](`crate::tui::ui::frame::frame`); this
+//! module owns the panel tree.
 
 mod composer;
 pub mod frame;
@@ -10,332 +12,52 @@ pub mod scrollback;
 mod sidebar;
 pub mod theme;
 
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::widgets::{Block, Borders};
-
-use crate::tui::app::App;
-use crate::tui::compat;
-use crate::tui::geom;
-use crate::tui::style::Style;
-
-const SIDEBAR_WIDTH: u16 = 34;
-
-pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
-    app.status_tick = app.status_tick.wrapping_add(1);
-    app.clear_expired_flash();
-    let area = f.area();
-    f.render_widget(
-        Block::default().style(compat::rat_style(
-            Style::default().bg(theme::current().bg_app),
-        )),
-        area,
-    );
-
-    let show_sidebar = app.session.sidebar_open && area.width >= 80;
-    let (chat, side) = if show_sidebar {
-        let cols = Layout::horizontal([Constraint::Min(60), Constraint::Length(SIDEBAR_WIDTH)])
-            .split(area);
-        (cols[0], Some(cols[1]))
-    } else {
-        (area, None)
-    };
-
-    // Composer height grows with wrapped content: box = text rows + 2 padding.
-    let text_w = (chat.width as usize)
-        .saturating_sub(2 + composer::TEXT_LEFT_PAD + composer::TEXT_RIGHT_PAD) // inset + inner pads
-        .max(1);
-    let row_count = messages::wrap_rows(&app.composer.text, text_w).len();
-    // box = text rows + 2 padding + the model/context info line
-    let composer_h = row_count.min(composer::MAX_TEXT_ROWS) as u16 + 3;
-    let bottom_h = composer_h + 3; // border(1) + box + status(1) + blank(1)
-
-    let rows = Layout::vertical([Constraint::Min(3), Constraint::Length(bottom_h)]).split(chat);
-    let msg_area = rows[0];
-    let bottom = rows[1];
-
-    // The permission prompt (F.5) rides directly above the composer region:
-    // its rows are carved out of the message area, so the shared top border
-    // and the composer block below it keep their positions. The plan form
-    // (F.3, Ctrl-T) stacks above it the same way.
-    let prompt_h = if app.overlays.permission_prompt.is_open() {
-        app.overlays
-            .permission_prompt
-            .height(chat.width)
-            .min(bottom.y.saturating_sub(msg_area.y))
-    } else {
-        0
-    };
-    // The question form (A.5) stacks above the permission prompt the same
-    // way; at most one is open at a time in practice.
-    let question_h = if app.overlays.question_form.is_open() {
-        app.overlays
-            .question_form
-            .height(chat.width)
-            .min(bottom.y.saturating_sub(msg_area.y + prompt_h))
-    } else {
-        0
-    };
-    let form_h = if app.plan_mode.plan_form.is_visible() {
-        app.plan_mode
-            .plan_form
-            .height()
-            .min(bottom.y.saturating_sub(msg_area.y + prompt_h + question_h))
-    } else {
-        0
-    };
-    let prompt_area = Rect {
-        x: bottom.x,
-        y: bottom.y - prompt_h,
-        width: bottom.width,
-        height: prompt_h,
-    };
-    let question_area = Rect {
-        x: bottom.x,
-        y: bottom.y - prompt_h - question_h,
-        width: bottom.width,
-        height: question_h,
-    };
-    let form_area = Rect {
-        x: bottom.x,
-        y: bottom.y - prompt_h - question_h - form_h,
-        width: bottom.width,
-        height: form_h,
-    };
-    let msg_area = if prompt_h + question_h + form_h > 0 {
-        Rect {
-            height: msg_area
-                .height
-                .saturating_sub(prompt_h + question_h + form_h),
-            ..msg_area
-        }
-    } else {
-        msg_area
-    };
-
-    // Shared top border across composer + status + footer.
-    f.render_widget(
-        Block::default()
-            .borders(Borders::TOP)
-            .border_style(compat::rat_style(
-                Style::default().fg(theme::current().border_subtle),
-            )),
-        bottom,
-    );
-    // Nested layout (instead of manual offsets) so tiny terminals that shrink
-    // `bottom` below BOTTOM_HEIGHT can't produce out-of-bounds rows.
-    let sub = Layout::vertical([
-        Constraint::Length(1),          // border row
-        Constraint::Length(composer_h), // composer
-        Constraint::Length(1),          // status row
-        Constraint::Length(1),          // blank row
-    ])
-    .split(bottom);
-    let composer_area = sub[1];
-    let status_area = sub[2];
-    let footer_area = sub[3];
-
-    // Task-chat header (task 96): one line above the transcript with
-    // the task name, status, and the Esc-Esc hint while it works.
-    if let Some(idx) = app.active_task {
-        render_task_header(f, app, idx, msg_area);
-    }
-    messages::render(f, app, msg_area);
-    if form_h > 0 {
-        app.plan_mode.plan_form.view(f, form_area);
-    }
-    if question_h > 0 {
-        app.overlays.question_form.view(f, question_area);
-    }
-    if prompt_h > 0 {
-        app.overlays.permission_prompt.view(f, prompt_area);
-    }
-    composer::render_input(f, app, composer_area);
-    composer::render_status(f, app, status_area);
-    // One-row " Plan Ctrl+T " reminder in the blank footer row while a
-    // ready plan's form is dismissed (reference `PlanForm::hint_line`).
-    if let Some(hint) = app.plan_mode.plan_form.hint_line() {
-        f.render_widget(
-            ratatui::widgets::Paragraph::new(compat::rat_line(&hint)),
-            footer_area,
-        );
-    } else if app.active_task.is_none() && app.any_task_working() {
-        // Main-chat hint while subagents run: how many, and the chord
-        // that opens their chats (task 96).
-        let n = app
-            .task_chats
-            .iter()
-            .filter(|c| c.outcome.is_none())
-            .count();
-        let hint = format!(
-            "{n} task{} running — Ctrl-N to view",
-            if n == 1 { "" } else { "s" }
-        );
-        f.render_widget(
-            ratatui::widgets::Paragraph::new(hint).style(compat::rat_style(
-                Style::default().fg(theme::current().text_tertiary),
-            )),
-            footer_area,
-        );
-    }
-
-    if let Some(side) = side {
-        sidebar::render(f, app, side);
-    }
-
-    // Overlays, back to front.
-    overlays::render_search(f, app, area);
-    overlays::render_file_picker(f, app, area);
-    overlays::render_slash(f, app, chat, bottom);
-    overlays::render_model_menu(f, app, chat, bottom);
-    overlays::render_thinking_picker(f, app, chat);
-    overlays::render_palette(f, app, area);
-    overlays::render_usage(f, app, area);
-    overlays::render_stats(f, app, area);
-    overlays::render_help(f, app, area);
-    overlays::render_sessions(f, app, area);
-    overlays::render_theme_picker(f, app, area);
-    overlays::render_mcp(f, app, area);
-    overlays::render_task_picker(f, app, area);
-    overlays::render_recipes(f, app, area);
-
-    // Snapshot the frame as plain text (selection copy extracts from this),
-    // then draw the current text selection as reversed cells.
-    // Paint rects convert to the app's geometry at the storage boundary.
-    {
-        let mut p = app.view.paint.lock().expect("paint handoff");
-        p.msg_area = geom::Rect::new(msg_area.x, msg_area.y, msg_area.width, msg_area.height);
-        p.composer_area = geom::Rect::new(
-            composer_area.x,
-            composer_area.y,
-            composer_area.width,
-            composer_area.height,
-        );
-    }
-    snapshot_frame(f, app);
-    render_selection(f, app);
-}
-
-/// One-line header above a focused task chat's transcript (task 96):
-/// task name, status, and the dim Esc-Esc hint while it works.
-fn render_task_header(f: &mut Frame, app: &App, idx: usize, area: Rect) {
-    use crate::tui::text::{Line, Span};
-    use ratatui::widgets::Paragraph;
-
-    let t = theme::current();
-    let Some(chat) = app.task_chats.get(idx) else {
-        return;
-    };
-    let status = chat.status();
-    let status_color = match status {
-        crate::tui::app::TaskStatus::Working => t.warning,
-        crate::tui::app::TaskStatus::Done => t.success,
-        crate::tui::app::TaskStatus::Error => t.danger,
-    };
-    let mut spans = vec![
-        Span::styled(chat.name.clone(), Style::default().fg(t.accent)),
-        Span::raw(" · "),
-        Span::styled(status.label(), Style::default().fg(status_color)),
-    ];
-    if status == crate::tui::app::TaskStatus::Working {
-        spans.push(Span::styled(
-            "  Esc-Esc cancels",
-            Style::default().fg(t.text_tertiary),
-        ));
-    }
-    // The transcript's top margin row hosts the header, so the messages
-    // below keep their layout unchanged.
-    let header = Rect {
-        x: area.x + 2,
-        y: area.y,
-        width: area.width.saturating_sub(4),
-        height: 1,
-    };
-    f.render_widget(Paragraph::new(compat::rat_line(&Line::from(spans))), header);
-}
-
-fn snapshot_frame(f: &mut Frame, app: &mut App) {
-    let area = f.area();
-    let buf = f.buffer_mut();
-    let mut p = app.view.paint.lock().expect("paint handoff");
-    let frame_text = &mut p.frame_text;
-    // Reuse the snapshot rows across frames: at spinner cadence a fresh
-    // Vec of freshly allocated row strings per frame is measurable churn.
-    frame_text.resize(area.height as usize, String::new());
-    for (r, line) in frame_text.iter_mut().enumerate() {
-        line.clear();
-        line.reserve(area.width as usize);
-        for c in 0..area.width {
-            match buf.cell((c, r as u16)) {
-                Some(cell) => {
-                    let symbol = cell.symbol();
-                    // Only hyperlink cells can carry OSC 8; push plain
-                    // cells without paying the strip's allocation.
-                    if symbol.contains('\u{1b}') {
-                        line.push_str(&crate::tui::hyperlink::strip_osc8(symbol));
-                    } else {
-                        line.push_str(symbol);
-                    }
-                }
-                None => line.push(' '),
-            }
-        }
-    }
-}
-
-fn render_selection(f: &mut Frame, app: &App) {
-    let Some(sel) = &app.view.selection else {
-        return;
-    };
-    if sel.is_empty() {
-        return;
-    }
-    let ((r1, c1), (r2, c2)) = sel.normalized();
-    let region = sel.region;
-    let area = f.area();
-    let buf = f.buffer_mut();
-    let frame_text = &app.view.paint.lock().expect("paint handoff").frame_text;
-    // The highlight binds to real text: each row is clamped to its text
-    // extent inside the selection's region, so padding, margins, the
-    // sidebar, and decoration glyphs are never highlighted.
-    for r in r1..=r2.min(area.height.saturating_sub(1)) {
-        if r < region.y || r >= region.y + region.height {
-            continue;
-        }
-        let Some(row) = frame_text.get(r as usize) else {
-            continue;
-        };
-        let Some((first, last)) = crate::tui::selection::text_extent(row, region) else {
-            continue;
-        };
-        let (first, last) = (first as u16, last as u16);
-        let row_from = if r == r1 { c1 } else { region.x };
-        let row_to = if r == r2 {
-            c2
-        } else {
-            region.x + region.width - 1
-        };
-        let from = row_from.max(first);
-        let to = row_to.min(last);
-        for c in from..=to {
-            if let Some(cell) = buf.cell_mut((c, r)) {
-                cell.modifier.insert(ratatui::style::Modifier::REVERSED);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::tui::app::App;
-    use crate::tui::geom::Rect;
     use crate::tui::provider::{
         AgentEvent, LineKind, ModelChoice, PlanItem, Status, Tone, ToolCallData, ToolKind,
         ToolLine, TouchedFile,
     };
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use crate::tui::style::Modifiers;
+    use crate::tui::ui::frame::{self, frame};
+    use crate::tui::ui::theme;
+
+    /// The app rendered on an `slt::TestBackend`, mirroring the run loop:
+    /// each `draw` is one frame, and the layout handoff (widths, scroll
+    /// bounds) settles over the first two frames.
+    struct Screen {
+        tb: slt::TestBackend,
+        view: frame::View,
+    }
+
+    impl Screen {
+        fn new(width: u32, height: u32) -> Self {
+            Self {
+                tb: slt::TestBackend::new(width, height),
+                view: frame::View::default(),
+            }
+        }
+
+        fn draw(&mut self, app: &mut App) {
+            self.tb.render(|ui| frame(ui, app, &mut self.view));
+        }
+
+        /// Two frames, so the transcript's prev-frame layout reads settle
+        /// before the assertions look at the buffer.
+        fn draw_settled(&mut self, app: &mut App) {
+            self.draw(app);
+            self.draw(app);
+        }
+
+        fn rows(&self) -> Vec<String> {
+            (0..self.tb.height()).map(|y| self.tb.line(y)).collect()
+        }
+
+        fn text(&self) -> String {
+            self.rows().join("\n")
+        }
+    }
 
     fn seeded_app() -> App {
         let mut app = App::new();
@@ -414,33 +136,19 @@ mod tests {
         app
     }
 
-    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
-    }
-
     #[test]
     fn help_sheet_renders_grouped_contexts_and_effective_chords() {
         use crate::tui::keybindings::KeybindingResolver;
         use crate::tui::modals::Modal;
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut screen = Screen::new(100, 40);
         let mut app = seeded_app();
         // A user override: search moves to Alt+M and must render that way.
         let entries = vec![("search".to_string(), vec!["Alt+M".to_string()])];
         let mut warnings = Vec::new();
         app.overlays.keybinds = KeybindingResolver::from_overlay(&entries, &mut warnings);
         app.overlays.modal = Modal::Help;
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let buf = terminal.backend().buffer();
-        let rows: Vec<String> = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect();
-        let all = rows.join("\n");
+        screen.draw_settled(&mut app);
+        let all = screen.text();
         assert!(all.contains("Keybindings"), "title rendered");
         assert!(all.contains("General"), "section header rendered");
         assert!(all.contains("Editing"), "section header rendered");
@@ -454,7 +162,7 @@ mod tests {
 
     #[test]
     fn permission_prompt_sits_above_the_composer_without_overlap() {
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut screen = Screen::new(100, 30);
         let mut app = seeded_app();
         app.handle_event(AgentEvent::PermissionRequest {
             id: "t9".into(),
@@ -464,13 +172,10 @@ mod tests {
             commands: vec!["rm -rf /tmp/x".into()],
         });
         app.handle_event(AgentEvent::StatusChanged(Status::WaitingApproval));
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let buf = terminal.backend().buffer();
-        let row =
-            |y: u16| -> String { (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect() };
+        screen.draw_settled(&mut app);
+        let rows = screen.rows();
 
         // The prompt form's title and the tool call must be visible...
-        let rows: Vec<String> = (0..buf.area.height).map(row).collect();
         let title = rows
             .iter()
             .position(|r| r.contains("Permission Required"))
@@ -489,12 +194,10 @@ mod tests {
         // ...strictly above the composer block, whose rows are unchanged:
         // the top border is the first row below the prompt, and the
         // composer's accent bar never appears inside the prompt rows.
-        // Match the layout's width (100-px terminal minus the 30-px sidebar).
-        let prompt_h = app.overlays.permission_prompt.height(70);
-        // The title now sits one row inside the prompt area (top padding).
-        let border_y = (title + prompt_h as usize)
+        let prompt_h = app.overlays.permission_prompt.height(66) as usize;
+        let border_y = (title + prompt_h)
             .saturating_sub(1)
-            .min(buf.area.height as usize - 1);
+            .min(rows.len() - 1);
         assert!(
             rows[border_y].starts_with('─'),
             "border below prompt: {:?}",
@@ -514,7 +217,7 @@ mod tests {
 
     #[test]
     fn composer_info_line_carries_model_provider_and_context_usage() {
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut screen = Screen::new(100, 24);
         let mut app = seeded_app();
         app.composer.clear();
         app.handle_event(AgentEvent::CatalogSet {
@@ -527,11 +230,9 @@ mod tests {
             }],
             current: 0,
         });
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let buf = terminal.backend().buffer();
-        let row =
-            |y: u16| -> String { (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect() };
-        let bottom: Vec<String> = (buf.area.height - 4..buf.area.height).map(row).collect();
+        screen.draw_settled(&mut app);
+        let rows = screen.rows();
+        let bottom: Vec<String> = rows[rows.len() - 4..].to_vec();
         // Composer info line (4th line of the input box): model · provider ·
         // thinking level on the left, used/total (pct) right-aligned, and
         // the box's accent bar still on its left edge.
@@ -551,20 +252,12 @@ mod tests {
 
     #[test]
     fn thinking_picker_renders_modes_and_current_budget() {
-        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let mut screen = Screen::new(90, 24);
         let mut app = seeded_app();
         app.session.thinking = crate::thinking::ThinkingConfig::Budget(4096);
         app.open_thinking_picker();
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let text = (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         for label in [
             "Thinking", "off", "adaptive", "minimal", "low", "medium", "high", "xhigh", "max",
             "● 4096",
@@ -572,31 +265,30 @@ mod tests {
             assert!(text.contains(label), "missing {label:?} in:\n{text}");
         }
         assert!(text.contains("/thinking <tokens>"));
-        let mut small = Terminal::new(TestBackend::new(30, 12)).unwrap();
-        small.draw(|f| draw(f, &mut app)).unwrap();
+        let mut small = Screen::new(30, 12);
+        small.draw_settled(&mut app);
     }
 
     #[test]
     fn overlays_render_without_panic() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
 
         app.overlays.modal = crate::tui::modals::Modal::Palette {
             query: "mo".into(),
             selected: 0,
         };
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("Change model"));
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("Change model"));
 
         app.overlays.modal = crate::tui::modals::Modal::ModelMenu(2);
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Claude Opus 4.1"));
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("Claude Opus 4.1"));
 
         app.overlays.modal = crate::tui::modals::Modal::None;
         app.composer.text = "/cl".into();
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("/clear"));
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("/clear"));
 
         // Theme picker: title, windowed list, and the current-theme marker.
         let entries = theme::all_theme_names();
@@ -606,8 +298,8 @@ mod tests {
             selected,
             original: theme::DEFAULT_THEME.to_owned(),
         };
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(text.contains("Themes"));
         assert!(text.contains("zenburn")); // last entry stays visible via the window
     }
@@ -617,7 +309,7 @@ mod tests {
     /// rendered window and vanish).
     #[test]
     fn palette_scrolls_to_keep_selection_visible() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
         app.overlays.modal = crate::tui::modals::Modal::Palette {
             query: String::new(),
@@ -629,16 +321,16 @@ mod tests {
             query: String::new(),
             selected: last,
         };
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        screen.draw_settled(&mut app);
         assert!(
-            buffer_text(&terminal).contains(label),
+            screen.text().contains(label),
             "the selected row ({label}) must be rendered"
         );
     }
 
     #[test]
     fn usage_and_stats_overlays_render_rows_and_costs() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
         app.handle_event(AgentEvent::UsageSnapshot(vec![
             crate::tui::provider::UsageRow {
@@ -653,8 +345,8 @@ mod tests {
             },
         ]));
         app.overlays.modal = crate::tui::modals::Modal::Usage(app.overlays.usage.clone());
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(text.contains("Session usage"));
         assert!(text.contains("claude-sonnet-5"));
         assert!(text.contains("$0.01"), "priced model shows its cost");
@@ -674,8 +366,8 @@ mod tests {
             sessions: 3,
             empty: false,
         });
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(text.contains("Cost stats"));
         assert!(text.contains("$1.50"));
         assert!(text.contains("3 sessions"));
@@ -684,13 +376,13 @@ mod tests {
             empty: true,
             ..Default::default()
         });
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("no runs recorded"));
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("no runs recorded"));
     }
 
     #[test]
     fn usage_overlay_renders_the_provider_quota_section() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
         app.overlays.usage = vec![crate::tui::provider::UsageRow {
             model: "anthropic/claude-sonnet-5".into(),
@@ -716,8 +408,8 @@ mod tests {
                     spend_microdollars: 2_330_000,
                 }],
             });
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(text.contains("Provider quota (lite):"));
         assert!(text.contains("5-hour window"));
         assert!(text.contains("14%"));
@@ -726,22 +418,21 @@ mod tests {
         assert!(text.contains("$2.33 today"));
 
         app.overlays.usage_quota = crate::tui::provider::UsageFetchState::Loading;
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("fetching"));
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("fetching"));
 
         app.overlays.usage_quota = crate::tui::provider::UsageFetchState::Unsupported;
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("not available"));
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("not available"));
 
-        app.overlays.usage_quota =
-            crate::tui::provider::UsageFetchState::Error("rate limited".into());
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("rate limited"));
+        app.overlays.usage_quota = crate::tui::provider::UsageFetchState::Error("rate limited".into());
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("rate limited"));
     }
 
     #[test]
     fn stats_overlay_caps_models_and_lists_top_sessions() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut screen = Screen::new(120, 40);
         let mut app = seeded_app();
         // The view is capped at build time (sidebar::stats_view): 12 rows
         // in the view, 2 more beyond it.
@@ -765,8 +456,8 @@ mod tests {
             sessions: 2,
             empty: false,
         });
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(text.contains("By model:"));
         assert!(!text.contains("model-12"), "only the 12 capped rows render");
         assert!(text.contains("+2 more models"));
@@ -782,7 +473,7 @@ mod tests {
     /// selection instead of painting over the chat and composer rows.
     #[test]
     fn model_menu_windows_around_selection_for_large_catalogs() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
         let models: Vec<ModelChoice> = (0..30)
             .map(|i| ModelChoice {
@@ -798,8 +489,8 @@ mod tests {
             current: 25,
         });
         app.overlays.modal = crate::tui::modals::Modal::ModelMenu(25);
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(text.contains("m25"), "window keeps the selection visible");
         assert!(text.contains("m29"), "window extends to the catalog tail");
         assert!(!text.contains("m00"), "out-of-window rows are clipped");
@@ -810,7 +501,7 @@ mod tests {
     /// advertises the tier-assignment keys (task 73).
     #[test]
     fn model_menu_shows_tier_labels_and_footer() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
         let dir = tempfile::tempdir().unwrap();
         let state = crate::storage::StateDir::from_path(dir.path().to_path_buf());
@@ -826,8 +517,8 @@ mod tests {
             &state,
         );
         app.overlays.modal = crate::tui::modals::Modal::ModelMenu(2);
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(text.contains("strong/weak"), "multi-tier label: {text:?}");
         assert!(text.contains("! strong"), "footer hints: {text:?}");
         assert!(text.contains("$ compaction"), "footer hints: {text:?}");
@@ -835,10 +526,10 @@ mod tests {
 
     #[test]
     fn selection_highlights_cells() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
         // Drag right-to-left across part of the first assistant line (row 1).
-        let region = Rect {
+        let region = crate::tui::geom::Rect {
             x: 0,
             y: 0,
             width: 120,
@@ -849,26 +540,26 @@ mod tests {
             head: (1, 4),
             region,
         });
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let buf = terminal.backend().buffer();
+        screen.draw_settled(&mut app);
+        let buf = screen.tb.buffer();
         // Cells inside the range are reversed, outside are not.
         assert!(
-            buf.cell((4, 1))
-                .unwrap()
-                .modifier
-                .contains(ratatui::style::Modifier::REVERSED)
+            buf.get(4, 1)
+                .style
+                .modifiers
+                .contains(Modifiers::REVERSED)
         );
         assert!(
-            buf.cell((12, 1))
-                .unwrap()
-                .modifier
-                .contains(ratatui::style::Modifier::REVERSED)
+            buf.get(12, 1)
+                .style
+                .modifiers
+                .contains(Modifiers::REVERSED)
         );
         assert!(
-            !buf.cell((13, 1))
-                .unwrap()
-                .modifier
-                .contains(ratatui::style::Modifier::REVERSED)
+            !buf.get(13, 1)
+                .style
+                .modifiers
+                .contains(Modifiers::REVERSED)
         );
         // And the frame snapshot holds the selectable text.
         assert!(
@@ -878,50 +569,47 @@ mod tests {
 
     #[test]
     fn status_indicator_reflects_and_animates_with_agent_status() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
 
         app.handle_event(AgentEvent::StatusChanged(Status::Running));
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let first = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let first = screen.text();
         assert!(first.contains("running"));
 
         // The spinner frame advances with the tick counter.
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let second = buffer_text(&terminal);
+        screen.draw(&mut app);
+        let second = screen.text();
         assert!(second.contains("running"));
         assert_ne!(first, second, "spinner frame changes between draws");
 
         app.handle_event(AgentEvent::StatusChanged(Status::WaitingApproval));
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("awaiting approval"));
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("awaiting approval"));
 
         app.handle_event(AgentEvent::StatusChanged(Status::Failed));
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("failed"));
+        screen.draw_settled(&mut app);
+        assert!(screen.text().contains("failed"));
     }
 
     /// The status row's indicator starts two cells in, lined up under the
     /// composer's accent bar rather than flush with the row's left edge.
     #[test]
     fn status_indicator_aligns_under_the_composer_accent_bar() {
-        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut screen = Screen::new(120, 36);
         let mut app = seeded_app();
         app.handle_event(AgentEvent::StatusChanged(Status::Running));
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let buf = terminal.backend().buffer();
-        let row = (0..buf.area.height)
-            .find(|&y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-                    .contains("running")
-            })
+        screen.draw_settled(&mut app);
+        let row = screen
+            .rows()
+            .into_iter()
+            .position(|r| r.contains("running"))
             .expect("status row with the running indicator");
-        assert_eq!(buf[(0, row)].symbol(), " ");
-        assert_eq!(buf[(1, row)].symbol(), " ");
+        let buf = screen.tb.buffer();
+        assert_eq!(buf.get(0, row as u32).symbol, " ");
+        assert_eq!(buf.get(1, row as u32).symbol, " ");
         assert_ne!(
-            buf[(2, row)].symbol(),
+            buf.get(2, row as u32).symbol,
             " ",
             "indicator starts under the accent bar"
         );
@@ -929,11 +617,11 @@ mod tests {
 
     #[test]
     fn narrow_terminal_hides_sidebar() {
-        let mut terminal = Terminal::new(TestBackend::new(70, 24)).unwrap();
+        let mut screen = Screen::new(70, 24);
         let mut app = seeded_app();
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        screen.draw_settled(&mut app);
         // Should not panic and should not render the sidebar plan heading.
-        assert!(!buffer_text(&terminal).contains("PLAN"));
+        assert!(!screen.text().contains("PLAN"));
     }
 
     /// The plan form (Ctrl-T) rides above the composer: its menu items are
@@ -941,20 +629,20 @@ mod tests {
     /// " Plan Ctrl+T " hint in the footer.
     #[test]
     fn plan_form_renders_above_composer_and_hints_when_dismissed() {
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut screen = Screen::new(100, 30);
         let mut app = App::new();
         app.mode = crate::tui::app::Mode::Plan;
         app.plan_mode.plan_path = Some(std::path::PathBuf::from("/tmp/plans/x.md"));
         app.plan_mode.plan_form.on_plan_ready();
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(text.contains("Plan complete"), "form title missing");
         assert!(text.contains("Implement plan"), "menu missing");
         assert!(text.contains("Refine plan"));
 
         app.plan_mode.plan_form.hide();
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
+        screen.draw_settled(&mut app);
+        let text = screen.text();
         assert!(!text.contains("Plan complete"));
         assert!(text.contains("Plan Ctrl+T"), "dismissed hint missing");
     }

@@ -20,7 +20,6 @@ base64 = "0.23"
 bs58 = "0.5"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-crossterm = "0.29"
 dirs = "7"
 etcetera = "0.11"
 futures = "0.3"
@@ -34,12 +33,6 @@ jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 libc = "0.2"
 minijinja = "2"
 nucleo-matcher = "0.3"
-ratatui = "0.30"
-ratatui-image = {
-  version = "11",
-  default-features = false,
-  features = ["image-defaults", "crossterm"]
-}
 regex = "1"
 reqwest = "0.13"
 rig-bedrock = "0.44"

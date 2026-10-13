@@ -5,13 +5,9 @@
 //! reference `craft-ui/src/components/permission_prompt.rs`; `subagent_id`
 //! routing is deferred until subagents land (task 95).
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::{Paragraph, Wrap};
 use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::permissions::{DEFAULT_DENY_GUIDANCE, PermissionAnswer};
-use crate::tui::compat;
 use crate::tui::style::{Modifier, Style, StyleExt};
 use crate::tui::text::{Line, Span};
 use crate::tui::ui::theme;
@@ -451,27 +447,6 @@ impl PermissionPrompt {
         lines
     }
 
-    pub fn view(&self, f: &mut Frame, area: Rect) {
-        let t = theme::current();
-
-        if !self.is_open() {
-            return;
-        }
-        let lines = self.build_lines();
-        f.render_widget(ratatui::widgets::Clear, area);
-        f.render_widget(
-            ratatui::widgets::Block::default()
-                .style(compat::rat_style(Style::default().bg(t.bg_raised))),
-            area,
-        );
-        f.render_widget(
-            Paragraph::new(compat::rat_text(&lines))
-                .wrap(Wrap { trim: false })
-                .style(compat::rat_style(Style::default().bg(t.bg_raised))),
-            area,
-        );
-    }
-
     pub fn height(&self, width: u16) -> u16 {
         let inner_width = width.saturating_sub(2).max(1) as usize;
         // `Paragraph::line_count` is unstable; estimate wrapped rows by
@@ -827,7 +802,8 @@ pub(crate) fn paint_raised_form(
     bg: slt::style::Color,
 ) {
     let base = Style::default().bg(bg);
-    ui.container()
+    let _ = ui
+        .container()
         .bg(bg)
         .w(width)
         .h(u32::from(height))

@@ -6,12 +6,8 @@
 //! the question is multi-select, matching the reference); multi-select
 //! toggles; Esc/Ctrl-C dismisses.
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::{Paragraph, Wrap};
 use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::tui::compat;
 use crate::tui::style::{Modifier, Style, StyleExt};
 use crate::tui::text::{Line, Span};
 use crate::tui::ui::theme;
@@ -416,26 +412,6 @@ impl QuestionForm {
         }
         lines.push(Line::from(""));
         lines
-    }
-
-    pub fn view(&self, f: &mut Frame, area: Rect) {
-        let t = theme::current();
-        if !self.is_open() {
-            return;
-        }
-        let lines = self.build_lines();
-        f.render_widget(ratatui::widgets::Clear, area);
-        f.render_widget(
-            ratatui::widgets::Block::default()
-                .style(compat::rat_style(Style::default().bg(t.bg_raised))),
-            area,
-        );
-        f.render_widget(
-            Paragraph::new(compat::rat_text(&lines))
-                .wrap(Wrap { trim: false })
-                .style(compat::rat_style(Style::default().bg(t.bg_raised))),
-            area,
-        );
     }
 
     pub fn height(&self, width: u16) -> u16 {

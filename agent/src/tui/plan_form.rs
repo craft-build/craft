@@ -5,12 +5,8 @@
 //! Dismiss and open-editor chords resolve through the data-driven
 //! keybinding resolver, so user rebinds apply inside the form.
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use slt::event::{KeyCode, KeyEvent};
 
-use crate::tui::compat;
 use crate::tui::style::{Modifier, Style, StyleExt};
 use crate::tui::text::{Line, Span};
 use crate::tui::ui::theme;
@@ -169,6 +165,9 @@ impl PlanForm {
         ]))
     }
 
+    /// The form's fixed height (menu + chrome), as `render_slt` reserves.
+    /// Test-only now that the painter sizes from `FORM_HEIGHT` directly.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn height(&self) -> u16 {
         if self.is_visible() { FORM_HEIGHT } else { 0 }
     }
@@ -205,7 +204,7 @@ impl PlanForm {
     }
 
     /// The form's content rows (menu, one blank, hint bar) — shared by the
-    /// ratatui `view()` and the slt `render_slt` painter.
+    /// slt `render_slt` painter and the `height()` estimate.
     fn content_lines(&self) -> Vec<Line<'static>> {
         let t = theme::current();
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(MENU.len() + 1);
@@ -235,37 +234,6 @@ impl PlanForm {
         lines.push(Line::default());
         lines.push(hint_line(HINT_PAIRS));
         lines
-    }
-
-    pub(crate) fn view(&self, frame: &mut Frame, area: Rect) {
-        if !self.is_visible() {
-            return;
-        }
-
-        let t = theme::current();
-        let lines = self.content_lines();
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(compat::rat_style(Style::default().fg(t.border_strong)))
-            // The Block title is ratatui-native (see the migration spec:
-            // a Line used only as a Block title is built as ratatui text
-            // instead of converting the app type).
-            .title_top(ratatui::text::Line::from(FORM_LABEL.to_string()).left_aligned())
-            .title_style(compat::rat_style(
-                Style::default()
-                    .fg(t.text_primary)
-                    .add_modifier(Modifier::BOLD),
-            ));
-
-        frame.render_widget(
-            Paragraph::new(compat::rat_text(&lines))
-                .style(compat::rat_style(Style::default().fg(t.text_primary)))
-                .wrap(Wrap { trim: false })
-                .block(block),
-            area,
-        );
     }
 }
 
@@ -486,7 +454,8 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
     // of a space).
     let title = FORM_LABEL.trim_start();
 
-    ui.container()
+    let _ = ui
+        .container()
         .border(slt::Border::Rounded)
         .border_style(Style::default().fg(t.border_strong))
         .title_styled(

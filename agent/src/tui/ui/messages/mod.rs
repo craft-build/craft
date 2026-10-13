@@ -1,14 +1,8 @@
 //! Message list rendering: user / assistant / tool blocks, plus scrolling.
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::Paragraph;
-
 use super::theme;
 use crate::tui::app::{App, Message};
-use crate::tui::compat;
 use crate::tui::geom;
-use crate::tui::hyperlink;
 use crate::tui::style::Style;
 use crate::tui::text::{Line, Span};
 use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
@@ -36,102 +30,108 @@ fn clamp_row_u16(delta: u32) -> u16 {
     u16::try_from(delta).unwrap_or(u16::MAX)
 }
 
-pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
-    let inner = Rect {
-        x: area.x + MARGIN,
-        y: area.y + 1,
-        width: area.width.saturating_sub(MARGIN * 2),
-        height: area.height.saturating_sub(1),
-    };
-    if inner.width == 0 {
-        return;
-    }
-    let g = crate::tui::geom::Rect::new(inner.x, inner.y, inner.width, inner.height);
-    let build = build_frame(app, g);
+// ---------------------------------------------------------------------------
+// OSC-8 hyperlinks (moved here from the deleted `tui/hyperlink.rs`)
+// ---------------------------------------------------------------------------
 
-    // App lines meet the legacy ratatui painter here; the compat shim
-    // borrows them as ratatui text at the paint boundary. Image bands
-    // blank-pad their reserved rows, exactly as the slice loop computed.
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner.height as usize);
-    for band in &build.bands {
-        match band {
-            Band::Text(rows) => lines.extend(rows.iter().cloned()),
-            Band::Image { rows, .. } => lines.extend((0..*rows).map(|_| Line::default())),
+/// OSC-8 link wrapper. `\x1b]8;;` opens, the URI follows, `ST` (`ESC \`)
+/// terminates the parameter, then the visible text, then the closer.
+const OSC8_OPEN: &str = "\u{1b}]8;;";
+const OSC8_CLOSE: &str = "\u{1b}\\";
+/// The bare closer (empty target). Production builds the wrap inline in
+/// [`apply_link_slt`]; the constant stays for the `strip_osc8` tests.
+#[cfg_attr(not(test), allow(dead_code))]
+const OSC8_EMPTY: &str = "\u{1b}]8;;\u{1b}\\";
+
+/// A hyperlink target: which cells of one display row to wrap, and the URI.
+/// `row` addresses the message document's rows (the same coordinate space
+/// the scrollback engine's `doc_row` produces); column ranges are within
+/// that row. Each entry targets a single row.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hyperlink {
+    pub row: u16,
+    pub col_start: u16,
+    pub col_end: u16,
+    pub uri: String,
+}
+
+impl Hyperlink {
+    pub fn new(row: u16, col_start: u16, col_end: u16, uri: String) -> Self {
+        Self {
+            row,
+            col_start,
+            col_end,
+            uri,
         }
     }
-    let para = Paragraph::new(compat::rat_text(&lines));
-    f.render_widget(para, inner);
+}
 
-    // Draw inline images over their reserved rows. Like the hyperlink
-    // injection this happens after the Paragraph so the layout math is
-    // untouched; skipped rows (scrolled out above or below) simply don't
-    // draw.
-    let mut off: u16 = 0;
-    for band in &build.bands {
-        match band {
-            Band::Text(rows) => off += rows.len() as u16,
-            Band::Image { state, rows } => {
-                state.render(
-                    Rect {
-                        x: inner.x,
-                        y: inner.y + off,
-                        width: inner.width,
-                        height: *rows,
-                    },
-                    f,
-                );
-                off += rows;
-            }
+/// Builds a `file://` URI from a path string, resolving `~` and
+/// cwd-relative paths to absolute. Returns `None` if the path cannot be
+/// made absolute (e.g. empty, or a bare filename with no cwd context).
+pub(crate) fn file_uri(path: &str) -> Option<String> {
+    let resolved = resolve_path(path)?;
+    let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+    Some(uri_from_path(&canonical))
+}
+
+fn resolve_path(path: &str) -> Option<std::path::PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        let home = crate::paths::home()?;
+        return Some(home.join(rest));
+    }
+    if trimmed == "~" {
+        return crate::paths::home();
+    }
+    if trimmed.starts_with('/') || (cfg!(windows) && trimmed.get(1..3) == Some(":\\")) {
+        return Some(std::path::PathBuf::from(trimmed));
+    }
+    let cwd = std::env::current_dir().ok()?;
+    Some(cwd.join(trimmed))
+}
+
+/// Encodes an absolute path into a `file://` URI, percent-encoding
+/// bytes that are not unreserved per RFC 3986. Non-existent paths pass
+/// through uncanonicalized (a diff may show a not-yet-written file).
+fn uri_from_path(path: &std::path::Path) -> String {
+    let mut out = String::from("file://");
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
         }
     }
+    out
+}
 
-    // The search modal's current match highlight (F.3): the segment's
-    // visible cells are reversed, mirroring the reference's
-    // `Cursor::render(..., highlight)`.
-    if let Some((start, end)) = build.highlight {
-        for row in start..end {
-            for col in 0..inner.width {
-                let cell = f
-                    .buffer_mut()
-                    .cell_mut((inner.x + col, inner.y + row))
-                    .expect("bounded by inner");
-                std::mem::swap(&mut cell.fg, &mut cell.bg);
-            }
+/// Whether the terminal multiplexer would corrupt OSC-8 passthrough.
+/// tmux re-escapes sequences it does not recognize; keep the reference's
+/// conservative gate and skip injection entirely under it.
+pub(crate) fn is_muxed() -> bool {
+    std::env::var_os("TMUX").is_some()
+}
+
+/// Removes OSC-8 hyperlink sequences (`ESC ]8;;…ST`) from a cell symbol,
+/// leaving the visible text. Used when snapshotting the frame as plain
+/// text so selection extents and clipboard copies stay clean.
+pub(crate) fn strip_osc8(symbol: &str) -> String {
+    let mut out = String::with_capacity(symbol.len());
+    let mut rest = symbol;
+    while let Some(i) = rest.find(OSC8_OPEN) {
+        out.push_str(&rest[..i]);
+        // Skip through the ST terminator that closes the URI params.
+        match rest[i..].find(OSC8_CLOSE) {
+            Some(end) => rest = &rest[i + end + OSC8_CLOSE.len()..],
+            None => return out,
         }
     }
-
-    // Rewrite the linked header cells in place: spans stayed plain text
-    // during layout, so wrap math is unaffected. The mux gate and the
-    // single-row/column bounds were applied when the links were resolved.
-    for (row, col_start, col_end, uri) in &build.links {
-        for col in *col_start..*col_end {
-            let cell = f
-                .buffer_mut()
-                .cell_mut((inner.x + col, inner.y + row))
-                .expect("col bounded by inner.width, vis by inner.height");
-            hyperlink::apply_to_cell(cell, uri);
-        }
-    }
-
-    // Publish the hit regions and the transcript area's width through the
-    // frame handoff (event handlers read them one frame later).
-    let mut p = app.view.paint.lock().expect("paint handoff");
-    p.tool_regions = build
-        .tool_spans
-        .iter()
-        .map(|&(idx, s, e)| {
-            (
-                idx,
-                crate::tui::geom::Rect::new(g.x, g.y + s, g.width, e - s),
-            )
-        })
-        .collect();
-    p.notice_regions = build
-        .notice_rows
-        .iter()
-        .map(|&(idx, r)| (idx, crate::tui::geom::Rect::new(g.x, g.y + r, g.width, 1)))
-        .collect();
-    p.width = area.width;
+    out.push_str(rest);
+    out
 }
 
 /// One horizontal band of the visible transcript produced by
@@ -146,9 +146,10 @@ enum Band {
     },
 }
 
-/// The painter-neutral transcript frame: visible bands plus hit-region,
-/// link, and highlight data, all addressed in inner-rect-relative rows so
-/// the legacy ratatui painter and the slt painter share one math.
+/// The painter-neutral transcript frame: visible bands plus hit-region and
+/// link data, all addressed in inner-rect-relative rows. The trailing
+/// overlay pass recomputes the search highlight itself (it must run after
+/// the whole frame is painted).
 struct FrameBuild {
     bands: Vec<Band>,
     /// (message index, start..end rows) of collapsible tool cards.
@@ -158,9 +159,6 @@ struct FrameBuild {
     /// (row, col_start, col_end, uri) of card link headers; empty under a
     /// muxed terminal or when every header is off-screen.
     links: Vec<(u16, u16, u16, String)>,
-    /// Search-highlight rows (start..end), when the highlighted segment
-    /// intersects the viewport.
-    highlight: Option<(u16, u16)>,
 }
 
 /// Build the frame's visible transcript: refill the segment document, resolve
@@ -211,7 +209,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
     let mut notice_seg_rows: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, seg, row)
     // (segment index, link) for card headers carrying an OSC-8 target;
     // resolved into viewport rows once the layout is known.
-    let mut card_links: Vec<(usize, hyperlink::Hyperlink)> = Vec::new();
+    let mut card_links: Vec<(usize, Hyperlink)> = Vec::new();
     // (segment, tool id, base64 payload) collected during the message walk;
     // resolved into render states right after it.
     let mut pending_images: Vec<(usize, String, String)> = Vec::new();
@@ -431,7 +429,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
     // is one pre-wrapped row, and column bounds keep any overflow from
     // writing outside the viewport.
     let mut links = Vec::new();
-    if !hyperlink::is_muxed() {
+    if !is_muxed() {
         for (seg, hl) in card_links {
             let doc = layout.doc_row(ScrollPos { seg, row: 1 });
             // Skip rows scrolled out above (plain subtraction, not
@@ -450,14 +448,11 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
         }
     }
 
-    let highlight = highlight_visible(app, &layout, top_row, inner);
-
     FrameBuild {
         bands,
         tool_spans,
         notice_rows,
         links,
-        highlight,
     }
 }
 
@@ -481,14 +476,32 @@ fn highlight_visible(
 #[cfg(test)]
 mod tests {
     use crate::tui::provider::ToolLine;
-    use ratatui::style::Modifier;
+
+    /// Renders the app through the slt frame (two passes so the layout
+    /// handoff settles) and returns the buffer rows, trailing blanks
+    /// trimmed.
+    fn frame_rows(app: &mut crate::tui::app::App, w: u32, h: u32) -> Vec<String> {
+        let mut view = crate::tui::ui::frame::View::default();
+        let mut tb = slt::TestBackend::new(w, h);
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, app, &mut view));
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, app, &mut view));
+        (0..h).map(|y| tb.line(y)).collect()
+    }
+
+    /// Renders ONLY the transcript painter at the full terminal width (the
+    /// way the legacy tests drove `messages::render` with `f.area()` — no
+    /// sidebar split), two passes for the layout handoff.
+    fn transcript_rows(app: &mut crate::tui::app::App, w: u32, h: u32) -> Vec<String> {
+        let mut tb = slt::TestBackend::new(w, h);
+        tb.render(|ui| super::render_slt(ui, app));
+        tb.render(|ui| super::render_slt(ui, app));
+        (0..h).map(|y| tb.line(y)).collect()
+    }
 
     #[test]
     fn streaming_frames_share_completed_transcript_lines() {
         use crate::tui::app::App;
         use crate::tui::provider::AgentEvent;
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
         use std::time::{Duration, Instant};
 
         let mut app = App::new();
@@ -498,17 +511,12 @@ mod tests {
             ));
         }
         app.handle_event(AgentEvent::AssistantDelta("Streaming reply.".into()));
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal
-            .draw(|f| crate::tui::ui::draw(f, &mut app))
-            .unwrap();
+        let _ = frame_rows(&mut app, 80, 24);
         let cached = app.view.segments.get(0).unwrap().lines().clone();
         let now = Instant::now();
         for elapsed in [16, 32, 48] {
             app.tick_reveal(now + Duration::from_millis(elapsed));
-            terminal
-                .draw(|f| crate::tui::ui::draw(f, &mut app))
-                .unwrap();
+            let _ = frame_rows(&mut app, 80, 24);
             assert!(cached.ptr_eq(app.view.segments.get(0).unwrap().lines()));
         }
     }
@@ -533,8 +541,6 @@ mod tests {
     fn view_image_card_renders_inline_image() {
         use crate::tui::app::App;
         use crate::tui::provider::{AgentEvent, ToolCallData, ToolKind};
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let img = image::RgbaImage::from_pixel(16, 8, image::Rgba([255, 255, 255, 255]));
         let mut png = Vec::new();
@@ -553,10 +559,7 @@ mod tests {
             awaiting_approval: false,
             image: Some(b64),
         }));
-        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
-        terminal
-            .draw(|f| super::render(f, &mut app, f.area()))
-            .unwrap();
+        let rows = frame_rows(&mut app, 60, 30);
 
         let seg_idx = (0..app.view.segments.len())
             .find(|&i| app.view.segments.get(i).is_some_and(|s| s.image.is_some()))
@@ -569,10 +572,9 @@ mod tests {
 
         // Halfblock fallback draws upper/lower-cell glyphs into the buffer
         // below the card header.
-        let buf = terminal.backend().buffer();
-        let symbols: Vec<&str> = buf.content.iter().map(|cell| cell.symbol()).collect();
         assert!(
-            symbols.iter().any(|s| *s == "\u{2580}" || *s == "\u{2584}"),
+            rows.iter()
+                .any(|r| r.contains('\u{2580}') || r.contains('\u{2584}')),
             "halfblock glyphs rendered"
         );
     }
@@ -583,8 +585,6 @@ mod tests {
     fn scrolling_into_image_rows_does_not_panic() {
         use crate::tui::app::App;
         use crate::tui::provider::{AgentEvent, ToolCallData, ToolKind};
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let img = image::RgbaImage::from_pixel(16, 8, image::Rgba([255, 255, 255, 255]));
         let mut png = Vec::new();
@@ -603,10 +603,7 @@ mod tests {
             awaiting_approval: false,
             image: Some(b64),
         }));
-        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
-        terminal
-            .draw(|f| super::render(f, &mut app, f.area()))
-            .unwrap();
+        let _ = frame_rows(&mut app, 60, 10);
         let seg_idx = (0..app.view.segments.len())
             .find(|&i| app.view.segments.get(i).is_some_and(|s| s.image.is_some()))
             .expect("image segment built");
@@ -621,9 +618,7 @@ mod tests {
             seg: seg_idx,
             row: caption + 1,
         };
-        terminal
-            .draw(|f| super::render(f, &mut app, f.area()))
-            .unwrap();
+        let _ = frame_rows(&mut app, 60, 10);
     }
 
     /// Auto-review renders as its own line *under* the tool card; the card
@@ -632,8 +627,6 @@ mod tests {
     fn auto_review_renders_under_the_card_not_inside_it() {
         use crate::tui::app::App;
         use crate::tui::provider::{AgentEvent, Tone, ToolCallData, ToolKind};
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let mut app = App::new();
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
@@ -651,14 +644,7 @@ mod tests {
             text: "auto-review allow: low — in-project edit".into(),
         });
 
-        let mut terminal = Terminal::new(TestBackend::new(70, 16)).unwrap();
-        terminal
-            .draw(|f| super::render(f, &mut app, f.area()))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let rows: Vec<String> = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect();
+        let rows = frame_rows(&mut app, 70, 16);
         let cmd_row = rows
             .iter()
             .position(|r| r.contains("cargo test"))
@@ -675,13 +661,11 @@ mod tests {
 
     #[test]
     fn assistant_markdown_read_highlight_and_painted_card_header() {
-        let t = theme::current();
-
-        use super::theme;
         use crate::tui::app::{App, Message};
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::style::Color;
+        use crate::tui::style::Modifiers;
+        use crate::tui::ui::theme;
+
+        let t = theme::current();
 
         let mut app = App::new();
         app.conversation.messages.push(Message::Assistant(
@@ -702,36 +686,29 @@ mod tests {
             review: None,
             image: None,
         });
-        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
-        terminal
-            .draw(|f| super::render(f, &mut app, f.area()))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let rows: Vec<String> = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
-            .collect();
-
-        // Theme colors are app-typed now; convert at the buffer boundary.
-        let accent = crate::tui::compat::rat_color(t.accent);
-        let text_secondary = crate::tui::compat::rat_color(t.text_secondary);
-        let text_tertiary = crate::tui::compat::rat_color(t.text_tertiary);
+        let mut view = crate::tui::ui::frame::View::default();
+        let mut tb = slt::TestBackend::new(80, 20);
+        tb.render(|ui| super::render_slt(ui, &mut app));
+        tb.render(|ui| super::render_slt(ui, &mut app));
+        let rows: Vec<String> = (0..tb.height()).map(|y| tb.line(y)).collect();
+        let buf = tb.buffer();
 
         // Agent text is markdown: heading rendered in accent bold.
         let hy = rows.iter().position(|r| r.contains("Title")).unwrap();
-        let hx = rows[hy].find("Title").unwrap() as u16;
-        let c = &buf[(hx, hy as u16)];
-        assert_eq!(c.fg, accent, "heading fg");
-        assert!(c.modifier.contains(Modifier::BOLD), "heading bold");
+        let hx = rows[hy].find("Title").unwrap() as u32;
+        let c = buf.get(hx, hy as u32);
+        assert_eq!(c.style.fg, Some(t.accent), "heading fg");
+        assert!(c.style.modifiers.contains(Modifiers::BOLD), "heading bold");
 
         // Read card body is syntax highlighted: some source cell carries a
         // color other than the plain secondary/tertiary card text.
         let cy = rows.iter().position(|r| r.contains("fn main() {")).unwrap();
-        let hl_found = (0..buf.area.width).any(|x| {
-            let c = &buf[(x, cy as u16)];
-            matches!(c.symbol(), "f" | "m" | "(" | ")")
-                && c.fg != Color::Reset
-                && c.fg != text_secondary
-                && c.fg != text_tertiary
+        let hl_found = (0..tb.width()).any(|x| {
+            let c = buf.get(x, cy as u32);
+            matches!(c.symbol.as_ref(), "f" | "m" | "(" | ")")
+                && c.style.fg.is_some()
+                && c.style.fg != Some(t.text_secondary)
+                && c.style.fg != Some(t.text_tertiary)
         });
         assert!(
             hl_found,
@@ -740,15 +717,14 @@ mod tests {
         );
 
         // Card header: OSC-8 link present, full path text survives, and no
-        // cell inside the message area falls back to terminal-default bg
+        // cell inside the message area falls back to an unset background
         // (the pre-fix symptom: black sections after the linked cell).
         let ry = rows.iter().position(|r| r.contains("Read ")).unwrap();
         assert!(rows[ry].contains("\u{1b}]8;;file://"));
         assert!(rows[ry].contains("probe.rs"));
-        for x in 2..78u16 {
-            assert_ne!(
-                buf[(x, ry as u16)].bg,
-                Color::Reset,
+        for x in 2..78u32 {
+            assert!(
+                buf.get(x, ry as u32).style.bg.is_some(),
                 "unpainted cell at x={x}"
             );
         }
@@ -757,8 +733,6 @@ mod tests {
     #[test]
     fn render_injects_osc8_into_visible_header_and_skips_scrolled_out() {
         use crate::tui::app::{App, Message};
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let mut app = App::new();
         let path = std::env::temp_dir().join("osc8_probe.rs");
@@ -785,19 +759,8 @@ mod tests {
         }
 
         app.view.follow = false;
-        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
-        terminal
-            .draw(|f| super::render(f, &mut app, f.area()))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let row_text: Vec<String> = (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect()
-            })
-            .collect();
-        let header_row = row_text
+        let rows = transcript_rows(&mut app, 80, 12);
+        let header_row = rows
             .iter()
             .find(|r| r.contains("Read "))
             .expect("header rendered");
@@ -809,19 +772,13 @@ mod tests {
         assert!(header_row.contains("\u{1b}]8;;\u{1b}\\"));
 
         // Scroll the card fully above the viewport: no escapes anywhere.
-        // A fresh terminal, so stale cells from the first draw can't leak
-        // into the assertion (Paragraph only rewrites the rows it fills).
         app.view.follow = false;
         app.view.scroll = crate::tui::ui::scrollback::ScrollPos { seg: 1, row: 0 };
-        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
-        terminal
-            .draw(|f| super::render(f, &mut app, f.area()))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let any_osc8 = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .any(|(x, y)| buf[(x, y)].symbol().contains("\u{1b}]8;;"));
-        assert!(!any_osc8, "scrolled-out link must not be injected");
+        let rows = transcript_rows(&mut app, 80, 12);
+        assert!(
+            !rows.iter().any(|r| r.contains("\u{1b}]8;;")),
+            "scrolled-out link must not be injected"
+        );
 
         // A link whose column range runs past the viewport is skipped, but
         // its visible text must survive untouched (spans render first;
@@ -840,20 +797,65 @@ mod tests {
             image: None,
         });
         narrow_app.view.follow = false;
-        let mut narrow = Terminal::new(TestBackend::new(24, 12)).unwrap();
-        narrow
-            .draw(|f| super::render(f, &mut narrow_app, f.area()))
-            .unwrap();
-        let buf = narrow.backend().buffer();
-        let screen: String = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_string())
-            .collect();
+        let rows = transcript_rows(&mut narrow_app, 24, 12);
+        let screen = rows.join("\n");
         assert!(
-            screen.contains("Read ") && screen.contains("/var/folders"),
+            screen.contains("Read") && screen.contains("/var/folders"),
             "off-screen link's visible text dropped: {screen:?}"
         );
         assert!(!screen.contains("\u{1b}]8;;"));
+    }
+
+    // ── hyperlink helpers (moved from `tui/hyperlink.rs`) ──
+
+    use super::{OSC8_EMPTY, Hyperlink, file_uri, strip_osc8};
+
+    #[test]
+    fn file_uri_starts_with_scheme_for_absolute() {
+        let uri = file_uri("/abs/file.rs").expect("uri");
+        assert!(uri.starts_with("file:///abs/file.rs"), "{uri}");
+    }
+
+    #[test]
+    fn file_uri_resolves_tilde() {
+        let uri = file_uri("~/notes.txt").expect("uri");
+        let home = crate::paths::home().expect("home");
+        let expect = format!("file://{}", home.join("notes.txt").display());
+        assert_eq!(uri, expect);
+    }
+
+    #[test]
+    fn file_uri_percent_encodes_space() {
+        let uri = file_uri("/abs/with space.rs").expect("uri");
+        assert!(uri.contains("with%20space.rs"), "{uri}");
+        assert!(!uri.contains(' '), "{uri}");
+    }
+
+    #[test]
+    fn file_uri_none_for_empty() {
+        assert!(file_uri("").is_none());
+        assert!(file_uri("   ").is_none());
+    }
+
+    #[test]
+    fn strip_osc8_restores_visible_text() {
+        let wrapped = format!("{OSC8_EMPTY}x\u{1b}]8;;file:///f\u{1b}\\");
+        assert_eq!(strip_osc8(&wrapped), "x");
+        assert_eq!(strip_osc8("plain"), "plain");
+    }
+
+    #[test]
+    fn hyperlink_new_roundtrips() {
+        let h = Hyperlink::new(2, 4, 8, "file:///a".into());
+        assert_eq!(
+            h,
+            Hyperlink {
+                row: 2,
+                col_start: 4,
+                col_end: 8,
+                uri: "file:///a".into()
+            }
+        );
     }
 }
 
@@ -946,17 +948,18 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                                 // Margins align the widget with the text
                                 // column; slt owns protocol detection and
                                 // falls back to halfblocks itself.
-                                ui.container()
+                                let _ = ui
+                                    .container()
                                     .ml(u32::from(MARGIN))
                                     .mr(u32::from(MARGIN))
                                     .h(u32::from(rows))
                                     .row(|ui| {
                                         if iterm_terminal() {
                                             let file = px.file.clone();
-                                            ui.iterm_image(&file, cols, u32::from(rows));
+                                            let _ = ui.iterm_image(&file, cols, u32::from(rows));
                                         } else {
                                             let rgba = px.rgba.clone();
-                                            ui.kitty_image(
+                                            let _ = ui.kitty_image(
                                                 &rgba,
                                                 px.pixel_width,
                                                 px.pixel_height,
@@ -968,7 +971,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                             } else {
                                 // No pixel payload: still reserve the rows so
                                 // the flow below the image stays aligned.
-                                ui.container().h(u32::from(rows)).draw(|_, _| {});
+                                let _ = ui.container().h(u32::from(rows)).draw(|_, _| {});
                             }
                             total_rows += u32::from(rows);
                             row_cursor += rows;
@@ -980,7 +983,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
             // a trailing in-col region that only has room when the bands
             // don't fill the viewport — carrying the TRUE area so the
             // second frame builds at the right width.
-            ui.container().grow(1).draw(move |_, rect| {
+            let _ = ui.container().grow(1).draw(move |_, rect| {
                 publish_area_slt(&area_only, rect, total_rows);
             });
             *regions_slot.lock().expect("paint handoff") = (tool_spans, notice_rows);
@@ -997,8 +1000,8 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
     let (tool_spans, notice_rows) =
         std::mem::take(&mut *regions_out.lock().expect("paint handoff"));
     let paint_for_publish = paint.clone();
-    ui.overlay(|ui| {
-        ui.container().w(1).h(1).draw(move |_, _rect| {
+    let _ = ui.overlay(|ui| {
+        let _ = ui.container().w(1).h(1).draw(move |_, _rect| {
             publish_frame_slt(
                 &paint_for_publish,
                 grow_resp.rect,
@@ -1076,8 +1079,7 @@ fn paint_rows_slt(
 }
 
 /// Wrap a linked cell's symbol in OSC-8 and set the first-class
-/// [`slt::Cell::hyperlink`] target. slt counterpart of
-/// [`hyperlink::apply_to_cell`]: the escape bytes live in the symbol (what
+/// [`slt::Cell::hyperlink`] target. The escape bytes live in the symbol (what
 /// the golden fixtures capture byte-for-byte), while `hyperlink` carries
 /// the URL for terminals that render OSC 8 natively.
 fn apply_link_slt(cell: &mut slt::Cell, uri: &str) {
@@ -1211,7 +1213,7 @@ pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
         )
     };
 
-    ui.overlay(|ui| {
+    let _ = ui.overlay(|ui| {
         let _ = ui.container().grow(1).draw(move |buf, _rect| {
             let (inner_x, inner_y, inner_w) = {
                 let p = paint.lock().expect("paint handoff");
@@ -1246,7 +1248,7 @@ pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
                 for c in 0..buf.area.width {
                     let symbol = buf.get(c, r).symbol.as_str();
                     if symbol.contains('\u{1b}') {
-                        line.push_str(&hyperlink::strip_osc8(symbol));
+                        line.push_str(&strip_osc8(symbol));
                     } else {
                         line.push_str(symbol);
                     }

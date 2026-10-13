@@ -1,111 +1,24 @@
-# TUI Porting Spec: batch wave 1 (app-wide type swap)
+# TUI migration: ratatui → `superlighttui` (`slt`)
 
-The TUI is migrating from ratatui to `superlighttui` (`slt`). This wave swaps
-the app's *data types* to the new foundation modules while the legacy
-ratatui paint layer keeps running through interim compat shims. Rendering
-moves to slt in a later wave; **do not rewrite rendering in this wave.**
+**Status: wave 2a is DONE.** The ratatui/crossterm/ratatui-image paint path,
+the legacy run loop, `tui/compat.rs` (except `slt_key`), and `tui/hyperlink.rs`
+are deleted; `run()` drives `slt::run_async_with` and `ui::frame::frame`
+paints. The golden-fixture suite (`tui::parity_slt`) holds the 8 scenes
+byte-identical. What remains is wave 2b (bottom of this doc).
 
-## New foundation modules (already landed)
+## Historical: wave 1 (app-wide type swap) — complete
 
-| Old import | New import |
-|---|---|
-| `use ratatui::text::{Line, Span}` | `use crate::tui::text::{Line, Span}` |
-| `use ratatui::style::Style` / `Color` / `{Modifier, Style}` | `use crate::tui::style::{Style, Color, Modifier}` (same names, slt-backed) |
-| `use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, ...}` | `use slt::event::{...same names...}` |
+The app's data types moved to the slt foundation (`crate::tui::text`,
+`crate::tui::style`, `slt::event`, `crate::tui::geom` for stored rects).
+The interim compat shims (`rat_style`/`rat_line`/`rat_text`,
+`slt_event`/`slt_mouse_button`/`slt_modifiers`) and the OSC-8 cell surgery
+(`hyperlink::apply_to_cell`) are gone; `compat::slt_key` remains because
+slt's `KeyEvent` is `#[non_exhaustive]` and the keybinding normalizer and
+many tests construct events through it. The URI helper (`file_uri`) and
+the mux gate (`is_muxed`) moved into `tui/ui/messages/mod.rs` next to the
+painter that uses them.
 
-These types keep the same constructor/method shapes as the ratatui ones:
-
-* `Span::raw(..)`, `Span::styled(.., style)`, `Line::from(vec![..])`,
-  `Line::from(String)`, `Line::default()`, `line.width()`, `line.spans`.
-* `Style::default()`, `.fg(c)`, `.bg(c)`, plus `StyleExt`: `.add_modifier(m)`,
-  `.remove_modifier(m)`, `.patch(other)`. **Anywhere `add_modifier` / `patch` /
-  `remove_modifier` is used, add `StyleExt` to the `crate::tui::style` import**.
-* `Color::Rgb(u8,u8,u8)`, `Color::Indexed(u8)`, named colors — unchanged.
-
-## Renames to apply
-
-1. **Modifier constants** (import name stays `Modifier`):
-   * `Modifier::UNDERLINED` → `Modifier::UNDERLINE`
-   * `Modifier::CROSSED_OUT` → `Modifier::STRIKETHROUGH`
-   * `Modifier::SLOW_BLINK`/`RAPID_BLINK` → `Modifier::BLINK`
-   * `Modifier::empty()` → `Modifier::NONE`; `.insert()` / `.contains()` exist.
-2. **Key events**: `slt::event::KeyEvent { code, modifiers, kind }` — same
-   fields/names as crossterm, **no `state` field**. `KeyEventKind::{Press, Repeat, Release}` unchanged.
-   * Detection helpers: `key.is_char('x')`, `key.is_code(KeyCode::Esc)`,
-     `key.is_ctrl_char('c')` exist on slt KeyEvent (kind==Press, modifiers checked).
-   * Construction in tests: `slt::Event::key(KeyCode::Char('x'))` then patch
-     fields (`if let slt::Event::Key(k) = &mut ev { k.modifiers = ... }`), or use
-     `slt::test_utils::EventBuilder` (`.key(...)`, `.key_code(...)`, `.key_mod(...)`, `.build()`).
-3. **KeyModifiers**: `slt::event::KeyModifiers` — same bit layout as crossterm;
-   `.contains(x)` works, raw field is `.0` (`u8`) if you need `intersects`
-   (use `(a.0 & b.0) != 0`), and `KeyModifiers::NONE`.
-4. **Mouse events**: `slt::event::MouseEvent`:
-   * `mouse.column` → `mouse.x` (u32), `mouse.row` → `mouse.y` (u32) —
-     cast `as u16` when feeding existing u16 math/hit-testing.
-   * `MouseEventKind` → `MouseKind` (same variants: Down/Up/Drag take
-     `MouseButton::{Left,Right,Middle}`, plus Moved/ScrollUp/ScrollDown/ScrollLeft/ScrollRight).
-5. **Event enum**: `slt::Event::{Key, Mouse, Resize(u32,u32), Paste(String), FocusGained, FocusLost}`.
-   The legacy input pump hands you slt events already (translated in `tui/mod.rs`).
-
-## Geometry
-
-**Only files that store rects across frames** use `crate::tui::geom::Rect`
-(u16, ratatui-shaped: `Rect::new(x, y, w, h)`, `.contains(row, col)`,
-`.right()`, `.bottom()`, `.area()`, `shrink()`, plus `rect_contains(r, row, col)`
-re-exported from `crate::tui::selection` if that's where you import it from).
-Paint-time rects stay `ratatui::layout::Rect` this wave. Conversions at the
-hand-off point: `geom::Rect::new(r.x, r.y, r.width, r.height)`.
-
-## Paint sites (Paragraph/Block) — interim conversion
-
-Ratatui still paints this wave. Where app `Line`/`Span` values reach a
-ratatui widget, wrap with the compat shims (`use crate::tui::compat;`):
-
-* `Paragraph::new(lines_vec)` → `Paragraph::new(compat::rat_text(&lines_vec))`
-* `Paragraph::new(line)` / `.title(line)` → `compat::rat_line(&line)`
-* `Paragraph::new(String)` / `&str` — unchanged (ratatui-native).
-* ratatui `Line` used *only* as a Block title: build a `ratatui::text::Line`
-  directly instead of the app type (e.g. plan_form's bordered title).
-
-Do **not** change: `Paragraph`, `Block`, `Borders`, `Clear`, `Wrap`,
-`Layout`, printing into rect math, buffer surgery (`cell.fg/bg`, `REVERSED`
-via ratatui Modifier write-ins, hyperlinks) — those are all still ratatui
-and get their own wave. Where buffer surgery writes ratatui
-`Modifier::REVERSED`, import it *as* `ratatui::style::Modifier` explicitly to
-avoid clashing with the app Modifier alias.
-
-## Theme/colors
-
-`crate::tui::ui::theme` fields and the `fallback` consts switch to app
-`Color`. Note its parser maps name strings ("bold", "underline", ...) to
-constants — apply the renames there too. `Mode::color()` (app/mode.rs)
-returns app Color.
-
-## Verification
-
-Iterate with your **private target dir** so parallel agents don't block you:
-
-```
-cargo check -p craft --lib --target-dir target/w1-<yourname>
-```
-
-Fix only errors/warnings in **your assigned files**. Other agents own theirs;
-if a foreign file errors, note it in your report and move on. When your files
-are clean, run the unit tests for your modules:
-
-```
-cargo test -p craft --lib --target-dir target/w1-<yourname> tui::<your modules>
-```
-
-Tests inside your files must pass (adapt their type constructions per the
-renames above). Do not edit files outside your list. The slt source is at
-`~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/superlighttui-0.25.0/`
-(consult `src/event.rs`, `src/style.rs`, `src/style/color.rs` when unsure of
-an API; `docs/` has more).
-
-# Wave 2+ design notes (paint pivot — do not implement in wave 1)
-
-Locked decisions from planning, kept here so later waves stay consistent:
+## Locked design decisions (kept so 2b stays consistent)
 
 * **Run loop**: `slt::run_async_with::<AgentEvent>(RunConfig{mouse:true,
   handle_ctrl_c:false, tick_rate≈80ms, ...}, frame)` + a forward task pumping
@@ -116,7 +29,7 @@ Locked decisions from planning, kept here so later waves stay consistent:
   text segments become fixed-height `.draw()` regions painting app
   `Line`s via `Buffer::set_string` (styles are already slt `Style`);
   image segments become slt image widgets (`ui.kitty_image` /
-  `ui.iterm_image` / `ui.image(HalfBlockImage)`) so payload encoding and
+  `ui.iterm_image` / halfblock fallback) so payload encoding and
   capability detection stay in slt. The existing scrollback engine
   (`bottom/clamp/doc_row`, `SegmentCache`) is untouched and decides heights
   and which rows are visible. Overlays that need cell surgery (search
@@ -124,49 +37,37 @@ Locked decisions from planning, kept here so later waves stay consistent:
   `.draw()` regions declared last so they see the finished cells.
 * **frame_text / regions**: painters run deferred (after the frame closure
   returns), so they can't borrow `App`. Hand data back through an
-  `Arc<Mutex<..>>` held in `View` — one frame of staleness is fine (the
-  current code reads the previous frame's snapshot too).
-* **Hyperlinks**: replace the OSC-8 cell-surgery with slt's first-class
-  `Cell.hyperlink` (set while painting spans); the tmux/mux gating stays.
-* **Composer/queries**: adopt slt input widgets per the planning decision
-  (real carets). The legacy crossterm pump and `tui/compat.rs` are deleted
-  when the loop swaps.
-* **Editor handoff**: the `$EDITOR` spawn is replaced with an in-TUI
-  `TextareaState` modal (user decision); Ctrl-Z suspend is slt built-in
-  (`RunConfig::handle_suspend`, default on).
+  `Arc<Mutex<..>>` — one frame of staleness is fine (the current code reads
+  the previous frame's snapshot too).
+* **Hyperlinks**: slt's first-class `Cell.hyperlink` set while painting
+  spans, with the OSC-8 bytes in the symbol (what the fixtures capture
+  byte-for-byte); the tmux/mux gating stays.
+* **Images**: `ui/image.rs` keeps the decode gates (8 MP pixel cap, 20 MB
+  byte cap, `MAX_IMAGE_ROWS`) and probes the font cell size itself
+  (`CSI 16 t` → `CSI 6 ; h ; w t`, cached, (8, 16) default under
+  tests/tmux/pipes) before slt takes over the terminal; protocol
+  detection and encoding live in slt's image widgets.
 
-# Wave 2 contract: `ui::frame` (the paint pivot)
+# Wave 2 contract: `ui::frame` (the paint pivot) — implemented
 
-`agent/src/tui/ui/frame.rs` (new) is the single slt entry point:
+`agent/src/tui/ui/frame.rs` is the single slt entry point:
 
 ```rust
 pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View);
 ```
 
-`View` is a new light struct in `frame.rs` for slt-side persistent state
+`View` is a light struct in `frame.rs` for slt-side persistent state
 (`ScrollState`-compatible offsets stay in `App` — the doc engine remains
-the source of truth). The root layout is:
-
-```
-root col [ bg=BgApp ]
-├── header row  (mode pill + cwd/branch + model + status)   [w2-chrome]
-├── content row (grow)
-│   ├── transcript col (grow)                               [w2-transcript]
-│   └── sidebar (optional, fixed width)                     [w2-chrome]
-├── composer block (border-top, TextareaState-backed)       [w2-chrome]
-└── overlays: pending approval bar [w2-chrome], then open modals
-   (palette / model menu / help / mcp / usage / search / file picker /
-    permission / question / plan / editor modal)            [w2-overlay]
-```
+the source of truth). Root layout: transcript column + optional sidebar,
+forms stacked above the composer block, overlays back to front, the
+in-TUI editor modal on top, then the trailing selection/frame_text pass.
 
 Panel signatures (each panel owns its file(s); frame.rs calls these):
 
-* `ui::composer_slt::render(ui, app)` — composer box + status row.
-* `ui::sidebar_slt::render(ui, app)` — right sidebar.
-* `ui::messages_slt::render(ui, app)` — transcript col (see design notes).
-* `ui::overlays_slt::render(ui, app)` — modal stack incl. prompts/forms.
-* bang-mode re-styling + `frame_text`/regions handoff: trailing `.draw()`
-  regions declared at the end of `frame()` in frame.rs itself.
+* `ui::composer::render_slt(ui, app, avail)` — composer box + status row.
+* `ui::sidebar::render_slt(ui, app)` — right sidebar.
+* `ui::messages::render_slt(ui, app)` — transcript col (see design notes).
+* `ui::overlays::render_slt(ui, app)` — modal stack incl. prompts/forms.
 
 Colors come from `ui::theme::current()` exactly as today; do NOT invent
 palette values.
@@ -176,23 +77,22 @@ each frame hands to `app.handle_key/handle_mouse/insert_paste` via
 `ui.events()` (translate nothing — they are already slt types). The paint
 files therefore take `&App` / `&mut App` but never read input.
 
-# Wave staging (2a / 2b)
+**Fixtures**: `tui::parity.rs` defines the scenes;
+`tui::parity_slt.rs` renders them through `ui::frame::frame` on
+`slt::TestBackend` (two passes — the layout handoff settles on frame 2)
+and compares against `agent/fixtures/golden/`. Re-capture with
+`UPDATE_FIXTURES=1`.
 
-The paint pivot is deliberately split so visual parity can be gated twice:
+# Wave 2b (remaining)
 
-* **Wave 2a** — restructure rendering only. Every editable field (composer,
-  palette/query rows) renders exactly as today, including the spoofed
-  block cursor; fixtures must stay byte-identical through the loop swap
-  and ratatui deletion. `ratatui`, `ratatui-image`, and direct `crossterm`
-  leave `agent/Cargo.toml` in this wave; `tui/compat.rs` (event
-  translation) and `tui/hyperlink.rs` (OSC-8 surgery) are deleted; the
-  URI helper moves to the painter.
-* **Wave 2b** — adopt slt input widgets ([`TextareaState`] for the
-  composer + in-TUI editor modal, [`TextInputState`] for palette/search/
-  picker query rows and question-form fields) for hardware-caret
-  fidelity, per the planning decisions. Fixtures are re-captured with the
-  caret-rendering delta applied deliberately and reviewed.
-* **Handoffs**: painters run deferred, so `App.view` frame data
-  (`frame_text`, hit-test regions, composer/message areas) moves into an
-  `Arc<Mutex<FrameHandoffs>>` created in `tui/mod.rs`, cloned into every
-  `.draw()` closure, and read one frame later exactly as today.
+* Adopt slt input widgets ([`TextareaState`] for the composer + the in-TUI
+  editor modal, [`TextInputState`] for palette/search/picker query rows
+  and question-form fields) for hardware-caret fidelity, per the planning
+  decisions. Fixtures are re-captured with the caret-rendering delta
+  applied deliberately and reviewed. The wave-2a spoofed block caret
+  (`apply_caret` in composer.rs and the query-row carets) is what 2b
+  replaces.
+* The `$EDITOR`/Ctrl-O handoff currently runs through the in-TUI
+  `EditorForm` modal (plain buffer editing, Ctrl-S save / Esc cancel);
+  2b decides whether `TextareaState` keeps or replaces it. Ctrl-Z
+  suspend/resume is slt built-in (`RunConfig::handle_suspend`).

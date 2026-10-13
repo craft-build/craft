@@ -1,12 +1,7 @@
 //! Right sidebar: cwd·branch, Plan checklist, Files touched.
 
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Paragraph};
-
 use super::theme;
 use crate::tui::app::App;
-use crate::tui::compat;
 use crate::tui::style::{Modifier, Style, StyleExt};
 use crate::tui::text::{Line, Span};
 
@@ -38,138 +33,8 @@ fn heading(label: &str) -> Line<'static> {
     ))
 }
 
-pub fn render(f: &mut Frame, app: &App, area: Rect) {
-    let t = theme::current();
-
-    let block = Block::default()
-        .style(ratatui::style::Style::default().bg(compat::rat_color(t.bg_surface)));
-    let inner = area;
-    f.render_widget(block, area);
-
-    let w = inner.width.saturating_sub(4) as usize; // 2-cell padding each side
-    let x = inner.x + 2;
-    let mut y = inner.y + 1;
-    if inner.height < 4 || w == 0 {
-        return;
-    }
-
-    let put = |f: &mut Frame, line: Line<'static>, y: u16| {
-        f.render_widget(
-            // App lines convert to ratatui text at the paint site (interim
-            // compat shim until the paint layer moves to slt).
-            Paragraph::new(compat::rat_line(&line)),
-            Rect {
-                x,
-                y,
-                width: w as u16,
-                height: 1,
-            },
-        );
-    };
-
-    // cwd · branch
-    put(
-        f,
-        Line::from(vec![Span::styled(
-            truncate(
-                if app.session.cwd.is_empty() {
-                    "—"
-                } else {
-                    &app.session.cwd
-                },
-                w,
-            ),
-            Style::default().fg(t.text_tertiary),
-        )]),
-        y,
-    );
-    y += 1;
-    put(
-        f,
-        Line::from(vec![Span::styled(
-            truncate(
-                if app.session.branch.is_empty() {
-                    "—"
-                } else {
-                    &app.session.branch
-                },
-                w,
-            ),
-            Style::default().fg(t.text_tertiary),
-        )]),
-        y,
-    );
-    y += 2;
-    if y >= inner.y + inner.height {
-        return;
-    }
-    put(f, divider(w), y);
-    y += 2;
-
-    // Plan
-    put(f, heading("Plan"), y);
-    y += 2;
-    for p in &app.plan {
-        if y >= inner.y + inner.height {
-            break;
-        }
-        let (mark, mark_color, text_color) = if p.done {
-            ("[x]", t.text_tertiary, t.text_tertiary)
-        } else if p.active {
-            ("[>]", t.accent, t.text_primary)
-        } else {
-            ("[ ]", t.border_strong, t.text_secondary)
-        };
-        let label_style = Style::default().fg(text_color).add_modifier(if p.done {
-            Modifier::STRIKETHROUGH
-        } else {
-            Modifier::NONE
-        });
-        put(
-            f,
-            Line::from(vec![
-                Span::styled(format!("{mark} "), Style::default().fg(mark_color)),
-                Span::styled(truncate(&p.label, w.saturating_sub(4)), label_style),
-            ]),
-            y,
-        );
-        y += 1;
-    }
-    y += 1;
-    if y >= inner.y + inner.height {
-        return;
-    }
-    put(f, divider(w), y);
-    y += 2;
-
-    // Files touched
-    put(f, heading("Files touched"), y);
-    y += 2;
-    for file in &app.files {
-        if y >= inner.y + inner.height {
-            break;
-        }
-        let badge = format!("[{}]", file.status);
-        let path_w = w.saturating_sub(badge.chars().count() + 1);
-        let gap = w.saturating_sub(path_w.min(file.path.chars().count()) + badge.chars().count());
-        put(
-            f,
-            Line::from(vec![
-                Span::styled(
-                    truncate(&file.path, path_w),
-                    Style::default().fg(t.text_secondary),
-                ),
-                Span::raw(" ".repeat(gap)),
-                Span::styled(badge, Style::default().fg(t.tone_color(file.tone))),
-            ]),
-            y,
-        );
-        y += 1;
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt sidebar panel
+// The slt sidebar panel
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Right-column width (legacy `SIDEBAR_WIDTH`, owned by `ui/mod.rs` on the
@@ -188,7 +53,8 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &App) {
     let width = SIDEBAR_WIDTH.min(ui.width().saturating_sub(CHAT_MIN_WIDTH));
     let w = (width as usize).saturating_sub(4); // 2-cell padding each side
 
-    ui.container()
+    let _ = ui
+        .container()
         .bg(t.bg_surface)
         .w(width)
         .px(2)

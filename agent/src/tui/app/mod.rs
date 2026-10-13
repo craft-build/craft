@@ -427,6 +427,11 @@ impl App {
     /// How soon the loop must wake for this app's screen, and whether the
     /// clock alone owes a frame. Streaming text uses the smooth cadence
     /// only while its visible prefix still has text to reveal.
+    ///
+    /// The slt run loop repaints on its own fixed tick, so production no
+    /// longer schedules through this; it stays as the tested description
+    /// of the app's animation state (reveal, spinner, flash expiry).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cadence(&self) -> repaint::Cadence {
         repaint::Cadence::any([
             repaint::Cadence::when(
