@@ -722,3 +722,15 @@ mod tests {
         assert!(!form.is_open());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt panel for this form (stub until the forms wave lands)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Render this form into the slt frame above the composer block. The
+/// container self-sizes from the same height helper the ratatui view used.
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
+    let _ = (ui, app);
+    // TODO(wave-2a forms): port `view()` into slt containers.
+}
+

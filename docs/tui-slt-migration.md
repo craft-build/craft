@@ -175,3 +175,24 @@ palette values.
 each frame hands to `app.handle_key/handle_mouse/insert_paste` via
 `ui.events()` (translate nothing — they are already slt types). The paint
 files therefore take `&App` / `&mut App` but never read input.
+
+# Wave staging (2a / 2b)
+
+The paint pivot is deliberately split so visual parity can be gated twice:
+
+* **Wave 2a** — restructure rendering only. Every editable field (composer,
+  palette/query rows) renders exactly as today, including the spoofed
+  block cursor; fixtures must stay byte-identical through the loop swap
+  and ratatui deletion. `ratatui`, `ratatui-image`, and direct `crossterm`
+  leave `agent/Cargo.toml` in this wave; `tui/compat.rs` (event
+  translation) and `tui/hyperlink.rs` (OSC-8 surgery) are deleted; the
+  URI helper moves to the painter.
+* **Wave 2b** — adopt slt input widgets ([`TextareaState`] for the
+  composer + in-TUI editor modal, [`TextInputState`] for palette/search/
+  picker query rows and question-form fields) for hardware-caret
+  fidelity, per the planning decisions. Fixtures are re-captured with the
+  caret-rendering delta applied deliberately and reviewed.
+* **Handoffs**: painters run deferred, so `App.view` frame data
+  (`frame_text`, hit-test regions, composer/message areas) moves into an
+  `Arc<Mutex<FrameHandoffs>>` created in `tui/mod.rs`, cloned into every
+  `.draw()` closure, and read one frame later exactly as today.

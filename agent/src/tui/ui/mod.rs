@@ -2,6 +2,7 @@
 //! plus the optional right sidebar, with overlays on top.
 
 mod composer;
+pub mod frame;
 pub mod image;
 pub(crate) mod messages;
 mod overlays;

@@ -88,3 +88,14 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt overlay stack (stub until the overlays wave lands)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Render every open overlay, back to front, into the slt frame.
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
+    let _ = (ui, app);
+    // TODO(wave-2a overlays): port the 13 overlay renderers into ui.modal.
+}
+

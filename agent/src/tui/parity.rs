@@ -22,10 +22,11 @@ use crate::tui::provider::{AgentEvent, Status, ToolCallData, ToolKind};
 use crate::tui::ui;
 
 /// Terminal size for every scene.
-const W: u16 = 80;
-const H: u16 = 24;
+pub(crate) const W: u16 = 80;
+pub(crate) const H: u16 = 24;
 
-fn render_screen(app: &mut App) -> String {
+/// Render one scene through the legacy ratatui paint path.
+pub(crate) fn render_screen(app: &mut App) -> String {
     let mut terminal = Terminal::new(TestBackend::new(W, H)).unwrap();
     terminal.draw(|f| ui::draw(f, app)).unwrap();
     let buf = terminal.backend().buffer().clone();
@@ -39,12 +40,30 @@ fn render_screen(app: &mut App) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    // OSC-8 card links resolve repo paths against this checkout; normalize
-    // them so fixtures are machine-independent.
+    normalize(frame)
+}
+
+/// Rows of a rendered `slt` buffer, trailing blanks trimmed.
+pub(crate) fn buffer_rows(buf: &slt::buffer::Buffer) -> String {
+    (0..buf.area.height)
+        .map(|r| {
+            (0..buf.area.width)
+                .map(|c| buf.get(c, r).symbol.clone())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// OSC-8 card links resolve repo paths against this checkout; normalize
+/// them so fixtures are machine-independent.
+pub(crate) fn normalize(frame: String) -> String {
     frame.replace(concat!(env!("CARGO_MANIFEST_DIR"), "/"), "<ROOT>/")
 }
 
-fn seeded_app() -> App {
+pub(crate) fn seeded_app() -> App {
     let mut app = App::new();
     // Fixed chrome strings so fixtures never depend on machine state.
     app.session.cwd = "/craft".into();
@@ -171,7 +190,7 @@ fn scene_question() -> App {
     app
 }
 
-fn scenes() -> Vec<(&'static str, App)> {
+pub(crate) fn scenes() -> Vec<(&'static str, App)> {
     vec![
         ("empty", seeded_app()),
         ("transcript", scene_transcript()),
@@ -184,7 +203,7 @@ fn scenes() -> Vec<(&'static str, App)> {
     ]
 }
 
-fn fixture_path(name: &str) -> PathBuf {
+pub(crate) fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/golden")
         .join(format!("{name}.txt"))

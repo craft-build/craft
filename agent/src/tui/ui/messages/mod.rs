@@ -775,3 +775,21 @@ mod tests {
         assert!(!screen.contains("\u{1b}]8;;"));
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt transcript painter (stubs until the transcript wave)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Paint the transcript: segments in document order via the existing
+/// scrollback engine, with inline images and hyperlink cells.
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
+    let _ = (ui, app);
+    // TODO(wave-2a transcript): segment-flow painter per docs contract.
+}
+
+/// Trailing per-frame buffer pass: selection REVERSED, search-highlight
+/// swap, and the frame_text/hit-region handoff back into `app.view`.
+pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
+    let _ = (ui, app);
+    // TODO(wave-2a transcript): full-screen trailing `.draw()` surgery.
+}

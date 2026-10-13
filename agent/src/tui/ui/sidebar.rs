@@ -167,3 +167,13 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         y += 1;
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt sidebar panel (stub until the chrome wave lands)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Render the right sidebar column into the slt frame.
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &App) {
+    let _ = (ui, app);
+    // TODO(wave-2a chrome): port sidebar::render.
+}

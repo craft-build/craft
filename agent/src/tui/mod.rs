@@ -15,6 +15,8 @@ mod modals;
 mod notify;
 #[cfg(test)]
 mod parity;
+#[cfg(test)]
+mod parity_slt;
 mod permission_prompt;
 mod plan_form;
 pub mod provider;

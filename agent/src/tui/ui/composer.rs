@@ -431,3 +431,14 @@ mod tests {
         assert_eq!(UnicodeWidthStr::width("好好好cd"), 8);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt composer panel (stub until the chrome wave lands)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Render the composer box + status + footer hint rows into the slt
+/// frame's bottom block (`avail` = the chat column's width).
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, avail: u32) {
+    let (ui, _app, _avail) = (ui, app, avail);
+    // TODO(wave-2a chrome): port render_input/render_status/footer hints.
+}
