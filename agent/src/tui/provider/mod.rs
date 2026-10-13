@@ -7,7 +7,7 @@
 pub mod cards;
 pub mod live;
 
-#[cfg(test)]
+/// The scripted mock backend (test suite + the `mock_tui` debug example).
 pub mod mock;
 
 use tokio::sync::mpsc;

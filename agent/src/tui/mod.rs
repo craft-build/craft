@@ -110,6 +110,26 @@ fn base_owns_keyboard(app: &App) -> bool {
 /// the render loop's message queue (each send wakes the loop), input events
 /// come straight from slt as slt types, and `ui::frame::frame` paints.
 ///
+/// Debug tracing for the render loop (CRAFT_TUI_TRACE=path): appends
+/// per-frame lines so runtime behavior can be inspected post-hoc.
+fn trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("CRAFT_TUI_TRACE").is_some())
+}
+
+fn trace_frame(line: String) {
+    use std::io::Write;
+    if !trace_enabled() {
+        return;
+    }
+    let Ok(path) = std::env::var("CRAFT_TUI_TRACE") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Startup sequencing (resume gating on the first `StatusChanged(Done)`),
 /// the bell/notification state machine, per-frame maintenance (file picker
 /// ticks, image loads, draft checkpointing, typewriter reveal), and
@@ -186,7 +206,19 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
     let history_in = std::sync::Arc::clone(&history_out);
     let mut app = app;
     let cmd_tx_frame = cmd_tx.clone();
-    let handle = slt::run_async_with::<AgentEvent>(config, move |ui, msgs| {        // ── Provider events (bounded burst; slt wakes on each send) ──
+    let handle = slt::run_async_with::<AgentEvent>(config, move |ui, msgs| {
+        if trace_enabled() {
+            trace_frame(format!(
+                "frame msgs={} ui_ev={} busy={:?} status={:?} conv_len={} reveal_anim={}",
+                msgs.len(),
+                ui.events().count(),
+                app.busy(),
+                app.status,
+                app.conversation.messages.len(),
+                app.conversation.reveal_pending(true),
+            ));
+        }
+        // ── Provider events (bounded burst; slt wakes on each send) ──
         for ev in msgs.drain(..) {
             let was_busy = app.busy();
             let was_waiting = app.status == Status::WaitingApproval;
@@ -312,6 +344,20 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
         app.tick_reveal(std::time::Instant::now());
 
         ui::frame::frame(ui, &mut app, &mut view);
+        let vis = app
+            .conversation
+            .visible_text(app.conversation.messages.len().saturating_sub(1))
+            .map(str::len)
+            .unwrap_or(0);
+        let (pw, mh) = app
+            .view
+            .paint
+            .lock()
+            .map(|p| (p.width, p.msg_area.height))
+            .unwrap_or((0, 0));
+        if trace_enabled() {
+            trace_frame(format!("painted vis_len={vis} paint_w={pw} msg_h={mh}"));
+        }
     })
     .map_err(|e| io::Error::other(e.to_string()))?;
 
