@@ -372,14 +372,10 @@ impl QuestionForm {
                 Span::styled("✓ ", success),
             ];
             spans.push(Span::raw(chars.iter().take(cursor).collect::<String>()));
-            spans.push(Span::styled(
-                chars
-                    .get(cursor)
-                    .map(|c| c.to_string())
-                    .unwrap_or(" ".into()),
-                Style::default().add_modifier(Modifier::REVERSED),
-            ));
-            spans.push(Span::raw(chars.iter().skip(cursor + 1).collect::<String>()));
+            // The `▎` caret glyph, matching the slt input-widget carets
+            // (wave 2b; the app owns the field's key routing).
+            spans.push(Span::styled("▎", Style::default().fg(t.text_primary)));
+            spans.push(Span::raw(chars.iter().skip(cursor).collect::<String>()));
             lines.push(Line::from(spans));
             lines.push(hint_line(&[("Enter", "Save answer"), ("Esc", "Cancel")]));
         } else {

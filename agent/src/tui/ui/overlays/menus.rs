@@ -11,8 +11,6 @@ use crate::tui::text::Span;
 // The slt overlay sheets
 // ─────────────────────────────────────────────────────────────────────────
 
-use crate::tui::style::{Modifier, StyleExt};
-
 use super::super::composer;
 use super::{SheetRow, boxed_slt, clip_spans, row_spans, sheet_slt};
 
@@ -191,9 +189,10 @@ pub(super) fn render_palette_slt(ui: &mut slt::Context, app: &App) {
         .saturating_sub(window.saturating_sub(1))
         .min(items.len().saturating_sub(window));
 
-    // Query row: `> ` prompt, the query (or placeholder), and the
-    // spoofed caret one cell past its last char — the cell the legacy
-    // hardware caret occupied.
+    // Query row: `> ` prompt, the query (or placeholder), and the caret.
+    // Wave 2b: the `▎` glyph matches the composer/editor widget carets
+    // (the app owns the query — filtering, list navigation — so this row
+    // is painted, not a TextInputState; see docs/tui-slt-migration.md).
     let qspans = clip_spans(
         vec![
             Span::styled("> ", Style::default().fg(t.cyan)),
@@ -209,12 +208,7 @@ pub(super) fn render_palette_slt(ui: &mut slt::Context, app: &App) {
                     t.text_primary
                 }),
             ),
-            Span::styled(
-                " ",
-                Style::default()
-                    .bg(t.bg_raised)
-                    .add_modifier(Modifier::REVERSED),
-            ),
+            Span::styled("▎", Style::default().fg(t.text_primary)),
         ],
         content_w,
     );

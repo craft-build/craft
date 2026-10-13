@@ -394,24 +394,17 @@ impl PermissionPrompt {
                 (&text[..byte], &text[byte..])
             };
             let mut chars = after.chars();
-            let cursor_ch = chars.next().unwrap_or(' ');
             let rest: String = chars.collect();
             let mut spans = vec![
                 Span::raw("  "),
                 Span::styled("guide ".to_string(), label_style),
             ];
             if text.is_empty() {
-                spans.push(Span::styled(
-                    cursor_ch.to_string(),
-                    Style::default().add_modifier(Modifier::REVERSED),
-                ));
+                spans.push(Span::styled("▎", value_style));
                 spans.push(Span::styled(rest, label_style));
             } else {
                 spans.push(Span::raw(before.to_string()));
-                spans.push(Span::styled(
-                    cursor_ch.to_string(),
-                    Style::default().add_modifier(Modifier::REVERSED),
-                ));
+                spans.push(Span::styled("▎", value_style));
                 if !rest.is_empty() {
                     spans.push(Span::raw(rest));
                 }
