@@ -593,6 +593,335 @@ async fn run_loop(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wave 2a: the slt run loop
+// ---------------------------------------------------------------------------
+
+/// Run the TUI on `slt::run_async_with`: the provider channel is pumped into
+/// the render loop's message queue (each send wakes the loop), input events
+/// come straight from slt as slt types, and `ui::frame::frame` paints.
+///
+/// Semantics ported 1:1 from `drive`/`run_loop`: startup sequencing (resume
+/// gating on the first `StatusChanged(Done)`), the bell/notification
+/// state machine, per-frame maintenance (file picker ticks, image loads,
+/// draft checkpointing, typewriter reveal), and input-history persistence
+/// on exit. The `$EDITOR` handoff (Alt-O) and the plan-file editor (Ctrl-O)
+/// become the in-TUI [`EditorForm`] modal; Ctrl-Z suspend/resume is handled
+/// by slt's own signal hook.
+#[allow(dead_code)] // flips on when the parity suite goes green
+async fn drive_slt<P: Provider>(
+    provider: P,
+    startup_prompt: Option<String>,
+) -> io::Result<()> {
+    // Probe the terminal's graphics protocol (kitty/sixel vs halfblocks)
+    // before slt takes over the terminal: the probe reads its replies
+    // straight from stdin (F.6).
+    ui::image::probe();
+
+    // B.11: grab the MCP handle before `start` consumes the provider.
+    let mcp = provider.mcp();
+    // `--no-commands`: read the gate before `start` consumes the provider.
+    let custom_commands = provider.custom_commands();
+    // `--mode plan` / `--permission-mode plan`: same for the initial mode.
+    let starts_in_plan_mode = provider.starts_in_plan_mode();
+    // Startup resume (`-s/--session`, `-c/--continue`): same.
+    let expects_startup_resume = provider.expects_startup_resume();
+    let (cmd_tx, mut evt_rx) = provider.start();
+
+    let mut app = App::new();
+    app.mcp = mcp;
+    if let Ok(cwd) = std::env::current_dir() {
+        app.custom_commands = discover_custom_commands(&cwd, custom_commands);
+    }
+    apply_initial_mode(&mut app, starts_in_plan_mode);
+    if let Ok(config) = crate::config::Config::load().await {
+        let entries: Vec<(String, Vec<String>)> = config.keybindings.into_iter().collect();
+        let mut warnings = Vec::new();
+        app.overlays.keybinds =
+            keybindings::KeybindingResolver::from_overlay(&entries, &mut warnings);
+        if let Some(w) = warnings.first() {
+            app.flash(w.clone());
+        }
+    }
+    // Recall the persistent input history and theme from the state dir (best effort).
+    if let Ok(dir) = crate::storage::StateDir::resolve() {
+        if let Some(name) = crate::storage::theme::read_theme_name(&dir)
+            && theme::load_by_name(&name).is_ok()
+        {
+            let _ = theme::set_named(&name);
+        }
+        app.input_history = crate::storage::input_history::InputHistory::load(
+            &dir,
+            crate::storage::input_history::MAX_ENTRIES,
+        );
+    }
+
+    // The frame closure owns the app; hand the session's accumulated input
+    // history back out through this box on exit so it can be persisted.
+    let history_out: std::sync::Arc<
+        std::sync::Mutex<crate::storage::input_history::InputHistory>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::storage::input_history::InputHistory::default(),
+    ));
+
+    let mut view = ui::frame::View::default();
+    let mut bells = notify::RunNotificationState::default();
+    let mut focus = notify::Focus::default();
+    let mut startup_prompt = startup_prompt;
+    if !expects_startup_resume {
+        submit_startup_prompt(&mut app, &cmd_tx, &mut startup_prompt);
+    }
+
+    let config = slt::RunConfig::default()
+        .title("CraftCode")
+        .mouse(true)
+        .tick_rate(std::time::Duration::from_millis(80))
+        // The app owns Ctrl-C (tri-state quit chord through the
+        // keybinding table); slt must not exit on it.
+        .handle_ctrl_c(false);
+
+    let history_in = std::sync::Arc::clone(&history_out);
+    let mut app = app;
+    let mut cmd_tx_frame = cmd_tx.clone();
+    let handle = slt::run_async_with::<AgentEvent>(config, move |ui, msgs| {
+        // ── Provider events (bounded burst; slt wakes on each send) ──
+        for ev in msgs.drain(..) {
+            let was_busy = app.busy();
+            let was_waiting = app.status == Status::WaitingApproval;
+            let settled_done = matches!(&ev, AgentEvent::StatusChanged(Status::Done));
+            if let AgentEvent::AssistantText(text) = &ev
+                && was_busy
+            {
+                // Candidate bell payload for this turn's completion.
+                bells.on_turn_complete(text);
+            }
+            app.handle_event(ev);
+            if settled_done {
+                // The provider settled (startup complete): a held startup
+                // prompt is now safe to submit — after any `SessionLoaded`
+                // the same burst carried.
+                submit_startup_prompt(&mut app, &cmd_tx_frame, &mut startup_prompt);
+            }
+            if !was_busy && app.busy() {
+                bells.on_new_turn();
+            }
+            if app.busy() || app.status == Status::WaitingApproval {
+                // Still working: nothing can settle yet.
+            } else if was_busy || was_waiting {
+                let failed = app.status == Status::Failed;
+                bells.on_done(failed);
+                // No queue to drain: the turn settled the moment the
+                // status landed.
+                bells.on_drain();
+            }
+            let attention =
+                (!was_waiting && app.status == Status::WaitingApproval).then_some(
+                    notify::Notification::PermissionRequested { tool: None },
+                );
+            let settled = !app.busy() && app.status != Status::WaitingApproval;
+            if let Some(notification) = bells.reconcile(attention, settled)
+                && focus.allows(&notification)
+            {
+                ring();
+            }
+        }
+
+        // ── Input events (already slt types; consumed-free cascade) ──
+        let events: Vec<_> = ui.events().cloned().collect();
+        for ev in events {
+            match ev {
+                slt::Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    focus.note_input();
+                    // The editor modal owns the keyboard while open.
+                    if let Some(editor) = view.editor.as_mut() {
+                        match handle_editor_key(editor, &key) {
+                            EditorKey::Consumed => continue,
+                            EditorKey::Save => {
+                                let editor = view.editor.take().expect("just borrowed");
+                                let text = editor.text();
+                                match editor.origin {
+                                    ui::frame::EditorOrigin::ComposerDraft => {
+                                        app.composer.set_text(text);
+                                    }
+                                    ui::frame::EditorOrigin::PlanFile(path) => {
+                                        if let Err(e) = std::fs::write(&path, text) {
+                                            eprintln!("warning: could not write plan file: {e}");
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            EditorKey::Cancel => {
+                                view.editor = None;
+                                continue;
+                            }
+                        }
+                    }
+                    // Alt-O hands the composer to the in-TUI editor.
+                    if app
+                        .overlays
+                        .keybinds
+                        .matches(keybindings::ActionId::EditInput, &key)
+                        && base_owns_keyboard(&app)
+                    {
+                        view.editor = Some(ui::frame::EditorForm::open(
+                            ui::frame::EditorOrigin::ComposerDraft,
+                            &app.composer.text,
+                        ));
+                    } else {
+                        app.handle_key(key, &cmd_tx_frame);
+                    }
+                    // Ctrl-O plan-editor request: open the plan file in
+                    // the in-TUI editor.
+                    if let Some(path) = app.take_editor_request() {
+                        let text = std::fs::read_to_string(&path).unwrap_or_default();
+                        view.editor = Some(ui::frame::EditorForm::open(
+                            ui::frame::EditorOrigin::PlanFile(path),
+                            &text,
+                        ));
+                    }
+                }
+                slt::Event::Paste(text) => {
+                    focus.note_input();
+                    app.insert_paste(&text);
+                }
+                slt::Event::Mouse(mouse) => {
+                    focus.note_input();
+                    app.handle_mouse(mouse);
+                }
+                slt::Event::FocusGained => focus.report(notify::Focus::Focused),
+                slt::Event::FocusLost => focus.report(notify::Focus::Unfocused),
+                _ => {} // Resize: slt relayouts; the next frame repaints.
+            }
+        }
+
+        if app.should_quit {
+            bells.on_manual_exit();
+            *history_in.lock().unwrap_or_else(|e| e.into_inner()) =
+                std::mem::take(&mut app.input_history);
+            ui.quit();
+            return;
+        }
+
+        // Per-frame maintenance (from run_loop): the file picker's walker
+        // ticks on its own, clipboard/file image loads land here (F.6), the
+        // draft gets its checkpoint (F.3), and the typewriter reveal
+        // advances.
+        app.tick_file_picker();
+        app.poll_image_loads();
+        app.sync_draft(&cmd_tx_frame);
+        app.tick_reveal(std::time::Instant::now());
+
+        ui::frame::frame(ui, &mut app, &mut view);
+    })
+    .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Pump provider events into the render loop; each send wakes it.
+    let sender = handle.sender();
+    let forward = tokio::spawn(async move {
+        while let Some(ev) = evt_rx.recv().await {
+            if sender.send(ev).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = handle
+        .join()
+        .await
+        .map_err(|e| io::Error::other(e.to_string()));
+    forward.abort();
+
+    // Persist the input history gathered this session (best effort).
+    if let Ok(dir) = crate::storage::StateDir::resolve() {
+        let history = history_out.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = history.save(&dir);
+    }
+    result
+}
+
+/// Keys for the open editor modal: `true` when the key was consumed.
+/// Ctrl-S saves (apply to the origin and close), Esc cancels.
+#[allow(dead_code)] // flips on with drive_slt
+enum EditorKey {
+    /// The key edited/navigated the buffer (or did nothing relevant).
+    Consumed,
+    /// Ctrl-S: apply the text to the origin and close.
+    Save,
+    /// Esc: discard and close.
+    Cancel,
+}
+
+#[allow(dead_code)] // flips on with drive_slt
+fn handle_editor_key(editor: &mut ui::frame::EditorForm, key: &slt::event::KeyEvent) -> EditorKey {
+    use slt::event::{KeyCode, KeyModifiers};
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('s') => EditorKey::Save,
+            KeyCode::Char('a') => {
+                editor.home();
+                EditorKey::Consumed
+            }
+            KeyCode::Char('e') => {
+                editor.end();
+                EditorKey::Consumed
+            }
+            _ => EditorKey::Consumed,
+        };
+    }
+    match key.code {
+        KeyCode::Char(c) => {
+            editor.insert_char(c);
+            EditorKey::Consumed
+        }
+        KeyCode::Enter => {
+            editor.insert_newline();
+            EditorKey::Consumed
+        }
+        KeyCode::Backspace => {
+            editor.backspace();
+            EditorKey::Consumed
+        }
+        KeyCode::Delete => {
+            editor.delete();
+            EditorKey::Consumed
+        }
+        KeyCode::Left => {
+            editor.left();
+            EditorKey::Consumed
+        }
+        KeyCode::Right => {
+            editor.right();
+            EditorKey::Consumed
+        }
+        KeyCode::Up => {
+            editor.up();
+            EditorKey::Consumed
+        }
+        KeyCode::Down => {
+            editor.down();
+            EditorKey::Consumed
+        }
+        KeyCode::Home => {
+            editor.home();
+            EditorKey::Consumed
+        }
+        KeyCode::End => {
+            editor.end();
+            EditorKey::Consumed
+        }
+        KeyCode::Esc => EditorKey::Cancel,
+        _ => EditorKey::Consumed,
+    }
+}
+
+/// The terminal bell (crossterm's `bell()` writes exactly this sequence).
+#[allow(dead_code)] // used by drive_slt; the legacy loop inlines it
+fn ring() {
+    let _ = write_and_flush("\u{7}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

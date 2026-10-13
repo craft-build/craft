@@ -89,6 +89,99 @@ impl EditorForm {
     pub fn text(&self) -> String {
         self.rows.join("\n")
     }
+
+    fn byte_index(&self) -> usize {
+        self.rows[self.row]
+            .char_indices()
+            .nth(self.col)
+            .map_or(self.rows[self.row].len(), |(i, _)| i)
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        let at = self.byte_index();
+        self.rows[self.row].insert(at, c);
+        self.col += 1;
+    }
+
+    pub fn insert_newline(&mut self) {
+        let at = self.byte_index();
+        let rest = self.rows[self.row].split_off(at);
+        self.rows.insert(self.row + 1, rest);
+        self.row += 1;
+        self.col = 0;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.col > 0 {
+            let back = self.last_char_len();
+            let at = self.byte_index();
+            self.rows[self.row].remove(at - back);
+            self.col -= 1;
+        } else if self.row > 0 {
+            let joined = self.rows.remove(self.row);
+            self.row -= 1;
+            self.col = self.rows[self.row].chars().count();
+            self.rows[self.row].push_str(&joined);
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.col < self.rows[self.row].chars().count() {
+            let at = self.byte_index();
+            self.rows[self.row].remove(at);
+        } else if self.row + 1 < self.rows.len() {
+            let joined = self.rows.remove(self.row + 1);
+            self.rows[self.row].push_str(&joined);
+        }
+    }
+
+    pub fn left(&mut self) {
+        if self.col > 0 {
+            self.col -= 1;
+        } else if self.row > 0 {
+            self.row -= 1;
+            self.col = self.rows[self.row].chars().count();
+        }
+    }
+
+    pub fn right(&mut self) {
+        if self.col < self.rows[self.row].chars().count() {
+            self.col += 1;
+        } else if self.row + 1 < self.rows.len() {
+            self.row += 1;
+            self.col = 0;
+        }
+    }
+
+    pub fn up(&mut self) {
+        if self.row > 0 {
+            self.row -= 1;
+            self.col = self.col.min(self.rows[self.row].chars().count());
+        }
+    }
+
+    pub fn down(&mut self) {
+        if self.row + 1 < self.rows.len() {
+            self.row += 1;
+            self.col = self.col.min(self.rows[self.row].chars().count());
+        }
+    }
+
+    pub fn home(&mut self) {
+        self.col = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.col = self.rows[self.row].chars().count();
+    }
+
+    /// Byte length of the char just left of the caret (for backspace).
+    fn last_char_len(&self) -> usize {
+        self.rows[self.row]
+            .chars()
+            .nth(self.col.saturating_sub(1))
+            .map_or(1, char::len_utf8)
+    }
 }
 
 /// Full frame paint on the `slt` backend. Counterpart of the legacy
@@ -262,5 +355,61 @@ fn editor_rows(ui: &mut slt::Context, editor: &EditorForm) {
             }
             let _ = t.bg_app; // keep theme linkage explicit for the 2b restyle
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn editor(text: &str) -> EditorForm {
+        EditorForm::open(EditorOrigin::ComposerDraft, text)
+    }
+
+    #[test]
+    fn open_places_caret_at_end() {
+        let e = editor("ab\ncd");
+        assert_eq!((e.row, e.col), (1, 2));
+        assert_eq!(e.text(), "ab\ncd");
+    }
+
+    #[test]
+    fn edits_split_and_join_lines() {
+        let mut e = editor("hello");
+        e.left();
+        e.insert_newline();
+        assert_eq!(e.text(), "hell\no");
+        assert_eq!((e.row, e.col), (1, 0));
+        e.backspace(); // join back
+        assert_eq!(e.text(), "hello");
+        assert_eq!((e.row, e.col), (0, 4));
+    }
+
+    #[test]
+    fn backspace_eats_multibyte_chars_whole() {
+        let mut e = editor("你");
+        e.backspace();
+        assert_eq!(e.text(), "");
+        assert_eq!((e.row, e.col), (0, 0));
+    }
+
+    #[test]
+    fn vertical_moves_clamp_to_line_lengths() {
+        let mut e = editor("abc\n中");
+        e.home();
+        e.right();
+        e.right();
+        e.down(); // col 2 clamps to 1 (one CJK char)
+        assert_eq!((e.row, e.col), (1, 1));
+        e.up();
+        assert_eq!((e.row, e.col), (0, 1));
+    }
+
+    #[test]
+    fn delete_merges_following_line() {
+        let mut e = editor("ab\ncd");
+        e.up(); // caret at end of "ab" (col clamps to 2)
+        e.delete();
+        assert_eq!(e.text(), "abcd");
     }
 }
