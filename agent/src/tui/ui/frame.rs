@@ -18,7 +18,6 @@
 //!    + modal overlays declared after the base UI
 //! ```
 
-
 use crate::tui::app::App;
 use crate::tui::ui::theme;
 
@@ -30,17 +29,20 @@ const SIDEBAR_MIN_WIDTH: u32 = 80;
 /// Right-column width (legacy `SIDEBAR_WIDTH`).
 const SIDEBAR_WIDTH: u32 = 34;
 
-/// View state that persists across frames on the `slt` side. Wave 2a keeps
-/// it minimal (the document engine in `App` stays the source of truth);
-/// wave 2b moves the editable fields onto slt input-widget states here.
+/// View state that persists across frames on the `slt` side. The document
+/// engine in `App` stays the source of truth; the input-widget states here
+/// are render mirrors (wave 2b) — the app owns every edit, the widgets own
+/// caret rendering.
 #[derive(Default)]
 pub struct View {
     /// The in-TUI editor modal (Alt-O composer handoff / Ctrl-O plan
     /// editing), replacing the old `$EDITOR` spawn. Owned here so the
     /// frame closure stays `Send + 'static`.
     pub editor: Option<EditorForm>,
-    // wave 2b: composer `TextareaState`, palette/search/picker
-    // `TextInputState`s live here for hardware-caret fidelity.
+    /// Composer render mirror (wave 2b): fed the legacy `wrap_rows` layout
+    /// each frame so row breaks stay byte-identical while the textarea
+    /// paints the real caret (`▎` glyph + hardware cursor position).
+    pub composer: slt::TextareaState,
 }
 
 /// A multiline edit session rendered as a modal over the whole UI.
@@ -197,11 +199,11 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
         let show_sidebar = app.session.sidebar_open && width >= SIDEBAR_MIN_WIDTH;
         if show_sidebar {
             let _ = ui.container().grow(1).row(|ui| {
-                chat_column(ui, app, width - SIDEBAR_WIDTH);
+                chat_column(ui, app, view, width - SIDEBAR_WIDTH);
                 sidebar::render_slt(ui, app);
             });
         } else {
-            chat_column(ui, app, width);
+            chat_column(ui, app, view, width);
         }
 
         // Overlays, back to front (modal stack, matching draw() ordering).
@@ -221,7 +223,7 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
 
 /// The chat half: transcript on top, forms stacked above the composer
 /// block, all pinned to the bottom. `avail` is the chat column's width.
-fn chat_column(ui: &mut slt::Context, app: &mut App, avail: u32) {
+fn chat_column(ui: &mut slt::Context, app: &mut App, view: &mut View, avail: u32) {
     let _ = ui.container().grow(1).col(|ui| {
         // Task-chat header (task 96): one line above the transcript.
         if app.active_task.is_some() {
@@ -238,13 +240,13 @@ fn chat_column(ui: &mut slt::Context, app: &mut App, avail: u32) {
         crate::tui::question_form::render_slt(ui, app);
         crate::tui::plan_form::render_slt(ui, app);
 
-        bottom_block(ui, app, avail);
+        bottom_block(ui, app, view, avail);
     });
 }
 
 /// The shared-top-border block: border row, composer box, status row, and
 /// the blank footer hint row.
-fn bottom_block(ui: &mut slt::Context, app: &mut App, avail: u32) {
+fn bottom_block(ui: &mut slt::Context, app: &App, view: &mut View, avail: u32) {
     let t = theme::current();
     let _ = ui
         .container()
@@ -256,7 +258,7 @@ fn bottom_block(ui: &mut slt::Context, app: &mut App, avail: u32) {
         .border_fg(t.border_subtle)
         .grow(0)
         .col(|ui| {
-            composer::render_slt(ui, app, avail);
+            composer::render_slt(ui, app, &mut view.composer, avail);
         });
 }
 

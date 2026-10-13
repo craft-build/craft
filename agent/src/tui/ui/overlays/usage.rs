@@ -140,7 +140,8 @@ pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<
 }
 
 /// One `session  cost  tokens` row of the `/stats` top-sessions section.
-fn session_line(entry: &(String, f64, u64)) -> Line<'static> {    let t = theme::current();
+fn session_line(entry: &(String, f64, u64)) -> Line<'static> {
+    let t = theme::current();
 
     use crate::storage::stats::format_usd;
     use crate::usage::format_tokens;

@@ -5,12 +5,12 @@ use crate::tui::style::{Color, Style};
 use crate::tui::text::{Line, Span};
 
 use super::super::theme;
+use super::Hyperlink;
 use super::text::surface_style_with;
 use super::tools::{diff_badge, styled_diff_spans, tool_label, tool_summary};
 use super::wrap::{cell_len, pad_row, spans_width, wrap_spans, wrap_text};
 use crate::markdown::highlight::Highlighter;
 use crate::tui::app::DiffState;
-use super::Hyperlink;
 use crate::tui::provider::{LineKind, ToolKind};
 
 const BODY_INDENT: usize = 4;
@@ -30,11 +30,7 @@ pub(super) fn tool_block(
     hovered: bool,
     body_expanded: bool,
     width: usize,
-) -> (
-    Vec<Line<'static>>,
-    Option<usize>,
-    Option<Hyperlink>,
-) {
+) -> (Vec<Line<'static>>, Option<usize>, Option<Hyperlink>) {
     let t = theme::current();
 
     // Hovered collapsible cards lift to a slightly lighter background.

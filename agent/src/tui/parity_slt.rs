@@ -60,5 +60,3 @@ fn golden_fixture_parity_slt() {
     }
     assert!(failures.is_empty(), "\n\n{}\n", failures.join("\n\n"));
 }
-
-

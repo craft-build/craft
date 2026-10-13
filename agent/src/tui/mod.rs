@@ -58,7 +58,10 @@ fn write_and_flush(bytes: &str) -> io::Result<()> {
 /// Custom slash commands for the app, honoring the provider's `--no-commands`
 /// gate: a disabled session gets an empty list without touching the
 /// filesystem. Extracted so the gate is testable without booting the TUI.
-fn discover_custom_commands(cwd: &std::path::Path, enabled: bool) -> Vec<crate::command::CustomCommand> {
+fn discover_custom_commands(
+    cwd: &std::path::Path,
+    enabled: bool,
+) -> Vec<crate::command::CustomCommand> {
     if enabled {
         crate::command::discover_commands(cwd)
     } else {
@@ -125,7 +128,11 @@ fn trace_frame(line: String) {
     let Ok(path) = std::env::var("CRAFT_TUI_TRACE") else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -258,16 +265,30 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
             }
         }
 
-        // ── Input events (already slt types; consumed-free cascade) ──
-        let events: Vec<_> = ui.events().cloned().collect();
-        for ev in events {
+        // ── Input events ──
+        //
+        // The app owns the keyboard: every event dispatched below is
+        // marked consumed so the focused input widgets (the composer
+        // textarea, wave 2b) render + carry the caret but never edit —
+        // `App`'s composer state stays the single source of truth (the
+        // render mirrors sync from it each frame). Mouse events stay
+        // unconsumed so clicks keep their widget-focus meaning.
+        let events: Vec<(usize, slt::Event)> = ui
+            .events()
+            .enumerate()
+            .map(|(i, ev)| (i, ev.clone()))
+            .collect();
+        for (i, ev) in events {
             match ev {
                 slt::Event::Key(key) if key.kind == KeyEventKind::Press => {
                     focus.note_input();
                     // The editor modal owns the keyboard while open.
                     if let Some(editor) = view.editor.as_mut() {
                         match handle_editor_key(editor, &key) {
-                            EditorKey::Consumed => continue,
+                            EditorKey::Consumed => {
+                                ui.consume_event(i);
+                                continue;
+                            }
                             EditorKey::Save => {
                                 let editor = view.editor.take().expect("just borrowed");
                                 let text = editor.text();
@@ -281,10 +302,12 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
                                         }
                                     }
                                 }
+                                ui.consume_event(i);
                                 continue;
                             }
                             EditorKey::Cancel => {
                                 view.editor = None;
+                                ui.consume_event(i);
                                 continue;
                             }
                         }
@@ -303,6 +326,7 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
                     } else {
                         app.handle_key(key, &cmd_tx_frame);
                     }
+                    ui.consume_event(i);
                     // Ctrl-O plan-editor request: open the plan file in
                     // the in-TUI editor.
                     if let Some(path) = app.take_editor_request() {
@@ -316,6 +340,7 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
                 slt::Event::Paste(text) => {
                     focus.note_input();
                     app.insert_paste(&text);
+                    ui.consume_event(i);
                 }
                 slt::Event::Mouse(mouse) => {
                     focus.note_input();

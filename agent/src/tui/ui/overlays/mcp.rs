@@ -131,7 +131,10 @@ mod tests {
     fn sheet_text(reader: &McpSnapshotReader, selected: usize, expanded: Option<usize>) -> String {
         let mut tb = slt::TestBackend::new(100, 30);
         tb.render(|ui| render_mcp_sheet_slt(ui, reader, selected, expanded));
-        (0..tb.height()).map(|y| tb.line(y)).collect::<Vec<_>>().join("\n")
+        (0..tb.height())
+            .map(|y| tb.line(y))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn server_info(name: &str, status: McpServerStatus) -> McpServerInfo {

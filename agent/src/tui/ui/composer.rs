@@ -16,32 +16,6 @@ pub const MAX_TEXT_ROWS: usize = 12;
 pub const TEXT_LEFT_PAD: usize = 3; // 1 pad + ▎ bar + 1 space
 pub const TEXT_RIGHT_PAD: usize = 2;
 
-/// Display-cell width of a char slice. The composer wraps in cells (see
-/// `wrap_rows`), so cursor columns and row padding must be cells too:
-/// a CJK/emoji glyph advances the cursor by two cells, not one char.
-fn cell_width(chars: &[char]) -> usize {
-    chars
-        .iter()
-        .map(|&c| UnicodeWidthChar::width(c).unwrap_or(0))
-        .sum()
-}
-
-/// (wrapped row, cell column) of the cursor within the wrapped layout
-/// produced by `wrap_rows` (char-index ranges over `chars`).
-fn cursor_row_col(rows: &[(usize, usize)], chars: &[char], cursor: usize) -> (usize, usize) {
-    let mut cursor_row = rows.len() - 1;
-    let mut cursor_col = 0;
-    for (i, &(s, e)) in rows.iter().enumerate() {
-        if cursor <= e {
-            cursor_row = i;
-            cursor_col = cell_width(&chars[s..cursor]);
-            break;
-        }
-        cursor_col = cell_width(&chars[s..e]);
-    }
-    (cursor_row, cursor_col)
-}
-
 /// Bang-prefix highlighting (task 96, ported from the reference's
 /// `shell_highlight_spans`): a first line starting `!` / `!!` renders its
 /// sigil in the theme's warning color and the command syntax-highlighted
@@ -189,33 +163,29 @@ mod tests {
         assert!(shell_spans("! ", base()).is_none(), "empty command");
     }
 
-    /// Wide glyphs before the cursor move it by their CELL width: two
-    /// CJK chars ⇒ column 4, not 2 (finding 59).
+    /// The mirror keeps the legacy wrapped-row layout: a wide-glyph line
+    /// wraps at the same cells `wrap_rows` picks, and the cursor maps to
+    /// (row, char offset within that row).
     #[test]
-    fn cursor_column_counts_display_cells_for_cjk() {
-        let chars: Vec<char> = "你好ab".chars().collect();
-        let rows = crate::tui::ui::messages::wrap_rows("你好ab", 10);
-        assert_eq!(cursor_row_col(&rows, &chars, 2), (0, 4));
-        assert_eq!(cursor_row_col(&rows, &chars, 4), (0, 6));
-        // ASCII stays one cell per char.
-        let chars: Vec<char> = "abc".chars().collect();
-        let rows = crate::tui::ui::messages::wrap_rows("abc", 10);
-        assert_eq!(cursor_row_col(&rows, &chars, 2), (0, 2));
-    }
-
-    /// A wrapped row with wide glyphs keeps the cursor on the same
-    /// screen position the text occupies (cells match the wrap).
-    #[test]
-    fn cursor_column_tracks_cells_across_wrap() {
-        // "好好好cd" wraps at 5 cells: 每 char is 2 cells, so the first
-        // row is 好好 (4 cells) + the wrapped remainder.
-        let chars: Vec<char> = "好好好cd".chars().collect();
-        let rows = crate::tui::ui::messages::wrap_rows("好好好cd", 5);
+    fn mirror_maps_text_and_cursor_onto_wrapped_rows() {
+        let text = "好好好cd second";
+        let rows = crate::tui::ui::messages::wrap_rows(text, 5);
         assert!(rows.len() > 1, "input wraps at width 5: {rows:?}");
-        // Cursor after the third wide char sits on row 1 at cell 2.
-        let (row, col) = cursor_row_col(&rows, &chars, 3);
-        assert_eq!((row, col), (1, 2));
-        assert_eq!(UnicodeWidthStr::width("好好好cd"), 8);
+        let mut state = slt::TextareaState::new();
+        sync_mirror(&mut state, text, &rows, 3);
+        assert_eq!(
+            state.lines,
+            rows.iter()
+                .map(|&(s, e)| text.chars().skip(s).take(e - s).collect::<String>())
+                .collect::<Vec<_>>(),
+            "widget rows are exactly the legacy wrapped rows"
+        );
+        assert_eq!((state.cursor_row, state.cursor_col), (1, 1));
+        // Edge cursor at the very end lands on the last row's end.
+        sync_mirror(&mut state, text, &rows, text.chars().count());
+        let last = rows.len() - 1;
+        assert_eq!(state.cursor_row, last);
+        assert_eq!(state.cursor_col, rows[last].1 - rows[last].0);
     }
 }
 
@@ -230,7 +200,20 @@ mod tests {
 /// layout (`[Min(60), Length(34)]`) keeps the chat at least 60 wide and
 /// squeezes the sidebar instead — the composer recomputes that width so
 /// narrow terminals (the 80-col fixture terminal → chat 60) match.
-pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, _avail: u32) {
+///
+/// Wave 2b: the text rows render through `slt::TextareaState` (real caret
+/// — `▎` glyph plus the hardware cursor position). The state is a render
+/// *mirror*: `App`'s composer owns text + cursor (history gating, word
+/// ops, submit), and the closure consumes every key it dispatches, so the
+/// widget never edits. Its `lines` are the legacy `wrap_rows` output (word
+/// preferring) rather than the widget's own hard wrap, keeping row breaks
+/// byte-identical; `wrap_width` stays `None` so each line renders as-is.
+pub(crate) fn render_slt(
+    ui: &mut slt::Context,
+    app: &App,
+    state: &mut slt::TextareaState,
+    _avail: u32,
+) {
     let t = theme::current();
     const SIDEBAR_MIN_WIDTH: u32 = 80; // legacy gate (frame.rs)
     const SIDEBAR_WIDTH: u32 = 34; // legacy `ui/mod.rs` SIDEBAR_WIDTH
@@ -251,7 +234,24 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, _avail: u32) {
     let view_rows = rows.len().min(MAX_TEXT_ROWS);
     let box_h = (view_rows + 3) as u32; // pad + rows + pad + info line
 
+    // Sync the mirror before the widget renders: pre-wrapped rows plus the
+    // cursor mapped onto them (the app cursor is a char index into the
+    // whole text; the widget wants (row, col-in-row)).
+    sync_mirror(state, &app.composer.text, &rows, app.composer.cursor);
+
+    // Bang-prefix spans for the first wrapped row (painted by the overlay
+    // pass below — the widget renders one style per row).
+    let bang_spans = if avail >= 11 && !app.composer.text.is_empty() {
+        let (s, e) = rows[0];
+        let line: String = app.composer.text.chars().skip(s).take(e - s).collect();
+        shell_spans(&line, Style::default().fg(t.text_primary).bg(t.bg_surface))
+    } else {
+        None
+    };
+    let empty = app.composer.text.is_empty();
+
     // ── Composer box: 1 cell of app-bg margin each side of the surface ──
+    let mut text_rect: Option<slt::Rect> = None;
     let box_resp = ui
         .container()
         .bg(t.bg_surface)
@@ -265,81 +265,21 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, _avail: u32) {
                 return; // legacy guard: inset too narrow for bar/text/info
             }
 
-            let chars: Vec<char> = app.composer.text.chars().collect();
-            let cursor = app.composer.cursor.min(chars.len());
-            let (cursor_row, _cursor_col) = cursor_row_col(&rows, &chars, cursor);
-            let offset = cursor_row
-                .saturating_sub(view_rows.saturating_sub(1))
-                .min(rows.len().saturating_sub(view_rows));
-
-            let text_style = Style::default().fg(t.text_primary).bg(t.bg_surface);
-            let surf = Style::default().bg(t.bg_surface);
-            let placeholder = offset == 0 && app.composer.text.is_empty();
-
-            for i in offset..(offset + view_rows).min(rows.len()) {
-                let (s, e) = rows[i];
-                let line: String = chars[s..e].iter().collect();
-                // Padding is display cells (the wrap width is cells), so
-                // wide glyphs don't pull the composer row past the box
-                // edge.
-                let w = UnicodeWidthStr::width(line.as_str());
-
-                if placeholder {
-                    // Placeholder on the first visible row; the spoofed
-                    // caret sits on its first cell.
-                    let mut spans = apply_caret(
-                        vec![Span::styled(
-                            "Message Craft…".to_string(),
-                            Style::default().fg(t.text_tertiary).bg(t.bg_surface),
-                        )],
-                        0,
-                    );
-                    spans.push(Span::styled(
-                        " ".repeat(text_w.saturating_sub(w.max(13))),
-                        surf,
-                    ));
-                    box_row(ui, &spans);
-                    continue;
-                }
-
-                // Bang-prefix highlighting on the first wrapped row only.
-                let mut spans = if s == 0 {
-                    shell_spans(&line, text_style)
-                        .unwrap_or_else(|| vec![Span::styled(line.clone(), text_style)])
-                } else {
-                    vec![Span::styled(line.clone(), text_style)]
-                };
-
-                // Spoofed caret (wave 2a): the hardware cursor becomes a
-                // REVERSED cell over the char at the cursor position; the
-                // real caret returns with wave 2b's TextareaState.
-                let mut padded = false;
-                if i == cursor_row {
-                    let pos = cursor.saturating_sub(s);
-                    if pos < e - s {
-                        spans = apply_caret(spans, pos);
-                    } else if w < text_w {
-                        // Caret one cell past the text: reverse the first
-                        // padding cell (the hardware caret's position).
-                        spans.push(Span::styled(" ".repeat(text_w - w - 1), surf));
-                        spans.push(Span::styled(
-                            " ",
-                            Style::default()
-                                .bg(t.bg_surface)
-                                .add_modifier(Modifier::REVERSED),
-                        ));
-                        padded = true;
-                    } else {
-                        // Full row: the legacy caret x clamped to the last
-                        // cell, so the final char carries the caret.
-                        spans = apply_caret(spans, e - s - 1);
-                    }
-                }
-                if !padded && w < text_w {
-                    spans.push(Span::styled(" ".repeat(text_w - w), surf));
-                }
-                box_row(ui, &spans);
-            }
+            // Text rows: 1 pad + bar cell + 1 pad, then the textarea at a
+            // fixed width so its rect (used by the overlays one frame
+            // later) is stable across frames. The accent bar itself is
+            // painted by the box-wide overlay pass — the widget owns its
+            // own rows, so the bar cannot interleave in flow.
+            ui.line(|ui| {
+                let surf = Style::default().bg(t.bg_surface);
+                ui.styled(" ", surf);
+                ui.styled(" ", surf);
+                ui.styled(" ", surf);
+                let resp = ui.container().w(text_w as u32).col(|ui| {
+                    ui.textarea(state, view_rows as u32);
+                });
+                text_rect = Some(resp.rect);
+            });
 
             box_row(ui, &[]); // padding row between text and the info line
 
@@ -386,6 +326,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, _avail: u32) {
                 app.thinking_label(),
                 Style::default().fg(t.warning).bg(t.bg_surface),
             ));
+            let surf = Style::default().bg(t.bg_surface);
             let right = format!("{}  ", app.session.token_label);
             let info_w = (avail as usize).saturating_sub(6); // inset.width - pads
             let right_w = right.chars().count();
@@ -396,6 +337,43 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &App, _avail: u32) {
             info.push(Span::styled(right, tertiary));
             box_row(ui, &info);
         });
+
+    // ── Overlay pass over the finished box (wave 2b) ──
+    //
+    // The textarea renders with slt's own row styles, so the craft theme
+    // is re-applied on top: the accent bar down column 1 (the widget owns
+    // its rows, so the bar cannot flow inline through them), the text
+    // cells restyled to the craft palette, bang-prefix syntax colors on
+    // the first wrapped row, and the placeholder on an empty composer.
+    // Rects are the previous frame's — the same one-frame handoff cadence
+    // the transcript regions use (`Response::rect` reports post-layout
+    // geometry, so a first-of-kind or resized frame simply skips). The
+    // bar is derived from the text rect (its wrapper predicts reliably;
+    // the outer box container's response rect does not).
+    let bar_fg = t.accent;
+    let bar_bg = t.bg_surface;
+    if let Some(rect) = text_rect.filter(|r| r.width > 0 && r.height > 0) {
+        let base = Style::default().fg(t.text_primary).bg(t.bg_surface);
+        let placeholder_style = Style::default().fg(t.text_tertiary).bg(t.bg_surface);
+        let bang = bang_spans.clone();
+        // Box rows: top pad + text rows + gap pad + info line.
+        let bar_x = rect.x.saturating_sub(2);
+        let bar_rows = rect.y.saturating_sub(1)..rect.y + rect.height + 2;
+        let _ = ui.overlay(|ui| {
+            let _ = ui.container().grow(1).draw(move |buf, _area| {
+                for y in bar_rows.clone() {
+                    buf.set_string(bar_x, y, "▎", Style::default().fg(bar_fg).bg(bar_bg));
+                }
+                restyle_text_area(buf, rect, base, bang.as_deref());
+                if empty {
+                    // The placeholder replaces the widget's empty-row
+                    // glyph (its `▎` included) — the hardware cursor
+                    // still lands on the first cell from `set_cursor_pos`.
+                    buf.set_string(rect.x, rect.y, "Message Craft…", placeholder_style);
+                }
+            });
+        });
+    }
 
     // ── Status row (single bottom row, full width) ──
     let tertiary = Style::default().fg(t.text_tertiary);
@@ -489,34 +467,80 @@ fn box_row(ui: &mut slt::Context, spans: &[Span<'static>]) {
     });
 }
 
-/// Split the span list at char index `pos` and render that char
-/// REVERSED — the wave-2a spoofed caret idiom (query rows use the same).
-fn apply_caret(spans: Vec<Span<'static>>, pos: usize) -> Vec<Span<'static>> {
-    let mut out = Vec::with_capacity(spans.len() + 2);
-    let mut used = 0usize;
-    let mut done = false;
-    for span in spans {
-        let len = span.content.chars().count();
-        if !done && len > 0 && pos < used + len {
-            let idx = pos - used;
-            let before: String = span.content.chars().take(idx).collect();
-            let ch = span.content.chars().nth(idx).unwrap_or(' ');
-            let after: String = span.content.chars().skip(idx + 1).collect();
-            if !before.is_empty() {
-                out.push(Span::styled(before, span.style));
-            }
-            out.push(Span::styled(
-                ch.to_string(),
-                span.style.add_modifier(Modifier::REVERSED),
-            ));
-            if !after.is_empty() {
-                out.push(Span::styled(after, span.style));
-            }
-            done = true;
-        } else {
-            out.push(span);
-        }
-        used += len;
+/// Feed the app's composer state into the render mirror: the widget's
+/// lines are the legacy `wrap_rows` output (word-preferring breaks) and
+/// the cursor lands on the row containing its char index, as a char
+/// offset within that row. The widget clamps both to the actual rows.
+fn sync_mirror(state: &mut slt::TextareaState, text: &str, rows: &[(usize, usize)], cursor: usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    state.wrap_width = None; // lines arrive pre-wrapped
+    state.lines = rows
+        .iter()
+        .map(|&(s, e)| chars[s..e].iter().collect())
+        .collect();
+    if state.lines.is_empty() {
+        state.lines.push(String::new());
     }
-    out
+    // First row whose end reaches the cursor (the legacy `cursor_row_col`
+    // tie-break: an edge cursor belongs to the earlier row).
+    let mut row = rows.len().saturating_sub(1);
+    let mut col = 0usize;
+    for (i, &(s, e)) in rows.iter().enumerate() {
+        if cursor <= e {
+            row = i;
+            col = cursor.saturating_sub(s);
+            break;
+        }
+    }
+    state.cursor_row = row.min(state.lines.len() - 1);
+    state.cursor_col = col;
+}
+
+/// Re-apply the craft palette over the textarea's rows (slt styles them
+/// from its own theme) and, when given, the bang-prefix syntax colors on
+/// the first row. Cells are walked by display width: wide glyphs cover
+/// their continuation cells, and the widget's inserted `▎` caret glyph is
+/// styled but consumes no span width (it shifts the row by one cell).
+fn restyle_text_area(
+    buf: &mut slt::Buffer,
+    rect: slt::Rect,
+    base: Style,
+    bang: Option<&[Span<'static>]>,
+) {
+    let x_end = rect.x.saturating_add(rect.width);
+    let y_end = rect.y.saturating_add(rect.height);
+    for y in rect.y..y_end {
+        for x in rect.x..x_end {
+            if let Some(cell) = buf.try_get_mut(x, y) {
+                cell.style = base;
+            }
+        }
+    }
+    let Some(spans) = bang else {
+        return;
+    };
+    let mut x = rect.x;
+    'spans: for span in spans {
+        let mut cells_left = UnicodeWidthStr::width(&*span.content);
+        while cells_left > 0 {
+            if x >= x_end {
+                break 'spans;
+            }
+            let symbol: String = buf.get(x, rect.y).symbol.to_string();
+            if let Some(cell) = buf.try_get_mut(x, rect.y) {
+                cell.style = span.style;
+            }
+            x += 1;
+            if symbol == "▎" {
+                continue; // the inserted caret glyph: width 0 in the text
+            }
+            let w = if symbol.is_empty() {
+                0 // wide-glyph continuation cell
+            } else {
+                UnicodeWidthStr::width(&*symbol).max(1)
+            };
+            cells_left = cells_left.saturating_sub(w);
+        }
+    }
 }

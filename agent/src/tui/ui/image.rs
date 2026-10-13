@@ -99,7 +99,11 @@ fn read_stdin_reply(
                 revents: 0,
             };
             let ready = unsafe {
-                libc::poll(&mut pfd, 1, remaining.as_millis().min(i32::MAX as u128) as i32)
+                libc::poll(
+                    &mut pfd,
+                    1,
+                    remaining.as_millis().min(i32::MAX as u128) as i32,
+                )
             };
             if ready <= 0 {
                 break; // timeout or poll error

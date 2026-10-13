@@ -51,7 +51,7 @@ impl Provider for StreamingMock {
             // Reasoning stream first (the GLM pattern), markdown-flavored.
             for i in 0..12 {
                 let delta = if i % 3 == 0 {
-                    format!("*thinking* chunk {i} `code` ", )
+                    format!("*thinking* chunk {i} `code` ",)
                 } else {
                     format!("reason {i} ")
                 };
@@ -67,7 +67,7 @@ impl Provider for StreamingMock {
                     0 => "## Fix plan\n\n".to_string(),
                     5 => "```rust\nfn main() {}\n```\n\n".to_string(),
                     12 => "**bold** and `inline` ".to_string(),
-                    _ => format!("word{i} ", ),
+                    _ => format!("word{i} ",),
                 };
                 text.push_str(&delta);
                 let _ = evt_tx.send(AgentEvent::AssistantDelta(delta));

@@ -808,7 +808,7 @@ mod tests {
 
     // ── hyperlink helpers (moved from `tui/hyperlink.rs`) ──
 
-    use super::{OSC8_EMPTY, Hyperlink, file_uri, strip_osc8};
+    use super::{Hyperlink, OSC8_EMPTY, file_uri, strip_osc8};
 
     #[test]
     fn file_uri_starts_with_scheme_for_absolute() {
@@ -1302,4 +1302,3 @@ pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
         });
     });
 }
-

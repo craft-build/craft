@@ -195,9 +195,7 @@ mod tests {
         // the top border is the first row below the prompt, and the
         // composer's accent bar never appears inside the prompt rows.
         let prompt_h = app.overlays.permission_prompt.height(66) as usize;
-        let border_y = (title + prompt_h)
-            .saturating_sub(1)
-            .min(rows.len() - 1);
+        let border_y = (title + prompt_h).saturating_sub(1).min(rows.len() - 1);
         assert!(
             rows[border_y].starts_with('─'),
             "border below prompt: {:?}",
@@ -425,7 +423,8 @@ mod tests {
         screen.draw_settled(&mut app);
         assert!(screen.text().contains("not available"));
 
-        app.overlays.usage_quota = crate::tui::provider::UsageFetchState::Error("rate limited".into());
+        app.overlays.usage_quota =
+            crate::tui::provider::UsageFetchState::Error("rate limited".into());
         screen.draw_settled(&mut app);
         assert!(screen.text().contains("rate limited"));
     }
@@ -543,24 +542,9 @@ mod tests {
         screen.draw_settled(&mut app);
         let buf = screen.tb.buffer();
         // Cells inside the range are reversed, outside are not.
-        assert!(
-            buf.get(4, 1)
-                .style
-                .modifiers
-                .contains(Modifiers::REVERSED)
-        );
-        assert!(
-            buf.get(12, 1)
-                .style
-                .modifiers
-                .contains(Modifiers::REVERSED)
-        );
-        assert!(
-            !buf.get(13, 1)
-                .style
-                .modifiers
-                .contains(Modifiers::REVERSED)
-        );
+        assert!(buf.get(4, 1).style.modifiers.contains(Modifiers::REVERSED));
+        assert!(buf.get(12, 1).style.modifiers.contains(Modifiers::REVERSED));
+        assert!(!buf.get(13, 1).style.modifiers.contains(Modifiers::REVERSED));
         // And the frame snapshot holds the selectable text.
         assert!(
             app.view.paint.lock().unwrap().frame_text[1].contains("Looking at the refresh path")
