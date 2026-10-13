@@ -47,19 +47,18 @@ pub struct View {
 
 /// A multiline edit session rendered as a modal over the whole UI.
 ///
-/// The 2a editor form is `TextBuffer`-backed (a plain multi-row buffer with
-/// a spoofed caret, identical to the query rows) — wave 2b swaps the buffer
-/// for `slt::widgets::TextareaState` for a real caret and native undo.
+/// Wave 2b: the buffer is a real `slt::widgets::TextareaState` — native
+/// editing (grapheme-safe caret, word jumps, Ctrl-Z/Ctrl-Y undo/redo,
+/// bracketed paste) with the `▎` glyph + hardware-cursor caret. The
+/// widget owns editing while the modal is open; the run-loop closure
+/// consumes everything except the widget's own edit keys (see
+/// `editor_key_edits_widget`) plus Esc/Ctrl-S, which it intercepts.
 pub struct EditorForm {
     /// Where the edited text goes on save.
     pub origin: EditorOrigin,
-    /// Rows of the buffer (lines split on `\n`; the trailing newline of a
-    /// nonempty buffer expresses the trailing empty row).
-    pub rows: Vec<String>,
-    /// Char row of the caret.
-    pub row: usize,
-    /// Char column of the caret within `rows[row]`.
-    pub col: usize,
+    /// The edit buffer; `wrap_width` stays `None` (one visual row per
+    /// logical line, matching the 2a rows rendering).
+    pub state: slt::TextareaState,
 }
 
 /// What a completed [`EditorForm`] save edits.
@@ -73,115 +72,18 @@ pub enum EditorOrigin {
 
 impl EditorForm {
     pub fn open(origin: EditorOrigin, text: &str) -> Self {
-        let mut rows: Vec<String> = text.split('\n').map(str::to_owned).collect();
-        if rows.is_empty() {
-            rows.push(String::new());
-        }
-        let row = rows.len() - 1;
-        let col = rows[row].chars().count();
-        Self {
-            origin,
-            rows,
-            row,
-            col,
-        }
+        let mut state = slt::TextareaState::new();
+        state.set_value(text);
+        // `set_value` parks the cursor at (0, 0); open at the end, where
+        // the 2a form (and every editor) puts it.
+        let last = state.lines.len() - 1;
+        state.cursor_row = last;
+        state.cursor_col = state.lines[last].chars().count();
+        Self { origin, state }
     }
 
     pub fn text(&self) -> String {
-        self.rows.join("\n")
-    }
-
-    fn byte_index(&self) -> usize {
-        self.rows[self.row]
-            .char_indices()
-            .nth(self.col)
-            .map_or(self.rows[self.row].len(), |(i, _)| i)
-    }
-
-    pub fn insert_char(&mut self, c: char) {
-        let at = self.byte_index();
-        self.rows[self.row].insert(at, c);
-        self.col += 1;
-    }
-
-    pub fn insert_newline(&mut self) {
-        let at = self.byte_index();
-        let rest = self.rows[self.row].split_off(at);
-        self.rows.insert(self.row + 1, rest);
-        self.row += 1;
-        self.col = 0;
-    }
-
-    pub fn backspace(&mut self) {
-        if self.col > 0 {
-            let back = self.last_char_len();
-            let at = self.byte_index();
-            self.rows[self.row].remove(at - back);
-            self.col -= 1;
-        } else if self.row > 0 {
-            let joined = self.rows.remove(self.row);
-            self.row -= 1;
-            self.col = self.rows[self.row].chars().count();
-            self.rows[self.row].push_str(&joined);
-        }
-    }
-
-    pub fn delete(&mut self) {
-        if self.col < self.rows[self.row].chars().count() {
-            let at = self.byte_index();
-            self.rows[self.row].remove(at);
-        } else if self.row + 1 < self.rows.len() {
-            let joined = self.rows.remove(self.row + 1);
-            self.rows[self.row].push_str(&joined);
-        }
-    }
-
-    pub fn left(&mut self) {
-        if self.col > 0 {
-            self.col -= 1;
-        } else if self.row > 0 {
-            self.row -= 1;
-            self.col = self.rows[self.row].chars().count();
-        }
-    }
-
-    pub fn right(&mut self) {
-        if self.col < self.rows[self.row].chars().count() {
-            self.col += 1;
-        } else if self.row + 1 < self.rows.len() {
-            self.row += 1;
-            self.col = 0;
-        }
-    }
-
-    pub fn up(&mut self) {
-        if self.row > 0 {
-            self.row -= 1;
-            self.col = self.col.min(self.rows[self.row].chars().count());
-        }
-    }
-
-    pub fn down(&mut self) {
-        if self.row + 1 < self.rows.len() {
-            self.row += 1;
-            self.col = self.col.min(self.rows[self.row].chars().count());
-        }
-    }
-
-    pub fn home(&mut self) {
-        self.col = 0;
-    }
-
-    pub fn end(&mut self) {
-        self.col = self.rows[self.row].chars().count();
-    }
-
-    /// Byte length of the char just left of the caret (for backspace).
-    fn last_char_len(&self) -> usize {
-        self.rows[self.row]
-            .chars()
-            .nth(self.col.saturating_sub(1))
-            .map_or(1, char::len_utf8)
+        self.state.value()
     }
 }
 
@@ -288,15 +190,22 @@ fn render_task_header_slt(ui: &mut slt::Context, app: &App) {
 }
 
 /// Render the in-TUI editor modal: a rounded box over the whole screen
-/// with a title, the buffer rows, and a save/cancel footer hint.
+/// with a title, the textarea, and a save/cancel footer hint.
+///
+/// The textarea sits in a fixed-width wrapper (its rect then predicts
+/// reliably) and a trailing overlay restyles the rows — the widget paints
+/// with slt's theme, the editor wants the plain default look of the 2a
+/// rows.
 fn render_editor_modal(ui: &mut slt::Context, editor: &mut EditorForm) {
     let t = theme::current();
     let width = ui.width().max(20);
     let height = ui.height().max(8);
     let box_w = (width.saturating_sub(8)).min(78);
-    let rows = editor.rows.len().min(24) as u32;
+    let rows = editor.state.lines.len().min(24) as u32;
     let box_h = (rows + 3).min(height.saturating_sub(2));
+    let inner_w = box_w.saturating_sub(2); // border insets
 
+    let mut area_rect: Option<slt::Rect> = None;
     let _ = ui.modal(|ui| {
         let _ = ui
             .container()
@@ -309,48 +218,32 @@ fn render_editor_modal(ui: &mut slt::Context, editor: &mut EditorForm) {
             .h(box_h)
             .col(|ui| {
                 ui.text(" ✎ edit").bold().fg(t.text_secondary);
-                let _ = ui.container().grow(1).py(0).col(|ui| {
-                    editor_rows(ui, editor);
+                let resp = ui.container().w(inner_w).py(0).col(|ui| {
+                    let _ = ui.textarea(&mut editor.state, rows);
                 });
+                area_rect = Some(resp.rect);
                 ui.line(|ui| {
-                    ui.text("Ctrl-S save   Esc cancel").fg(t.text_tertiary);
+                    ui.text("Ctrl-S save   Esc cancel   Ctrl-Z undo")
+                        .fg(t.text_tertiary);
                 });
-                ui.styled(
-                    "in-TUI editor (wave 2a): $EDITOR handoff returns with wave 2b",
-                    slt::Style::default().fg(t.text_disabled),
-                );
             });
     });
-}
 
-/// The editor buffer rows, informationally styled; wave 2a renders a
-/// spoofed caret (reversed cell), wave 2b hands this to `TextareaState`.
-fn editor_rows(ui: &mut slt::Context, editor: &EditorForm) {
-    use crate::tui::style::{Modifier, Style, StyleExt};
-
-    let t = theme::current();
-    let caret_style = Style::default().add_modifier(Modifier::REVERSED);
-    for (r, row) in editor.rows.iter().enumerate() {
-        ui.line(|ui| {
-            if r == editor.row {
-                let prefix: String = row.chars().take(editor.col).collect();
-                let caret_ch: String = row
-                    .chars()
-                    .nth(editor.col)
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| " ".to_string());
-                let suffix: String = row.chars().skip(editor.col + 1).collect();
-                if !prefix.is_empty() {
-                    ui.styled(prefix, slt::Style::default());
+    // Trailing restyle from the wrapper's previous-frame rect (the same
+    // one-frame handoff cadence as the composer overlays).
+    if let Some(rect) = area_rect.filter(|r| r.width > 0 && r.height > 0) {
+        let _ = ui.overlay(|ui| {
+            ui.container().grow(1).draw(move |buf, _area| {
+                let x_end = rect.x.saturating_add(rect.width);
+                let y_end = rect.y.saturating_add(rect.height);
+                for y in rect.y..y_end {
+                    for x in rect.x..x_end {
+                        if let Some(cell) = buf.try_get_mut(x, y) {
+                            cell.style = slt::Style::default();
+                        }
+                    }
                 }
-                ui.styled(&caret_ch, caret_style);
-                if !suffix.is_empty() {
-                    ui.styled(suffix, slt::Style::default());
-                }
-            } else {
-                ui.styled(row.clone(), slt::Style::default());
-            }
-            let _ = t.bg_app; // keep theme linkage explicit for the 2b restyle
+            });
         });
     }
 }
@@ -366,47 +259,28 @@ mod tests {
     #[test]
     fn open_places_caret_at_end() {
         let e = editor("ab\ncd");
-        assert_eq!((e.row, e.col), (1, 2));
+        let last = e.state.lines.len() - 1;
+        assert_eq!(
+            (e.state.cursor_row, e.state.cursor_col),
+            (last, e.state.lines[last].chars().count())
+        );
         assert_eq!(e.text(), "ab\ncd");
     }
 
     #[test]
-    fn edits_split_and_join_lines() {
-        let mut e = editor("hello");
-        e.left();
-        e.insert_newline();
-        assert_eq!(e.text(), "hell\no");
-        assert_eq!((e.row, e.col), (1, 0));
-        e.backspace(); // join back
-        assert_eq!(e.text(), "hello");
-        assert_eq!((e.row, e.col), (0, 4));
+    fn text_round_trips_through_the_state() {
+        let mut e = editor("hello\nworld");
+        e.state.set_value("replaced");
+        assert_eq!(e.text(), "replaced");
+        // set_value parks the caret at the start; open() is what moves it
+        // to the end.
+        assert_eq!((e.state.cursor_row, e.state.cursor_col), (0, 0));
     }
 
     #[test]
-    fn backspace_eats_multibyte_chars_whole() {
-        let mut e = editor("你");
-        e.backspace();
-        assert_eq!(e.text(), "");
-        assert_eq!((e.row, e.col), (0, 0));
-    }
-
-    #[test]
-    fn vertical_moves_clamp_to_line_lengths() {
-        let mut e = editor("abc\n中");
-        e.home();
-        e.right();
-        e.right();
-        e.down(); // col 2 clamps to 1 (one CJK char)
-        assert_eq!((e.row, e.col), (1, 1));
-        e.up();
-        assert_eq!((e.row, e.col), (0, 1));
-    }
-
-    #[test]
-    fn delete_merges_following_line() {
-        let mut e = editor("ab\ncd");
-        e.up(); // caret at end of "ab" (col clamps to 2)
-        e.delete();
-        assert_eq!(e.text(), "abcd");
+    fn empty_text_still_has_one_row() {
+        let e = editor("");
+        assert_eq!(e.state.lines, vec![String::new()]);
+        assert_eq!((e.state.cursor_row, e.state.cursor_col), (0, 0));
     }
 }
