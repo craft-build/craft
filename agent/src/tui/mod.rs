@@ -5,6 +5,8 @@
 
 mod animation;
 mod app;
+mod compat;
+pub(crate) mod geom;
 mod composer;
 mod file_picker;
 mod hyperlink;
@@ -19,6 +21,8 @@ mod repaint;
 pub(crate) mod search_modal;
 mod selection;
 mod shell;
+mod style;
+pub(crate) mod text;
 mod ui;
 
 use std::cell::RefCell;
