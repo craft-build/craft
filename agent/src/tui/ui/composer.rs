@@ -1,6 +1,6 @@
 //! Composer (input box), status bar and footer hint row.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use super::theme;
 use crate::markdown::highlight::{Highlighter, SegmentColor};
@@ -276,7 +276,7 @@ pub(crate) fn render_slt(
                 ui.styled(" ", surf);
                 ui.styled(" ", surf);
                 let resp = ui.container().w(text_w as u32).col(|ui| {
-                    ui.textarea(state, view_rows as u32);
+                    let _ = ui.textarea(state, view_rows as u32);
                 });
                 text_rect = Some(resp.rect);
             });
@@ -360,7 +360,7 @@ pub(crate) fn render_slt(
         let bar_x = rect.x.saturating_sub(2);
         let bar_rows = rect.y.saturating_sub(1)..rect.y + rect.height + 2;
         let _ = ui.overlay(|ui| {
-            let _ = ui.container().grow(1).draw(move |buf, _area| {
+            ui.container().grow(1).draw(move |buf, _area| {
                 for y in bar_rows.clone() {
                     buf.set_string(bar_x, y, "▎", Style::default().fg(bar_fg).bg(bar_bg));
                 }
@@ -443,7 +443,7 @@ pub(crate) fn render_slt(
     let paint = app.view.paint.clone();
     let rect = box_resp.rect;
     let _ = ui.overlay(|ui| {
-        let _ = ui.container().w(1).h(1).draw(move |_buf, _area| {
+        ui.container().w(1).h(1).draw(move |_buf, _area| {
             if let Ok(mut p) = paint.lock() {
                 p.composer_area = crate::tui::geom::Rect::from_slt(rect);
             }
