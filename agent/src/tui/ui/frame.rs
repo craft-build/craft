@@ -279,10 +279,7 @@ fn render_task_header_slt(ui: &mut slt::Context, app: &App) {
         ui.text(" · ");
         ui.styled(status.label(), Style::default().fg(status_color));
         if status == crate::tui::app::TaskStatus::Working {
-            ui.styled(
-                "  Esc-Esc cancels",
-                Style::default().fg(t.text_tertiary),
-            );
+            ui.styled("  Esc-Esc cancels", Style::default().fg(t.text_tertiary));
         }
     });
     let _ = Color::Reset; // theme import hygiene for compile-time checks
@@ -308,15 +305,12 @@ fn render_editor_modal(ui: &mut slt::Context, editor: &mut EditorForm) {
             .w(box_w)
             .h(box_h)
             .col(|ui| {
-                ui.text(" ✎ edit")
-                    .bold()
-                    .fg(t.text_secondary);
+                ui.text(" ✎ edit").bold().fg(t.text_secondary);
                 ui.container().grow(1).py(0).col(|ui| {
                     editor_rows(ui, editor);
                 });
                 ui.line(|ui| {
-                    ui.text("Ctrl-S save   Esc cancel")
-                        .fg(t.text_tertiary);
+                    ui.text("Ctrl-S save   Esc cancel").fg(t.text_tertiary);
                 });
                 ui.styled(
                     "in-TUI editor (wave 2a): $EDITOR handoff returns with wave 2b",

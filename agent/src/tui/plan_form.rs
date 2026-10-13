@@ -204,11 +204,9 @@ impl PlanForm {
         }
     }
 
-    pub(crate) fn view(&self, frame: &mut Frame, area: Rect) {
-        if !self.is_visible() {
-            return;
-        }
-
+    /// The form's content rows (menu, one blank, hint bar) — shared by the
+    /// ratatui `view()` and the slt `render_slt` painter.
+    fn content_lines(&self) -> Vec<Line<'static>> {
         let t = theme::current();
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(MENU.len() + 1);
 
@@ -236,6 +234,16 @@ impl PlanForm {
         }
         lines.push(Line::default());
         lines.push(hint_line(HINT_PAIRS));
+        lines
+    }
+
+    pub(crate) fn view(&self, frame: &mut Frame, area: Rect) {
+        if !self.is_visible() {
+            return;
+        }
+
+        let t = theme::current();
+        let lines = self.content_lines();
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -453,13 +461,61 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt panel for this form (stub until the forms wave lands)
+// Wave 2a: the slt panel for this form
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Render this form into the slt frame above the composer block. The
-/// container self-sizes from the same height helper the ratatui view used.
+/// Render this form into the slt frame above the composer block: the
+/// rounded all-sides border with the bold "Plan complete" title, the same
+/// menu/blank/hint rows, and the same fixed `FORM_HEIGHT` the ratatui
+/// view reserved. Rows wrap exactly like the legacy `Wrap { trim: false }`
+/// paragraph and clip at the fixed inner height, as `Paragraph` did.
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
-    let _ = (ui, app);
-    // TODO(wave-2a forms): port `view()` into slt containers.
-}
+    let form = &app.plan_mode.plan_form;
+    if !form.is_visible() {
+        return;
+    }
+    let t = theme::current();
+    let width = super::permission_prompt::chat_width(ui, app);
+    let base = Style::default().fg(t.text_primary);
 
+    // slt pins container titles two cells in from the left border, while
+    // ratatui starts a left-aligned title flush after the corner — the
+    // label's own leading space compensated for that. Dropping it lands
+    // every visible title glyph on the same cell the legacy title did
+    // (only the separator cell between corner and title shows `─` instead
+    // of a space).
+    let title = FORM_LABEL.trim_start();
+
+    ui.container()
+        .border(slt::Border::Rounded)
+        .border_style(Style::default().fg(t.border_strong))
+        .title_styled(
+            title,
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        )
+        .w(width)
+        .h(FORM_HEIGHT as u32)
+        .col(|ui| {
+            let inner_width = (width as usize).saturating_sub(2).max(1);
+            // 2 borders + inner rows; the legacy Paragraph clipped beyond.
+            let mut rows_left = MENU.len() + 2;
+            for line in &form.content_lines() {
+                for row in super::permission_prompt::wrap_line_rows(line, inner_width, base) {
+                    if rows_left == 0 {
+                        break;
+                    }
+                    rows_left -= 1;
+                    ui.line(|ui| {
+                        if row.is_empty() {
+                            ui.styled(" ", base);
+                        }
+                        for span in &row {
+                            ui.styled(span.content.as_ref(), span.style);
+                        }
+                    });
+                }
+            }
+        });
+}

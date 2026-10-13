@@ -53,11 +53,7 @@ pub(crate) fn buffer_rows(buf: &slt::buffer::Buffer) -> String {
             (0..buf.area.width)
                 .map(|c| {
                     let s = buf.get(c, r).symbol.to_string();
-                    if s.is_empty() {
-                        " ".to_string()
-                    } else {
-                        s
-                    }
+                    if s.is_empty() { " ".to_string() } else { s }
                 })
                 .collect::<String>()
                 .trim_end()

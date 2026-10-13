@@ -133,6 +133,110 @@ fn render_mcp_sheet(
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt MCP sheet
+// ─────────────────────────────────────────────────────────────────────────
+
+use super::{SheetRow, centered_slt, row_spans, sheet_slt};
+
+/// `/mcp` on the slt frame.
+pub(super) fn render_mcp_slt(ui: &mut slt::Context, app: &App) {
+    let Modal::Mcp { selected } = &app.overlays.modal else {
+        return;
+    };
+    let reader = app
+        .mcp
+        .as_ref()
+        .map(|handle| handle.reader())
+        .unwrap_or_else(crate::mcp::McpSnapshotReader::empty);
+    render_mcp_sheet_slt(ui, &reader, *selected, app.overlays.mcp_expanded);
+}
+
+/// The `/mcp` sheet on the slt frame, drawn from any snapshot reader so
+/// tests can feed it a hand-built snapshot (mirrors `render_mcp_sheet`).
+fn render_mcp_sheet_slt(
+    ui: &mut slt::Context,
+    reader: &crate::mcp::McpSnapshotReader,
+    selected: usize,
+    expanded: Option<usize>,
+) {
+    let t = theme::current();
+    let (sw, sh) = (ui.width(), ui.height());
+    let snapshot = reader.load();
+    let infos = snapshot.infos.clone();
+    let resources = snapshot.resources.clone();
+
+    // Row plan: every server's header row (the one the selection marks),
+    // plus a detail row for NeedsAuth / Failed servers.
+    let mut all_rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut header_rows: Vec<usize> = Vec::new();
+    for (i, info) in infos.iter().enumerate() {
+        header_rows.push(all_rows.len());
+        let (status_label, status_color) = mcp_status_style(info);
+        let left = format!(
+            " {} · {} · {} tools · {} prompts · {} resources",
+            info.name, info.transport_kind, info.tool_count, info.prompt_count, info.resource_count
+        );
+        let status = status_label.to_string();
+        let gap = 76usize.saturating_sub(left.chars().count() + status.chars().count());
+        all_rows.push(vec![
+            Span::styled(left, Style::default().fg(t.text_primary)),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(status, Style::default().fg(status_color)),
+        ]);
+        if let McpServerStatus::NeedsAuth { url } = &info.status
+            && let Some(url) = url
+        {
+            all_rows.push(vec![Span::styled(
+                format!("   login required: {url} (l to log in)"),
+                Style::default().fg(t.danger),
+            )]);
+        }
+        if expanded == Some(i) {
+            let server_resources: Vec<_> =
+                resources.iter().filter(|r| r.server == info.name).collect();
+            if server_resources.is_empty() {
+                all_rows.push(vec![Span::styled(
+                    "   (no resources)".to_string(),
+                    Style::default().fg(t.text_tertiary),
+                )]);
+            } else {
+                for resource in server_resources {
+                    all_rows.push(vec![Span::styled(
+                        format!("   {} — {}", resource.name, resource.uri),
+                        Style::default().fg(t.text_secondary),
+                    )]);
+                }
+            }
+        }
+    }
+
+    let width = 78.min(sw.saturating_sub(4));
+    // 16 not 10: an expanded resource list adds rows under its server.
+    let n = all_rows.len().clamp(1, 16) as u32;
+    let (x, y, w, h) = centered_slt(width, n + 4, sw, sh);
+    if all_rows.is_empty() {
+        all_rows.push(vec![Span::styled(
+            " no MCP servers configured".to_string(),
+            Style::default().fg(t.text_tertiary),
+        )]);
+    }
+    let content_w = w.saturating_sub(2) as usize;
+    let sel_row = header_rows.get(selected).copied().unwrap_or(usize::MAX);
+    let mut rows = vec![SheetRow {
+        dx: 1,
+        dy: 1,
+        spans: vec![super::pickers::title_span(
+            "MCP servers — t toggle, r reconnect, enter resources, esc close",
+        )],
+    }];
+    rows.extend(all_rows.iter().enumerate().map(|(i, spans)| SheetRow {
+        dx: 1,
+        dy: 2 + i as u32,
+        spans: row_spans(spans.clone(), i == sel_row, content_w),
+    }));
+    sheet_slt(ui, x, y, w, h, rows);
+}
 /// Status label and theme color for one server row: Running rides success,
 /// Connecting warning, Failed and NeedsAuth danger, Disabled the dim text.
 fn mcp_status_style(info: &McpServerInfo) -> (&'static str, Color) {

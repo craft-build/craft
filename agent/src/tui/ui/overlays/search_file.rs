@@ -251,3 +251,218 @@ fn highlighted_path_row(
     }
     spans
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt fuzzy-query overlays
+// ─────────────────────────────────────────────────────────────────────────
+
+use super::{SheetRow, centered_slt, row_spans, sheet_slt};
+
+/// Search modal on the slt frame (Ctrl-F): list on top, query row below.
+pub(super) fn render_search_slt(ui: &mut slt::Context, app: &mut App) {
+    use crate::tui::search_modal::{self, SearchModal};
+
+    if !app.overlays.search.is_open() {
+        return;
+    }
+    let search: &mut SearchModal = &mut app.overlays.search;
+    let t = theme::current();
+    let (sw, sh) = (ui.width(), ui.height());
+
+    let content_rows = if search.matches.is_empty() && !search.query().is_empty() {
+        1
+    } else {
+        search.matches.len().min(16)
+    } as u32;
+    let width = (sw / 2).max(20).min(sw);
+    let height = (content_rows + u32::from(search_modal::search_row_height()) + 2)
+        .min(sh * 3 / 5)
+        .max(3);
+    let (x, y, w, h) = centered_slt(width, height, sw, sh);
+
+    // The titled block claims the first row; the list gets the rows
+    // between it and the query row (legacy [Min(1), Length(1)] split).
+    let list_h = h.saturating_sub(2);
+    search.viewport_height = list_h as usize;
+    search.ensure_visible();
+
+    let max_label_width = w.saturating_sub(2) as usize; // label indent
+    let end = (search.scroll_offset + search.viewport_height).min(search.matches.len());
+    let sel_row = search.selected - search.scroll_offset;
+    let list_rows: Vec<Vec<Span<'static>>> = (search.scroll_offset..end)
+        .map(|i| {
+            search_modal::highlighted_row(&search.matches[i], max_label_width, i == search.selected)
+        })
+        .collect();
+
+    // Query row with a block cursor over the char at the caret.
+    let query = search.query().to_string();
+    let cursor_char = search.cursor();
+    let before: String = query.chars().take(cursor_char).collect();
+    let at: String = query
+        .chars()
+        .nth(cursor_char)
+        .map(String::from)
+        .unwrap_or(" ".into());
+    let after: String = query.chars().skip(cursor_char + 1).collect();
+    let qspans = vec![
+        Span::styled(
+            search_modal::search_prefix(),
+            Style::default().fg(t.text_tertiary),
+        ),
+        Span::raw(before),
+        Span::styled(at, Style::default().bg(t.accent).fg(t.bg_app)),
+        Span::raw(after),
+    ];
+
+    let empty_matches = search.matches.is_empty();
+    let no_matches = empty_matches && !search.query().is_empty();
+    let mut rows = vec![SheetRow {
+        dx: 0,
+        dy: 0,
+        spans: vec![Span::raw(search_modal::MODAL_TITLE)],
+    }];
+    if no_matches {
+        rows.push(SheetRow {
+            dx: 0,
+            dy: 1,
+            spans: vec![Span::styled(
+                search_modal::no_matches_label(),
+                Style::default().fg(t.text_tertiary),
+            )],
+        });
+    } else {
+        rows.extend(list_rows.iter().enumerate().map(|(i, spans)| SheetRow {
+            dx: 0,
+            dy: 1 + i as u32,
+            spans: row_spans(spans.clone(), i == sel_row, w as usize),
+        }));
+    }
+    rows.push(SheetRow {
+        dx: 0,
+        dy: h.saturating_sub(1),
+        spans: qspans,
+    });
+    sheet_slt(ui, x, y, w, h, rows);
+}
+
+/// File picker on the slt frame (Ctrl-S): list on top, query row below,
+/// "scanning…" title + spinner while walking.
+pub(super) fn render_file_picker_slt(ui: &mut slt::Context, app: &mut App) {
+    use crate::tui::file_picker::{self, FilePicker};
+
+    if !app.overlays.file_picker.is_open() {
+        return;
+    }
+    let picker: &mut FilePicker = &mut app.overlays.file_picker;
+    let t = theme::current();
+
+    let Some(s) = picker.session_mut() else {
+        return;
+    };
+    if !s.visible {
+        return;
+    }
+    let (sw, sh) = (ui.width(), ui.height());
+
+    let content_rows = if s.matches.is_empty() && !s.query.is_empty() {
+        1
+    } else {
+        // One row extra when the "+N more files" hint sits at the bottom.
+        let hint_row = u32::from((s.total_matches > file_picker::max_materialized()) as u8);
+        (s.matches.len() as u32).min(16) + hint_row
+    };
+    let width = (sw / 2).max(24).min(sw);
+    let height = (content_rows + u32::from(file_picker::search_row_height()) + 2)
+        .min(sh * 4 / 5)
+        .max(3);
+    let (x, y, w, h) = centered_slt(width, height, sw, sh);
+
+    let list_h = h.saturating_sub(2);
+    s.viewport_height = list_h as usize;
+    s.apply_scroll();
+
+    let max_label_width = w.saturating_sub(2) as usize; // label indent
+    let end = (s.scroll_offset + s.viewport_height).min(s.matches.len());
+    let sel_row = s.selected - s.scroll_offset;
+    let visible_rows = (end - s.scroll_offset) as u32;
+    let list_rows: Vec<Vec<Span<'static>>> = (s.scroll_offset..end)
+        .map(|i| highlighted_path_row(&s.matches[i], max_label_width, i == s.selected))
+        .collect();
+
+    let no_matches = s.matches.is_empty() && !s.query.is_empty();
+    let more_row = s.total_matches > file_picker::max_materialized()
+        && s.scroll_offset + s.viewport_height >= s.matches.len();
+    let more_n = s.total_matches - file_picker::max_materialized();
+
+    // Query row: spinner while walking, block cursor over the caret char.
+    let mut qspans = vec![Span::styled(
+        file_picker::search_prefix(),
+        Style::default().fg(t.text_tertiary),
+    )];
+    if s.walking {
+        let ch = file_picker::spinner_frame(s.started_at.elapsed());
+        qspans.push(Span::styled(
+            format!("{ch} "),
+            Style::default().fg(t.text_tertiary),
+        ));
+    }
+    let query = s.query.clone();
+    let cursor = s.cursor;
+    let before: String = query.chars().take(cursor).collect();
+    let at: String = query
+        .chars()
+        .nth(cursor)
+        .map(String::from)
+        .unwrap_or(" ".into());
+    let after: String = query.chars().skip(cursor + 1).collect();
+    qspans.extend([
+        Span::raw(before),
+        Span::styled(at, Style::default().bg(t.accent).fg(t.bg_app)),
+        Span::raw(after),
+    ]);
+
+    let title = if s.walking {
+        file_picker::MODAL_TITLE_WALKING
+    } else {
+        file_picker::MODAL_TITLE
+    };
+    let mut rows = vec![SheetRow {
+        dx: 0,
+        dy: 0,
+        spans: vec![Span::raw(title)],
+    }];
+    rows.extend(list_rows.iter().enumerate().map(|(i, spans)| SheetRow {
+        dx: 0,
+        dy: 1 + i as u32,
+        spans: row_spans(spans.clone(), i == sel_row, w as usize),
+    }));
+    if no_matches {
+        rows.push(SheetRow {
+            dx: 0,
+            dy: 1 + visible_rows,
+            spans: vec![Span::styled(
+                file_picker::no_matches_label(),
+                Style::default().fg(t.text_tertiary),
+            )],
+        });
+    } else if more_row {
+        rows.push(SheetRow {
+            dx: 0,
+            dy: 1 + visible_rows,
+            spans: vec![Span::styled(
+                format!(
+                    "{}+{more_n} more files (not shown)",
+                    file_picker::label_indent()
+                ),
+                Style::default().fg(t.text_tertiary),
+            )],
+        });
+    }
+    rows.push(SheetRow {
+        dx: 0,
+        dy: h.saturating_sub(1),
+        spans: qspans,
+    });
+    sheet_slt(ui, x, y, w, h, rows);
+}

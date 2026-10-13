@@ -202,13 +202,16 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // Snapshot the frame as plain text (selection copy extracts from this),
     // then draw the current text selection as reversed cells.
     // Paint rects convert to the app's geometry at the storage boundary.
-    app.view.msg_area = geom::Rect::new(msg_area.x, msg_area.y, msg_area.width, msg_area.height);
-    app.view.composer_area = geom::Rect::new(
-        composer_area.x,
-        composer_area.y,
-        composer_area.width,
-        composer_area.height,
-    );
+    {
+        let mut p = app.view.paint.lock().expect("paint handoff");
+        p.msg_area = geom::Rect::new(msg_area.x, msg_area.y, msg_area.width, msg_area.height);
+        p.composer_area = geom::Rect::new(
+            composer_area.x,
+            composer_area.y,
+            composer_area.width,
+            composer_area.height,
+        );
+    }
     snapshot_frame(f, app);
     render_selection(f, app);
 }
@@ -254,7 +257,8 @@ fn render_task_header(f: &mut Frame, app: &App, idx: usize, area: Rect) {
 fn snapshot_frame(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let buf = f.buffer_mut();
-    let frame_text = &mut app.view.frame_text;
+    let mut p = app.view.paint.lock().expect("paint handoff");
+    let frame_text = &mut p.frame_text;
     // Reuse the snapshot rows across frames: at spinner cadence a fresh
     // Vec of freshly allocated row strings per frame is measurable churn.
     frame_text.resize(area.height as usize, String::new());
@@ -290,6 +294,7 @@ fn render_selection(f: &mut Frame, app: &App) {
     let region = sel.region;
     let area = f.area();
     let buf = f.buffer_mut();
+    let frame_text = &app.view.paint.lock().expect("paint handoff").frame_text;
     // The highlight binds to real text: each row is clamped to its text
     // extent inside the selection's region, so padding, margins, the
     // sidebar, and decoration glyphs are never highlighted.
@@ -297,7 +302,7 @@ fn render_selection(f: &mut Frame, app: &App) {
         if r < region.y || r >= region.y + region.height {
             continue;
         }
-        let Some(row) = app.view.frame_text.get(r as usize) else {
+        let Some(row) = frame_text.get(r as usize) else {
             continue;
         };
         let Some((first, last)) = crate::tui::selection::text_extent(row, region) else {
@@ -499,7 +504,7 @@ mod tests {
             assert!(!r.contains('▎'), "composer bled into prompt: {r:?}");
         }
         // The composer area snapshot matches where its accent bar renders.
-        let composer_y = app.view.composer_area.y;
+        let composer_y = app.view.paint.lock().unwrap().composer_area.y;
         assert!(
             rows[composer_y as usize].contains('▎'),
             "composer at {}",
@@ -866,7 +871,9 @@ mod tests {
                 .contains(ratatui::style::Modifier::REVERSED)
         );
         // And the frame snapshot holds the selectable text.
-        assert!(app.view.frame_text[1].contains("Looking at the refresh path"));
+        assert!(
+            app.view.paint.lock().unwrap().frame_text[1].contains("Looking at the refresh path")
+        );
     }
 
     #[test]

@@ -674,13 +674,188 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt panel for this form (stub until the forms wave lands)
+// Wave 2a: the slt panel for this form
 // ─────────────────────────────────────────────────────────────────────────
+
+/// The chat column's width, replicating the legacy `[Min(60), Length(34)]`
+/// split `ui::draw()` used (see `composer::render_slt`): the sidebar is
+/// squeezed before the chat drops below 60 cells. Shared with the other
+/// stacked forms so every box agrees on the width they carve out of the
+/// message area.
+pub(crate) fn chat_width(ui: &slt::Context, app: &crate::tui::app::App) -> u32 {
+    const SIDEBAR_MIN_WIDTH: u32 = 80; // legacy gate (frame.rs)
+    const SIDEBAR_WIDTH: u32 = 34; // legacy `ui/mod.rs` SIDEBAR_WIDTH
+    const CHAT_MIN_WIDTH: u32 = 60; // legacy `Constraint::Min(60)`
+    let term_w = ui.width();
+    if app.session.sidebar_open && term_w >= SIDEBAR_MIN_WIDTH {
+        (term_w - SIDEBAR_WIDTH).max(CHAT_MIN_WIDTH)
+    } else {
+        term_w
+    }
+    .max(1)
+}
+
+/// Word-wrap one styled line to `max` cells, matching ratatui's
+/// `Paragraph` + `Wrap { trim: false }` byte for byte: a faithful port of
+/// `WordWrapper::process_input` (ratatui-widgets `reflow.rs`) over
+/// `(char, style)` cells with `base` patched under each span's style, the
+/// same merge `Paragraph::style` applied. Wrapped rows are re-merged into
+/// spans so each row paints as one `ui.line`.
+pub(crate) fn wrap_line_rows(line: &Line<'_>, max: usize, base: Style) -> Vec<Vec<Span<'static>>> {
+    // Flatten to styled cells first: breaks are chosen per grapheme-ish
+    // char with display widths, then runs of equal style become spans.
+    let cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |c| (c, base.patch(span.style)))
+        })
+        .collect();
+    let width = |c: char| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+
+    let mut wrapped: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut pending_line: Vec<(char, Style)> = Vec::new();
+    let mut pending_word: Vec<(char, Style)> = Vec::new();
+    let mut pending_ws: std::collections::VecDeque<(char, Style)> = Default::default();
+    let mut line_width = 0usize;
+    let mut word_width = 0usize;
+    let mut whitespace_width = 0usize;
+    let mut non_whitespace_previous = false;
+
+    for &(ch, style) in &cells {
+        let is_whitespace = ch.is_whitespace();
+        let symbol_width = width(ch);
+
+        // Symbols wider than the line limit are dropped entirely.
+        if symbol_width > max {
+            continue;
+        }
+
+        let word_found = non_whitespace_previous && is_whitespace;
+        // With trim: false only the untrimmed overflow check can fire (the
+        // trimmed variants require `self.trim`).
+        let untrimmed_overflow =
+            pending_line.is_empty() && word_width + whitespace_width + symbol_width > max;
+
+        if word_found || untrimmed_overflow {
+            // trim: false keeps the whitespace even on an empty line.
+            pending_line.extend(pending_ws.drain(..));
+            line_width += whitespace_width;
+            pending_line.append(&mut pending_word);
+            line_width += word_width;
+            whitespace_width = 0;
+            word_width = 0;
+        }
+
+        let line_full = line_width >= max;
+        let pending_word_overflow =
+            symbol_width > 0 && line_width + whitespace_width + word_width >= max;
+
+        if line_full || pending_word_overflow {
+            let mut remaining_width = max.saturating_sub(line_width);
+            wrapped.push(std::mem::take(&mut pending_line));
+            line_width = 0;
+
+            // Whitespace that still fits the finished row stays there.
+            while let Some(&(ws_ch, _)) = pending_ws.front() {
+                let w = width(ws_ch);
+                if w > remaining_width {
+                    break;
+                }
+                whitespace_width -= w;
+                remaining_width -= w;
+                pending_ws.pop_front();
+            }
+
+            // Don't count the first whitespace after a break toward the
+            // next word: it is consumed by the wrap point.
+            if is_whitespace && pending_ws.is_empty() {
+                continue;
+            }
+        }
+
+        if is_whitespace {
+            whitespace_width += symbol_width;
+            pending_ws.push_back((ch, style));
+        } else {
+            word_width += symbol_width;
+            pending_word.push((ch, style));
+        }
+        non_whitespace_previous = !is_whitespace;
+    }
+
+    // Trailing flush (trim: false keeps trailing whitespace).
+    pending_line.extend(pending_ws.drain(..));
+    pending_line.append(&mut pending_word);
+    if !pending_line.is_empty() {
+        wrapped.push(pending_line);
+    }
+    if wrapped.is_empty() {
+        wrapped.push(Vec::new());
+    }
+
+    // Re-merge runs of equal style into spans.
+    wrapped
+        .into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (ch, style) in row {
+                match spans.last_mut() {
+                    Some(last) if last.style == style => {
+                        last.content.to_mut().push(ch);
+                    }
+                    _ => spans.push(Span::styled(ch.to_string(), style)),
+                }
+            }
+            spans
+        })
+        .collect()
+}
+
+/// Paint a raised-background form (permission prompt / question form):
+/// a self-sized container whose rows are the wrapped `build_lines()`
+/// output. Empty rows still emit one styled space so the row keeps its
+/// height inside the column (the container bg fills the rest, matching
+/// the legacy `Paragraph` whole-area style fill).
+pub(crate) fn paint_raised_form(
+    ui: &mut slt::Context,
+    lines: &[Line<'static>],
+    width: u32,
+    height: u16,
+    bg: slt::style::Color,
+) {
+    let base = Style::default().bg(bg);
+    ui.container()
+        .bg(bg)
+        .w(width)
+        .h(u32::from(height))
+        .col(|ui| {
+            for line in lines {
+                for row in wrap_line_rows(line, width as usize, base) {
+                    ui.line(|ui| {
+                        if row.is_empty() {
+                            ui.styled(" ", base);
+                        }
+                        for span in &row {
+                            ui.styled(span.content.as_ref(), span.style);
+                        }
+                    });
+                }
+            }
+        });
+}
 
 /// Render this form into the slt frame above the composer block. The
 /// container self-sizes from the same height helper the ratatui view used.
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
-    let _ = (ui, app);
-    // TODO(wave-2a forms): port `view()` into slt containers.
+    let prompt = &app.overlays.permission_prompt;
+    if !prompt.is_open() {
+        return;
+    }
+    let t = theme::current();
+    let width = chat_width(ui, app);
+    let lines = prompt.build_lines();
+    paint_raised_form(ui, &lines, width, prompt.height(width as u16), t.bg_raised);
 }
-

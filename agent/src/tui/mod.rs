@@ -609,10 +609,7 @@ async fn run_loop(
 /// become the in-TUI [`EditorForm`] modal; Ctrl-Z suspend/resume is handled
 /// by slt's own signal hook.
 #[allow(dead_code)] // flips on when the parity suite goes green
-async fn drive_slt<P: Provider>(
-    provider: P,
-    startup_prompt: Option<String>,
-) -> io::Result<()> {
+async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> io::Result<()> {
     // Probe the terminal's graphics protocol (kitty/sixel vs halfblocks)
     // before slt takes over the terminal: the probe reads its replies
     // straight from stdin (F.6).
@@ -658,11 +655,10 @@ async fn drive_slt<P: Provider>(
 
     // The frame closure owns the app; hand the session's accumulated input
     // history back out through this box on exit so it can be persisted.
-    let history_out: std::sync::Arc<
-        std::sync::Mutex<crate::storage::input_history::InputHistory>,
-    > = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::storage::input_history::InputHistory::default(),
-    ));
+    let history_out: std::sync::Arc<std::sync::Mutex<crate::storage::input_history::InputHistory>> =
+        std::sync::Arc::new(std::sync::Mutex::new(
+            crate::storage::input_history::InputHistory::default(),
+        ));
 
     let mut view = ui::frame::View::default();
     let mut bells = notify::RunNotificationState::default();
@@ -714,10 +710,8 @@ async fn drive_slt<P: Provider>(
                 // status landed.
                 bells.on_drain();
             }
-            let attention =
-                (!was_waiting && app.status == Status::WaitingApproval).then_some(
-                    notify::Notification::PermissionRequested { tool: None },
-                );
+            let attention = (!was_waiting && app.status == Status::WaitingApproval)
+                .then_some(notify::Notification::PermissionRequested { tool: None });
             let settled = !app.busy() && app.status != Status::WaitingApproval;
             if let Some(notification) = bells.reconcile(attention, settled)
                 && focus.allows(&notification)

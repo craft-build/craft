@@ -724,13 +724,26 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt panel for this form (stub until the forms wave lands)
+// Wave 2a: the slt panel for this form
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Render this form into the slt frame above the composer block. The
-/// container self-sizes from the same height helper the ratatui view used.
+/// container self-sizes from the same height helper the ratatui view used;
+/// row painting is shared with the permission prompt (same raised
+/// `Paragraph` + `Wrap { trim: false }` shape).
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
-    let _ = (ui, app);
-    // TODO(wave-2a forms): port `view()` into slt containers.
+    let form = &app.overlays.question_form;
+    if !form.is_open() {
+        return;
+    }
+    let t = theme::current();
+    let width = super::permission_prompt::chat_width(ui, app);
+    let lines = form.build_lines();
+    super::permission_prompt::paint_raised_form(
+        ui,
+        &lines,
+        width,
+        form.height(width as u16),
+        t.bg_raised,
+    );
 }
-

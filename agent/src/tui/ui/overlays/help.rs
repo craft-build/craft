@@ -33,3 +33,29 @@ pub fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
         scroll,
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt keybinding sheet
+// ─────────────────────────────────────────────────────────────────────────
+
+/// `/help` on the slt frame — the shared sheet renderer with the
+/// keybinding table and scroll footer.
+pub(super) fn render_help_slt(ui: &mut slt::Context, app: &mut App) {
+    let t = theme::current();
+
+    if !matches!(app.overlays.modal, Modal::Help) {
+        return;
+    }
+    let (lines, _) = crate::tui::keybindings::help_lines(&app.overlays.keybinds);
+    let scroll = app.overlays.help_scroll;
+    app.overlays.help_scroll_max = super::usage::render_usage_sheet_slt(
+        ui,
+        "Keybindings",
+        &lines,
+        vec![Span::styled(
+            "↑↓ scroll · esc to close",
+            Style::default().fg(t.text_tertiary),
+        )],
+        scroll,
+    );
+}

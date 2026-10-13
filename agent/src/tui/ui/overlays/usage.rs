@@ -356,3 +356,185 @@ pub fn render_stats(f: &mut Frame, app: &mut App, area: Rect) {
         scroll,
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 2a: the slt cost sheets
+// ─────────────────────────────────────────────────────────────────────────
+
+use super::{SheetRow, centered_slt, clip_spans, sheet_slt};
+
+/// The shared scrollable sheet on the slt frame: dim, centered box, bold
+/// title, a clipped body window, and the footer pinned to the last row
+/// (legacy `render_usage_sheet` geometry). Returns `max_scroll`.
+pub(super) fn render_usage_sheet_slt(
+    ui: &mut slt::Context,
+    title: &str,
+    lines: &[Line<'static>],
+    footer: Vec<Span<'static>>,
+    scroll: usize,
+) -> usize {
+    let (sw, sh) = (ui.width(), ui.height());
+    let height = (lines.len() as u32 + 4).min(sh);
+    let width = 64.min(sw.saturating_sub(4));
+    let (x, y, w, h) = centered_slt(width, height, sw, sh);
+
+    let w_in = w.saturating_sub(2) as usize;
+    // Title and footer claim two lines of the box; the body must fit in
+    // the rest or it would spill over the dimmed chat on short terminals.
+    let visible = h.saturating_sub(3) as usize;
+    let scroll = scroll.min(lines.len().saturating_sub(visible.min(lines.len())));
+    let max_scroll = lines.len().saturating_sub(visible.min(lines.len()));
+
+    let mut rows = vec![SheetRow {
+        dx: 1,
+        dy: 1,
+        spans: vec![super::pickers::title_span(title)],
+    }];
+    rows.extend(
+        lines
+            .iter()
+            .skip(scroll)
+            .take(visible)
+            .enumerate()
+            .map(|(i, line)| {
+                // An empty Line still occupies its row in the legacy
+                // sheet; a fully clipped row keeps one space so the
+                // layout below is unaffected either way.
+                let mut spans = clip_spans(line.spans.clone(), w_in);
+                if spans.is_empty() {
+                    spans.push(Span::raw(" "));
+                }
+                SheetRow {
+                    dx: 1,
+                    dy: 2 + i as u32,
+                    spans,
+                }
+            }),
+    );
+    rows.push(SheetRow {
+        dx: 1,
+        dy: h.saturating_sub(1),
+        spans: clip_spans(footer, w_in),
+    });
+    sheet_slt(ui, x, y, w, h, rows);
+    max_scroll
+}
+
+/// `/usage` on the slt frame.
+pub(super) fn render_usage_slt(ui: &mut slt::Context, app: &mut App) {
+    let t = theme::current();
+
+    let Modal::Usage(rows) = &app.overlays.modal else {
+        return;
+    };
+    let w = 56usize; // body column width, as the old table used
+    let mut lines = Vec::new();
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " no usage recorded yet",
+            Style::default().fg(t.text_tertiary),
+        )));
+    } else {
+        lines.push(section_label("Per model:"));
+        lines.extend(rows.iter().map(|row| usage_row_line(row, w)));
+    }
+    let quota = quota_lines(&app.overlays.usage_quota);
+    if !quota.is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(quota);
+    }
+    let total_tokens: u64 = rows.iter().map(|r| r.tokens).sum();
+    // Costs sum like the session ledger: `None` until a priced model shows up.
+    let total_cost = rows.iter().filter_map(|r| r.cost).reduce(|a, b| a + b);
+    let footer_cost = match total_cost {
+        Some(cost) => crate::storage::stats::format_usd(cost),
+        None => "—".to_string(),
+    };
+    let scroll = app.overlays.usage_scroll;
+    app.overlays.usage_scroll_max = render_usage_sheet_slt(
+        ui,
+        "Session usage",
+        &lines,
+        vec![
+            Span::styled(
+                format!(" total {}", crate::usage::format_tokens(total_tokens)),
+                Style::default().fg(t.text_secondary),
+            ),
+            Span::styled(
+                format!("  {}", footer_cost),
+                Style::default().fg(t.text_secondary),
+            ),
+            Span::styled(
+                "  ctrl+r reload · esc to close",
+                Style::default().fg(t.text_tertiary),
+            ),
+        ],
+        scroll,
+    );
+}
+
+/// `/stats` on the slt frame.
+pub(super) fn render_stats_slt(ui: &mut slt::Context, app: &mut App) {
+    let t = theme::current();
+
+    let Modal::Stats(view) = &app.overlays.modal else {
+        return;
+    };
+    if view.empty {
+        app.overlays.usage_scroll_max = render_usage_sheet_slt(
+            ui,
+            "Cost stats",
+            &[Line::from(Span::styled(
+                " no runs recorded",
+                Style::default().fg(t.text_tertiary),
+            ))],
+            vec![Span::styled(
+                " esc to close",
+                Style::default().fg(t.text_tertiary),
+            )],
+            0,
+        );
+        return;
+    }
+    let w = 56usize;
+    let mut lines = vec![section_label("By model:")];
+    lines.extend(view.rows.iter().map(|row| usage_row_line(row, w)));
+    if view.models_overflow > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" +{} more models", view.models_overflow),
+            Style::default().fg(t.text_tertiary),
+        )));
+    }
+    if !view.by_session.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_label("Top sessions:"));
+        lines.extend(view.by_session.iter().map(session_line));
+    }
+    let scroll = app.overlays.usage_scroll;
+    app.overlays.usage_scroll_max = render_usage_sheet_slt(
+        ui,
+        "Cost stats",
+        &lines,
+        vec![
+            Span::styled(
+                format!(" total {}", crate::usage::format_tokens(view.total_tokens)),
+                Style::default().fg(t.text_secondary),
+            ),
+            Span::styled(
+                format!(
+                    "  {}",
+                    crate::storage::stats::format_total_cost(
+                        view.total_cost,
+                        view.unpriced_records
+                    )
+                ),
+                Style::default().fg(t.text_secondary),
+            ),
+            Span::styled(
+                format!("  {} sessions  esc to close", view.sessions),
+                Style::default().fg(t.text_tertiary),
+            ),
+        ],
+        scroll,
+    );
+}
