@@ -7,7 +7,7 @@
     the widget.
 
     ▎
-    ▎ ▸ Read ]8;;file://<ROOT>/src/x.ts\s]8;;\]8;;file://<ROOT>/src/x.ts\r]8;;\]8;;file://<ROOT>/src/x.ts\c]8;;\]8;;file://<ROOT>/src/x.ts\/]8;;\]8;;file://<ROOT>/src/x.ts\x]8;;\]8;;file://<ROOT>/src/x.ts\.]8;;\]8;;file://<ROOT>/src/x.ts\t]8;;\]8;;file://<ROOT>/src/x.ts\s]8;;\                                               10 lines
+    ▎ ▸ Read src/x.ts                                               10 lines
     ▎
 
     The file defines a Widget class with render and a default export.

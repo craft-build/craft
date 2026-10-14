@@ -4,7 +4,7 @@
     ▎
 
     ▎
-    ▎ ▾ Edit ]8;;file://<ROOT>/craft.toml\c]8;;\]8;;file://<ROOT>/craft.toml\r]8;;\]8;;file://<ROOT>/craft.toml\a]8;;\]8;;file://<ROOT>/craft.toml\f]8;;\]8;;file://<ROOT>/craft.toml\t]8;;\]8;;file://<ROOT>/craft.toml\.]8;;\]8;;file://<ROOT>/craft.toml\t]8;;\]8;;file://<ROOT>/craft.toml\o]8;;\]8;;file://<ROOT>/craft.toml\m]8;;\]8;;file://<ROOT>/craft.toml\l]8;;\                                                +1 -1
+    ▎ ▾ Edit craft.toml                                                +1 -1
     ▎ 13 - links = []
     ▎ 13 + links = ["raylib"]
     ▎

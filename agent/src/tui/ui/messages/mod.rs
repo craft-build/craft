@@ -43,8 +43,9 @@ fn clamp_row_u16(delta: u32) -> u16 {
 /// terminates the parameter, then the visible text, then the closer.
 const OSC8_OPEN: &str = "\u{1b}]8;;";
 const OSC8_CLOSE: &str = "\u{1b}\\";
-/// The bare closer (empty target). Production builds the wrap inline in
-/// [`apply_link_slt`]; the constant stays for the `strip_osc8` tests.
+/// The bare closer (empty target). No production code embeds OSC-8 bytes
+/// in symbols anymore (slt owns emission via `Cell::hyperlink`); the
+/// constant stays for the `strip_osc8` tests.
 #[cfg_attr(not(test), allow(dead_code))]
 const OSC8_EMPTY: &str = "\u{1b}]8;;\u{1b}\\";
 
@@ -701,18 +702,42 @@ mod tests {
             rows[cy]
         );
 
-        // Card header: OSC-8 link present, full path text survives, and no
-        // cell inside the message area falls back to an unset background
-        // (the pre-fix symptom: black sections after the linked cell).
+        // Card header: native OSC-8 link attached via `Cell::hyperlink`
+        // (slt emits the escapes), full path text survives in the symbols,
+        // and no cell inside the message area falls back to an unset
+        // background (the pre-fix symptom: black sections after the
+        // linked cell).
         let ry = rows.iter().position(|r| r.contains("Read ")).unwrap();
-        assert!(rows[ry].contains("\u{1b}]8;;file://"));
         assert!(rows[ry].contains("probe.rs"));
+        assert!(
+            (0..tb.width()).any(|x| buf
+                .get(x, ry as u32)
+                .hyperlink
+                .as_deref()
+                .is_some_and(|u| u.starts_with("file://"))),
+            "header cells must carry a file:// hyperlink"
+        );
         for x in 4..78u32 {
             assert!(
                 buf.get(x, ry as u32).style.bg.is_some(),
                 "unpainted cell at x={x}"
             );
         }
+    }
+
+    /// Like [`transcript_rows`] but returns the backend so tests can
+    /// inspect `Cell::hyperlink` (OSC-8 is emitted by the slt backend,
+    /// not embedded in symbols).
+    fn transcript_backend(app: &mut crate::tui::app::App, w: u32, h: u32) -> slt::TestBackend {
+        let mut tb = slt::TestBackend::new(w, h);
+        tb.render(|ui| super::render_slt(ui, app));
+        tb.render(|ui| super::render_slt(ui, app));
+        tb
+    }
+
+    /// Whether any cell in the frame carries an OSC-8 hyperlink.
+    fn any_linked(tb: &slt::TestBackend) -> bool {
+        (0..tb.height()).any(|y| (0..tb.width()).any(|x| tb.buffer().get(x, y).hyperlink.is_some()))
     }
 
     #[test]
@@ -744,27 +769,23 @@ mod tests {
         }
 
         app.view.follow = false;
-        let rows = transcript_rows(&mut app, 80, 12);
+        let tb = transcript_backend(&mut app, 80, 12);
+        let rows: Vec<String> = (0..tb.height()).map(|y| tb.line(y).to_string()).collect();
         let header_row = rows
             .iter()
             .find(|r| r.contains("Read "))
             .expect("header rendered");
         assert!(
-            header_row.contains("\u{1b}]8;;"),
-            "header row wrapped: {header_row:?}"
+            header_row.contains("osc8_probe.rs"),
+            "header filename visible: {header_row:?}"
         );
-        assert!(header_row.contains("file://"));
-        assert!(header_row.contains("\u{1b}]8;;\u{1b}\\"));
+        assert!(any_linked(&tb), "header cells must carry a hyperlink");
 
-        // Scroll the card fully above the viewport: no escapes anywhere.
+        // Scroll the card fully above the viewport: no links anywhere.
         app.view.follow = false;
         app.view.scroll = crate::tui::ui::scrollback::ScrollPos { seg: 1, row: 0 };
-        let rows = transcript_rows(&mut app, 80, 12);
-        assert!(
-            !rows.iter().any(|r| r.contains("\u{1b}]8;;")),
-            "scrolled-out link must not be injected"
-        );
-
+        let tb = transcript_backend(&mut app, 80, 12);
+        assert!(!any_linked(&tb), "scrolled-out link must not be attached");
         // A link whose column range runs past the viewport is skipped, but
         // its visible text must survive untouched (spans render first;
         // injection only adds escapes to cells it wraps).
@@ -782,13 +803,16 @@ mod tests {
             image: None,
         });
         narrow_app.view.follow = false;
-        let rows = transcript_rows(&mut narrow_app, 24, 12);
-        let screen = rows.join("\n");
+        let tb = transcript_backend(&mut narrow_app, 24, 12);
+        let screen = (0..tb.height())
+            .map(|y| tb.line(y).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             screen.contains("Read") && screen.contains("/var/folders"),
             "off-screen link's visible text dropped: {screen:?}"
         );
-        assert!(!screen.contains("\u{1b}]8;;"));
+        assert!(!any_linked(&tb));
     }
 
     // ── hyperlink helpers (moved from `tui/hyperlink.rs`) ──
@@ -1063,14 +1087,13 @@ fn paint_rows_slt(
     }
 }
 
-/// Wrap a linked cell's symbol in OSC-8 and set the first-class
-/// [`slt::Cell::hyperlink`] target. The escape bytes live in the symbol (what
-/// the golden fixtures capture byte-for-byte), while `hyperlink` carries
-/// the URL for terminals that render OSC 8 natively.
+/// Mark a cell as part of an OSC-8 hyperlink via the first-class
+/// [`slt::Cell::hyperlink`] field; the slt backend emits and closes the
+/// escape sequence itself (run-coalesced across contiguous linked cells).
+/// Escape bytes must NOT be embedded in `cell.symbol`: slt normalizes
+/// symbols at the flush boundary and replaces C0/C1 controls (ESC) with
+/// U+FFFD, which renders as `�`/`?` garbage instead of the filename.
 fn apply_link_slt(cell: &mut slt::Cell, uri: &str) {
-    let prev = cell.symbol.to_string();
-    let wrapped = format!("\u{1b}]8;;{uri}\u{1b}\\{prev}\u{1b}]8;;\u{1b}\\");
-    cell.symbol = wrapped.into();
     cell.hyperlink = Some(uri.to_string().into());
 }
 
