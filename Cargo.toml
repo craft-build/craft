@@ -9,11 +9,11 @@ resolver = "3"
 members = ["agent"]
 
 [workspace.dependencies]
-agent-client-protocol = "2.2"
+agent-client-protocol = { version = "3.3", features = ["stdio", "process"] }
 aho-corasick = "1"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 arc-swap = "1"
-argosy = "0.6"
+argosy = "0.7"
 async-trait = "0.1"
 barkml = "0.10"
 base64 = "0.23"
@@ -31,7 +31,7 @@ indexmap = "2"
 jiff = "0.2"
 jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 libc = "0.2"
-minijinja = "2"
+minijinja = "3"
 nucleo-matcher = "0.3"
 regex = "1"
 reqwest = "0.13"
@@ -67,7 +67,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 toml = "1"
 toml_edit = "0.25"
 tracing = "0.1"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 two-face = {
   version = "0.5",

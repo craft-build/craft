@@ -474,16 +474,6 @@ mod tests {
         (0..h).map(|y| tb.line(y)).collect()
     }
 
-    /// Renders ONLY the transcript painter at the full terminal width (the
-    /// way the legacy tests drove `messages::render` with `f.area()` — no
-    /// sidebar split), two passes for the layout handoff.
-    fn transcript_rows(app: &mut crate::tui::app::App, w: u32, h: u32) -> Vec<String> {
-        let mut tb = slt::TestBackend::new(w, h);
-        tb.render(|ui| super::render_slt(ui, app));
-        tb.render(|ui| super::render_slt(ui, app));
-        (0..h).map(|y| tb.line(y)).collect()
-    }
-
     #[test]
     fn streaming_frames_share_completed_transcript_lines() {
         use crate::tui::app::App;
@@ -672,7 +662,6 @@ mod tests {
             review: None,
             image: None,
         });
-        let mut view = crate::tui::ui::frame::View::default();
         let mut tb = slt::TestBackend::new(80, 20);
         tb.render(|ui| super::render_slt(ui, &mut app));
         tb.render(|ui| super::render_slt(ui, &mut app));

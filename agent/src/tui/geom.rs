@@ -38,21 +38,10 @@ impl Rect {
         self.x.saturating_add(self.width)
     }
 
-    /// One past the bottommost row (clamped; mirrors ratatui semantics).
-    pub const fn bottom(&self) -> u16 {
-        self.y.saturating_add(self.height)
-    }
-
     /// True when the region has no area.
     #[allow(dead_code)] // foundation API; consumed by the paint pivot
     pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
-    }
-
-    /// True when `(row, col)` lies inside the region (inclusive of origin,
-    /// exclusive of the far edge).
-    pub const fn contains(&self, row: u16, col: u16) -> bool {
-        row >= self.y && row < self.bottom() && col >= self.x && col < self.right()
     }
 
     /// Shrink by removing `dx` columns on each side and `dy` rows top+bottom,
@@ -69,16 +58,6 @@ impl Rect {
         }
     }
 
-    /// Convert to the `slt` (`u32`-field) rect used at the paint boundary.
-    pub fn to_slt(self) -> slt::Rect {
-        slt::Rect::new(
-            self.x as u32,
-            self.y as u32,
-            self.width as u32,
-            self.height as u32,
-        )
-    }
-
     /// Convert from an `slt` rect, saturating overflowing coordinates.
     pub fn from_slt(r: slt::Rect) -> Self {
         Self::new(
@@ -87,26 +66,5 @@ impl Rect {
             r.width.min(u16::MAX as u32) as u16,
             r.height.min(u16::MAX as u32) as u16,
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn contains_rowcol() {
-        let r = Rect::new(5, 2, 10, 4);
-        assert!(r.contains(2, 5));
-        assert!(r.contains(5, 14));
-        assert!(r.contains(2, 5));
-        assert!(!r.contains(9, 5));
-        assert!(!r.contains(2, 15));
-    }
-
-    #[test]
-    fn slt_roundtrip() {
-        let r = Rect::new(1, 2, 30, 40);
-        assert_eq!(Rect::from_slt(r.to_slt()), r);
     }
 }

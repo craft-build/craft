@@ -73,7 +73,6 @@ pub enum Modal {
 pub struct RecipeEntry {
     /// Recipe `name` field or the file stem.
     pub name: String,
-    pub description: String,
     /// Parameters that need a `key=value` argument (no default).
     pub params: Vec<String>,
 }
@@ -682,7 +681,6 @@ mod tests {
         app.overlays.modal = Modal::Recipes {
             entries: vec![RecipeEntry {
                 name: "deploy".into(),
-                description: "ship it".into(),
                 params: vec!["env".into(), "tag".into()],
             }],
             selected: 0,

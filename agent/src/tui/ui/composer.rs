@@ -453,6 +453,7 @@ pub(crate) fn render_slt(
                 }
                 ui.line(|ui| {
                     ui.styled(" ".repeat(PROMPT_W), surf);
+                    #[allow(unused)]
                     ui.container().w(text_w as u32).col(|ui| {
                         let _ = ui.textarea(state, view_rows as u32);
                     });

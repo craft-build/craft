@@ -411,7 +411,6 @@ impl App {
             }
             entries.push(crate::tui::modals::RecipeEntry {
                 name,
-                description: r.description.clone().unwrap_or_default(),
                 params: r
                     .parameters
                     .iter()
