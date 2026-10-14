@@ -243,6 +243,16 @@ pub(crate) fn box_top(app: &App, term_w: u32, term_h: u32) -> u32 {
     term_h.saturating_sub(box_height(view_rows(app, term_w)) + rows_below(app))
 }
 
+/// Height the whole composer block occupies under the box: the box
+/// itself (text rows plus padding) and the rows below it. Pure in app
+/// state so the transcript painter can budget for it synchronously (see
+/// `messages::render_slt`). Only valid while the box is shown — while a
+/// form (permission/question/plan) takes its place, the caller falls
+/// back to the stale handoff.
+pub(crate) fn block_height(app: &App, term_w: u32) -> u32 {
+    box_height(view_rows(app, term_w)) + rows_below(app)
+}
+
 /// The footer hint row, when there is one: the dismissed plan form's
 /// `Plan Ctrl+T` reminder, or the running-subagents hint (task 96).
 fn footer_hint(app: &App) -> Option<Vec<Span<'static>>> {
@@ -426,7 +436,6 @@ pub(crate) fn render_slt(
     let box_rect: Option<slt::Rect> = if show_box {
         // ── Composer box: surface panel, bar + `>` prompt, the textarea ──
         let surf = Style::default().bg(t.bg_surface);
-        let mut text_rect: Option<slt::Rect> = None;
         let box_resp = ui
             .container()
             .bg(t.bg_surface)
@@ -437,17 +446,16 @@ pub(crate) fn render_slt(
                 // The bar, `>` and hint are painted by the overlay pass (the
                 // widget owns its rows, so they cannot flow inline through
                 // them); the flow reserves their cells. The textarea sits at a
-                // fixed width so its rect (read one frame later) is stable.
-                // Blank rows above and below give the input its height.
+                // fixed width so its rect is predictable. Blank rows above
+                // and below give the input its height.
                 for _ in 0..BOX_PAD_ROWS {
                     ui.styled(" ", surf);
                 }
                 ui.line(|ui| {
                     ui.styled(" ".repeat(PROMPT_W), surf);
-                    let resp = ui.container().w(text_w as u32).col(|ui| {
+                    ui.container().w(text_w as u32).col(|ui| {
                         let _ = ui.textarea(state, view_rows as u32);
                     });
-                    text_rect = Some(resp.rect);
                 });
                 for _ in 0..BOX_PAD_ROWS {
                     ui.styled(" ", surf);
@@ -460,12 +468,28 @@ pub(crate) fn render_slt(
         // is re-applied on top: the accent bar down the box's left edge, the
         // `>` prompt and `enter send` hint on the first row, the text cells
         // restyled to the craft palette, bang-prefix syntax colors on the
-        // first wrapped row, and the placeholder on an empty composer. Rects
-        // are the previous frame's (`Response::rect` reports post-layout
-        // geometry, so a first-of-kind or resized frame simply skips); the
-        // geometry derives from the text rect, whose fixed-width wrapper
-        // predicts reliably (the outer box container's does not).
-        if let Some(rect) = text_rect.filter(|r| r.width > 0 && r.height > 0) {
+        // first wrapped row, and the placeholder on an empty composer.
+        //
+        // The textarea rect is COMPUTED, not read from `Response::rect`:
+        // that is a retained per-id lookup, and a todo/files toggle (ctrl+b
+        // / ctrl+t) changes the widget call order, so the id misses and slt
+        // hands back the full-screen fallback rect — the overlay then
+        // painted a ▎ bar down column 0 and the placeholder at row 0 for a
+        // frame. The box is bottom-anchored with fixed insets, so the rect
+        // is exact synchronously; when the terminal is too short for the
+        // box (clipped flow), skip the pass like before.
+        let term_h = ui.height().max(1) as u32;
+        let text_rect: Option<slt::Rect> = if term_h > box_height(view_rows) + rows_below(app) {
+            Some(slt::Rect {
+                x: SIDE_MARGIN + PROMPT_W as u32,
+                y: box_top(app, term_w, term_h) + BOX_PAD_ROWS as u32,
+                width: text_w as u32,
+                height: view_rows as u32,
+            })
+        } else {
+            None
+        };
+        if let Some(rect) = text_rect {
             let base = Style::default().fg(t.text_primary).bg(t.bg_surface);
             let placeholder_style = Style::default().fg(t.text_disabled).bg(t.bg_surface);
             let bar_style = Style::default().fg(t.accent).bg(t.bg_surface);

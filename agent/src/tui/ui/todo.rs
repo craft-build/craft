@@ -214,6 +214,23 @@ fn file_rows(app: &App, width: usize) -> Vec<Vec<Span<'static>>> {
     rows
 }
 
+/// Height the whole widget occupies in the chat column (0 when both
+/// lists are empty): the two padding rows, the section rows, and the
+/// trailing blank separator row. Pure in app state so the transcript
+/// painter can budget for it synchronously (see `messages::render_slt`)
+/// instead of trusting the one-frame-stale area handoff — a ctrl+b /
+/// ctrl+t toggle must not let stale-height bands overflow into the
+/// sections and composer below.
+pub(crate) fn block_height(app: &App, width: usize) -> u32 {
+    let todo = todo_rows(app, width).len();
+    let files = file_rows(app, width).len();
+    if todo == 0 && files == 0 {
+        0
+    } else {
+        (todo + files + 3) as u32
+    }
+}
+
 /// Render the widget above the composer (nothing while both lists are
 /// empty), followed by a one-row gap. Section header rects are published
 /// for click-to-fold, one frame stale like every other hit region.

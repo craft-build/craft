@@ -725,6 +725,77 @@ mod tests {
         }
     }
 
+    /// Ctrl+b / ctrl+t toggle the todo/files sections, shifting the
+    /// composer and status line on that same frame. Two one-frame-stale
+    /// sources used to corrupt exactly that frame: the composer's overlay
+    /// pass read `Response::rect` (a retained per-id lookup that returns
+    /// the full-screen fallback when the extra section row shifts the
+    /// widget call order — painting a ▎ bar down column 0 and the
+    /// placeholder at row 0), and the transcript built its bands with the
+    /// previous frame's area height. Both are now computed synchronously,
+    /// so the toggle frame must be byte-identical to the settled frame.
+    #[test]
+    fn section_toggle_reflows_without_a_glitch_frame() {
+        use crate::tui::app::{App, Message};
+        use crate::tui::provider::{PlanItem, Tone, TouchedFile};
+
+        let mut app = App::new();
+        for i in 0..40 {
+            app.conversation
+                .messages
+                .push(Message::Assistant(format!("filler line {i}")));
+        }
+        app.plan = vec![PlanItem {
+            label: "step one".into(),
+            done: false,
+            active: true,
+        }];
+        app.files = vec![TouchedFile {
+            path: "src/a.rs".into(),
+            status: "M".into(),
+            tone: Tone::Warning,
+        }];
+
+        let mut view = crate::tui::ui::frame::View::default();
+        let mut tb = slt::TestBackend::new(80, 24);
+        let dump = |tb: &slt::TestBackend| {
+            (0..tb.height())
+                .map(|y| tb.line(y).to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view));
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view));
+        let before = dump(&tb);
+
+        // The glitch frame: expand the files list — the transcript area
+        // shrinks and the composer moves up right now. The FIRST render
+        // after the toggle must already match the settled state.
+        app.session.files_open = true;
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view));
+        let toggled = dump(&tb);
+        assert!(
+            toggled.contains("▾ files 1") && toggled.contains("src/a.rs"),
+            "expanded files section rendered"
+        );
+        assert_ne!(before, toggled, "the toggle must change the layout");
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view));
+        let settled = dump(&tb);
+        assert_eq!(
+            toggled, settled,
+            "the toggle frame must already be the settled layout"
+        );
+
+        // And the shrink direction (collapse again) must be clean too.
+        app.session.files_open = false;
+        tb.render(|ui| crate::tui::ui::frame::frame(ui, &mut app, &mut view));
+        let collapsed = dump(&tb);
+        assert_eq!(
+            collapsed, before,
+            "collapse returns to the folded layout on the first frame"
+        );
+    }
+
     /// Like [`transcript_rows`] but returns the backend so tests can
     /// inspect `Cell::hyperlink` (OSC-8 is emitted by the slt backend,
     /// not embedded in symbols).
@@ -880,14 +951,37 @@ mod tests {
 /// next frame's event handlers and wrap math (one frame stale, like the
 /// ratatui-era snapshot reads).
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
-    // slt lays out after the frame closure returns, so the wrap width and
-    // viewport height can only come from the previous frame's handoff; the
-    // bookkeeping draw below republishes the true rect every frame (the
-    // parity harness renders twice, so frame 2 is exact). 80 columns is the
-    // first-frame fallback.
-    let (area_w, area_h) = {
+    // slt lays out after the frame closure returns, so the wrap width can
+    // only come from the previous frame's handoff; the bookkeeping draw
+    // below republishes the true rect every frame (the parity harness
+    // renders twice, so frame 2 is exact). 80 columns is the first-frame
+    // fallback.
+    let (area_w, stale_h) = {
         let p = app.view.paint.lock().expect("paint handoff");
         (if p.width == 0 { 80 } else { p.width }, p.msg_area.height)
+    };
+    // The viewport HEIGHT, though, must not be stale: the transcript
+    // sits above the todo/files sections and the composer block, and a
+    // ctrl+b / ctrl+t toggle (or a composer row count change) reshuffles
+    // those heights on this very frame. Bands built with the stale
+    // height overflow the shrunk grow(1) area (slt is overflow-by-design)
+    // and paint over the sections, composer and status line for a frame.
+    // Those sibling heights are pure functions of app state, so budget
+    // synchronously; the handoff stays as fallback for the form-open
+    // layouts whose heights aren't cheaply derivable.
+    let term_h = u16::try_from(ui.height()).unwrap_or(u16::MAX);
+    let forms_open = app.overlays.permission_prompt.is_open()
+        || app.overlays.question_form.is_open()
+        || app.plan_mode.plan_form.is_visible();
+    let area_h = if forms_open {
+        stale_h
+    } else {
+        let task_h = u16::from(app.active_task.is_some());
+        let todo_w =
+            (u32::from(area_w).saturating_sub(super::composer::SIDE_MARGIN * 2) as usize).max(1);
+        let todo_h = super::todo::block_height(app, todo_w) as u16;
+        let composer_h = super::composer::block_height(app, u32::from(area_w)) as u16;
+        term_h.saturating_sub(task_h + todo_h + composer_h)
     };
     let inner = geom::Rect {
         x: 0,
