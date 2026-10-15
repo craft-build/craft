@@ -221,12 +221,30 @@ pub(super) async fn finish_turn(
             _ => None,
         })
         .collect();
+    // An empty reply is replaced by the `(empty)` marker and its evidence
+    // discarded below; record what the model actually did here — this is
+    // the only place the cause survives. (The reasoning-presence flag in
+    // particular distinguishes a thinking-only turn from a stream that
+    // produced nothing.) Computed before the move into `turn`.
+    let empty_reasoning = content
+        .iter()
+        .any(|block| matches!(block, history::AssistantContent::Reasoning(_)));
     turn.push(output.assistant);
     if tool_calls.is_empty() {
         let reply = turn.last().expect("assistant pushed").text();
         // A truncated reply continues: the model's cut-off message is
         // already in `turn`, so the next request resumes from it.
         let truncated = output.finish_reason == Some(FinishReason::Length);
+        if reply.trim().is_empty() && !truncated {
+            tracing::warn!(
+                model = params.model_spec.as_deref().unwrap_or("unknown"),
+                finish_reason = ?output.finish_reason,
+                input_tokens = output.usage.input_tokens,
+                output_tokens = output.usage.output_tokens,
+                reasoning = empty_reasoning,
+                "model reply had no text and no tool calls; replacing with the (empty) marker"
+            );
+        }
         if let Some(outcome) = super::handle_terminal_reply(
             history,
             turn,

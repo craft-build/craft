@@ -55,6 +55,7 @@ tokio = {
 }
 toml.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
 two-face.workspace = true

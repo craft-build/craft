@@ -103,7 +103,7 @@ impl RotatingFileWriter {
         Self::with_limits(&logs, max_bytes, max_files)
     }
 
-    fn with_limits(dir: &Path, max_bytes: u64, max_files: u32) -> io::Result<Self> {
+    pub(crate) fn with_limits(dir: &Path, max_bytes: u64, max_files: u32) -> io::Result<Self> {
         let dir = dir.to_path_buf();
         let path = file_path(&dir, 0);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;

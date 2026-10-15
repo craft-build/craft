@@ -14,6 +14,9 @@ use std::io::IsTerminal;
 #[snafu::report]
 async fn main() -> Result<(), Error> {
     let cli = Cli::parse();
+    // Diagnostics before any subsystem starts: tracing events (model stalls,
+    // MCP failures) land in the rotating log file from the first turn on.
+    craft::logging::init();
     cli.warn_ignored_flags();
     cli.validate()?;
     match &cli.command {
