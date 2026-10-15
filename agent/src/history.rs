@@ -216,6 +216,12 @@ impl ToolResultContent {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Reasoning {
     pub content: Vec<ReasoningContent>,
+    /// The wire, provider and model that produced the turn, as rig's
+    /// serialized `Origin`: providers replay their native reasoning items
+    /// only for turns their own wire produced, so the origin must ride the
+    /// history back into the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<serde_json::Value>,
 }
 
 /// One reasoning part. `Opaque` carries provider-opaque reasoning payloads
@@ -230,11 +236,20 @@ pub enum ReasoningContent {
         /// the provider rejects the history.
         #[serde(default)]
         signature: Option<String>,
+        /// The provider-native item the block was decoded from, verbatim.
+        /// Rig's encoders replay signed or redacted thinking only through
+        /// this item: a canonically rebuilt block goes back as plain text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native: Option<serde_json::Value>,
     },
     /// Provider-redacted reasoning payload (base64). Bedrock and Anthropic
-    /// replay these verbatim as `redactedContent` / `redacted_thinking`.
+    /// replay these verbatim as `redactedContent` / `redacted_thinking` —
+    /// which only the native item can do; the base64 `data` alone is not
+    /// re-encodable.
     Redacted {
         data: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native: Option<serde_json::Value>,
     },
     Opaque(String),
 }
@@ -286,7 +301,9 @@ mod tests {
                     content: vec![ReasoningContent::Text {
                         text: "hmm".into(),
                         signature: None,
+                        native: None,
                     }],
+                    origin: None,
                 })],
             },
             Message::User {

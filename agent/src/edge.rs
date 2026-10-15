@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use rig_core::completion::message::{
     AssistantContent, AssistantMessage, CallId, DocumentSourceKind, ImageMediaType,
-    Message as RigMessage, Reasoning as RigReasoning, ToolCall as RigToolCall, ToolName,
+    Message as RigMessage, Origin, Reasoning as RigReasoning, ToolCall as RigToolCall, ToolName,
     ToolResultContent as RigToolResultContent, UserContent,
 };
 use rig_core::completion::{CompletionRequest, ToolDefinition};
@@ -26,14 +26,16 @@ pub(crate) fn tool_name(name: &str) -> ToolName {
 }
 
 /// Pull a provider reasoning signature out of a block's native item, when
-/// the provider preserved one (Anthropic and Bedrock write `signature`).
+/// the provider preserved one. Anthropic writes a top-level `signature`;
+/// Bedrock nests it in `reasoningContent.reasoningText.signature`.
 fn reasoning_signature(reasoning: &RigReasoning) -> Option<String> {
-    reasoning
-        .native
-        .as_ref()
-        .and_then(|native| native.item.get("signature"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+    let item = reasoning.native.as_ref().map(|native| &native.item);
+    item.and_then(|item| {
+        item.get("signature")
+            .or_else(|| item.pointer("/reasoningContent/reasoningText/signature"))
+    })
+    .and_then(serde_json::Value::as_str)
+    .map(str::to_owned)
 }
 
 /// Build the provider request for one model call.
@@ -145,13 +147,35 @@ pub fn own_message_to_rig(message: &history::Message) -> RigMessage {
         history::Message::User { content } => RigMessage::User {
             content: content.iter().map(own_user_block_to_rig).collect(),
         },
-        history::Message::Assistant { content } => RigMessage::Assistant(AssistantMessage::new(
-            content
-                .iter()
-                .flat_map(own_assistant_block_to_rig)
-                .collect(),
-        )),
+        history::Message::Assistant { content } => {
+            // Replay of provider-native reasoning items requires the turn's
+            // origin to name the wire that produced it: rig's request
+            // shaping keeps native items only for the target's own turns.
+            let origin = content.iter().find_map(|block| match block {
+                history::AssistantContent::Reasoning(reasoning) => origin_from_history(
+                    reasoning.origin.as_ref(),
+                ),
+                _ => None,
+            });
+            let message = AssistantMessage::new(
+                content
+                    .iter()
+                    .flat_map(own_assistant_block_to_rig)
+                    .collect(),
+            );
+            RigMessage::Assistant(match origin {
+                Some(origin) => message.with_origin(origin),
+                None => message,
+            })
+        }
     }
+}
+
+/// The stored turn origin, decoded back into rig's `Origin`.
+fn origin_from_history(stored: Option<&serde_json::Value>) -> Option<Origin> {
+    stored
+        .and_then(|value| serde_json::from_value::<Origin>(value.clone()).ok())
+        .filter(|origin| !origin.model.is_empty())
 }
 
 fn own_user_block_to_rig(block: &history::UserContent) -> UserContent {
@@ -198,10 +222,19 @@ fn own_assistant_block_to_rig(block: &history::AssistantContent) -> Vec<Assistan
             // carries nothing any provider can replay (Bedrock rejects the
             // block outright); dropping it recovers sessions persisted
             // without signatures.
-            .filter(|reasoning| {
-                !reasoning.text.is_empty() || reasoning.redacted || reasoning.native.is_some()
+            .filter(|(reasoning, native)| {
+                !reasoning.text.is_empty() || reasoning.redacted || native.is_some()
             })
-            .map(AssistantContent::Reasoning)
+            .map(|(reasoning, native)| {
+                let block = AssistantContent::Reasoning(reasoning);
+                // Re-attach the provider item so the wire replays it
+                // verbatim (signature included) instead of demoting the
+                // thinking to plain text.
+                match native {
+                    Some(item) => block.with_native(item),
+                    None => block,
+                }
+            })
             .collect(),
         history::AssistantContent::ToolCall(call) => vec![AssistantContent::tool_call(
             &call.id,
@@ -211,33 +244,51 @@ fn own_assistant_block_to_rig(block: &history::AssistantContent) -> Vec<Assistan
     }
 }
 
-/// Each persisted reasoning part becomes its own streamed block; signatures
-/// ride the provider-native item when the provider kept one.
-fn own_reasoning_to_rig(item: &history::ReasoningContent) -> RigReasoning {
+/// Each persisted reasoning part becomes its own streamed block, with its
+/// provider-native item (when one was kept) for verbatim replay.
+fn own_reasoning_to_rig(
+    item: &history::ReasoningContent,
+) -> (RigReasoning, Option<serde_json::Value>) {
     match item {
-        history::ReasoningContent::Text { text, .. } => RigReasoning {
-            text: text.clone(),
-            redacted: false,
-            native: None,
-        },
-        history::ReasoningContent::Opaque(data) => RigReasoning {
-            text: data.clone(),
-            redacted: false,
-            native: None,
-        },
-        history::ReasoningContent::Redacted { data } => RigReasoning {
-            text: data.clone(),
-            redacted: true,
-            native: None,
-        },
+        history::ReasoningContent::Text { text, native, .. } => (
+            RigReasoning {
+                text: text.clone(),
+                redacted: false,
+                native: None,
+            },
+            native.clone(),
+        ),
+        history::ReasoningContent::Opaque(data) => (
+            RigReasoning {
+                text: data.clone(),
+                redacted: false,
+                native: None,
+            },
+            None,
+        ),
+        history::ReasoningContent::Redacted { data, native } => (
+            RigReasoning {
+                text: data.clone(),
+                redacted: true,
+                native: None,
+            },
+            native.clone(),
+        ),
     }
 }
 
 fn rig_reasoning_block_to_own(reasoning: &RigReasoning) -> history::ReasoningContent {
     let signature = reasoning_signature(reasoning);
+    // The provider-native item is the only replayable form of signed or
+    // redacted thinking; keep it beside the canonical text. `native_item`
+    // (not the raw `native`) so an edited block is not replayed stale.
+    let native = AssistantContent::Reasoning(reasoning.clone())
+        .native_item()
+        .cloned();
     match () {
         _ if reasoning.redacted => history::ReasoningContent::Redacted {
             data: reasoning.text.clone(),
+            native,
         },
         _ if reasoning.text.is_empty() && signature.is_none() => {
             history::ReasoningContent::Opaque(String::new())
@@ -245,6 +296,7 @@ fn rig_reasoning_block_to_own(reasoning: &RigReasoning) -> history::ReasoningCon
         _ => history::ReasoningContent::Text {
             text: reasoning.text.clone(),
             signature,
+            native,
         },
     }
 }
@@ -256,15 +308,18 @@ fn rig_reasoning_block_to_own(reasoning: &RigReasoning) -> history::ReasoningCon
 /// correlate with whatever id we recorded at call time.
 pub fn assistant_from_stream(
     choice: &[AssistantContent],
+    origin: Option<&Origin>,
     call_ids: &HashMap<String, String>,
     streamed: &StreamedParts,
 ) -> history::Message {
     let _ = choice;
     let mut content = Vec::new();
     if !streamed.reasoning.content.is_empty() {
-        content.push(history::AssistantContent::Reasoning(
-            streamed.reasoning.clone(),
-        ));
+        let mut reasoning = streamed.reasoning.clone();
+        // The turn's origin is what lets the next request replay the
+        // reasoning's provider-native items on the same wire.
+        reasoning.origin = origin.and_then(|origin| serde_json::to_value(origin).ok());
+        content.push(history::AssistantContent::Reasoning(reasoning));
     }
     if !streamed.text.is_empty() {
         content.push(history::AssistantContent::text(streamed.text.clone()));
@@ -309,6 +364,7 @@ pub fn fold_streamed_event(parts: &mut StreamedParts, event: &StreamEvent) {
                     .push(history::ReasoningContent::Text {
                         text: String::new(),
                         signature: None,
+                        native: None,
                     });
             }
             if let Some(history::ReasoningContent::Text { text: pending, .. }) =
@@ -402,6 +458,7 @@ fn rig_message_to_own(message: &RigMessage) -> history::Message {
                     AssistantContent::Reasoning(reasoning) => {
                         Some(history::AssistantContent::Reasoning(history::Reasoning {
                             content: vec![rig_reasoning_block_to_own(reasoning)],
+                            origin: None,
                         }))
                     }
                     AssistantContent::ToolCall(call) => {
@@ -469,7 +526,9 @@ fn media_rig_to_own(media: ImageMediaType) -> history::ImageMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_bedrock::completion::Converse;
     use rig_core::completion::message::ToolFunction;
+    use rig_core::wire::Wire;
 
     fn part(index: u32) -> Part {
         serde_json::from_value(serde_json::json!(index)).expect("part index")
@@ -486,7 +545,9 @@ mod tests {
                         content: vec![history::ReasoningContent::Text {
                             text: "thinking".into(),
                             signature: None,
+                            native: None,
                         }],
+                        origin: None,
                     }),
                     history::AssistantContent::ToolCall(history::ToolCall::new(
                         "t1",
@@ -521,6 +582,16 @@ mod tests {
         rig_core::message::Native {
             fingerprint: rig_core::message::Fingerprint::of(&item),
             item,
+        }
+    }
+
+    /// Attach a provider-native item the way a rig decoder does, so its
+    /// fingerprint matches the canonical block and the item replays.
+    fn reasoning_with_native(reasoning: RigReasoning, json: &str) -> RigReasoning {
+        let item: serde_json::Value = serde_json::from_str(json).expect("native item");
+        match AssistantContent::Reasoning(reasoning).with_native(item) {
+            AssistantContent::Reasoning(reasoning) => reasoning,
+            _ => unreachable!("with_native preserves the block kind"),
         }
     }
 
@@ -790,7 +861,7 @@ mod tests {
         );
         let mut ids = HashMap::new();
         ids.insert("provider-id".to_string(), "internal-1".to_string());
-        let message = assistant_from_stream(&[], &ids, &parts);
+        let message = assistant_from_stream(&[], None, &ids, &parts);
         let history::Message::Assistant { content } = &message else {
             panic!("assistant message");
         };
@@ -842,6 +913,128 @@ mod tests {
     /// provider-native items a generic mapping cannot mint, so the replay
     /// copy drops the empty block instead of sending thinking Bedrock
     /// rejects — exactly the failure this guards against.
+    /// Regression for craft-build/craft#17: rig-bedrock 0.44 keeps the
+    /// thinking signature nested in the native item
+    /// (`reasoningContent.reasoningText.signature`), and the only replayable
+    /// form of signed thinking is the native item itself. The decode must
+    /// find the nested signature, keep the item, and the encode must
+    /// re-attach both the item and the turn origin so the wire replays the
+    /// block verbatim instead of demoting it to text.
+    #[test]
+    fn bedrock_signed_thinking_replays_through_its_native_item() {
+        let native = r#"{"reasoningContent":{"reasoningText":{"text":"Thinking about it.","signature":"sig-bedrock"}}}"#;
+        let mut parts = StreamedParts::default();
+        fold_streamed_event(
+            &mut parts,
+            &reasoning_event(
+                0,
+                reasoning_with_native(
+                    RigReasoning {
+                        text: "Thinking about it.".into(),
+                        redacted: false,
+                        native: None,
+                    },
+                    native,
+                ),
+            ),
+        );
+        let origin = Origin::new("bedrock.converse", "bedrock", "us.anthropic.claude-opus-5-5");
+        let message = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
+        let history::Message::Assistant { content } = &message else {
+            panic!("assistant message");
+        };
+        let history::AssistantContent::Reasoning(reasoning) = &content[0] else {
+            panic!("reasoning block");
+        };
+        // The nested Bedrock signature is extracted...
+        match &reasoning.content[0] {
+            history::ReasoningContent::Text { signature, native, .. } => {
+                assert_eq!(signature, &Some("sig-bedrock".into()));
+                assert!(native.is_some(), "the provider item must be kept");
+            }
+            other => panic!("expected text reasoning, got {other:?}"),
+        }
+        // ...and the turn origin rides the history for same-wire replay.
+        assert!(reasoning.origin.is_some());
+
+        let rig = own_to_rig(&[message]);
+        let RigMessage::Assistant(assistant) = &rig[0] else {
+            panic!("assistant message");
+        };
+        // The origin names the wire that produced the turn...
+        assert_eq!(assistant.origin.as_ref(), Some(&origin));
+        // ...and the native item is re-attached with a current fingerprint,
+        // so rig's encoders replay the signed block verbatim.
+        let item: serde_json::Value = serde_json::from_str(native).unwrap();
+        assert_eq!(
+            assistant.content.first().and_then(|block| block.native_item()),
+            Some(&item)
+        );
+    }
+
+    /// The turn origin from the response reaches the replayed message even
+    /// when the reasoning arrived as deltas only (no complete block).
+    #[test]
+    fn origin_rides_unsigned_reasoning_turns_too() {
+        let mut parts = StreamedParts::default();
+        fold_streamed_event(&mut parts, &reasoning_delta(0, "hmm"));
+        let origin = Origin::new("bedrock.converse", "bedrock", "us.anthropic.claude-opus-5-5");
+        let message = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
+        let rig = own_to_rig(&[message]);
+        let RigMessage::Assistant(assistant) = &rig[0] else {
+            panic!("assistant message");
+        };
+        assert_eq!(assistant.origin.as_ref(), Some(&origin));
+    }
+
+    /// End-to-end against the real rig-bedrock encoder: a Bedrock turn whose
+    /// signed thinking was captured with its native item and origin must go
+    /// back over the wire as `reasoningContent` with the signature — not be
+    /// demoted to a plain text block, which is what broke craft-build/craft#17.
+    #[test]
+    fn bedrock_wire_replays_signed_thinking_verbatim() {
+        let model = "us.anthropic.claude-opus-5-5";
+        let native = r#"{"reasoningContent":{"reasoningText":{"text":"Thinking about it.","signature":"sig-bedrock"}}}"#;
+        let mut parts = StreamedParts::default();
+        parts.text.push_str("Hello there.");
+        fold_streamed_event(
+            &mut parts,
+            &reasoning_event(
+                0,
+                reasoning_with_native(
+                    RigReasoning {
+                        text: "Thinking about it.".into(),
+                        redacted: false,
+                        native: None,
+                    },
+                    native,
+                ),
+            ),
+        );
+        // The origin a Bedrock response carries: rig's provider descriptor
+        // name, not craft's config spelling.
+        let origin = Origin::new("bedrock.converse", "aws_bedrock", model);
+        let turn = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
+        let request = to_request(&[turn, history::Message::user("next")], &[], None, None, None);
+        let encoded = Converse::new(model)
+            .encode(request, rig_core::wire::Mode::Streaming)
+            .expect("the request is representable");
+        let body = serde_json::to_value(&encoded.body).expect("body is JSON");
+        let messages = body.pointer("/messages").and_then(|m| m.as_array()).expect("messages");
+        // [assistant reasoning+text, user "next"]: the reasoning must be the
+        // first block of the assistant message, still signed.
+        let assistant = messages
+            .iter()
+            .find(|m| m.get("role") == Some(&serde_json::json!("assistant")))
+            .expect("assistant message");
+        let blocks = assistant.get("content").and_then(|c| c.as_array()).expect("content");
+        assert_eq!(
+            blocks.first().and_then(|b| b.pointer("/reasoningContent/reasoningText/signature")),
+            Some(&serde_json::json!("sig-bedrock")),
+            "signed thinking must replay as reasoningContent, not text: {blocks:?}"
+        );
+    }
+
     #[test]
     fn signature_only_thinking_block_replays_with_its_signature() {
         let mut parts = StreamedParts::default();
@@ -856,7 +1049,7 @@ mod tests {
                 },
             ),
         );
-        let message = assistant_from_stream(&[], &HashMap::new(), &parts);
+        let message = assistant_from_stream(&[], None, &HashMap::new(), &parts);
         let history::Message::Assistant { content } = &message else {
             panic!("assistant message");
         };
@@ -867,7 +1060,9 @@ mod tests {
                 content: vec![history::ReasoningContent::Text {
                     text: String::new(),
                     signature: Some("sig-1".into()),
+                    native: None,
                 }],
+                origin: None,
             }))
         );
         // ...and the wire copy omits the empty block rather than shipping
@@ -883,7 +1078,9 @@ mod tests {
                 content: vec![history::ReasoningContent::Text {
                     text: "deliberating".into(),
                     signature: Some("sig-2".into()),
+                    native: None,
                 }],
+                origin: None,
             })],
         }];
         let rig = own_to_rig(&own);
@@ -907,7 +1104,7 @@ mod tests {
         };
         assert_eq!(reasoning.content.len(), 1);
         match &reasoning.content[0] {
-            history::ReasoningContent::Text { text, signature } => {
+            history::ReasoningContent::Text { text, signature, .. } => {
                 assert_eq!(text, "deliberating");
                 // The canonical wire form of 0.44 carries signatures only in
                 // provider-native items, which a generic mapping cannot mint.
@@ -945,7 +1142,7 @@ mod tests {
                 },
             ),
         );
-        let message = assistant_from_stream(&[], &HashMap::new(), &parts);
+        let message = assistant_from_stream(&[], None, &HashMap::new(), &parts);
         let history::Message::Assistant { content } = &message else {
             panic!("assistant message");
         };
@@ -958,6 +1155,7 @@ mod tests {
             history::ReasoningContent::Text {
                 text: "step one".into(),
                 signature: Some("sig-3".into()),
+                native: None,
             }
         );
         // Bedrock-native redacted: kept as its own kind so replay can decode
@@ -966,7 +1164,8 @@ mod tests {
         assert_eq!(
             reasoning.content[1],
             history::ReasoningContent::Redacted {
-                data: "cmVkYWN0ZWQ=".into()
+                data: "cmVkYWN0ZWQ=".into(),
+                native: None,
             }
         );
     }
@@ -978,9 +1177,11 @@ mod tests {
                 content: vec![
                     history::ReasoningContent::Redacted {
                         data: "YmVkcm9jay1ibG9i".into(),
+                        native: None,
                     },
                     history::ReasoningContent::Opaque("openai-encrypted".into()),
                 ],
+                origin: None,
             })],
         }];
         let rig = own_to_rig(&own);
@@ -1012,7 +1213,8 @@ mod tests {
         assert_eq!(
             reasoning.content[0],
             history::ReasoningContent::Redacted {
-                data: "YmVkcm9jay1ibG9i".into()
+                data: "YmVkcm9jay1ibG9i".into(),
+                native: None,
             }
         );
     }
@@ -1027,7 +1229,9 @@ mod tests {
                     content: vec![history::ReasoningContent::Text {
                         text: String::new(),
                         signature: None,
+                        native: None,
                     }],
+                    origin: None,
                 }),
                 history::AssistantContent::text("answer"),
             ],

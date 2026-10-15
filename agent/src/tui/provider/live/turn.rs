@@ -613,17 +613,21 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         }
     }
     // Abort safety: stage the user's message into the shared session before
-    // the run owns it. Every commit path replaces `session.history`
-    // wholesale with the run's copy (prompt included exactly once), so the
-    // staged copy only survives when this task dies without committing —
-    // the interrupt grace abort on a stuck await — and the next turn still
-    // sees the prompt instead of silently losing it.
+    // the run owns it. The run's own turn adds the prompt to the request and
+    // commits it, so the copy handed to the run must be taken BEFORE the
+    // staging push — otherwise the request and the committed history both
+    // carry the prompt twice (issue #17: the model saw every prompt doubled,
+    // and Bedrock merged the adjacent user messages). The staged copy only
+    // survives when this task dies without committing — the interrupt grace
+    // abort on a stuck await — and the next turn still sees the prompt
+    // instead of silently losing it.
     let mut history = {
         let mut session = state.lock().await;
+        let history = session.history.clone();
         session
             .history
             .push(crate::run::prompt_message(&text, &images));
-        session.history.clone()
+        history
     };
     let thinking = state.lock().await.thinking;
     let dedup = state.lock().await.dedup.clone();
