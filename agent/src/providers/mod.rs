@@ -3,6 +3,7 @@
 //! [`DynamicModel`] erases the concrete model type behind rig-core's
 //! `DynModel` so the rest of the crate never names a provider type.
 
+mod bedrock;
 mod catalog;
 mod dynamic;
 mod openai_compat;
@@ -376,15 +377,24 @@ pub(crate) fn build_azure(
 /// Bedrock has no craft-side credential or base URL: the AWS SDK's default
 /// chain (environment credentials, `~/.aws` profiles, SSO, container/IMDS
 /// roles) supplies both credentials and region, resolved lazily on the
-/// first request. The AWS SDK also owns its transport, so the shared
-/// reqwest [`Timeouts`] policy does not apply; AWS call timeouts live in
-/// the SDK config instead.
+/// first request. `region`/`profile` in the provider config override the
+/// region and name the shared-config profile (e.g. an assume-role or SSO
+/// account that is not the default profile). The AWS SDK also owns its
+/// transport, so the shared reqwest [`Timeouts`] policy does not apply;
+/// AWS call timeouts live in the SDK config instead.
 pub(crate) fn build_bedrock(
-    _: &ProviderConfig,
+    config: &ProviderConfig,
     _: Timeouts,
     _: &dyn Fn(&str) -> Result<String>,
 ) -> Result<rig_bedrock::client::BedrockRuntime> {
-    Ok(rig_bedrock::client::BedrockRuntime::from_env())
+    let mut builder = rig_bedrock::client::BedrockRuntime::builder();
+    if let Some(region) = &config.region {
+        builder = builder.region(region.clone());
+    }
+    if let Some(profile) = &config.profile {
+        builder = builder.profile_name(profile.clone());
+    }
+    Ok(builder.build())
 }
 
 /// The OAuth and GitHub-token device flows are async; providers are still
@@ -712,7 +722,23 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_discovery_uses_configured_models() {
-        for kind in [ProviderKind::Voyageai, ProviderKind::Bedrock] {
+        // Bedrock now discovers through the AWS control-plane API; without
+        // credentials that surfaces as an error instead of an empty list,
+        // and discover_models = false restores the configured-only catalog.
+        let mut parsed = Config::parse(
+            "provider \"test\" { kind = \"amazon-bedrock\"\n  model \"m\" { name = \"Manual\" }\n  discover_models = false }",
+        )
+        .unwrap();
+        let bedrock = parsed.providers.remove("test").unwrap();
+        assert_eq!(
+            build(&bedrock)
+                .models_with(&bedrock, &|_| Ok("test-key".into()))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        for kind in [ProviderKind::Voyageai] {
             let config = config(kind, "http://127.0.0.1:1");
             assert!(config.discover_models);
             assert_eq!(

@@ -195,6 +195,10 @@ macro_rules! providers {
                 let discovered = if config.discover_models {
                     if matches!(self, Self::OpenaiCompatible(_)) && config.base_url.is_some() {
                         list_openai_compatible_models(config, credential).await?
+                    } else if matches!(self, Self::Bedrock(_)) {
+                        // The rig-bedrock data-plane client has no listing;
+                        // inference profiles come from the control-plane API.
+                        super::bedrock::list_models(config).await?
                     } else {
                         match self {
                             $(Self::$variant(client) => list_models!(client, $listing),)+

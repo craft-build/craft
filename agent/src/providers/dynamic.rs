@@ -132,7 +132,20 @@ impl DynamicModel {
                 && (kind == super::ProviderKind::Anthropic
                     || (kind == super::ProviderKind::Bedrock && id.contains("claude")))
             {
-                request.max_tokens = Some(u64::from(info.max_output.unwrap_or(8192)));
+                let fallback = info.max_output.unwrap_or(8192);
+                if info.max_output.is_none() {
+                    // Claude requires an explicit maxTokens; 8192 is the
+                    // safe default when no catalog entry names the model's
+                    // real ceiling. That default is tight for adaptive
+                    // thinking (issue #17's empty first turns), so say so.
+                    tracing::warn!(
+                        model = id,
+                        fallback_max_tokens = fallback,
+                        "no catalog output limit for this model; set provider model max_output_tokens \
+                         or refresh the models.dev catalog for the model's real ceiling"
+                    );
+                }
+                request.max_tokens = Some(u64::from(fallback));
             }
             let extra = crate::thinking::wire(thinking, kind, id, &info, request.max_tokens);
             let effective_output = match (request.max_tokens, info.max_output.map(u64::from)) {

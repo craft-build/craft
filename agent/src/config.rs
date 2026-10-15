@@ -325,6 +325,14 @@ pub struct ProviderConfig {
     pub api_version: Option<String>,
     /// ChatGPT account ID when using an explicit access token.
     pub account_id: Option<String>,
+    /// Bedrock region override; without it the AWS SDK resolves the region
+    /// (AWS_REGION, the shared config's default profile, or the profile
+    /// below). Other providers reject this field.
+    pub region: Option<String>,
+    /// Named profile in the AWS shared config files (`~/.aws/config`), for
+    /// accounts whose credentials are not the default profile's. Equivalent
+    /// to AWS_PROFILE, scoped to this provider. Bedrock only.
+    pub profile: Option<String>,
     /// Disable discovery for compatible servers without a models endpoint.
     #[serde(default = "default_discover_models")]
     pub discover_models: bool,
@@ -577,6 +585,22 @@ impl ProviderConfig {
                          AWS_ENDPOINT_URL or a profile endpoint_url in ~/.aws/config",
             }
             .fail();
+        }
+        for (field, value) in [("region", &self.region), ("profile", &self.profile)] {
+            if let Some(value) = value {
+                if value.trim().is_empty() {
+                    return InvalidSnafu {
+                        reason: format!("provider {field} must not be empty"),
+                    }
+                    .fail();
+                }
+                if self.kind != ProviderKind::Bedrock {
+                    return InvalidSnafu {
+                        reason: format!("{field} is only supported by bedrock"),
+                    }
+                    .fail();
+                }
+            }
         }
         if let Some(base) = &self.base_url {
             let url = url::Url::parse(base).context(InvalidBaseUrlSnafu)?;
@@ -872,6 +896,29 @@ mod tests {
         assert_eq!(provider.kind, ProviderKind::Bedrock);
         assert!(provider.api_key_env.is_none());
         assert!(provider.base_url.is_none());
+    }
+
+    #[test]
+    fn bedrock_accepts_region_and_profile() {
+        let config = Config::parse(
+            "provider \"bedrock\" {\n  kind = \"amazon-bedrock\"\n  region = \"us-east-1\"\n  profile = \"work\"\n}",
+        )
+        .unwrap();
+        let provider = &config.providers["bedrock"];
+        assert_eq!(provider.region.as_deref(), Some("us-east-1"));
+        assert_eq!(provider.profile.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn region_and_profile_are_bedrock_only_and_nonempty() {
+        for text in [
+            "provider \"x\" { kind = \"openai\"\n  region = \"us-east-1\" }",
+            "provider \"x\" { kind = \"openai\"\n  profile = \"work\" }",
+            "provider \"x\" { kind = \"amazon-bedrock\"\n  region = \" \" }",
+            "provider \"x\" { kind = \"amazon-bedrock\"\n  profile = \"\" }",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
     }
 
     #[test]
