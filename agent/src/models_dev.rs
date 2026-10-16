@@ -13,8 +13,9 @@
 //! - A stale cache with a failing fetch leaves the warm catalog untouched
 //!   and lookups simply return `None` until one succeeds. Catalog failures
 //!   never break startup.
-//! - Providers without an API URL are skipped: they are not
-//!   API-addressable, so their metadata can never be used.
+//! - Every provider in the catalog is kept: lookup is slug-keyed metadata
+//!   only, and several slugs we consult (`amazon-bedrock`, `anthropic`,
+//!   `google`, …) declare no REST `api` URL in the catalog.
 //!
 //! One deliberate divergence: the reference keys models by exact ID because
 //! its own model IDs *are* catalog IDs. Here discovery comes from Rig, whose
@@ -56,7 +57,6 @@ struct CatalogProvider {
     name: String,
     #[serde(default)]
     npm: String,
-    api: Option<String>,
     models: HashMap<String, CatalogModel>,
 }
 
@@ -153,15 +153,14 @@ impl ModelMeta {
     }
 }
 
-/// Keep only API-addressable providers, flattening each model to
-/// [`ModelMeta`]. Mirrors the reference's skip rule of dropping providers
-/// with no API URL; the other reference filters (blocked slugs, npm
-/// allowlist, builtin overlap) exist to keep the catalog from shadowing
-/// native providers inside its meta-provider, which this repo does not have.
+/// Flatten each provider's models to [`ModelMeta`]. Unlike the reference —
+/// which skips providers with no API URL because it builds an
+/// API-addressable meta-provider — this repo uses the catalog purely as a
+/// slug-keyed metadata side-table, and slugs like `amazon-bedrock` carry no
+/// REST `api` URL while holding exactly the limits we need.
 fn flatten(index: CatalogIndex) -> HashMap<String, HashMap<String, ModelMeta>> {
     index
         .into_iter()
-        .filter(|(_, provider)| provider.api.is_some())
         .map(|(slug, provider)| {
             let models = provider
                 .models
@@ -459,10 +458,14 @@ mod tests {
     }
 
     #[test]
-    fn flatten_skips_providers_without_api_and_applies_defaults() {
+    fn flatten_keeps_all_providers_and_applies_defaults() {
         let flattened = flatten(parsed_index());
-        assert_eq!(flattened.len(), 1);
+        assert_eq!(flattened.len(), 2);
         assert!(flattened.contains_key("some-vendor"));
+        // Providers without an API URL are kept: lookup is slug-keyed, and
+        // e.g. `amazon-bedrock` declares none while holding real limits.
+        assert!(flattened.contains_key("no-api"));
+        assert_eq!(flattened["no-api"]["m"].context, 128_000);
 
         let big = &flattened["some-vendor"]["big"];
         assert_eq!(big.context, 200_000);
@@ -497,10 +500,7 @@ mod tests {
 
         save_cached(&path, &index);
         let loaded = load_cached(&path, now).unwrap();
-        assert_eq!(
-            loaded["some-vendor"].api.as_deref(),
-            Some("https://api.somevendor.test/v1")
-        );
+        assert_eq!(loaded["some-vendor"].name, "Some Vendor");
         assert_eq!(loaded["some-vendor"].models.len(), 4);
 
         // A cache older than the TTL (written "25h ago" relative to `now`)
@@ -565,7 +565,6 @@ mod tests {
         );
         assert!(metadata_for("some-vendor", "dated-202601012").is_none());
         assert!(metadata_for("some-vendor", "bigge").is_none());
-        assert!(metadata_for("no-api", "m").is_none());
         assert!(metadata_for("other", "big").is_none());
         assert_eq!(context_for("some-vendor", "big"), Some((200_000, 32_000)));
 
