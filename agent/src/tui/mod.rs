@@ -137,11 +137,79 @@ fn trace_frame(line: String) {
     }
 }
 
+/// `TERM` values of terminals that are truecolor (24-bit) but whose name
+/// doesn't carry `256color`. SSH forwards `TERM` but not `COLORTERM`, so
+/// these are the only signal left on the remote side.
+const TRUECOLOR_TERMS: &[&str] = &[
+    "alacritty",
+    "alacritty-direct",
+    "contour",
+    "foot",
+    "foot-extra",
+    "ghostty",
+    "kitty",
+    "mintty",
+    "mlterm",
+    "rio",
+    "wezterm",
+    "wezterm-ssh",
+    "xterm-ghostty",
+    "xterm-kitty",
+];
+
+/// Color depth for the slt run config, extending `slt::ColorDepth::detect`.
+///
+/// slt's chain is `NO_COLOR` → no color, `COLORTERM=truecolor|24bit` →
+/// truecolor, `TERM` contains `256color` → 256-color, else 16-color Basic.
+/// SSH sessions forward `TERM` but never `COLORTERM`, so on a modern
+/// truecolor terminal whose `TERM` lacks `256color` (Ghostty's
+/// `xterm-ghostty`, Alacritty, WezTerm, kitty, foot, …) every theme color is
+/// downsampled to one of 16 ANSI colors: muted palettes collapse to black /
+/// gray / white ("the coloring disappeared") and all bundled themes look
+/// the same. The known-truecolor `TERM` list and the terminfo `*-direct`
+/// direct-color convention close that gap; everything else keeps slt's
+/// semantics untouched.
+fn detect_color_depth() -> slt::ColorDepth {
+    let var = |name: &str| std::env::var(name).ok();
+    color_depth_for(
+        var("NO_COLOR").as_deref(),
+        var("COLORTERM").as_deref(),
+        var("TERM").as_deref(),
+    )
+}
+
+/// Pure core of [`detect_color_depth`] so the precedence chain is testable
+/// without racing other tests through the process environment.
+fn color_depth_for(
+    no_color: Option<&str>,
+    colorterm: Option<&str>,
+    term: Option<&str>,
+) -> slt::ColorDepth {
+    // https://no-color.org — any non-empty value disables color.
+    if no_color.is_some_and(|v| !v.is_empty()) {
+        return slt::ColorDepth::NoColor;
+    }
+    if let Some(ct) = colorterm.map(str::to_ascii_lowercase) {
+        if ct == "truecolor" || ct == "24bit" {
+            return slt::ColorDepth::TrueColor;
+        }
+    }
+    let term = term.unwrap_or_default().trim().to_ascii_lowercase();
+    if TRUECOLOR_TERMS.contains(&term.as_str()) || term.ends_with("-direct") {
+        return slt::ColorDepth::TrueColor;
+    }
+    if term.contains("256color") {
+        return slt::ColorDepth::EightBit;
+    }
+    slt::ColorDepth::Basic
+}
+
+
 /// Startup sequencing (resume gating on the first `StatusChanged(Done)`),
 /// the bell/notification state machine, per-frame maintenance (file picker
 /// ticks, image loads, draft checkpointing, typewriter reveal), and
-/// input-history persistence on exit. The `$EDITOR` handoff (Alt-O) and the
-/// plan-file editor (Ctrl-O) are the in-TUI [`EditorForm`] modal; Ctrl-Z
+/// input-history persistence on exit. The `$EDITOR` handoff (Alt-O) and
+/// the plan-file editor (Ctrl-O) are the in-TUI [`EditorForm`] modal; Ctrl-Z
 /// suspend/resume is handled by slt's own signal hook.
 async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> io::Result<()> {
     // Probe the terminal's graphics protocol (kitty/sixel vs halfblocks)
@@ -206,6 +274,7 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
         .title("CraftCode")
         .mouse(true)
         .tick_rate(std::time::Duration::from_millis(80))
+        .color_depth(detect_color_depth())
         // The app owns Ctrl-C (tri-state quit chord through the
         // keybinding table); slt must not exit on it.
         .handle_ctrl_c(false);
@@ -586,6 +655,57 @@ mod tests {
         app.overlays.modal = modals::Modal::None;
         app.overlays.file_picker.open("");
         assert!(!base_owns_keyboard(&app));
+    }
+
+    /// The SSH case: `TERM` arrives (truecolor terminal, no `256color` in
+    /// the name) but `COLORTERM` does not — the depth must still resolve to
+    /// truecolor instead of collapsing the theme into 16 ANSI colors.
+    #[test]
+    fn truecolor_term_survives_missing_colorterm_over_ssh() {
+        for term in [
+            "xterm-ghostty",
+            "XTerm-Ghostty",
+            "xterm-kitty",
+            "alacritty",
+            "wezterm",
+            "wezterm-ssh",
+            "foot",
+            "xterm-direct",
+        ] {
+            assert_eq!(
+                color_depth_for(None, None, Some(term)),
+                slt::ColorDepth::TrueColor,
+                "TERM={term}"
+            );
+        }
+    }
+
+    /// slt's original precedence must survive the extension: NO_COLOR wins,
+    /// COLORTERM confirms truecolor, `*256color` stays 256-color, and an
+    /// unknown TERM still falls back to 16-color Basic.
+    #[test]
+    fn color_depth_precedence_chain_is_preserved() {
+        assert_eq!(
+            color_depth_for(Some("1"), Some("truecolor"), Some("xterm-ghostty")),
+            slt::ColorDepth::NoColor
+        );
+        assert_eq!(
+            color_depth_for(None, Some("24bit"), Some("xterm")),
+            slt::ColorDepth::TrueColor
+        );
+        assert_eq!(
+            color_depth_for(None, None, Some("xterm-256color")),
+            slt::ColorDepth::EightBit
+        );
+        assert_eq!(
+            color_depth_for(None, None, Some("tmux-256color")),
+            slt::ColorDepth::EightBit
+        );
+        assert_eq!(
+            color_depth_for(None, None, Some("vt220")),
+            slt::ColorDepth::Basic
+        );
+        assert_eq!(color_depth_for(None, None, None), slt::ColorDepth::Basic);
     }
 
     /// Digest a provider burst exactly as `drive_slt`'s frame closure does:
