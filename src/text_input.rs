@@ -19,7 +19,7 @@ use gpui::{
     SharedString, StyledText, Window, div, px, rgb,
 };
 
-use crate::theme;
+use crate::{menus, theme};
 
 type SubmitCallback = dyn Fn(&str, &mut Window, &mut App);
 type ChangeCallback = dyn Fn(&mut Window, &mut App);
@@ -151,58 +151,72 @@ impl TextInput {
             .unwrap_or(self.content.len())
     }
 
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selection_anchor = Some(0);
+        self.cursor = self.content.len();
+        cx.notify();
+    }
+
+    /// Copies the selection; `false` when there's nothing selected.
+    fn copy(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(range) = self.selected_range() else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(self.content[range].to_string()));
+        true
+    }
+
+    fn cut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.copy(cx) {
+            self.delete_selection();
+            self.changed(window, cx);
+        }
+    }
+
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            let text = if self.multiline {
+                text
+            } else {
+                text.replace(['\r', '\n'], " ")
+            };
+            self.replace_selection(&text);
+            self.changed(window, cx);
+        }
+    }
+
+    fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(cb) = self.on_change.clone() {
+            cb(window, cx);
+        }
+        cx.notify();
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = event.keystroke.clone();
         let submit_mod = ks.modifiers.platform || ks.modifiers.control;
+        // Cmd/Ctrl+A/C/X/V normally arrive as `menus::{SelectAll, Copy, Cut,
+        // Paste}` actions; this catches the other modifier (Ctrl on macOS).
         if submit_mod {
-            match ks.key.as_str() {
+            let handled = match ks.key.as_str() {
                 "a" => {
-                    self.selection_anchor = Some(0);
-                    self.cursor = self.content.len();
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
+                    self.select_all(cx);
+                    true
                 }
-                "c" => {
-                    if let Some(range) = self.selected_range() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            self.content[range].to_string(),
-                        ));
-                        cx.stop_propagation();
-                        return;
-                    }
-                }
+                "c" => self.copy(cx),
                 "x" => {
-                    if let Some(range) = self.selected_range() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            self.content[range].to_string(),
-                        ));
-                        self.delete_selection();
-                        if let Some(cb) = self.on_change.clone() {
-                            cb(window, cx);
-                        }
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                    return;
+                    self.cut(window, cx);
+                    true
                 }
                 "v" => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        let text = if self.multiline {
-                            text
-                        } else {
-                            text.replace(['\r', '\n'], " ")
-                        };
-                        self.replace_selection(&text);
-                        if let Some(cb) = self.on_change.clone() {
-                            cb(window, cx);
-                        }
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                    return;
+                    self.paste(window, cx);
+                    true
                 }
-                _ => {}
+                _ => false,
+            };
+            if handled {
+                cx.stop_propagation();
+                return;
             }
         }
 
@@ -319,6 +333,16 @@ impl Render for TextInput {
             .track_focus(&self.focus_handle)
             .cursor_text()
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_action(cx.listener(|this, _: &menus::SelectAll, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &menus::Copy, _, cx| {
+                // Nothing selected here: let the root view copy a dragged
+                // text selection instead.
+                if !this.copy(cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &menus::Cut, window, cx| this.cut(window, cx)))
+            .on_action(cx.listener(|this, _: &menus::Paste, window, cx| this.paste(window, cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

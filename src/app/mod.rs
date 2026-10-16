@@ -28,6 +28,7 @@ use crate::acp::{AcpClient, AnchoredComment, PendingElicitation, PendingPermissi
 use crate::async_runtime;
 use crate::checkpoint::{Checkpoint, CheckpointManager};
 use crate::config::{AgentConfig, AgentProfile, AgentRegistry, ConfigStore, TransportConfig};
+use crate::menus;
 use crate::persistence::{PersistedState, StateStore};
 use crate::screens;
 use crate::state::*;
@@ -855,6 +856,26 @@ impl Render for App {
             .font_family(theme::FONT_FAMILY)
             .text_size(px(12.))
             .overflow_hidden()
+            .on_action(cx.listener(|app, _: &menus::Copy, window, cx| {
+                // Same rule as the key handler below: only while the
+                // selection (not some input) owns focus.
+                if !(app.selection_focus.is_focused(window)
+                    && crate::selectable_text::copy_active_selection(cx))
+                {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|app, _: &menus::OpenSettings, _, cx| app.go_settings(cx)))
+            .on_action(cx.listener(|app, _: &menus::OpenWorkspace, _, cx| app.select_workspace(cx)))
+            .on_action(cx.listener(|app, _: &menus::ShowWorkspaces, _, cx| {
+                if app.screen != Screen::Onboarding {
+                    app.go_projects(cx)
+                }
+            }))
+            .on_action(cx.listener(|app, _: &menus::ToggleSidebar, _, cx| app.toggle_sidebar(cx)))
+            .on_action(
+                cx.listener(|app, _: &menus::ToggleFileTree, _, cx| app.toggle_file_tree(cx)),
+            )
             .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
                 // Selection owns keyboard focus until it hands off to a draft.
                 // Focused inputs still own their own typing and copy shortcuts.
