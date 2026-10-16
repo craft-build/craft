@@ -442,7 +442,10 @@ fn assistant_content_and_footers_stay_inside_scrollable_cards(cx: &mut gpui::Tes
         let stop = cx.debug_bounds("cancel-turn").unwrap();
         let composer = cx.debug_bounds("composer").unwrap();
         assert!(stop.bottom() <= card.bottom() - px(16.));
-        assert!(composer.origin.y >= card.bottom() + px(16.));
+        // The composer is pinned under the thread rather than scrolling with
+        // it, so it must never overlap the scrollable conversation.
+        let viewport = app.read_with(cx, |app, _| app.thread_scroll.bounds());
+        assert!(composer.origin.y >= viewport.bottom());
     }
 }
 

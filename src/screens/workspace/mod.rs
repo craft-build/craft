@@ -13,6 +13,7 @@ mod permission;
 mod sidebar;
 mod tool_call;
 mod top_bar;
+mod widgets;
 
 use composer::composer_view;
 use elicitation::elicitation_view;
@@ -20,17 +21,24 @@ use messages::message_view;
 use overlays::{checkpoints_overlay, right_panels};
 use permission::permission_view;
 use sidebar::sidebar;
-use top_bar::{footer_bar, top_bar};
+use top_bar::top_bar;
+
+/// Width shared by the sidebar and the title bar's leading section, so the
+/// sidebar's hairline runs unbroken from the top of the window.
+pub(super) const SIDEBAR_WIDTH: f32 = 260.;
+
 pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
     div()
         .size_full()
         .flex()
         .flex_col()
         .relative()
+        .bg(rgb(theme::BG))
         .child(top_bar(app, window, cx))
         .child(
             div()
                 .flex_1()
+                .min_h(px(0.))
                 .flex()
                 .overflow_x_hidden()
                 .overflow_y_hidden()
@@ -38,14 +46,13 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                 .child(main_column(app, window, cx))
                 .when(app.file_tree_visible, |d| d.child(right_panels(app, cx))),
         )
-        .child(footer_bar(app, cx))
         .when(app.show_checkpoints, |d| {
             d.child(checkpoints_overlay(app, cx))
         })
 }
 // ---------------------------------------------------------------- main column
 
-fn active_session_ref(app: &App) -> Option<&crate::state::Session> {
+pub(super) fn active_session_ref(app: &App) -> Option<&crate::state::Session> {
     let key = app
         .active_project
         .as_ref()
@@ -73,6 +80,7 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
         .flex_col()
         .overflow_hidden()
         .bg(rgb(theme::BG))
+        .font_family(theme::MONO_FONT_FAMILY)
         .child(
             div()
                 .id("thread-scroll")
@@ -80,8 +88,9 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_y_scroll()
-                .px(px(18.))
-                .py(px(14.))
+                .px(px(32.))
+                .pt(px(24.))
+                .pb(px(12.))
                 .flex()
                 .items_start()
                 .child(
@@ -89,11 +98,11 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
                     // before measuring wrapped text. A max-width constraint can leave
                     // GPUI's card heights or scroll extent measured at the wrong width.
                     div()
-                        .w(px(760.))
+                        .w(px(880.))
                         .min_w(px(0.))
                         .flex()
                         .flex_col()
-                        .gap(px(16.))
+                        .gap(px(12.))
                         .children(messages.iter().enumerate().map(|(index, message)| {
                             let is_streaming = app.thinking
                                 && index == last_index
@@ -105,8 +114,8 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
                         })
                         .when(app.pending_elicitation.is_some(), |d| {
                             d.child(elicitation_view(app, cx))
-                        })
-                        .child(composer_view(app, cx)),
+                        }),
                 ),
         )
+        .child(composer_view(app, cx))
 }

@@ -152,9 +152,9 @@ pub fn own_message_to_rig(message: &history::Message) -> RigMessage {
             // origin to name the wire that produced it: rig's request
             // shaping keeps native items only for the target's own turns.
             let origin = content.iter().find_map(|block| match block {
-                history::AssistantContent::Reasoning(reasoning) => origin_from_history(
-                    reasoning.origin.as_ref(),
-                ),
+                history::AssistantContent::Reasoning(reasoning) => {
+                    origin_from_history(reasoning.origin.as_ref())
+                }
                 _ => None,
             });
             let message = AssistantMessage::new(
@@ -938,7 +938,11 @@ mod tests {
                 ),
             ),
         );
-        let origin = Origin::new("bedrock.converse", "bedrock", "us.anthropic.claude-opus-5-5");
+        let origin = Origin::new(
+            "bedrock.converse",
+            "bedrock",
+            "us.anthropic.claude-opus-5-5",
+        );
         let message = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
         let history::Message::Assistant { content } = &message else {
             panic!("assistant message");
@@ -948,7 +952,9 @@ mod tests {
         };
         // The nested Bedrock signature is extracted...
         match &reasoning.content[0] {
-            history::ReasoningContent::Text { signature, native, .. } => {
+            history::ReasoningContent::Text {
+                signature, native, ..
+            } => {
                 assert_eq!(signature, &Some("sig-bedrock".into()));
                 assert!(native.is_some(), "the provider item must be kept");
             }
@@ -967,7 +973,10 @@ mod tests {
         // so rig's encoders replay the signed block verbatim.
         let item: serde_json::Value = serde_json::from_str(native).unwrap();
         assert_eq!(
-            assistant.content.first().and_then(|block| block.native_item()),
+            assistant
+                .content
+                .first()
+                .and_then(|block| block.native_item()),
             Some(&item)
         );
     }
@@ -978,7 +987,11 @@ mod tests {
     fn origin_rides_unsigned_reasoning_turns_too() {
         let mut parts = StreamedParts::default();
         fold_streamed_event(&mut parts, &reasoning_delta(0, "hmm"));
-        let origin = Origin::new("bedrock.converse", "bedrock", "us.anthropic.claude-opus-5-5");
+        let origin = Origin::new(
+            "bedrock.converse",
+            "bedrock",
+            "us.anthropic.claude-opus-5-5",
+        );
         let message = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
         let rig = own_to_rig(&[message]);
         let RigMessage::Assistant(assistant) = &rig[0] else {
@@ -1015,21 +1028,35 @@ mod tests {
         // name, not craft's config spelling.
         let origin = Origin::new("bedrock.converse", "aws_bedrock", model);
         let turn = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
-        let request = to_request(&[turn, history::Message::user("next")], &[], None, None, None);
+        let request = to_request(
+            &[turn, history::Message::user("next")],
+            &[],
+            None,
+            None,
+            None,
+        );
         let encoded = Converse::new(model)
             .encode(request, rig_core::wire::Mode::Streaming)
             .expect("the request is representable");
         let body = serde_json::to_value(&encoded.body).expect("body is JSON");
-        let messages = body.pointer("/messages").and_then(|m| m.as_array()).expect("messages");
+        let messages = body
+            .pointer("/messages")
+            .and_then(|m| m.as_array())
+            .expect("messages");
         // [assistant reasoning+text, user "next"]: the reasoning must be the
         // first block of the assistant message, still signed.
         let assistant = messages
             .iter()
             .find(|m| m.get("role") == Some(&serde_json::json!("assistant")))
             .expect("assistant message");
-        let blocks = assistant.get("content").and_then(|c| c.as_array()).expect("content");
+        let blocks = assistant
+            .get("content")
+            .and_then(|c| c.as_array())
+            .expect("content");
         assert_eq!(
-            blocks.first().and_then(|b| b.pointer("/reasoningContent/reasoningText/signature")),
+            blocks
+                .first()
+                .and_then(|b| b.pointer("/reasoningContent/reasoningText/signature")),
             Some(&serde_json::json!("sig-bedrock")),
             "signed thinking must replay as reasoningContent, not text: {blocks:?}"
         );
@@ -1104,7 +1131,9 @@ mod tests {
         };
         assert_eq!(reasoning.content.len(), 1);
         match &reasoning.content[0] {
-            history::ReasoningContent::Text { text, signature, .. } => {
+            history::ReasoningContent::Text {
+                text, signature, ..
+            } => {
                 assert_eq!(text, "deliberating");
                 // The canonical wire form of 0.44 carries signatures only in
                 // provider-native items, which a generic mapping cannot mint.

@@ -41,6 +41,12 @@ pub struct WorkspaceFile {
     pub supports_text_diff: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReviewTab {
+    Comments,
+    Changes,
+}
+
 pub struct App {
     pub screen: Screen,
     pub projects: Vec<Project>,
@@ -56,6 +62,7 @@ pub struct App {
 
     pub sidebar_visible: bool,
     pub file_tree_visible: bool,
+    pub review_tab: ReviewTab,
     pub collapsed_projects: HashSet<String>,
     pub expanded_archives: HashSet<String>,
     pub pending_session_delete: Option<String>,
@@ -174,6 +181,7 @@ impl App {
             agent_menu_open: false,
             sidebar_visible: true,
             file_tree_visible: true,
+            review_tab: ReviewTab::Comments,
             collapsed_projects: HashSet::new(),
             expanded_archives: HashSet::new(),
             pending_session_delete: None,
@@ -757,6 +765,22 @@ impl App {
         }
         self.persist_state();
 
+        cx.notify();
+    }
+
+    /// Sends whatever is in the composer (plus pending review comments), the
+    /// same as pressing Cmd+Enter in it.
+    pub fn submit_composer(&mut self, cx: &mut Context<Self>) {
+        let text = self.composer.update(cx, |input, cx| {
+            cx.notify();
+            input.take_content()
+        });
+        self.send_message(text, cx);
+    }
+
+    pub fn set_review_tab(&mut self, tab: ReviewTab, cx: &mut Context<Self>) {
+        self.review_tab = tab;
+        self.file_tree_visible = true;
         cx.notify();
     }
 

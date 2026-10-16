@@ -291,7 +291,8 @@ pub(crate) async fn run_model_stream<M: CompletionSource + Clone>(
         Err(error) => return Err(failure_from_error(&error)),
     };
     let usage = usage_from_response(&response);
-    let assistant = assistant_from_stream(&response.choice, Some(&response.origin), &call_ids, &parts);
+    let assistant =
+        assistant_from_stream(&response.choice, Some(&response.origin), &call_ids, &parts);
     Ok(TurnOutput {
         assistant,
         usage,

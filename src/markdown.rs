@@ -286,8 +286,8 @@ fn highlight(mark: &InlineMark) -> HighlightStyle {
             ..Default::default()
         },
         InlineKind::Code => HighlightStyle {
-            color: Some(rgb(theme::TEXT_SECONDARY).into()),
-            background_color: Some(rgb(theme::INPUT_BG).into()),
+            color: Some(rgb(theme::TEXT_PRIMARY).into()),
+            background_color: Some(rgb(theme::DIVIDER).into()),
             ..Default::default()
         },
         InlineKind::Link => HighlightStyle {
@@ -339,9 +339,6 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarg
             .w_full()
             .min_w(px(0.))
             .whitespace_normal()
-            .text_size(px(13.))
-            .line_height(px(21.))
-            .text_color(rgb(theme::TEXT_PRIMARY))
             .child(inline_text(&block, inline_id, target))
             .into_any_element(),
         BlockKind::Heading(level) => {
@@ -366,13 +363,11 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarg
             .w_full()
             .min_w(px(0.))
             .ml(px((depth.saturating_sub(1) as f32) * 8.))
-            .pl(px(10.))
-            .border_l_2()
-            .border_color(rgb(theme::BORDER))
+            .pl(px(11.))
+            .border_l_3()
+            .border_color(rgb(theme::NEUTRAL_BAR))
             .whitespace_normal()
-            .text_size(px(12.))
-            .line_height(px(19.))
-            .text_color(rgb(theme::TEXT_SECONDARY))
+            .text_color(rgb(theme::TEXT_MUTED))
             .child(inline_text(&block, inline_id, target))
             .into_any_element(),
         BlockKind::ListItem { depth, ref marker } => div()
@@ -382,13 +377,12 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarg
             .flex()
             .items_start()
             .gap(px(6.))
-            .text_size(px(13.))
-            .line_height(px(20.))
             .child(
                 div()
                     .w(px(22.))
                     .flex_shrink_0()
-                    .text_color(rgb(theme::TEXT_MUTED))
+                    .font_family(theme::MONO_FONT_FAMILY)
+                    .text_color(rgb(theme::TEXT_FAINT))
                     .child(marker.clone()),
             )
             .child(
@@ -396,7 +390,6 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarg
                     .flex_1()
                     .min_w(px(0.))
                     .whitespace_normal()
-                    .text_color(rgb(theme::TEXT_PRIMARY))
                     .child(inline_text(&block, inline_id, target)),
             )
             .into_any_element(),
@@ -406,14 +399,15 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarg
             .min_w(px(0.))
             .overflow_x_scroll()
             .whitespace_nowrap()
-            .bg(rgb(theme::TERMINAL_BG))
-            .border_1()
-            .border_color(rgb(theme::TERMINAL_BORDER))
-            .px(px(10.))
+            .bg(rgb(theme::INPUT_BG))
+            .border_l_3()
+            .border_color(rgb(theme::NEUTRAL_BAR))
+            .font_family(theme::MONO_FONT_FAMILY)
+            .px(px(11.))
             .py(px(8.))
-            .text_size(px(12.))
-            .line_height(px(18.))
-            .text_color(rgb(theme::TEXT_SECONDARY))
+            .text_size(px(11.5))
+            .line_height(px(19.))
+            .text_color(rgb(theme::TEXT_PRIMARY))
             .child(inline_text(&block, inline_id, target))
             .into_any_element(),
         BlockKind::TableRow => div()
@@ -424,7 +418,8 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarg
             .border_color(rgb(theme::TERMINAL_BORDER))
             .px(px(8.))
             .py(px(5.))
-            .text_size(px(12.))
+            .font_family(theme::MONO_FONT_FAMILY)
+            .text_size(px(11.5))
             .line_height(px(18.))
             .text_color(rgb(theme::TEXT_SECONDARY))
             .child(inline_text(&block, inline_id, target))
@@ -433,7 +428,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarg
             .w_full()
             .h(px(1.))
             .my(px(4.))
-            .bg(rgb(theme::BORDER))
+            .bg(rgb(theme::DIVIDER))
             .into_any_element(),
     }
 }

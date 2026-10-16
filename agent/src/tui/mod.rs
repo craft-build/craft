@@ -204,7 +204,6 @@ fn color_depth_for(
     slt::ColorDepth::Basic
 }
 
-
 /// Startup sequencing (resume gating on the first `StatusChanged(Done)`),
 /// the bell/notification state machine, per-frame maintenance (file picker
 /// ticks, image loads, draft checkpointing, typewriter reveal), and

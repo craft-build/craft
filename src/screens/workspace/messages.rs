@@ -8,46 +8,42 @@ use crate::state::{Comment, Message, MessagePart, Role, Steps, Terminal};
 use crate::theme;
 
 use super::tool_call::{diff_view, tool_call_view};
+use super::widgets::{ButtonKind, SPINNER, badge, bar_card, button, ghost};
 
 fn running_indicator(cx: &mut Context<App>) -> impl IntoElement {
-    div()
+    bar_card(theme::ACCENT, theme::CARD_BG)
         .debug_selector(|| "running-indicator".into())
         .flex()
         .items_center()
-        .justify_between()
-        .border_t_1()
-        .border_color(rgb(theme::TERMINAL_BORDER))
-        .pt(px(8.))
+        .gap(px(10.))
+        .px(px(14.))
+        .py(px(7.))
+        .text_size(px(12.))
+        .child(div().text_color(rgb(theme::ACCENT)).child(SPINNER))
         .child(
             div()
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(theme::TEXT_PRIMARY))
+                .child("working"),
+        )
+        .child(div().w(px(7.)).h(px(14.)).bg(rgb(theme::ACCENT)))
+        .child(
+            div()
+                .ml_auto()
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::ACCENT)))
-                .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::ACCENT)))
-                .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::ACCENT)))
+                .gap(px(10.))
+                .child(div().text_color(rgb(theme::ACCENT)).child("running"))
                 .child(
-                    div()
-                        .ml(px(4.))
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_MUTED))
-                        .child("Running"),
+                    ghost("cancel-turn", "■ stop")
+                        .debug_selector(|| "cancel-turn".into())
+                        .px(px(8.))
+                        .py(px(1.))
+                        .bg(rgb(theme::DIVIDER))
+                        .text_color(rgb(theme::TEXT_SECONDARY))
+                        .hover(|style| style.text_color(rgb(theme::DIFF_DEL_TEXT)))
+                        .on_click(cx.listener(|app, _, _, cx| app.cancel_turn(cx))),
                 ),
-        )
-        .child(
-            div()
-                .id("cancel-turn")
-                .debug_selector(|| "cancel-turn".into())
-                .px(px(8.))
-                .py(px(3.))
-                .border_1()
-                .border_color(rgb(theme::BORDER))
-                .text_size(px(11.))
-                .text_color(rgb(theme::ACCENT))
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(theme::HOVER_BG)))
-                .child("Stop")
-                .on_click(cx.listener(|app, _, _, cx| app.cancel_turn(cx))),
         )
 }
 
@@ -106,37 +102,57 @@ pub(super) fn comment_preview(text: &str) -> String {
 fn user_message(m: &Message, app: &App, cx: &mut Context<App>) -> impl IntoElement {
     let markdown_id = format!("user-markdown-{}", m.id);
     let comment_key = app.comment_key(&format!("msg_{}", m.id));
-    div()
-        .w_full()
+    let comments = app.comments.get(&comment_key).cloned().unwrap_or_default();
+    let draft = app.comment_drafts.get(&comment_key).cloned();
+    bar_card(theme::USER, theme::USER_CARD_BG)
+        .px(px(14.))
+        .py(px(8.))
         .flex()
         .flex_col()
         .gap(px(4.))
         .child(
             div()
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(theme::ACCENT))
-                .child("you"),
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .text_size(px(12.))
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(theme::USER))
+                        .child("you"),
+                )
+                .when_some(m.time.clone(), |d, time| {
+                    d.child(
+                        div()
+                            .ml_auto()
+                            .text_color(rgb(theme::TEXT_FAINT))
+                            .child(time),
+                    )
+                }),
         )
-        .child(markdown_view(
-            &m.body.text(),
-            markdown_id,
-            CommentTarget {
-                key: comment_key.clone(),
-                label: "user message".to_string(),
-                scroll_handle: app.thread_scroll.clone(),
-                focus_handle: app.selection_focus.clone(),
-            },
-        ))
-        .when_some(app.comments.get(&comment_key), |d, comments| {
-            d.child(comments_list(comments))
-        })
-        .when_some(app.comment_drafts.get(&comment_key).cloned(), |d, draft| {
-            d.child(comment_box(draft, comment_key, cx))
-        })
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.))
+                .text_size(px(13.))
+                .line_height(px(21.))
+                .text_color(rgb(theme::TEXT_PRIMARY))
+                .child(markdown_view(
+                    &m.body.text(),
+                    markdown_id,
+                    CommentTarget {
+                        key: comment_key.clone(),
+                        label: "user message".to_string(),
+                        scroll_handle: app.thread_scroll.clone(),
+                        focus_handle: app.selection_focus.clone(),
+                    },
+                )),
+        )
         .when(!m.context.is_empty(), |d| {
             d.child(
                 div()
+                    .pt(px(2.))
                     .flex()
                     .gap(px(6.))
                     .flex_wrap()
@@ -144,25 +160,47 @@ fn user_message(m: &Message, app: &App, cx: &mut Context<App>) -> impl IntoEleme
             )
         })
         .when(!m.attached_comments.is_empty(), |d| {
-            d.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .border_l_2()
-                    .border_color(rgb(theme::BORDER))
-                    .pl(px(8.))
-                    .children(m.attached_comments.iter().map(|(label, text)| {
-                        div()
-                            .w_full()
-                            .min_w(px(0.))
-                            .whitespace_normal()
-                            .text_size(px(11.))
-                            .line_height(px(16.))
-                            .text_color(rgb(theme::TEXT_SECONDARY))
-                            .child(format!("{label}: {}", comment_preview(text)))
-                    })),
-            )
+            d.child(div().pt(px(2.)).flex().flex_col().gap(px(2.)).children(
+                m.attached_comments.iter().map(|(label, text)| {
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .flex()
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .line_height(px(17.))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(rgb(theme::USER))
+                                .child("◆"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .whitespace_normal()
+                                .text_color(rgb(theme::TEXT_MUTED))
+                                .child(format!(
+                                    "{}: {}",
+                                    label.lines().next().unwrap_or_default(),
+                                    comment_preview(text)
+                                )),
+                        )
+                }),
+            ))
+        })
+        .when(!comments.is_empty() || draft.is_some(), |d| {
+            d.child(div().pt(px(4.)).child(comment_thread(&comments).when_some(
+                draft,
+                |t, draft| {
+                    t.child(div().px(px(14.)).py(px(8.)).child(comment_box(
+                        draft,
+                        comment_key.clone(),
+                        cx,
+                    )))
+                },
+            )))
         })
 }
 
@@ -174,13 +212,10 @@ fn chip_view(text: String) -> impl IntoElement {
         .text_size(px(11.))
         .line_height(px(16.))
         .px(px(6.))
-        .py(px(2.))
-        .bg(rgb(theme::INPUT_BG))
-        .border_1()
-        .border_color(rgb(theme::BORDER))
-        .rounded(px(5.))
+        .py(px(1.))
+        .bg(rgb(theme::DIVIDER))
         .text_color(rgb(theme::TEXT_SECONDARY))
-        .child(text)
+        .child(format!("@{text}"))
 }
 
 fn assistant_message(
@@ -194,48 +229,51 @@ fn assistant_message(
     let steps_expanded = app.expanded_steps.contains(&msg_id);
     let toggle_steps_id = msg_id.clone();
     let toggle_comment_key = comment_key.clone();
+    let agent_name = app
+        .active_agent_profile_id()
+        .and_then(|id| app.agent_profiles.iter().find(|profile| profile.id == id))
+        .map(|profile| profile.name.to_lowercase())
+        .unwrap_or_else(|| "agent".into());
 
+    // Agent turns are flat: prose sits on the thread background and tools
+    // carry their own cards. The vertical padding keeps a turn's footer
+    // clear of the next block.
     let mut col = div()
         .debug_selector(|| format!("assistant-card-{msg_id}"))
         .w_full()
         .min_w(px(0.))
-        .border_1()
-        .border_color(rgb(theme::BORDER))
-        .bg(rgb(theme::PANEL_BG))
-        .rounded(px(8.))
-        .p(px(16.))
+        .py(px(16.))
         .flex()
         .flex_col()
         .gap(px(12.))
         .child(
             div()
                 .flex()
-                .justify_between()
                 .items_center()
+                .gap(px(10.))
+                .text_size(px(12.))
                 .child(
                     div()
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::TEXT_SECONDARY))
-                        .child("assistant"),
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(theme::ACCENT))
+                        .child(agent_name),
                 )
                 .child(
-                    div()
-                        .id(SharedString::from(format!("comment-toggle-{msg_id}")))
-                        .px(px(4.))
-                        .py(px(2.))
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_MUTED))
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(rgb(theme::TEXT_SECONDARY)))
-                        .child("✎")
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.open_comment_box(
-                                toggle_comment_key.clone(),
-                                "assistant reply".to_string(),
-                                cx,
-                            )
-                        })),
+                    ghost(
+                        SharedString::from(format!("comment-toggle-{msg_id}")),
+                        "◆ comment",
+                    )
+                    .ml_auto()
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .hover(|style| style.text_color(rgb(theme::USER)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.open_comment_box(
+                            toggle_comment_key.clone(),
+                            "assistant reply".to_string(),
+                            cx,
+                        )
+                    })),
                 ),
         );
 
@@ -276,16 +314,26 @@ fn assistant_message(
                     format!("assistant-markdown-{msg_id}-text-{text_index}")
                 };
                 text_index += 1;
-                col = col.child(markdown_view(
-                    text,
-                    markdown_id,
-                    CommentTarget {
-                        key: comment_key.clone(),
-                        label: "assistant reply".to_string(),
-                        scroll_handle: app.thread_scroll.clone(),
-                        focus_handle: app.selection_focus.clone(),
-                    },
-                ));
+                col = col.child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .pl(px(3.))
+                        .font_family(theme::FONT_FAMILY)
+                        .text_size(px(14.))
+                        .line_height(px(23.))
+                        .text_color(rgb(theme::TEXT_SECONDARY))
+                        .child(markdown_view(
+                            text,
+                            markdown_id,
+                            CommentTarget {
+                                key: comment_key.clone(),
+                                label: "assistant reply".to_string(),
+                                scroll_handle: app.thread_scroll.clone(),
+                                focus_handle: app.selection_focus.clone(),
+                            },
+                        )),
+                );
             }
         }
     }
@@ -299,24 +347,30 @@ fn assistant_message(
                 .min_h(px(25.))
                 .flex()
                 .items_end()
+                .gap(px(8.))
                 .text_size(px(11.))
                 .line_height(px(16.))
-                .text_color(rgb(theme::TEXT_MUTED))
+                .text_color(rgb(theme::TEXT_FAINT))
                 .border_t_1()
-                .border_color(rgb(theme::TERMINAL_BORDER))
+                .border_color(rgb(theme::BORDER))
                 .pt(px(7.))
                 .pb(px(2.))
+                .child(div().text_color(rgb(theme::NEUTRAL_BAR)).child("◇"))
                 .child(cp.clone()),
         );
     }
-    if let Some(list) = app.comments.get(&comment_key).cloned()
-        && !list.is_empty()
-    {
-        col = col.child(comments_list(&list));
-    }
-    if let Some(draft) = app.comment_drafts.get(&comment_key).cloned() {
-        let submit_key = comment_key.clone();
-        col = col.child(comment_box(draft, submit_key, cx));
+    let comments = app.comments.get(&comment_key).cloned().unwrap_or_default();
+    let draft = app.comment_drafts.get(&comment_key).cloned();
+    if !comments.is_empty() || draft.is_some() {
+        let mut thread = comment_thread(&comments);
+        if let Some(draft) = draft {
+            thread = thread.child(div().px(px(14.)).py(px(8.)).child(comment_box(
+                draft,
+                comment_key.clone(),
+                cx,
+            )));
+        }
+        col = col.child(thread);
     }
     col
 }
@@ -328,16 +382,19 @@ fn steps_view(
     cx: &mut Context<App>,
 ) -> impl IntoElement {
     let items = steps.items.clone();
-    div()
+    bar_card(theme::NEUTRAL_BAR, theme::STRIP_BG)
+        .px(px(14.))
+        .py(px(6.))
+        .text_size(px(11.5))
         .child(
             div()
                 .id(SharedString::from(format!("steps-{msg_id}")))
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(px(8.))
                 .cursor_pointer()
-                .text_size(px(12.))
                 .text_color(rgb(theme::TEXT_MUTED))
+                .hover(|style| style.text_color(rgb(theme::TEXT_PRIMARY)))
                 .child(if expanded { "▾" } else { "▸" })
                 .child(
                     div()
@@ -351,72 +408,132 @@ fn steps_view(
         .when(expanded, |d| {
             d.child(
                 div()
-                    .mt(px(6.))
-                    .pl(px(16.))
+                    .mt(px(4.))
+                    .pl(px(18.))
                     .flex()
                     .flex_col()
-                    .gap(px(3.))
+                    .gap(px(2.))
                     .children(items.into_iter().map(|item| {
                         div()
                             .w_full()
                             .min_w(px(0.))
-                            .whitespace_normal()
-                            .text_size(px(11.))
-                            .line_height(px(16.))
+                            .flex()
+                            .gap(px(8.))
+                            .line_height(px(19.))
                             .text_color(rgb(theme::TEXT_MUTED))
-                            .child(format!("· {item}"))
+                            .child(div().text_color(rgb(theme::ACCENT)).child("[✓]"))
+                            .child(div().flex_1().min_w(px(0.)).whitespace_normal().child(item))
                     })),
             )
         })
 }
 fn terminal_view(term: &Terminal, message_id: &str) -> impl IntoElement {
-    div()
+    bar_card(theme::ACCENT, theme::CARD_BG)
         .id(SharedString::from(format!("terminal-scroll-{message_id}")))
-        .w_full()
-        .min_w(px(0.))
         .overflow_x_scroll()
-        .bg(rgb(theme::TERMINAL_BG))
-        .border_1()
-        .border_color(rgb(theme::TERMINAL_BORDER))
-        .rounded(px(6.))
-        .font_family(theme::MONO_FONT_FAMILY)
-        .px(px(10.))
-        .py(px(8.))
         .text_size(px(12.))
         .flex()
         .flex_col()
         .child(
             div()
+                .flex()
+                .gap(px(10.))
+                .px(px(14.))
+                .py(px(7.))
                 .whitespace_nowrap()
-                .text_color(rgb(theme::TEXT_SECONDARY))
-                .child(format!("$ {}", term.cmd)),
+                .child(div().text_color(rgb(theme::ACCENT)).child("$"))
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(theme::TEXT_PRIMARY))
+                        .child(term.cmd.clone()),
+                ),
         )
         .child(
             div()
-                .mt(px(2.))
+                .pl(px(36.))
+                .pr(px(14.))
+                .pb(px(8.))
+                .text_size(px(11.5))
+                .line_height(px(19.))
                 .whitespace_nowrap()
-                .text_color(rgb(theme::DIFF_ADD_TEXT))
+                .text_color(rgb(theme::TEXT_MUTED))
                 .child(term.output.clone()),
         )
 }
 
-pub(super) fn comments_list(list: &[Comment]) -> impl IntoElement {
-    div()
+/// A blue-barred thread of review comments: who wrote each one, where it
+/// points, and whether it is still waiting to be sent.
+pub(super) fn comment_thread(list: &[Comment]) -> gpui::Div {
+    bar_card(theme::USER, theme::USER_CARD_BG)
         .flex()
         .flex_col()
-        .gap(px(3.))
-        .border_t_1()
-        .border_color(rgb(theme::TERMINAL_BORDER))
-        .pt(px(6.))
         .children(list.iter().map(|c| {
+            let by_user = c.author == "you";
+            let target = c.label.lines().next().unwrap_or_default().to_string();
             div()
-                .w_full()
-                .min_w(px(0.))
-                .whitespace_normal()
-                .text_size(px(11.))
-                .line_height(px(16.))
-                .text_color(rgb(theme::TEXT_SECONDARY))
-                .child(format!("{}: {}", c.author, c.text))
+                .px(px(14.))
+                .pt(px(8.))
+                .pb(px(10.))
+                .when(!by_user, |d| {
+                    d.bg(rgb(theme::CARD_BG))
+                        .border_l_3()
+                        .border_color(rgb(theme::ACCENT))
+                        .ml(px(-3.))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(12.))
+                        .child(
+                            div()
+                                .font_family(theme::MONO_FONT_FAMILY)
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(if by_user { theme::USER } else { theme::ACCENT }))
+                                .child(c.author.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .font_family(theme::MONO_FONT_FAMILY)
+                                .text_size(px(11.))
+                                .text_color(rgb(theme::TEXT_FAINT))
+                                .child(format!("on {target}")),
+                        )
+                        .child(if c.pending {
+                            badge("PENDING", theme::USER).into_any_element()
+                        } else {
+                            div()
+                                .flex_shrink_0()
+                                .font_family(theme::MONO_FONT_FAMILY)
+                                .text_size(px(11.))
+                                .text_color(rgb(theme::TEXT_FAINT))
+                                .child("✓ sent")
+                                .into_any_element()
+                        }),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .pt(px(4.))
+                        .whitespace_normal()
+                        .font_family(theme::FONT_FAMILY)
+                        .text_size(px(13.5))
+                        .line_height(px(21.))
+                        .text_color(rgb(if c.pending {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_SECONDARY
+                        }))
+                        .child(c.text.clone()),
+                )
         }))
 }
 
@@ -427,6 +544,7 @@ pub(super) fn comment_box(
 ) -> impl IntoElement {
     let reference = draft.reference_label();
     let input = draft.input;
+    let cancel_key = key.clone();
     div()
         .id(SharedString::from(format!("comment-draft-{key}")))
         .anchor_scroll(draft.scroll_anchor)
@@ -434,12 +552,13 @@ pub(super) fn comment_box(
         .min_w(px(0.))
         .flex()
         .flex_col()
-        .gap(px(4.))
+        .gap(px(6.))
         .child(
             div()
                 .whitespace_normal()
+                .font_family(theme::MONO_FONT_FAMILY)
                 .text_size(px(11.))
-                .text_color(rgb(theme::TEXT_MUTED))
+                .text_color(rgb(theme::TEXT_FAINT))
                 .child(comment_preview(&reference)),
         )
         .child(
@@ -447,36 +566,37 @@ pub(super) fn comment_box(
                 .w_full()
                 .flex()
                 .items_start()
-                .gap(px(6.))
+                .gap(px(8.))
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.))
                         .bg(rgb(theme::INPUT_BG))
-                        .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .text_size(px(11.))
-                        .px(px(6.))
-                        .py(px(4.))
+                        .font_family(theme::FONT_FAMILY)
+                        .text_size(px(12.5))
+                        .text_color(rgb(theme::TEXT_PRIMARY))
+                        .px(px(10.))
+                        .py(px(6.))
                         .child(input.clone()),
                 )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("add-comment-{key}")))
-                        .bg(rgb(theme::SELECTION))
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_PRIMARY))
-                        .px(px(8.))
-                        .py(px(4.))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(theme::HOVER_BG)))
-                        .child("Add")
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            // This listener is already updating App. Calling
-                            // TextInput::submit here would recursively update App.
-                            let text = input.update(cx, |input, _| input.take_content());
-                            app.submit_comment(key.clone(), text, cx);
-                        })),
-                ),
+                .child(button(
+                    SharedString::from(format!("add-comment-{key}")),
+                    "Comment",
+                    ButtonKind::Primary(theme::USER),
+                    cx,
+                    move |app, cx| {
+                        // This listener is already updating App. Calling
+                        // TextInput::submit here would recursively update App.
+                        let text = input.update(cx, |input, _| input.take_content());
+                        app.submit_comment(key.clone(), text, cx);
+                    },
+                ))
+                .child(button(
+                    SharedString::from(format!("cancel-comment-{cancel_key}")),
+                    "Cancel",
+                    ButtonKind::Secondary,
+                    cx,
+                    move |app, cx| app.discard_comment_draft(&cancel_key, cx),
+                )),
         )
 }

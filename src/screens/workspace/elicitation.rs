@@ -7,7 +7,8 @@ use gpui::{Context, FontWeight, SharedString, div, px, rgb};
 use crate::app::App;
 use crate::theme;
 
-use super::permission::action_button;
+use super::permission::{action_button, prompt_card};
+use super::widgets::ButtonKind;
 
 pub(super) fn elicitation_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let (message, title, description, properties, required, form_supported) = app
@@ -39,73 +40,68 @@ pub(super) fn elicitation_view(app: &mut App, cx: &mut Context<App>) -> impl Int
             }
         })
         .unwrap_or_else(|| (String::new(), None, None, vec![], vec![], false));
-    div()
-        .w_full()
-        .border_1()
-        .border_color(rgb(theme::ACCENT))
-        .rounded(px(8.))
-        .p(px(12.))
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(
-            div()
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(title.unwrap_or_else(|| "Agent needs information".into())),
-        )
-        .child(
+    prompt_card(
+        "?",
+        "input",
+        title.unwrap_or_else(|| "Agent needs information".into()),
+    )
+    .child(
+        div()
+            .w_full()
+            .min_w(px(0.))
+            .whitespace_normal()
+            .font_family(theme::FONT_FAMILY)
+            .text_size(px(13.5))
+            .line_height(px(21.))
+            .text_color(rgb(theme::TEXT_SECONDARY))
+            .child(message),
+    )
+    .when_some(description, |d, description| {
+        d.child(
             div()
                 .w_full()
                 .min_w(px(0.))
                 .whitespace_normal()
-                .text_size(px(12.))
-                .line_height(px(18.))
-                .child(message),
+                .text_size(px(11.))
+                .line_height(px(16.))
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(description),
         )
-        .when_some(description, |d, description| {
-            d.child(
-                div()
-                    .w_full()
-                    .min_w(px(0.))
-                    .whitespace_normal()
-                    .text_size(px(11.))
-                    .line_height(px(16.))
-                    .text_color(rgb(theme::TEXT_MUTED))
-                    .child(description),
-            )
-        })
-        .when(!form_supported, |d| {
-            d.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(theme::DIFF_DEL_TEXT))
-                    .child("This agent requested an unsupported elicitation mode."),
-            )
-        })
-        .children(properties.into_iter().map(|(key, property)| {
-            let is_required = required.contains(&key);
-            elicitation_field(key, property, is_required, app, cx)
-        }))
-        .child(
+    })
+    .when(!form_supported, |d| {
+        d.child(
             div()
-                .flex()
-                .gap(px(8.))
-                .child(action_button(
-                    "elicitation-decline",
-                    "Decline",
-                    cx,
-                    |app, cx| app.decline_elicitation(cx),
-                ))
-                .when(form_supported, |d| {
-                    d.child(action_button(
-                        "elicitation-accept",
-                        "Submit",
-                        cx,
-                        |app, cx| app.accept_elicitation(cx),
-                    ))
-                }),
+                .text_size(px(11.))
+                .text_color(rgb(theme::DIFF_DEL_TEXT))
+                .child("This agent requested an unsupported elicitation mode."),
         )
+    })
+    .children(properties.into_iter().map(|(key, property)| {
+        let is_required = required.contains(&key);
+        elicitation_field(key, property, is_required, app, cx)
+    }))
+    .child(
+        div()
+            .flex()
+            .gap(px(8.))
+            .pt(px(2.))
+            .when(form_supported, |d| {
+                d.child(action_button(
+                    "elicitation-accept",
+                    "Submit",
+                    ButtonKind::Primary(theme::ACCENT),
+                    cx,
+                    |app, cx| app.accept_elicitation(cx),
+                ))
+            })
+            .child(action_button(
+                "elicitation-decline",
+                "Decline",
+                ButtonKind::Secondary,
+                cx,
+                |app, cx| app.decline_elicitation(cx),
+            )),
+    )
 }
 
 fn elicitation_field(
@@ -145,8 +141,9 @@ fn elicitation_field(
         .gap(px(5.))
         .child(
             div()
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(11.5))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(theme::TEXT_PRIMARY))
                 .child(label),
         )
         .when_some(description, |d, description| {
@@ -219,11 +216,12 @@ fn elicitation_field(
                 field = field.child(
                     div()
                         .bg(rgb(theme::INPUT_BG))
-                        .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .px(px(8.))
+                        .border_l_3()
+                        .border_color(rgb(theme::NEUTRAL_BAR))
+                        .px(px(10.))
                         .py(px(6.))
-                        .text_size(px(12.))
+                        .text_size(px(12.5))
+                        .text_color(rgb(theme::TEXT_PRIMARY))
                         .child(input),
                 );
             }
@@ -261,18 +259,28 @@ fn elicitation_choice_buttons(
                 .min_w(px(0.))
                 .whitespace_normal()
                 .px(px(9.))
-                .py(px(5.))
-                .border_1()
-                .border_color(rgb(if is_selected {
+                .py(px(3.))
+                .bg(rgb(if is_selected {
                     theme::ACCENT
                 } else {
-                    theme::BORDER
+                    theme::INPUT_BG
                 }))
-                .when(is_selected, |d| d.bg(rgb(theme::INPUT_BG)))
-                .text_size(px(11.))
-                .line_height(px(16.))
+                .text_color(rgb(if is_selected {
+                    theme::ACCENT_DARK_TEXT
+                } else {
+                    theme::TEXT_SECONDARY
+                }))
+                .when(is_selected, |d| d.font_weight(FontWeight::BOLD))
+                .text_size(px(11.5))
+                .line_height(px(17.))
                 .cursor_pointer()
-                .hover(|style| style.bg(rgb(theme::HOVER_BG)))
+                .when(!is_selected, |d| {
+                    d.hover(|style| {
+                        style
+                            .bg(rgb(theme::HOVER_BG))
+                            .text_color(rgb(theme::TEXT_PRIMARY))
+                    })
+                })
                 .child(label)
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.set_elicitation_value(selected_key.clone(), selected_value.clone(), cx)
@@ -308,18 +316,28 @@ fn elicitation_multi_choice_buttons(
                 .min_w(px(0.))
                 .whitespace_normal()
                 .px(px(9.))
-                .py(px(5.))
-                .border_1()
-                .border_color(rgb(if is_selected {
+                .py(px(3.))
+                .bg(rgb(if is_selected {
                     theme::ACCENT
                 } else {
-                    theme::BORDER
+                    theme::INPUT_BG
                 }))
-                .when(is_selected, |d| d.bg(rgb(theme::INPUT_BG)))
-                .text_size(px(11.))
-                .line_height(px(16.))
+                .text_color(rgb(if is_selected {
+                    theme::ACCENT_DARK_TEXT
+                } else {
+                    theme::TEXT_SECONDARY
+                }))
+                .when(is_selected, |d| d.font_weight(FontWeight::BOLD))
+                .text_size(px(11.5))
+                .line_height(px(17.))
                 .cursor_pointer()
-                .hover(|style| style.bg(rgb(theme::HOVER_BG)))
+                .when(!is_selected, |d| {
+                    d.hover(|style| {
+                        style
+                            .bg(rgb(theme::HOVER_BG))
+                            .text_color(rgb(theme::TEXT_PRIMARY))
+                    })
+                })
                 .child(label)
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.toggle_elicitation_value(selected_key.clone(), selected_value.clone(), cx)

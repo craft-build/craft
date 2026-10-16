@@ -20,6 +20,7 @@ use gpui::{
 
 fn main() {
     Application::new().run(|cx: &mut gpui::App| {
+        theme::load_fonts(cx);
         let bounds = Bounds::centered(None, size(px(1440.0), px(860.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -27,12 +28,12 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Craft".into()),
                     // No native white titlebar — every screen draws its own
-                    // 36px bar (see `chrome.rs`) and reserves room on the
+                    // 40px bar (see `chrome.rs`) and reserves room on the
                     // left for the still-native macOS traffic lights, which
                     // are just repositioned (not hand-drawn) via
                     // `traffic_light_position` below.
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), px(12.0))),
+                    traffic_light_position: Some(point(px(14.0), px(14.0))),
                 }),
                 // Client-side decorations on Linux, so there's no native
                 // titlebar strip left for our chrome to sit under either.

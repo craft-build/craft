@@ -2,8 +2,8 @@
 //! profiles (system-defined cross-region and application) the account can
 //! call. The data-plane client rig-bedrock wraps has no listing operation.
 
-use aws_sdk_bedrock::types::InferenceProfileStatus;
 use aws_sdk_bedrock::Client;
+use aws_sdk_bedrock::types::InferenceProfileStatus;
 use rig_core::model::{ModelInfo, ModelList};
 
 use crate::config::ProviderConfig;
@@ -26,10 +26,8 @@ pub(crate) async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
             .into_paginator()
             .send();
         while let Some(result) = page.next().await {
-            let result = result.map_err(|e| {
-                crate::error::Error::Invalid {
-                    reason: format!("bedrock discovery failed: {e}"),
-                }
+            let result = result.map_err(|e| crate::error::Error::Invalid {
+                reason: format!("bedrock discovery failed: {e}"),
             })?;
             for summary in result.inference_profile_summaries() {
                 if *summary.status() != InferenceProfileStatus::Active {
@@ -51,7 +49,9 @@ pub(crate) async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
 /// underlying base model (from its first `model_arn`) consulted when the
 /// catalog has no entry for the profile id itself: a cross-region profile
 /// (`us.anthropic.claude-…`) and its base model share limits.
-fn profile_to_model(summary: &aws_sdk_bedrock::types::InferenceProfileSummary) -> Option<ModelInfo> {
+fn profile_to_model(
+    summary: &aws_sdk_bedrock::types::InferenceProfileSummary,
+) -> Option<ModelInfo> {
     let id = summary.inference_profile_id();
     if id.trim().is_empty() {
         return None;
@@ -147,14 +147,9 @@ mod tests {
     fn underlying_model_comes_from_the_profile_model_arn() {
         let base = underlying_model(&summary(
             "us.anthropic.claude-opus-5-5",
-            Some(
-                "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5-v1:0",
-            ),
+            Some("arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5-v1:0"),
         ));
-        assert_eq!(
-            base.as_deref(),
-            Some("anthropic.claude-opus-5-5-v1:0")
-        );
+        assert_eq!(base.as_deref(), Some("anthropic.claude-opus-5-5-v1:0"));
     }
 
     #[test]

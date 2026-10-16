@@ -1,9 +1,11 @@
 use gpui::prelude::*;
 use gpui::{Context, FontWeight, SharedString, Window, div, px, rgb};
 
-use crate::app::{App, SessionConfigControl};
+use crate::app::{App, ReviewTab, SessionConfigControl};
 use crate::chrome;
 use crate::theme;
+
+use super::{SIDEBAR_WIDTH, active_session_ref};
 
 // ---------------------------------------------------------------- top bar
 
@@ -12,7 +14,7 @@ pub(super) fn top_bar(
     window: &mut Window,
     cx: &mut Context<App>,
 ) -> impl IntoElement {
-    let name = app
+    let project_name = app
         .active_project
         .as_ref()
         .map(|p| p.name.clone())
@@ -22,84 +24,202 @@ pub(super) fn top_bar(
         .as_ref()
         .map(|p| p.path.clone())
         .unwrap_or_default();
+    let session_name = active_session_ref(app)
+        .map(|session| session.name.clone())
+        .unwrap_or_else(|| "New session".into());
     let checkpoint_count = app.checkpoints_for().len();
+    let pending_count = app.pending_comments().len();
+    let status_color = if app.thinking || app.acp_client.is_some() {
+        theme::ACCENT
+    } else {
+        theme::TEXT_FAINT
+    };
+    let review_open = app.file_tree_visible && app.review_tab == ReviewTab::Comments;
 
     chrome::draggable(
         div()
-            .h(px(36.))
+            .h(px(40.))
             .flex_shrink_0()
             .flex()
             .items_center()
-            .justify_between()
-            .pl(px(chrome::leading_inset()))
-            .pr(px(8.))
             .bg(rgb(theme::PANEL_BG))
             .border_b_1()
             .border_color(rgb(theme::BORDER)),
     )
     .child(
         div()
+            .h_full()
+            .flex_shrink_0()
+            .when(app.sidebar_visible, |d| {
+                d.w(px(SIDEBAR_WIDTH))
+                    .border_r_1()
+                    .border_color(rgb(theme::BORDER))
+            })
             .flex()
             .items_center()
-            .gap(px(10.))
-            .child(icon_button("all-workspaces", "←", cx, |app, cx| {
-                app.go_projects(cx)
-            }))
-            .child(icon_button("toggle-sidebar", "☰", cx, |app, cx| {
+            .gap(px(8.))
+            .pl(px(chrome::leading_inset()))
+            .pr(px(14.))
+            .child(icon_button("toggle-sidebar", "◧", cx, |app, cx| {
                 app.toggle_sidebar(cx)
             }))
+            .child(icon_button("all-workspaces", "⌂", cx, |app, cx| {
+                app.go_projects(cx)
+            }))
             .child(
                 div()
+                    .ml_auto()
+                    .pl(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .font_family(theme::MONO_FONT_FAMILY)
                     .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(name),
-            )
-            .child(
-                div()
-                    .text_size(px(10.))
                     .text_color(rgb(theme::TEXT_MUTED))
-                    .child(path),
+                    .child(
+                        div()
+                            .size(px(16.))
+                            .rounded(px(4.))
+                            .bg(rgb(theme::ACCENT))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(theme::ACCENT_DARK_TEXT))
+                            .child("C"),
+                    )
+                    .child("craft"),
             ),
     )
     .child(
         div()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(12.))
+            .px(px(16.))
             .child(
                 div()
-                    .id("toggle-checkpoints")
-                    .px(px(9.))
-                    .py(px(4.))
-                    .bg(rgb(theme::INPUT_BG))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .rounded(px(5.))
-                    .text_size(px(11.))
-                    .text_color(rgb(theme::TEXT_SECONDARY))
-                    .cursor_pointer()
-                    .child(format!("Checkpoints ({checkpoint_count})"))
-                    .on_click(cx.listener(|app, _, _, cx| app.toggle_checkpoints(cx))),
+                    .flex_shrink_0()
+                    .max_w(px(320.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme::TEXT_PRIMARY))
+                    .child(session_name),
             )
             .child(
                 div()
-                    .id("goto-settings")
-                    .px(px(9.))
-                    .py(px(4.))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .rounded(px(5.))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .font_family(theme::MONO_FONT_FAMILY)
                     .text_size(px(11.))
-                    .text_color(rgb(theme::TEXT_SECONDARY))
-                    .cursor_pointer()
-                    .child("Settings")
-                    .on_click(cx.listener(|app, _, _, cx| app.go_settings(cx))),
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(format!("{project_name} / {path}")),
             )
-            .child(icon_button("toggle-file-tree", "☰", cx, |app, cx| {
-                app.toggle_file_tree(cx)
-            }))
-            .child(chrome::window_controls(window, cx)),
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(14.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .max_w(px(260.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .font_family(theme::MONO_FONT_FAMILY)
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::TEXT_MUTED))
+                            .child(div().text_color(rgb(status_color)).child("●"))
+                            .child(app.connection_status.clone()),
+                    )
+                    .child(div().w(px(1.)).h(px(16.)).bg(rgb(theme::DIVIDER)))
+                    .child(
+                        bar_button("toggle-checkpoints", "⟲", "Checkpoints", cx, |app, cx| {
+                            app.toggle_checkpoints(cx)
+                        })
+                        .child(count_badge(
+                            checkpoint_count,
+                            theme::DIVIDER,
+                            theme::TEXT_SECONDARY,
+                        )),
+                    )
+                    .child(
+                        bar_button("toggle-review", "☰", "Review", cx, move |app, cx| {
+                            if review_open {
+                                app.toggle_file_tree(cx)
+                            } else {
+                                app.set_review_tab(ReviewTab::Comments, cx)
+                            }
+                        })
+                        .when(pending_count > 0, |d| {
+                            d.child(count_badge(
+                                pending_count,
+                                theme::USER,
+                                theme::ACCENT_DARK_TEXT,
+                            ))
+                        }),
+                    )
+                    .child(icon_button("goto-settings", "⚙", cx, |app, cx| {
+                        app.go_settings(cx)
+                    }))
+                    .child(icon_button("toggle-file-tree", "◨", cx, |app, cx| {
+                        app.toggle_file_tree(cx)
+                    })),
+            ),
     )
+    .child(chrome::window_controls(window, cx))
+}
+
+fn bar_button(
+    id: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+    cx: &mut Context<App>,
+    on_click: impl Fn(&mut App, &mut Context<App>) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .px(px(6.))
+        .py(px(3.))
+        .rounded(px(4.))
+        .text_size(px(12.))
+        .text_color(rgb(theme::TEXT_SECONDARY))
+        .cursor_pointer()
+        .hover(|style| {
+            style
+                .bg(rgb(theme::HOVER_BG))
+                .text_color(rgb(theme::TEXT_PRIMARY))
+        })
+        .child(div().text_color(rgb(theme::TEXT_MUTED)).child(glyph))
+        .child(label)
+        .on_click(cx.listener(move |app, _, _, cx| on_click(app, cx)))
+}
+
+fn count_badge(count: usize, bg: u32, fg: u32) -> impl IntoElement {
+    div()
+        .font_family(theme::MONO_FONT_FAMILY)
+        .text_size(px(10.))
+        .text_color(rgb(fg))
+        .bg(rgb(bg))
+        .px(px(5.))
+        .rounded(px(3.))
+        .child(count.to_string())
 }
 
 fn icon_button(
@@ -110,127 +230,29 @@ fn icon_button(
 ) -> impl IntoElement {
     div()
         .id(id)
+        .size(px(24.))
+        .flex()
+        .items_center()
+        .justify_center()
         .text_size(px(14.))
-        .text_color(rgb(theme::TEXT_SECONDARY))
+        .text_color(rgb(theme::TEXT_MUTED))
         .cursor_pointer()
-        .px(px(5.))
-        .py(px(3.))
         .rounded(px(4.))
-        .hover(|style| style.bg(rgb(theme::HOVER_BG)))
+        .hover(|style| {
+            style
+                .bg(rgb(theme::HOVER_BG))
+                .text_color(rgb(theme::TEXT_PRIMARY))
+        })
         .child(label)
         .on_click(cx.listener(move |app, _, _, cx| on_click(app, cx)))
 }
 
-// ---------------------------------------------------------------- footer
-
-pub(super) fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
-    let percent = app.context_usage.unwrap_or(0);
-    let context_label = app
-        .context_usage
-        .map(|percent| format!("{percent}% context"))
-        .unwrap_or_else(|| "Context unavailable".into());
-    let status_label = app.connection_status.clone();
-    let status_color = if app.thinking {
-        theme::ACCENT
-    } else {
-        theme::TEXT_MUTED
-    };
-    let config_controls = app.session_config_controls.clone();
-    let open_config_menu = app.open_config_menu.clone();
-    let config_search_input = app.config_search_input.clone();
-    let config_search_query = app
-        .config_search_input
-        .read(cx)
-        .content
-        .trim()
-        .to_lowercase();
-    let agent_profiles = app.agent_profiles.clone();
-    let selected_agent = app.active_agent_profile_id().map(str::to_string);
-    let can_select_agent = app.can_select_agent_for_session();
-    let agent_menu_open = app.agent_menu_open;
-
-    div()
-        .h(px(28.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_between()
-        .px(px(12.))
-        .border_t_1()
-        .border_color(rgb(theme::BORDER))
-        .bg(rgb(theme::FOOTER_BG))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .child(agent_selector(
-                    agent_profiles,
-                    selected_agent,
-                    can_select_agent,
-                    agent_menu_open,
-                    cx,
-                ))
-                .children(config_controls.into_iter().map(|control| {
-                    let is_open = open_config_menu.as_deref() == Some(control.id.as_str());
-                    config_selector(
-                        control,
-                        is_open,
-                        config_search_input.clone(),
-                        config_search_query.clone(),
-                        cx,
-                    )
-                })),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(16.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .w(px(14.))
-                                .h(px(14.))
-                                .rounded_full()
-                                .bg(rgb(theme::ACCENT))
-                                .opacity((percent as f32 / 100.0).clamp(0.15, 1.0)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(theme::TEXT_MUTED))
-                                .child(context_label),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_SECONDARY))
-                        .child(
-                            div()
-                                .w(px(6.))
-                                .h(px(6.))
-                                .rounded_full()
-                                .bg(rgb(status_color)),
-                        )
-                        .child(status_label),
-                ),
-        )
-}
-
-fn agent_selector(
+pub(super) fn agent_selector(
     profiles: Vec<crate::config::AgentProfile>,
     selected_id: Option<String>,
     can_select: bool,
     menu_open: bool,
+    connected: bool,
     cx: &mut Context<App>,
 ) -> gpui::AnyElement {
     let selected_name = selected_id
@@ -243,6 +265,7 @@ fn agent_selector(
         })
         .unwrap_or_else(|| "Select agent".into());
     let has_profiles = !profiles.is_empty();
+    let interactive = can_select && has_profiles;
 
     div()
         .relative()
@@ -251,64 +274,67 @@ fn agent_selector(
                 .id("agent-menu-toggle")
                 .flex()
                 .items_center()
-                .gap(px(5.))
-                .text_size(px(11.))
+                .gap(px(6.))
                 .text_color(rgb(if selected_id.is_some() {
                     theme::TEXT_SECONDARY
                 } else {
-                    theme::ACCENT
+                    theme::USER
                 }))
-                .when(can_select && has_profiles, |d| {
+                .when(interactive, |d| {
                     d.cursor_pointer()
+                        .hover(|style| style.text_color(rgb(theme::TEXT_PRIMARY)))
                         .on_click(cx.listener(|app, _, _, cx| app.toggle_agent_menu(cx)))
                 })
-                .child(format!("Agent: {selected_name}"))
-                .when(can_select && has_profiles, |d| {
+                .child(
+                    div()
+                        .text_color(rgb(if connected {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_FAINT
+                        }))
+                        .child("●"),
+                )
+                .child(selected_name)
+                .when(interactive, |d| {
                     d.child(div().text_color(rgb(theme::TEXT_MUTED)).child("▾"))
                 }),
         )
-        .when(menu_open && can_select && has_profiles, |d| {
+        .when(menu_open && interactive, |d| {
             d.child(
-                div()
-                    .absolute()
-                    .bottom(px(28.))
-                    .left(px(0.))
-                    .bg(rgb(theme::INPUT_BG))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .min_w(px(170.))
-                    .children(profiles.into_iter().map(|profile| {
-                        let profile_id = profile.id.clone();
-                        div()
-                            .id(SharedString::from(format!(
-                                "session-agent-profile-{}",
-                                profile.id
-                            )))
-                            .px(px(10.))
-                            .py(px(8.))
-                            .text_size(px(12.))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(theme::HOVER_BG)))
-                            .child(profile.name)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.select_agent_profile(&profile_id, cx)
-                            }))
-                    })),
+                menu_panel(px(200.)).children(profiles.into_iter().map(|profile| {
+                    let profile_id = profile.id.clone();
+                    let is_selected = selected_id.as_deref() == Some(profile.id.as_str());
+                    menu_item(
+                        SharedString::from(format!("session-agent-profile-{}", profile.id)),
+                        profile.name,
+                        is_selected,
+                    )
+                    .on_click(
+                        cx.listener(move |app, _, _, cx| app.select_agent_profile(&profile_id, cx)),
+                    )
+                })),
             )
         })
         .into_any_element()
 }
 
-fn config_selector(
+/// Option sets this small are shown inline as a segmented toggle.
+const SEGMENTED_MAX_CHOICES: usize = 3;
+
+pub(super) fn config_selector(
     control: SessionConfigControl,
     is_open: bool,
     search_input: gpui::Entity<crate::text_input::TextInput>,
     search_query: String,
     cx: &mut Context<App>,
 ) -> gpui::AnyElement {
+    if !control.searchable && (2..=SEGMENTED_MAX_CHOICES).contains(&control.choices.len()) {
+        return segmented_selector(control, cx);
+    }
     let toggle_id = control.id.clone();
     let has_choices = !control.choices.is_empty();
     let searchable = control.searchable;
+    let selected_name = control.selected_name.clone();
     let choices = control
         .choices
         .iter()
@@ -328,12 +354,17 @@ fn config_selector(
                 .flex()
                 .items_center()
                 .gap(px(5.))
-                .text_size(px(11.))
                 .text_color(rgb(theme::TEXT_SECONDARY))
-                .when(has_choices, |d| d.cursor_pointer())
-                .child(format!("{}: {}", control.name, control.selected_name))
+                .child(
+                    div()
+                        .text_color(rgb(theme::TEXT_FAINT))
+                        .child(control.name.to_lowercase()),
+                )
+                .child(control.selected_name.clone())
                 .when(has_choices, |d| {
-                    d.child(div().text_color(rgb(theme::TEXT_MUTED)).child("▾"))
+                    d.cursor_pointer()
+                        .hover(|style| style.text_color(rgb(theme::TEXT_PRIMARY)))
+                        .child(div().text_color(rgb(theme::TEXT_MUTED)).child("▾"))
                         .on_click(
                             cx.listener(move |app, _, _, cx| {
                                 app.toggle_config_menu(&toggle_id, cx)
@@ -343,14 +374,7 @@ fn config_selector(
         )
         .when(is_open && has_choices, |d| {
             d.child(
-                div()
-                    .absolute()
-                    .bottom(px(28.))
-                    .left(px(0.))
-                    .bg(rgb(theme::INPUT_BG))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .w(px(280.))
+                menu_panel(px(280.))
                     .max_h(px(320.))
                     .flex()
                     .flex_col()
@@ -363,13 +387,21 @@ fn config_selector(
                                 .border_color(rgb(theme::BORDER))
                                 .child(
                                     div()
-                                        .bg(rgb(theme::PANEL_BG))
-                                        .border_1()
-                                        .border_color(rgb(theme::BORDER))
+                                        .flex()
+                                        .gap(px(8.))
+                                        .bg(rgb(theme::INPUT_BG))
+                                        .border_l_3()
+                                        .border_color(rgb(theme::ACCENT))
                                         .px(px(8.))
                                         .py(px(6.))
                                         .text_size(px(11.))
-                                        .child(search_input),
+                                        .child(
+                                            div()
+                                                .text_color(rgb(theme::ACCENT))
+                                                .font_weight(FontWeight::BOLD)
+                                                .child("/"),
+                                        )
+                                        .child(div().flex_1().child(search_input)),
                                 ),
                         )
                     })
@@ -386,35 +418,110 @@ fn config_selector(
                                     div()
                                         .px(px(10.))
                                         .py(px(12.))
-                                        .text_size(px(11.))
-                                        .text_color(rgb(theme::TEXT_MUTED))
+                                        .text_color(rgb(theme::TEXT_FAINT))
                                         .child("No matching models"),
                                 )
                             })
                             .children(choices.into_iter().map(|choice| {
                                 let config_id = control.id.clone();
                                 let value = choice.value.clone();
-                                div()
-                                    .id(SharedString::from(format!(
+                                let is_selected = choice.name == selected_name;
+                                menu_item(
+                                    SharedString::from(format!(
                                         "footer-config-{}-{}",
                                         control.id, choice.name
-                                    )))
-                                    .px(px(10.))
-                                    .py(px(8.))
-                                    .text_size(px(12.))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(theme::HOVER_BG)))
-                                    .child(choice.name)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                    )),
+                                    choice.name,
+                                    is_selected,
+                                )
+                                .on_click(cx.listener(
+                                    move |app, _, _, cx| {
                                         app.select_session_config(
                                             config_id.clone(),
                                             value.clone(),
                                             cx,
                                         )
-                                    }))
+                                    },
+                                ))
                             })),
                     ),
             )
         })
         .into_any_element()
+}
+
+fn segmented_selector(control: SessionConfigControl, cx: &mut Context<App>) -> gpui::AnyElement {
+    div()
+        .flex()
+        .bg(rgb(theme::INPUT_BG))
+        .children(control.choices.into_iter().map(|choice| {
+            let is_selected = choice.name == control.selected_name;
+            let config_id = control.id.clone();
+            let value = choice.value.clone();
+            div()
+                .id(SharedString::from(format!(
+                    "footer-config-{}-{}",
+                    control.id, choice.name
+                )))
+                .px(px(9.))
+                .py(px(1.))
+                .when(is_selected, |d| {
+                    d.bg(rgb(theme::ACCENT))
+                        .text_color(rgb(theme::ACCENT_DARK_TEXT))
+                        .font_weight(FontWeight::BOLD)
+                        .child(choice.name.to_uppercase())
+                })
+                .when(!is_selected, |d| {
+                    d.text_color(rgb(theme::TEXT_MUTED))
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(rgb(theme::TEXT_PRIMARY)))
+                        .child(choice.name.to_lowercase())
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.select_session_config(config_id.clone(), value.clone(), cx)
+                        }))
+                })
+        }))
+        .into_any_element()
+}
+
+/// Popup that opens upward from a control in the composer's bottom row.
+fn menu_panel(width: gpui::Pixels) -> gpui::Div {
+    div()
+        .absolute()
+        .bottom(px(24.))
+        .left(px(-10.))
+        .w(width)
+        .bg(rgb(theme::PANEL_BG))
+        .border_1()
+        .border_color(rgb(theme::DIVIDER))
+        .py(px(4.))
+        .font_family(theme::MONO_FONT_FAMILY)
+        .text_size(px(12.))
+}
+
+fn menu_item(id: SharedString, label: String, selected: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .gap(px(8.))
+        .px(px(10.))
+        .py(px(6.))
+        .cursor_pointer()
+        .text_color(rgb(if selected {
+            theme::TEXT_PRIMARY
+        } else {
+            theme::TEXT_SECONDARY
+        }))
+        .hover(|style| {
+            style
+                .bg(rgb(theme::HOVER_BG))
+                .text_color(rgb(theme::TEXT_PRIMARY))
+        })
+        .child(
+            div()
+                .w(px(10.))
+                .text_color(rgb(theme::ACCENT))
+                .child(if selected { "▸" } else { "" }),
+        )
+        .child(label)
 }

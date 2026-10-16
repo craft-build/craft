@@ -59,9 +59,8 @@ mod tests {
     #[test]
     fn events_land_in_the_log_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer =
-            crate::storage::log::RotatingFileWriter::with_limits(dir.path(), 1 << 20, 2)
-                .expect("writer");
+        let writer = crate::storage::log::RotatingFileWriter::with_limits(dir.path(), 1 << 20, 2)
+            .expect("writer");
         let dispatch = tracing::Dispatch::new(subscriber(
             writer,
             EnvFilter::new("craft::logging::tests=trace"),

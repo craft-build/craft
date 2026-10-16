@@ -152,6 +152,35 @@ impl App {
         cx.notify();
     }
 
+    pub fn discard_comment_draft(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.comment_drafts.remove(key).is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Every comment left in the active session, pending or already sent,
+    /// in a stable order for the review panel.
+    pub fn session_comments(&self) -> Vec<(String, usize, Comment)> {
+        let scope = comment_scope_prefix(self.active_session_id.as_deref());
+        let mut out = self
+            .comments
+            .iter()
+            .filter(|(key, _)| key.starts_with(&scope))
+            .flat_map(|(key, list)| {
+                list.iter()
+                    .enumerate()
+                    .map(|(idx, comment)| (key.clone(), idx, comment.clone()))
+            })
+            .collect::<Vec<_>>();
+        out.sort_by(|a, b| {
+            b.2.pending
+                .cmp(&a.2.pending)
+                .then(a.0.cmp(&b.0))
+                .then(a.1.cmp(&b.1))
+        });
+        out
+    }
+
     pub fn pending_comments(&self) -> Vec<PendingComment> {
         let mut out = vec![];
         let scope = comment_scope_prefix(self.active_session_id.as_deref());
