@@ -21,22 +21,17 @@ default: app
 build:
     cargo build --release --bin {{bin_name}}
 
-# AppIcon.icns from Logo.png (padded to a square, then every iconset size).
+# AppIcon.icns from Logo.png, scaled to every iconset size.
 icon:
     #!/usr/bin/env bash
     set -euo pipefail
     rm -rf "{{icon_work}}"
     mkdir -p "{{icon_work}}/AppIcon.iconset"
-    w=$(sips -g pixelWidth Logo.png | awk '/pixelWidth/ {print $2}')
-    h=$(sips -g pixelHeight Logo.png | awk '/pixelHeight/ {print $2}')
-    side=$(( w > h ? w : h ))
-    # iconutil needs square images; pad the shorter side with transparency.
-    sips --padToHeightWidth "$side" "$side" Logo.png --out "{{icon_work}}/square.png" >/dev/null
     for size in 16 32 128 256 512; do
-        sips -z "$size" "$size" "{{icon_work}}/square.png" \
+        sips -z "$size" "$size" Logo.png \
             --out "{{icon_work}}/AppIcon.iconset/icon_${size}x${size}.png" >/dev/null
         double=$(( size * 2 ))
-        sips -z "$double" "$double" "{{icon_work}}/square.png" \
+        sips -z "$double" "$double" Logo.png \
             --out "{{icon_work}}/AppIcon.iconset/icon_${size}x${size}@2x.png" >/dev/null
     done
     iconutil -c icns "{{icon_work}}/AppIcon.iconset" -o "{{icon_work}}/AppIcon.icns"
