@@ -18,6 +18,7 @@ mod parity;
 mod parity_slt;
 mod permission_prompt;
 mod plan_form;
+mod probe;
 pub mod provider;
 mod question_form;
 mod repaint;
@@ -157,33 +158,47 @@ const TRUECOLOR_TERMS: &[&str] = &[
     "xterm-kitty",
 ];
 
-/// Color depth for the slt run config, extending `slt::ColorDepth::detect`.
+/// Color depth for the slt run config, resolved in two evidence layers.
 ///
-/// slt's chain is `NO_COLOR` → no color, `COLORTERM=truecolor|24bit` →
-/// truecolor, `TERM` contains `256color` → 256-color, else 16-color Basic.
-/// SSH sessions forward `TERM` but never `COLORTERM`, so on a modern
-/// truecolor terminal whose `TERM` lacks `256color` (Ghostty's
-/// `xterm-ghostty`, Alacritty, WezTerm, kitty, foot, …) every theme color is
-/// downsampled to one of 16 ANSI colors: muted palettes collapse to black /
-/// gray / white ("the coloring disappeared") and all bundled themes look
-/// the same. The known-truecolor `TERM` list and the terminfo `*-direct`
-/// direct-color convention close that gap; everything else keeps slt's
-/// semantics untouched.
+/// **Env layer** (extends `slt::ColorDepth::detect`): `NO_COLOR` → no
+/// color, `COLORTERM=truecolor|24bit` → truecolor, and — closing the
+/// first SSH gap — the known-truecolor `TERM` allowlist plus the terminfo
+/// `*-direct` convention, since SSH forwards `TERM` but not `COLORTERM`:
+/// without them, `xterm-ghostty` and friends collapsed to 16-color Basic
+/// and every bundled theme read as "the coloring disappeared".
+///
+/// **Wire layer** (`tui::probe`, consulted when the env layer alone would
+/// downsample): `xterm-256color` is what most modern truecolor terminals
+/// report out of the box (iTerm2, Terminal.app, VS Code, tmux users), so
+/// an SSH session to one of them cannot be distinguished from an SSH
+/// session to a genuinely 256-color terminal by environment alone. Before
+/// slt takes over stdin, the startup probe asks the terminal itself for
+/// the terminfo `Tc` direct-color capability — every truecolor terminal
+/// behind a plain SSH hop answers, and the ack upgrades EightBit/Basic to
+/// truecolor. A silent or 256-only terminal keeps the downsampled depth:
+/// the probe only ever adds fidelity, it never speculates.
+///
+/// `NO_COLOR` is an explicit user demand and stays final in both layers.
 fn detect_color_depth() -> slt::ColorDepth {
     let var = |name: &str| std::env::var(name).ok();
     color_depth_for(
         var("NO_COLOR").as_deref(),
         var("COLORTERM").as_deref(),
         var("TERM").as_deref(),
+        probe::truecolor_ack(),
     )
 }
 
 /// Pure core of [`detect_color_depth`] so the precedence chain is testable
-/// without racing other tests through the process environment.
+/// without racing other tests through the process environment or stdio.
+/// `truecolor_ack` is the wire probe's cached outcome (`None` = the probe
+/// never ran — muxed session, non-tty stdio, or the env layer already
+/// decided the depth).
 fn color_depth_for(
     no_color: Option<&str>,
     colorterm: Option<&str>,
     term: Option<&str>,
+    truecolor_ack: Option<bool>,
 ) -> slt::ColorDepth {
     // https://no-color.org — any non-empty value disables color.
     if no_color.is_some_and(|v| !v.is_empty()) {
@@ -195,13 +210,50 @@ fn color_depth_for(
         }
     }
     let term = term.unwrap_or_default().trim().to_ascii_lowercase();
-    if TRUECOLOR_TERMS.contains(&term.as_str()) || term.ends_with("-direct") {
-        return slt::ColorDepth::TrueColor;
+    let env_depth = if TRUECOLOR_TERMS.contains(&term.as_str()) || term.ends_with("-direct") {
+        slt::ColorDepth::TrueColor
+    } else if term.contains("256color") {
+        slt::ColorDepth::EightBit
+    } else {
+        slt::ColorDepth::Basic
+    };
+    // The terminal's own `Tc` ack outranks a boring TERM, but only
+    // upgrades depths that lost fidelity; NO_COLOR returned above is
+    // already out of reach by then.
+    match (env_depth, truecolor_ack) {
+        (slt::ColorDepth::Basic | slt::ColorDepth::EightBit, Some(true)) => {
+            slt::ColorDepth::TrueColor
+        }
+        _ => env_depth,
     }
-    if term.contains("256color") {
-        return slt::ColorDepth::EightBit;
-    }
-    slt::ColorDepth::Basic
+}
+
+/// Terminal color environment for `craft doctor`: the raw color-relevant
+/// variables exactly as the process sees them, whether an SSH daemon or a
+/// terminal multiplexer produced that environment, and the depth the env
+/// layer resolves on its own (doctor runs the chain with `ack=None`: the
+/// live wire probe belongs to the TUI's pre-slt startup window, and
+/// firing it from doctor would stack a raw-mode session on doctor's own
+/// stdout). Everything here is plain env reading — no stdio, no probes.
+pub(crate) fn color_env_doctor() -> serde_json::Value {
+    let var = |name: &str| std::env::var(name).ok();
+    let env_depth = color_depth_for(
+        var("NO_COLOR").as_deref(),
+        var("COLORTERM").as_deref(),
+        var("TERM").as_deref(),
+        None,
+    );
+    let ssh = ["SSH_TTY", "SSH_CONNECTION", "SSH_CLIENT"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some());
+    serde_json::json!({
+        "term": var("TERM"),
+        "colorterm": var("COLORTERM"),
+        "no_color": var("NO_COLOR"),
+        "ssh_session": ssh,
+        "multiplexer": if std::env::var_os("TMUX").is_some() { Some("tmux") } else { None },
+        "color_depth": format!("{env_depth:?}"),
+    })
 }
 
 /// Startup sequencing (resume gating on the first `StatusChanged(Done)`),
@@ -215,6 +267,12 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
     // before slt takes over the terminal: the probe reads its replies
     // straight from stdin (F.6).
     ui::image::probe();
+    // Same pre-pump window: ask the terminal for its `Tc` direct-color
+    // capability. SSH drops COLORTERM, so for `TERM=xterm-256color` — what
+    // most truecolor terminals report — the wire ack is the only evidence
+    // that can lift the depth above 256-color (probe.rs);
+    // `detect_color_depth` reads it back when the run config is built.
+    probe::probe_truecolor();
 
     // B.11: grab the MCP handle before `start` consumes the provider.
     let mcp = provider.mcp();
@@ -659,6 +717,8 @@ mod tests {
     /// The SSH case: `TERM` arrives (truecolor terminal, no `256color` in
     /// the name) but `COLORTERM` does not — the depth must still resolve to
     /// truecolor instead of collapsing the theme into 16 ANSI colors.
+    /// The ack is `None`: the env layer already decides, so the wire probe
+    /// never fires on allowlisted terminals.
     #[test]
     fn truecolor_term_survives_missing_colorterm_over_ssh() {
         for term in [
@@ -672,7 +732,7 @@ mod tests {
             "xterm-direct",
         ] {
             assert_eq!(
-                color_depth_for(None, None, Some(term)),
+                color_depth_for(None, None, Some(term), Some(false)),
                 slt::ColorDepth::TrueColor,
                 "TERM={term}"
             );
@@ -685,26 +745,73 @@ mod tests {
     #[test]
     fn color_depth_precedence_chain_is_preserved() {
         assert_eq!(
-            color_depth_for(Some("1"), Some("truecolor"), Some("xterm-ghostty")),
+            color_depth_for(Some("1"), Some("truecolor"), Some("xterm-ghostty"), Some(true)),
             slt::ColorDepth::NoColor
         );
         assert_eq!(
-            color_depth_for(None, Some("24bit"), Some("xterm")),
+            color_depth_for(None, Some("24bit"), Some("xterm"), Some(false)),
             slt::ColorDepth::TrueColor
         );
         assert_eq!(
-            color_depth_for(None, None, Some("xterm-256color")),
+            color_depth_for(None, None, Some("xterm-256color"), None),
             slt::ColorDepth::EightBit
         );
         assert_eq!(
-            color_depth_for(None, None, Some("tmux-256color")),
+            color_depth_for(None, None, Some("tmux-256color"), None),
             slt::ColorDepth::EightBit
         );
         assert_eq!(
-            color_depth_for(None, None, Some("vt220")),
+            color_depth_for(None, None, Some("vt220"), None),
             slt::ColorDepth::Basic
         );
-        assert_eq!(color_depth_for(None, None, None), slt::ColorDepth::Basic);
+        assert_eq!(
+            color_depth_for(None, None, None, None),
+            slt::ColorDepth::Basic
+        );
+    }
+
+    /// The wire-probe upgrade (tui::probe): an SSH session with
+    /// `TERM=xterm-256color` — what most truecolor terminals report — stays
+    /// downsampled when the terminal is silent, and lifts to truecolor when
+    /// it acks the XTGETTCAP `Tc` query. The unprobed case (`None`) keeps
+    /// the pre-probe behavior.
+    #[test]
+    fn probe_ack_lifts_a_downsampled_ssh_session_to_truecolor() {
+        assert_eq!(
+            color_depth_for(None, None, Some("xterm-256color"), Some(true)),
+            slt::ColorDepth::TrueColor,
+            "an acked truecolor terminal behind SSH renders all colors"
+        );
+        assert_eq!(
+            color_depth_for(None, None, Some("xterm-256color"), Some(false)),
+            slt::ColorDepth::EightBit,
+            "a silent or genuinely 256-color terminal keeps the 256-color depth"
+        );
+        assert_eq!(
+            color_depth_for(None, None, Some("xterm-256color"), None),
+            slt::ColorDepth::EightBit,
+            "no probe (muxed, non-tty, or a session that skipped it): env stands"
+        );
+    }
+
+    /// The upgrade also rescues unknown TERM values (a remote shell that
+    /// rewrote a fancy terminal's TERM to something plain) — and still never
+    /// escapes an explicit NO_COLOR.
+    #[test]
+    fn probe_ack_rescues_unknown_terms_but_not_no_color() {
+        assert_eq!(
+            color_depth_for(None, None, Some("vt220"), Some(true)),
+            slt::ColorDepth::TrueColor
+        );
+        assert_eq!(
+            color_depth_for(None, None, Some("vt220"), Some(false)),
+            slt::ColorDepth::Basic
+        );
+        assert_eq!(
+            color_depth_for(Some("1"), None, Some("xterm-256color"), Some(true)),
+            slt::ColorDepth::NoColor,
+            "NO_COLOR is an explicit user demand; even an ack cannot override it"
+        );
     }
 
     /// Digest a provider burst exactly as `drive_slt`'s frame closure does:

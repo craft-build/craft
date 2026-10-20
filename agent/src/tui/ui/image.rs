@@ -11,11 +11,13 @@
 //! images are the `history::ImageBlock` base64 payloads produced by
 //! `view_image` and composer attachments.
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::IsTerminal;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use base64::Engine;
+
+use crate::tui::probe::read_tty_reply;
 
 /// Cap on image height in terminal rows so a tall screenshot doesn't
 /// consume the whole scrollback.
@@ -52,78 +54,10 @@ fn query_cell_pixel_size() -> Option<(u32, u32)> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return None;
     }
-    let reply = read_stdin_reply("\x1b[16t", Duration::from_millis(100), |buf| {
+    let reply = read_tty_reply("\x1b[16t", Duration::from_millis(100), |buf| {
         parse_cell_pixel_size(buf).is_some()
     })?;
     parse_cell_pixel_size(reply.as_bytes())
-}
-
-/// Read a terminal reply from stdin for up to `timeout`, with raw mode (and
-/// its restore) owned by this call so nothing the pump owns is disturbed.
-fn read_stdin_reply(
-    query: &str,
-    timeout: Duration,
-    complete: impl Fn(&[u8]) -> bool,
-) -> Option<String> {
-    use std::os::fd::AsRawFd;
-
-    let stdin = std::io::stdin();
-    let fd = stdin.as_raw_fd();
-    // Park the line discipline: the reply must be readable byte by byte.
-    let mut saved = unsafe { std::mem::zeroed::<libc::termios>() };
-    let raw_ok = unsafe { libc::tcgetattr(fd, &mut saved) } == 0;
-    if raw_ok {
-        let mut raw = saved;
-        unsafe { libc::cfmakeraw(&mut raw) };
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-            return None;
-        }
-    }
-
-    let mut out = std::io::stdout();
-    let wrote = out
-        .write_all(query.as_bytes())
-        .and_then(|()| out.flush())
-        .is_ok();
-
-    let mut buf: Vec<u8> = Vec::new();
-    let deadline = std::time::Instant::now() + timeout;
-    if wrote {
-        let mut stdin = stdin.lock();
-        let mut byte = [0u8; 1];
-        while deadline.duration_since(std::time::Instant::now()) > Duration::ZERO {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ready = unsafe {
-                libc::poll(
-                    &mut pfd,
-                    1,
-                    remaining.as_millis().min(i32::MAX as u128) as i32,
-                )
-            };
-            if ready <= 0 {
-                break; // timeout or poll error
-            }
-            match stdin.read(&mut byte) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    buf.push(byte[0]);
-                    if complete(&buf) {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    if raw_ok {
-        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
-    }
-    String::from_utf8(buf).ok()
 }
 
 /// Parse: `ESC [ 6 ; <height> ; <width> t`.

@@ -225,6 +225,7 @@ pub async fn doctor(config: Config, export: bool) -> Result<()> {
         "platform": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
         "config_dir": paths::config_dir().ok().map(|p| p.display().to_string()),
         "state_dir": dir.path().display().to_string(),
+        "terminal": crate::tui::color_env_doctor(),
         "current_model": current.as_ref().map(|(n, m)| format!("{n}/{m}")),
         "saved_model": saved_model,
         "healed_to": healed_to,
@@ -303,6 +304,28 @@ fn print_doctor_report(report: &Value) {
     }
     if let Some(dir) = report["state_dir"].as_str() {
         println!("state dir:  {dir}");
+    }
+    // Terminal rendering facts: SSH color reports used to require
+    // reproducing the session by hand, because nothing surfaced what the
+    // TUI actually saw (tui::color_env_doctor mirrors the depth chain).
+    if let Some(term) = report["terminal"].as_object() {
+        let show = |key: &str, value: Option<&str>| match value {
+            Some("") | None => format!("{key}=<unset>"),
+            Some(v) => format!("{key}={v}"),
+        };
+        let ssh = if term["ssh_session"] == json!(true) { "yes" } else { "no" };
+        let mux = term["multiplexer"].as_str().unwrap_or("none");
+        println!(
+            "terminal:  {} {} (ssh: {ssh}, multiplexer: {mux})",
+            show("TERM", term["term"].as_str()),
+            show("COLORTERM", term["colorterm"].as_str()),
+        );
+        let no_color = term["no_color"].as_str();
+        println!(
+            "           {} → depth {} (env chain; the TUI's startup probe upgrades 8/16-color once the terminal acks truecolor)",
+            show("NO_COLOR", no_color),
+            term["color_depth"].as_str().unwrap_or("?"),
+        );
     }
     println!();
     match report["current_model"].as_str() {
