@@ -152,9 +152,27 @@ pub fn parse_decision(text: &str) -> Result<Decision, ReviewError> {
 /// Decision-endpoint auto-approval (Phase 2 of the argosy integration):
 /// answer the same NeedsPrompt question through the configured Jev/laya
 /// endpoint instead of an LLM reviewer call. The endpoint's calibrated
-/// `answer_confidence` is thresholded (≥ 0.5 → allow); anything below, and
-/// any endpoint failure, fails closed exactly like the LLM reviewer.
+/// answer for the `safe` noul question is thresholded (≥ 0.5 → allow):
+/// `answer_confidence` when the endpoint reports one, else the noul
+/// probability itself (llama.cpp's decision router reports only that).
+/// Anything below, and any endpoint failure, fails closed exactly like
+/// the LLM reviewer.
 pub const DECISION_ALLOW_CONFIDENCE: f32 = 0.5;
+
+/// The calibrated P(safe) to threshold. `answer_confidence` when the
+/// endpoint reports it; otherwise the noul probability, which for a
+/// yes/no question is the same quantity (llama.cpp's decision router,
+/// hosting the Kev/Laya GGUF checkpoints, answers `{"type": "noul",
+/// "noul": p}` with no confidence key). A `choice` label (a string, not
+/// a probability) still yields `None` and fails closed.
+fn calibrated_safe(response: &argosy::decision::DecisionResponse) -> Option<f32> {
+    response.answer_confidence("safe").or_else(|| {
+        response
+            .primary("safe")
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value as f32)
+    })
+}
 
 pub async fn decide_with_endpoint(
     provider: std::sync::Arc<dyn argosy::decision::DecisionProvider>,
@@ -179,11 +197,11 @@ pub async fn decide_with_endpoint(
         .map_err(|e| ReviewError::Provider {
             message: format!("decision endpoint: {e:#}"),
         })?;
-    let confidence = response
-        .answer_confidence("safe")
-        .ok_or_else(|| ReviewError::Parse {
-            message: "the decision endpoint returned no calibrated confidence".into(),
-        })?;
+    let confidence = calibrated_safe(&response).ok_or_else(|| ReviewError::Parse {
+        message: "the decision endpoint returned neither an `answer_confidence` nor a \
+                  noul probability for `safe`"
+            .into(),
+    })?;
     let allow = confidence >= DECISION_ALLOW_CONFIDENCE;
     Ok(Decision {
         verdict: if allow { Verdict::Allow } else { Verdict::Deny },
@@ -368,6 +386,76 @@ mod tests {
             decide_with_endpoint(provider, "write", &[]).await,
             Err(ReviewError::Parse { .. })
         ));
+    }
+
+    /// llama.cpp's decision router (Kev/Laya GGUF) answers a noul question
+    /// with the noul probability only — no `answer_confidence`. That value
+    /// is the calibration, and it maps onto verdicts the same way.
+    #[tokio::test]
+    async fn router_noul_probability_maps_to_verdicts() {
+        struct RouterNoul(f64);
+        impl argosy::decision::DecisionProvider for RouterNoul {
+            fn is_enabled(&self) -> bool {
+                true
+            }
+            fn decide(
+                &self,
+                _request: &argosy::decision::DecisionRequest,
+            ) -> std::result::Result<argosy::decision::DecisionResponse, argosy::error::Error>
+            {
+                Ok(serde_json::from_value(serde_json::json!({
+                    "model": "ggml-org/Laya-GGUF:Q8_0",
+                    "answers": {"safe": {"type": "noul", "noul": self.0}}
+                }))
+                .expect("router decision deserializes"))
+            }
+        }
+        for (noul, expected) in [
+            (0.52, Verdict::Allow),
+            (0.5, Verdict::Allow),
+            (0.39, Verdict::Deny),
+        ] {
+            let provider: std::sync::Arc<dyn argosy::decision::DecisionProvider> =
+                std::sync::Arc::new(RouterNoul(noul));
+            let decision = decide_with_endpoint(provider, "write", &["/tmp/x".into()])
+                .await
+                .unwrap();
+            assert_eq!(decision.verdict, expected, "noul {noul}");
+            assert!(decision.rationale.contains("confidence"));
+        }
+    }
+
+    /// When both are present the explicit `answer_confidence` wins, matching
+    /// argosy's preference order (Laya's entropy confidence is its own
+    /// quantity, not the yes-probability).
+    #[tokio::test]
+    async fn explicit_answer_confidence_is_preferred_over_noul() {
+        struct Both(f64, f64);
+        impl argosy::decision::DecisionProvider for Both {
+            fn is_enabled(&self) -> bool {
+                true
+            }
+            fn decide(
+                &self,
+                _request: &argosy::decision::DecisionRequest,
+            ) -> std::result::Result<argosy::decision::DecisionResponse, argosy::error::Error>
+            {
+                Ok(serde_json::from_value(serde_json::json!({
+                    "answers": {"safe": {"noul": self.1, "answer_confidence": self.0}}
+                }))
+                .expect("fixed decision deserializes"))
+            }
+        }
+        for (confidence, noul, expected) in [(0.9, 0.1, Verdict::Allow), (0.4, 0.9, Verdict::Deny)]
+        {
+            let provider: std::sync::Arc<dyn argosy::decision::DecisionProvider> =
+                std::sync::Arc::new(Both(confidence, noul));
+            let decision = decide_with_endpoint(provider, "write", &[]).await.unwrap();
+            assert_eq!(
+                decision.verdict, expected,
+                "answer_confidence {confidence} over noul {noul}"
+            );
+        }
     }
 
     fn decision_json(verdict: &str, risk: &str, rationale: &str) -> String {
