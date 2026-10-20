@@ -198,7 +198,7 @@ macro_rules! providers {
                     } else if matches!(self, Self::Bedrock(_)) {
                         // The rig-bedrock data-plane client has no listing;
                         // inference profiles come from the control-plane API.
-                        super::bedrock::list_models(config).await?
+                        super::bedrock::list_models(config, Timeouts::default()).await?
                     } else {
                         match self {
                             $(Self::$variant(client) => list_models!(client, $listing),)+

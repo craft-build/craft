@@ -42,9 +42,14 @@ pub async fn models(config: Config) -> Result<()> {
                         println!("{line}");
                     }
                 }
-                Err(e) => eprintln!("warning: {name}: {e}"),
+                // The full chain, not just the top line: an unresolvable
+                // region or credential source explains itself in the
+                // sources (TUI and ACP render the same way).
+                Err(e) => eprintln!("warning: {name}: {}", snafu::Report::from_error(e)),
             },
-            Err(e) => eprintln!("warning: {name}: {e}"),
+            Err(e) => {
+                eprintln!("warning: {name}: {}", snafu::Report::from_error(e))
+            }
         }
     }
     Ok(())
@@ -148,7 +153,9 @@ pub async fn doctor(config: Config, export: bool) -> Result<()> {
                     Ok(_) => ("ok", String::new()),
                     Err(detail) => ("fail", detail),
                 },
-                Err(e) => ("fail", e.to_string()),
+                // Full source chain: the actionable reason (unresolvable
+                // region, missing credential env, ...) lives in the sources.
+                Err(e) => ("fail", snafu::Report::from_error(e).to_string()),
             };
             let ok = status == "ok";
             provider_status.push(json!({
@@ -184,7 +191,7 @@ pub async fn doctor(config: Config, export: bool) -> Result<()> {
                     provider_status.push(json!({
                         "kind": name,
                         "status": "unavailable",
-                        "detail": e.to_string(),
+                        "detail": snafu::Report::from_error(e).to_string(),
                     }));
                     continue;
                 }
@@ -313,7 +320,11 @@ fn print_doctor_report(report: &Value) {
             Some("") | None => format!("{key}=<unset>"),
             Some(v) => format!("{key}={v}"),
         };
-        let ssh = if term["ssh_session"] == json!(true) { "yes" } else { "no" };
+        let ssh = if term["ssh_session"] == json!(true) {
+            "yes"
+        } else {
+            "no"
+        };
         let mux = term["multiplexer"].as_str().unwrap_or("none");
         println!(
             "terminal:  {} {} (ssh: {ssh}, multiplexer: {mux})",

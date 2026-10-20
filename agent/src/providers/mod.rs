@@ -375,26 +375,27 @@ pub(crate) fn build_azure(
 }
 
 /// Bedrock has no craft-side credential or base URL: the AWS SDK's default
-/// chain (environment credentials, `~/.aws` profiles, SSO, container/IMDS
-/// roles) supplies both credentials and region, resolved lazily on the
-/// first request. `region`/`profile` in the provider config override the
-/// region and name the shared-config profile (e.g. an assume-role or SSO
-/// account that is not the default profile). The AWS SDK also owns its
-/// transport, so the shared reqwest [`Timeouts`] policy does not apply;
-/// AWS call timeouts live in the SDK config instead.
+/// chain (environment credentials, `~/.aws` profiles including SSO and
+/// assume-role, web identity, container and IMDS roles) supplies both
+/// credentials and region through one craft-owned, cached SDK config —
+/// with a fast-failing IMDS probe so non-EC2 machines neither stall nor
+/// wait through multi-second SDK defaults (see [`crate::providers::bedrock`]).
+/// `region`/`profile` in the provider config override the region and name
+/// the shared-config profile (e.g. an assume-role or SSO account that is
+/// not the default profile); `AWS_PROFILE` flows through the chain
+/// natively. A missing region fails here with the fixes spelled out
+/// instead of an opaque "dispatch failure" on the first request. The AWS
+/// SDK owns its transport, so craft's `Timeouts` map onto the SDK's
+/// connect/stall timeouts rather than the shared reqwest policy.
 pub(crate) fn build_bedrock(
     config: &ProviderConfig,
-    _: Timeouts,
+    timeouts: Timeouts,
     _: &dyn Fn(&str) -> Result<String>,
 ) -> Result<rig_bedrock::client::BedrockRuntime> {
-    let mut builder = rig_bedrock::client::BedrockRuntime::builder();
-    if let Some(region) = &config.region {
-        builder = builder.region(region.clone());
-    }
-    if let Some(profile) = &config.profile {
-        builder = builder.profile_name(profile.clone());
-    }
-    Ok(builder.build())
+    let sdk_config = bedrock::sdk_config_blocking(config, timeouts)?;
+    Ok(rig_bedrock::client::BedrockRuntime::from(
+        aws_sdk_bedrockruntime::Client::new(&sdk_config),
+    ))
 }
 
 /// The OAuth and GitHub-token device flows are async; providers are still
@@ -522,7 +523,9 @@ mod tests {
 
     fn config(kind: ProviderKind, base_url: &str) -> ProviderConfig {
         // Bedrock takes neither credentials nor a base URL: the AWS default
-        // credential chain owns both.
+        // credential chain owns both. It does need a resolvable region —
+        // the fixture pins one so provider construction stays offline
+        // (no IMDS probing, no region guard).
         let auth = if matches!(kind, ProviderKind::Llamafile | ProviderKind::Bedrock) {
             ""
         } else {
@@ -538,8 +541,13 @@ mod tests {
         } else {
             format!("  base_url = \"{base_url}\"\n")
         };
+        let region = if kind == ProviderKind::Bedrock {
+            "  region = \"us-east-1\"\n"
+        } else {
+            ""
+        };
         Config::parse(&format!(
-            "provider \"test\" {{\n  kind = \"{}\"\n{base}{auth}{azure}  model \"manual\" {{ name = \"Manual model\" }}\n}}",
+            "provider \"test\" {{\n  kind = \"{}\"\n{region}{base}{auth}{azure}  model \"manual\" {{ name = \"Manual model\" }}\n}}",
             kind.as_str(),
         ))
         .unwrap()
@@ -726,7 +734,7 @@ mod tests {
         // credentials that surfaces as an error instead of an empty list,
         // and discover_models = false restores the configured-only catalog.
         let mut parsed = Config::parse(
-            "provider \"test\" { kind = \"amazon-bedrock\"\n  model \"m\" { name = \"Manual\" }\n  discover_models = false }",
+            "provider \"test\" { kind = \"amazon-bedrock\"\n  region = \"us-east-1\"\n  model \"m\" { name = \"Manual\" }\n  discover_models = false }",
         )
         .unwrap();
         let bedrock = parsed.providers.remove("test").unwrap();

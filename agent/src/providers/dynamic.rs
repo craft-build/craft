@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn bedrock_claude_honors_configured_max_output_tokens() {
         let config = crate::config::Config::parse(
-            "provider \"aws\" {\n  kind = \"amazon-bedrock\"\n  \
+            "provider \"aws\" {\n  kind = \"amazon-bedrock\"\n  region = \"us-east-1\"\n  \
              model \"us.anthropic.claude-sonnet-4-6\" { max_output_tokens = 24000 }\n}",
         )
         .unwrap();
