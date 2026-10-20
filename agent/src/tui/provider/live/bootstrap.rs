@@ -102,6 +102,16 @@ impl CraftProvider {
             notes.push(format!("mcp: {}", env.mcp_errors));
         }
         let mcp = workspace.mcp();
+        // H.2 models.dev catalog: warm the 24h disk cache (best-effort, with
+        // a fetch budget) BEFORE discovery, matching headless and ACP: the
+        // Bedrock listing resolves inference-profile limits (exact id, then
+        // the profile's base model) while listing, and openai-compatible
+        // endpoints record reasoning hints — a post-warm pass can only fill
+        // fields keyed by the model id, so a cold catalog would leave those
+        // permanently empty. The per-model enrichment itself now lives in
+        // `models_with`; failures degrade to whatever discovery provides.
+        let _ =
+            tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
         for (name, provider_config) in &config.providers {
             if provider_config.kind == ProviderKind::Voyageai {
                 notes.push(format!("{name}: no completion models (non-chat provider)"));
@@ -130,17 +140,6 @@ impl CraftProvider {
                 ),
             }
             .fail();
-        }
-
-        // H.2 models.dev catalog: warm the 24h disk cache (best-effort, with
-        // a fetch budget) and fill context/output metadata the Rig listing
-        // lacks. Failures degrade to whatever discovery already provided.
-        let _ =
-            tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
-        for (name, provider_config) in &config.providers {
-            if let Some(models) = catalogs.get_mut(name) {
-                crate::models_dev::enrich_catalog(provider_config.kind.as_str(), models);
-            }
         }
 
         // H.3 model-tier registry: load persisted tier overrides and feed in

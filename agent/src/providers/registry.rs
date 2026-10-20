@@ -207,7 +207,15 @@ macro_rules! providers {
                 } else {
                     ModelList::new(vec![])
                 };
-                Ok(merge_catalog(config, discovered))
+                let mut catalog = merge_catalog(config, discovered);
+                // The models.dev side-table (warmed by the caller before
+                // discovery) fills whatever the listing and config left
+                // `None`, so context windows and output limits — compaction
+                // thresholds and metadata consumers — hold across surfaces.
+                // Configured values win; unknown models keep what discovery
+                // gave them.
+                crate::models_dev::enrich_catalog(config.kind.as_str(), &mut catalog);
+                Ok(catalog)
             }
         }
     };

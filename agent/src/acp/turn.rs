@@ -127,10 +127,6 @@ pub(super) async fn run_turn(
         provider: provider_name.clone(),
         model_id: model_label.clone(),
         context_length,
-        max_output_tokens: _models
-            .iter()
-            .find(|entry| entry.id == model_label)
-            .and_then(|entry| entry.max_output_tokens),
     };
     let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
         config: &state.config,

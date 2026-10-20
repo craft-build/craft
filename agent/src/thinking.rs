@@ -202,14 +202,58 @@ impl<'de> Deserialize<'de> for ThinkingConfig {
 
 /// models.dev and discovery declare knobs rather than assuming three levels.
 /// Unknown option types remain readable and do not break catalog startup.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ReasoningOption {
     #[serde(rename = "type")]
     pub kind: String,
-    #[serde(default)]
     pub values: Vec<String>,
     pub min: Option<u32>,
     pub max: Option<u32>,
+}
+
+/// The live models.dev payload is rougher than any schema: effort lists
+/// carry `null` slots (sarvam), budget floors can be `-1` (nvidia), and
+/// one unreadable knob must never cost a whole catalog parse — when it
+/// did, every lookup silently returned `None` and no limits were found.
+/// Decode leniently: non-string values drop, and bounds outside u32 read
+/// as unset.
+impl<'de> Deserialize<'de> for ReasoningOption {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let Some(object) = value.as_object() else {
+            return Err(serde::de::Error::custom(
+                "reasoning option entries must be objects",
+            ));
+        };
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let values = object
+            .get("values")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let bound = |field: &str| {
+            object
+                .get(field)
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+        };
+        Ok(Self {
+            kind,
+            values,
+            min: bound("min"),
+            max: bound("max"),
+        })
+    }
 }
 
 /// Local chat templates may use arbitrary request fragments for each mode.

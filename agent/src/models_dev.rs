@@ -16,6 +16,11 @@
 //! - Every provider in the catalog is kept: lookup is slug-keyed metadata
 //!   only, and several slugs we consult (`amazon-bedrock`, `anthropic`,
 //!   `google`, …) declare no REST `api` URL in the catalog.
+//! - Entries whose shape we cannot read are skipped and counted in a
+//!   warning, never fatal: models.dev ships hundreds of models nobody here
+//!   controls, and one unknown field must not cost the whole side-table.
+//!   (It has: a `-1` budget floor and `null` effort slots failed the whole
+//!   parse, the error was swallowed, and no cache file ever appeared.)
 //!
 //! One deliberate divergence: the reference keys models by exact ID because
 //! its own model IDs *are* catalog IDs. Here discovery comes from Rig, whose
@@ -50,6 +55,20 @@ fn invalid(reason: impl Into<String>) -> Error {
 }
 
 type CatalogIndex = HashMap<String, CatalogProvider>;
+
+/// Entries the tolerant parser dropped: field shapes we do not read.
+/// Purely informative (a warning) — never a startup failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Skipped {
+    models: usize,
+    providers: usize,
+}
+
+impl Skipped {
+    fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+}
 
 #[derive(Deserialize, Serialize, Clone)]
 struct CatalogProvider {
@@ -192,6 +211,79 @@ pub async fn warm() -> Result<()> {
     populate(&path, SystemTime::now(), || Box::pin(fetch_remote()) as _).await
 }
 
+/// Parse a catalog payload into a [`CatalogIndex`], tolerating entries we
+/// cannot read. The root must be a JSON object (anything else is a broken
+/// document, not a rough one); below it, a provider that fails to decode
+/// wholesale is salvaged model-by-model, so a bad entry drops only itself.
+/// An empty result is rejected too — a catalog with no providers is a
+/// broken payload, and caching it would pin "fresh" nothing for a day.
+fn parse_index(text: &str) -> Result<(CatalogIndex, Skipped)> {
+    let root: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| invalid(format!("failed to parse models.dev catalog JSON: {e}")))?;
+    let Some(providers) = root.as_object() else {
+        return Err(invalid("models.dev catalog root is not a JSON object"));
+    };
+    let mut index = CatalogIndex::new();
+    let mut skipped = Skipped::default();
+    for (slug, provider) in providers {
+        // Fast path: a provider that decodes wholesale.
+        if let Ok(parsed) = serde_json::from_value::<CatalogProvider>(provider.clone()) {
+            index.insert(slug.clone(), parsed);
+            continue;
+        }
+        // Salvage: decode the models one at a time, so an entry whose shape
+        // models.dev grew overnight drops only itself, not its provider and
+        // not the catalog.
+        let mut models = HashMap::new();
+        if let Some(entries) = provider
+            .get("models")
+            .and_then(serde_json::Value::as_object)
+        {
+            for (id, model) in entries {
+                match serde_json::from_value::<CatalogModel>(model.clone()) {
+                    Ok(model) => {
+                        models.insert(id.clone(), model);
+                    }
+                    Err(_) => skipped.models += 1,
+                }
+            }
+        }
+        if models.is_empty() {
+            skipped.providers += 1;
+            continue;
+        }
+        index.insert(
+            slug.clone(),
+            CatalogProvider {
+                name: provider
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                npm: provider
+                    .get("npm")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                models,
+            },
+        );
+    }
+    if index.is_empty() {
+        return Err(invalid(
+            "models.dev catalog payload contained no readable providers",
+        ));
+    }
+    if !skipped.is_empty() {
+        tracing::warn!(
+            models = skipped.models,
+            providers = skipped.providers,
+            "models.dev catalog: skipped entries with unreadable shapes"
+        );
+    }
+    Ok((index, skipped))
+}
+
 /// Path- and fetch-injectable core of [`warm`], so tests exercise the whole
 /// cache lifecycle without the network.
 async fn populate(
@@ -210,9 +302,8 @@ async fn populate(
             // Last resort: a stale (TTL-expired) cache still beats an empty
             // catalog when the refresh cannot be fetched (offline, models.dev
             // down). A later successful refresh overwrites it.
-            if let Some(index) = std::fs::read_to_string(path)
-                .ok()
-                .and_then(|text| serde_json::from_str(&text).ok())
+            if let Some(text) = std::fs::read_to_string(path).ok()
+                && let Ok((index, _)) = parse_index(&text)
             {
                 let flattened = flatten(index);
                 if !flattened.is_empty() {
@@ -220,11 +311,14 @@ async fn populate(
                 }
                 return Ok(());
             }
+            // Warming is best-effort and callers ignore this error, so the
+            // trail must be left here: a silently cold catalog looks exactly
+            // like "no token limits anywhere" until someone goes looking.
+            tracing::warn!("models.dev catalog unavailable (fetch failed, no usable cache): {e}");
             return Err(e);
         }
     };
-    let index: CatalogIndex = serde_json::from_str(&text)
-        .map_err(|e| invalid(format!("failed to parse models.dev catalog JSON: {e}")))?;
+    let (index, _) = parse_index(&text)?;
     save_cached(path, &index);
     let flattened = flatten(index);
     if !flattened.is_empty() {
@@ -288,7 +382,7 @@ fn load_cached(path: &Path, now: SystemTime) -> Option<CatalogIndex> {
         return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    parse_index(&text).ok().map(|(index, _)| index)
 }
 
 fn save_cached(path: &Path, index: &CatalogIndex) {
@@ -296,8 +390,15 @@ fn save_cached(path: &Path, index: &CatalogIndex) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(text) = serde_json::to_string_pretty(index) {
-        // A read-only cache dir is not worth failing startup over.
-        let _ = std::fs::write(path, &text);
+        // A read-only cache dir is not worth failing startup over, but the
+        // next launch has to know why it keeps refetching instead of using
+        // the file ("did not update it" must be diagnosable).
+        if let Err(e) = std::fs::write(path, &text) {
+            tracing::warn!(
+                "failed to write the models.dev cache at {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -317,6 +418,42 @@ async fn fetch_remote() -> Result<String> {
     response.text().await.map_err(client_error)
 }
 
+// --- Test support -----------------------------------------------------------
+
+/// Hooks over the process-global catalog for cross-module tests: bedrock's
+/// discovery tests install fixtures through the same lock and swap logic
+/// this module's own tests use, so the global is never mutated from two
+/// tests at once.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// The catalog global is process-wide; serialize the tests that touch
+    /// it. Async so the guards may be held across `.await`s in tokio tests.
+    pub(crate) static GLOBAL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Swap the global catalog for `data`, returning the previous catalog
+    /// for restoration.
+    pub(crate) fn swap(data: HashMap<String, HashMap<String, ModelMeta>>) -> SharedCatalog {
+        let mut guard = catalog().write().unwrap();
+        let previous = guard.clone();
+        *guard = Arc::new(data);
+        previous
+    }
+
+    /// Install the catalog parsed from `text` (tolerant parse), returning
+    /// the previous catalog to hand back to [`restore`] when the test ends.
+    pub(crate) fn install(text: &str) -> SharedCatalog {
+        let (index, _) = parse_index(text).expect("test catalog payload parses");
+        swap(flatten(index))
+    }
+
+    /// Put back what [`swap`]/[`install`] replaced.
+    pub(crate) fn restore(previous: SharedCatalog) {
+        swap(previous.as_ref().clone());
+    }
+}
+
 // --- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
@@ -325,9 +462,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    /// The catalog global is process-wide; serialize the tests that touch it.
-    /// Async so the guards may be held across `.await`s in tokio tests.
-    static GLOBAL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    use super::testing::GLOBAL_LOCK;
 
     #[test]
     fn thinking_choices_use_synthetic_and_zai_endpoint_catalogs() {
@@ -450,11 +585,132 @@ mod tests {
         (tmp, path)
     }
 
+    /// The exact rough edges models.dev shipped that previously failed the
+    /// whole parse (and, with every caller swallowing the error, left the
+    /// catalog empty and the cache file unwritten): a `-1` budget floor on
+    /// an nvidia model and `null` slots inside sarvam effort lists.
+    #[test]
+    fn parse_index_tolerates_the_live_catalogs_rough_edges() {
+        let (index, skipped) = parse_index(
+            r#"{
+              "nvidia": {"models": {
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
+                  "limit": {"context": 256000, "output": 65536},
+                  "reasoning_options": [
+                    {"type": "toggle"},
+                    {"type": "budget_tokens", "min": -1, "max": 32768}
+                  ]
+                }
+              }},
+              "sarvam": {"models": {
+                "sarvam-30b": {
+                  "limit": {"context": 1000, "output": 500},
+                  "reasoning_options": [
+                    {"type": "effort", "values": [null, "low", "medium", "high"]}
+                  ]
+                }
+              }}
+            }"#,
+        )
+        .unwrap();
+        // Before the lenient parse this failed wholesale: no entry parsed.
+        assert!(
+            skipped.is_empty(),
+            "rough shapes must be tolerated, not skipped"
+        );
+
+        let flattened = flatten(index);
+        let nemotron = &flattened["nvidia"]["nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"];
+        assert_eq!(nemotron.context, 256_000);
+        assert_eq!(nemotron.output, 65_536);
+        assert_eq!(nemotron.reasoning_options[1].kind, "budget_tokens");
+        assert_eq!(
+            nemotron.reasoning_options[1].min, None,
+            "-1 floors read as unset"
+        );
+        assert_eq!(nemotron.reasoning_options[1].max, Some(32_768));
+
+        let sarvam = &flattened["sarvam"]["sarvam-30b"];
+        assert_eq!(sarvam.context, 1_000);
+        assert_eq!(sarvam.output, 500);
+        assert_eq!(
+            sarvam.reasoning_options[0].values,
+            ["low", "medium", "high"]
+        );
+    }
+
+    /// One undecodable model drops only itself; a provider that fails
+    /// wholesale (a null `name`, no `models`) is salvaged per-model or
+    /// skipped without dragging anything else down. (A positional
+    /// `"limit": [context, output]` array is valid input to serde's derived
+    /// struct deserializer, so the fixture needs a genuinely unreadable
+    /// field to exercise the drop.)
+    #[test]
+    fn parse_index_drops_unreadable_entries_without_losing_the_rest() {
+        let (index, skipped) = parse_index(
+            r#"{
+              "vendor": {"name": null, "models": {
+                "good": {"limit": {"context": 9000}},
+                "stringlimit": {"limit": {"context": "not-a-number"}},
+                "bare": {}
+              }},
+              "modelsless": {"name": "Empty"},
+              "healthy": {"models": {"m": {"limit": {"context": 1, "output": 2}}}}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(skipped.models, 1, "only the string-limit model is dropped");
+        assert_eq!(
+            skipped.providers, 1,
+            "the provider without models is dropped"
+        );
+
+        let vendor = index.get("vendor").expect("salvaged provider is kept");
+        assert_eq!(
+            vendor.name, "",
+            "a null name degrades to empty, not to a drop"
+        );
+        let good = vendor.models.get("good").expect("the good model survives");
+        assert_eq!(good.limit.as_ref().and_then(|l| l.context), Some(9_000));
+        assert!(
+            vendor.models.contains_key("bare"),
+            "a model with no known fields still parses"
+        );
+        assert!(!vendor.models.contains_key("stringlimit"));
+
+        let healthy = index.get("healthy").expect("untouched provider is kept");
+        assert_eq!(healthy.models.len(), 1);
+    }
+
+    #[test]
+    fn parse_index_rejects_broken_documents() {
+        assert!(parse_index("not json").is_err());
+        assert!(parse_index("[]").is_err(), "a non-object root is broken");
+        assert!(parse_index("42").is_err());
+        assert!(
+            parse_index("{}").is_err(),
+            "no readable providers means broken"
+        );
+    }
+
+    /// An empty payload must not be written as a fresh cache: it would pin
+    /// nothing for a day while every lookup still misses.
+    #[tokio::test]
+    async fn populate_refuses_to_cache_an_empty_catalog() {
+        let _guard = GLOBAL_LOCK.lock().await;
+        let (_tmp, path) = cache_path();
+        let previous = swap_catalog(HashMap::new());
+        let fetch = || {
+            Box::pin(async { Ok("{}".to_string()) })
+                as futures::future::BoxFuture<'static, Result<String>>
+        };
+        assert!(populate(&path, SystemTime::now(), fetch).await.is_err());
+        assert!(!path.exists(), "an empty catalog is never cached");
+        swap_catalog(previous.as_ref().clone());
+    }
+
     fn swap_catalog(data: HashMap<String, HashMap<String, ModelMeta>>) -> SharedCatalog {
-        let mut guard = catalog().write().unwrap();
-        let previous = guard.clone();
-        *guard = Arc::new(data);
-        previous
+        testing::swap(data)
     }
 
     #[test]

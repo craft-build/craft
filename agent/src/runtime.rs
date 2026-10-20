@@ -136,7 +136,10 @@ pub async fn workspace_env(
 
 /// A model choice with the catalog metadata that travel with it. Metadata
 /// only: nothing here enforces catalog membership (headless `-m` and
-/// client-supplied ACP ids stay usable without catalog backing).
+/// client-supplied ACP ids stay usable without catalog backing). Output
+/// ceilings are deliberately NOT carried here — they ride the model
+/// handle (`DynamicModel::max_output`: per-model config, then models.dev),
+/// the only place request shaping reads them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedModel {
     pub provider: String,
@@ -144,7 +147,6 @@ pub struct ResolvedModel {
     /// The model's context window, when a catalog reports one; drives
     /// compaction thresholds and output-cap clamping.
     pub context_length: Option<u32>,
-    pub max_output_tokens: Option<u32>,
 }
 
 impl ResolvedModel {
@@ -154,7 +156,6 @@ impl ResolvedModel {
             provider: provider.into(),
             model_id: model_id.into(),
             context_length: None,
-            max_output_tokens: None,
         }
     }
 
@@ -164,19 +165,18 @@ impl ResolvedModel {
     }
 }
 
-/// Look up a model's catalog metadata. `(None, None)` on any miss — the
-/// caller keeps its own selection policy; this only guarantees that
-/// whenever a catalog entry exists, its metadata travel with the choice.
+/// Look up a model's context window. `None` on any miss — the caller keeps
+/// its own selection policy; this only guarantees that whenever a catalog
+/// entry exists, its window travels with the choice.
 pub fn catalog_metadata(
     catalogs: &BTreeMap<String, Vec<CatalogModel>>,
     provider: &str,
     model: &str,
-) -> (Option<u32>, Option<u32>) {
+) -> Option<u32> {
     catalogs
         .get(provider)
         .and_then(|models| models.iter().find(|entry| entry.id == model))
-        .map(|entry| (entry.context_length, entry.max_output_tokens))
-        .unwrap_or((None, None))
+        .and_then(|entry| entry.context_length)
 }
 
 // --- Compaction -------------------------------------------------------------
@@ -312,7 +312,6 @@ mod tests {
             provider: "acme".into(),
             model_id: "one".into(),
             context_length: Some(128_000),
-            max_output_tokens: None,
         }
     }
 
@@ -501,13 +500,15 @@ mod tests {
 
     // --- catalog metadata ---
 
-    fn entry(id: &str, context: Option<u32>, output: Option<u32>) -> CatalogModel {
+    fn entry(id: &str, context: Option<u32>) -> CatalogModel {
         CatalogModel {
             id: id.into(),
             name: None,
             description: None,
             context_length: context,
-            max_output_tokens: output,
+            // Windows are the only metadata `catalog_metadata` carries;
+            // output ceilings are the request path's business.
+            max_output_tokens: Some(4_000),
         }
     }
 
@@ -515,24 +516,15 @@ mod tests {
     fn catalog_metadata_travels_with_present_entries_only() {
         let catalogs = BTreeMap::from([(
             "acme".to_string(),
-            vec![
-                entry("one", Some(8_000), Some(4_000)),
-                entry("two", None, None),
-            ],
+            vec![entry("one", Some(8_000)), entry("two", None)],
         )]);
-        assert_eq!(
-            catalog_metadata(&catalogs, "acme", "one"),
-            (Some(8_000), Some(4_000))
-        );
-        // Present but metadata-less: both None, not a miss error.
-        assert_eq!(catalog_metadata(&catalogs, "acme", "two"), (None, None));
+        assert_eq!(catalog_metadata(&catalogs, "acme", "one"), Some(8_000));
+        // Present but metadata-less: None, not a miss error.
+        assert_eq!(catalog_metadata(&catalogs, "acme", "two"), None);
         // Misses never enforce membership.
-        assert_eq!(catalog_metadata(&catalogs, "acme", "gone"), (None, None));
-        assert_eq!(catalog_metadata(&catalogs, "gone", "one"), (None, None));
-        assert_eq!(
-            catalog_metadata(&BTreeMap::new(), "acme", "one"),
-            (None, None)
-        );
+        assert_eq!(catalog_metadata(&catalogs, "acme", "gone"), None);
+        assert_eq!(catalog_metadata(&catalogs, "gone", "one"), None);
+        assert_eq!(catalog_metadata(&BTreeMap::new(), "acme", "one"), None);
     }
 
     // --- workspace environment ---
@@ -657,7 +649,6 @@ mod tests {
                 provider: "mock".into(),
                 model_id: "overflowing".into(),
                 context_length: Some(context_length),
-                max_output_tokens: None,
             },
             compaction: Some(compaction_ctx(
                 compaction_state.clone(),

@@ -328,4 +328,40 @@ mod tests {
             4096
         );
     }
+
+    /// The manual escape hatch for a missing catalog entry —
+    /// `model "id" { max_output_tokens = N }` — must survive to the wire,
+    /// not just the catalog: the request cap and the thinking ceiling both
+    /// come from the same settings lookup.
+    #[test]
+    fn bedrock_claude_honors_configured_max_output_tokens() {
+        let config = crate::config::Config::parse(
+            "provider \"aws\" {\n  kind = \"amazon-bedrock\"\n  \
+             model \"us.anthropic.claude-sonnet-4-6\" { max_output_tokens = 24000 }\n}",
+        )
+        .unwrap();
+        let provider = crate::providers::Provider::from_config_with(
+            &config.providers["aws"],
+            crate::providers::Timeouts::default(),
+            &|_| Ok("unused".into()),
+        )
+        .unwrap();
+        let model = provider
+            .configured_model(&config.providers["aws"], "us.anthropic.claude-sonnet-4-6")
+            .unwrap();
+        let mut request = crate::edge::to_request(
+            &[crate::history::Message::user("hello")],
+            &[],
+            None,
+            None,
+            None,
+        );
+        crate::thinking::attach(&mut request, ThinkingConfig::Effort(Effort::High));
+        let prepared = model.prepare(request).unwrap();
+        assert_eq!(
+            prepared.max_tokens,
+            Some(24_000),
+            "the configured cap replaces the 8192 fallback"
+        );
+    }
 }

@@ -2262,7 +2262,10 @@ async fn run_headless_query_with(
         }
     };
     let model = provider.configured_model(&provider_config, &model_id)?;
-    let (context_length, max_output_tokens) = catalog
+    // The context window feeds compaction thresholds; the output ceiling
+    // rides the model handle itself (per-model config, then the warmed
+    // models.dev catalog), where request shaping reads it.
+    let context_length = catalog
         .as_ref()
         .map(|models| {
             crate::runtime::catalog_metadata(
@@ -2271,7 +2274,7 @@ async fn run_headless_query_with(
                 &model_id,
             )
         })
-        .unwrap_or((None, None));
+        .unwrap_or(None);
 
     let cwd = std::env::current_dir().map_err(|e| {
         crate::error::InvalidSnafu {
@@ -2338,7 +2341,6 @@ async fn run_headless_query_with(
         provider: provider_name.clone(),
         model_id: model_id.clone(),
         context_length,
-        max_output_tokens,
     };
     let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
         config: &config,

@@ -156,4 +156,40 @@ mod tests {
     fn missing_model_arn_yields_no_underlying_model() {
         assert!(underlying_model(&summary("us.anthropic.claude-opus-5-5", None)).is_none());
     }
+
+    /// Discovery-time catalog lookups are the regression path: a cold
+    /// models.dev catalog leaves every profile without limits, so these
+    /// prove the listing reads a warmed one.
+    #[test]
+    fn limits_come_from_the_catalog_by_exact_profile_id() {
+        let _guard = crate::models_dev::testing::GLOBAL_LOCK.blocking_lock();
+        let previous = crate::models_dev::testing::install(
+            r#"{"amazon-bedrock": {"models": {
+                "us.anthropic.claude-sonnet-4-6": {"limit": {"context": 200000, "output": 16000}}
+            }}}"#,
+        );
+        let model = profile_to_model(&summary("us.anthropic.claude-sonnet-4-6", None))
+            .expect("a model for a nonempty id");
+        assert_eq!(model.context_length, Some(200_000));
+        assert_eq!(model.max_output_tokens, Some(16_000));
+        crate::models_dev::testing::restore(previous);
+    }
+
+    #[test]
+    fn limits_fall_back_to_the_underlying_model_when_the_profile_is_unknown() {
+        let _guard = crate::models_dev::testing::GLOBAL_LOCK.blocking_lock();
+        let previous = crate::models_dev::testing::install(
+            r#"{"amazon-bedrock": {"models": {
+                "anthropic.claude-opus-5-5-v1:0": {"limit": {"context": 1000000, "output": 128000}}
+            }}}"#,
+        );
+        let model = profile_to_model(&summary(
+            "us.anthropic.claude-opus-5-5",
+            Some("arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5-v1:0"),
+        ))
+        .expect("a model for a nonempty id");
+        assert_eq!(model.context_length, Some(1_000_000));
+        assert_eq!(model.max_output_tokens, Some(128_000));
+        crate::models_dev::testing::restore(previous);
+    }
 }

@@ -64,7 +64,7 @@ When a request still overflows after compaction, an escalating ladder collapses 
 Every execution surface (TUI, `--print` headless, ACP) obtains the shared pieces of a session from `agent/src/runtime.rs`, so equivalent sessions receive equivalent run policies:
 
 - `runtime::workspace_env(cwd, mcp, install_reviewer)` — instruction discovery, the workspace (MCP handle installed), and the permission engine. Every surface constructs the `PermissionManager` and consults it: the TUI prompt overlay, the ACP `session/request_permission`, and the headless gate below.
-- `runtime::catalog_metadata` / `runtime::ResolvedModel` — a model choice plus its catalog metadata (`context_length`, `max_output_tokens`). Lookup only: it never enforces catalog membership, so `--model` ids the catalog does not list stay usable.
+- `runtime::catalog_metadata` / `runtime::ResolvedModel` — a model choice plus its catalog window (`context_length`; output ceilings ride the model handle, where request shaping reads them). Lookup only: it never enforces catalog membership, so `--model` ids the catalog does not list stay usable.
 - `runtime::new_compaction_state` / `runtime::compaction_ctx` — the session-shared compaction state (linked to the dedup cache and guardrail counters) and the per-run context (stages, buffer, window). Headless `--print` runs carry this too: output caps are clamped into the model's context window and in-run overflow recovery compacts and retries.
 - `runtime::run_policy` — the only `RunParams` constructor: system prompt, sampling, turn bound, continuation bound, compression, compaction, reauth hook, model spec, advisor.
 

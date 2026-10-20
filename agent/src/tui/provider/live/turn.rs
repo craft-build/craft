@@ -648,13 +648,13 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         &config,
         selection.context_length,
     );
-    // The TUI's `Selection` carries the window but not the output cap;
-    // the catalog seam (runtime::ResolvedModel) is where it will land.
+    // The run-policy summary carries only the window; the output ceiling is
+    // resolved on the model handle (per-model config, then the warmed
+    // models.dev catalog) where request shaping reads it.
     let resolved = crate::runtime::ResolvedModel {
         provider: selection.provider.clone(),
         model_id: selection.model.clone(),
         context_length: selection.context_length,
-        max_output_tokens: None,
     };
     let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
         config: &config,
