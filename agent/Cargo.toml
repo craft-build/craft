@@ -63,8 +63,8 @@ unicode-normalization.workspace = true
 unicode-width.workspace = true
 url.workspace = true
 uuid.workspace = true
-aws-sdk-bedrock = "1.161.0"
-aws-config = "1.12.0"
+aws-sdk-bedrock.workspace = true
+aws-config.workspace = true
 
 [dev-dependencies]
 fastrand = "2"

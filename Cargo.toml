@@ -9,12 +9,14 @@ resolver = "3"
 members = ["agent"]
 
 [workspace.dependencies]
-agent-client-protocol = { version = "3.3", features = ["stdio", "process"] }
+agent-client-protocol = { version = "3.4", features = ["stdio", "process"] }
 aho-corasick = "1"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 arc-swap = "1"
 argosy = "0.7"
 async-trait = "0.1"
+aws-sdk-bedrock = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-config = "1"
 barkml = "0.10"
 base64 = "0.23"
 bs58 = "0.5"
