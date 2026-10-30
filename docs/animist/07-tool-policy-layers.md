@@ -4,16 +4,25 @@
 
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
-- Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt).
+- Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
+  and the [harness design rules](harness-design.md), especially
+  [Layers](harness-design.md#layers). Start with the
+  [test inventory](harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
   (`.craft/agents/reviewer.md`) as described in [Finish](#finish).
 
 ## Goal
 
-Every tool-call policy becomes an animist layer, in place of 05's interim
-`BeforeExecute`/`AfterExecute` adapter. Surfaces supply interaction (the
-approval UI, ACP permission requests, the headless policy) through narrow craft
-traits. The layers own sequencing.
+Every tool-call policy becomes real layer code. This replaces the body of
+05's interim `PolicyLayer` and completes 05's dedup-only `GuardrailLayer`.
+Surfaces supply interaction (the approval UI, ACP permission requests, the
+headless policy) through one narrow craft trait. The layers own sequencing
+and state.
+
+Only two policy layers exist, `PolicyLayer` and `GuardrailLayer`, in that
+order at the head of the [chain](harness-design.md#chain). Don't add a layer
+per rule. A denial short-circuits everything after it, so the order *is* the
+policy, and it must read top to bottom in one place.
 
 ## Read first
 
@@ -50,10 +59,11 @@ traits. The layers own sequencing.
 2. **`PolicyLayer::pre_tool_exec`**:
    1. permission rules → allow, deny or ask;
    2. if ask and auto-review is enabled → auto-review (emits
-      `AutoReviewStart`/`Decision` via `RunScope`);
+      `AutoReviewStart`/`Decision` through the conversation event sink);
    3. else → the responder;
    4. the plan-mode write restriction (`PLAN_WRITE_RESTRICTED`, with the plan
-      path from `AgentMode`).
+      path), read from `TurnSettings` at `turn_start`. Switching modes
+      doesn't rebuild the agent.
 
    It maps onto `ToolDecision::{Run, Deny{reason}, Stop{reason}}`. Keep the
    exact model-visible denial texts. Child calls (`ToolContext::parent_call_id`
@@ -91,8 +101,13 @@ traits. The layers own sequencing.
        maps to `Failed` like any other conflict; the retained messages are
        logged.
    - **State reset**: the tracker and guardrails reset when compaction rewrites
-     history (09 calls the reset hook), and on new user input
-     (`reset_for_new_user_input`), as today.
+     history (08's compaction calls `reset()` on the typed handle
+     `Conversation` holds), and on new user input. That reset happens in
+     `GuardrailLayer::turn_start`, which replaces
+     `reset_for_new_user_input` at the call sites.
+   - Doom tracker, guardrail counters and the dedup cache live in one
+     `GuardrailState` behind an `Arc`, shared by the layer and that typed
+     handle. Delete the old `Shared*` type aliases.
 4. **Concurrency.** These layers run concurrently once parallel waves are on.
    Guard shared state with `std::sync::Mutex` and never hold it across
    `.await`. Responders that block on the user hold no layer lock.
@@ -101,7 +116,7 @@ traits. The layers own sequencing.
      whether it can run concurrently: two prompts at once may break the TUI
      modal. Serialize interactive approvals with an async mutex inside the
      responder if needed. Pin that with a test.
-5. **Remove** the interim adapter from 05, plus `BeforeExecute`, `AfterExecute`,
+5. **Remove** the interim `PolicyLayer` body from 05, plus `BeforeExecute`, `AfterExecute`,
    `Decision` and `DispatchOutcome`, once nothing uses them.
 
 ## Tests
@@ -119,6 +134,9 @@ traits. The layers own sequencing.
   approval and guardrails, and never reaches the executor.
 - Two parallel gated calls never show two approval prompts at once.
 - Un-ignore the 07-tagged tests from 05.
+- `PolicyLayer` and `GuardrailLayer` each have direct hook tests, plus one
+  test that builds the real chain from `ConversationBuilder` and asserts the
+  layer order.
 
 ## Acceptance
 
@@ -133,8 +151,11 @@ traits. The layers own sequencing.
 2. **Run the review agent** (`.craft/agents/reviewer.md`) over this prompt's
    full diff. Address its findings, re-run validation, and repeat until the
    verdict is clean.
-3. Append a completion note: the approval serialization, the layer order, and
-   where dedup sits in it.
+3. Append a completion note:
+   - the approval serialization;
+   - the layer order and where dedup sits in it;
+   - the test-inventory diff;
+   - the indirection rows closed.
 
 ## Completion note
 

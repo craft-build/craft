@@ -4,7 +4,9 @@
 
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
-- Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt).
+- Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
+  and the [harness design rules](harness-design.md). Start with the
+  [test inventory](harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
   (`.craft/agents/reviewer.md`) as described in [Finish](#finish).
 
@@ -77,7 +79,23 @@ survived.
    - List every remaining `spawn_blocking` with its reason, and confirm each
      is CPU-bound or a sync-only library.
    - `clippy::await_holding_lock` is clean.
-7. **Performance sanity.** Measure startup time, one scripted 50-tool-call
+7. **Indirection and layer audit** ([design rules](harness-design.md)):
+   - Every row of the
+     [inventory](harness-design.md#no-indirection-without-a-job) is closed,
+     or its reason for staying is written down.
+   - `grep -rn 'RunScope\|HarnessExecutor\|SharedDispatch\|SharedDedupCache\|SharedGuardrails\|SharedCompactionState\|RunParams\|run_policy\|BeforeExecute\|AfterExecute' agent/src`
+     is empty (or each hit has a reason).
+   - List every craft trait under `agent/src` with its implementations. A
+     trait with one non-test implementation is inlined unless it is a
+     deliberate test seam, and the note says which.
+   - Walk the layer chain. Each layer's hooks match the
+     [hook table](harness-design.md#pick-the-hook-by-what-the-behaviour-is).
+     No layer instance is shared between agents. The driver does only its
+     listed jobs.
+   - Count the channel hops from provider delta to the TUI cell and to the
+     ACP notification, and record them. Expected: animist → conversation
+     sink → surface adapter.
+8. **Performance sanity.** Measure startup time, one scripted 50-tool-call
    session, and session save/load times for a large fixture against the 01
    baseline commit, and record them. Investigate any regression above 20%.
 
@@ -89,6 +107,7 @@ survived.
 - No workaround for a released animist followup remains, and any new gap
   has an animist followup prompt.
 - The async audit is clean.
+- The indirection and layer audit is clean, and the inventory is closed.
 - Final: `cargo fmt -p craft --check`, `cargo clippy -p craft --all-targets`
   (no warnings beyond the 01 baseline, and ideally fewer), and
   `cargo test -p craft` all green.
@@ -100,8 +119,12 @@ survived.
    full diff, **and once more over the entire migration branch diff against
    `main`**. Address its findings, re-run validation, and repeat until the
    verdict is clean.
-3. Append a completion note: performance numbers, conformance coverage, and the
-   final test count compared with the 01 baseline.
+3. Append a completion note:
+   - performance numbers;
+   - conformance coverage;
+   - the final test count compared with the 01 baseline;
+   - the trait list from the audit;
+   - the line counts of `agent/src` before (01) and after.
 
 ## Completion note
 

@@ -1,11 +1,16 @@
-# 09 — Compaction and alterations on `History`
+# 08 — Compaction and alterations on `History`
 
 ## Required workflow
 
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt),
-  including the [async rules](README.md#async-native).
+  including the [async rules](README.md#async-native), and the
+  [harness design rules](harness-design.md). Start with the
+  [test inventory](harness-design.md#test-integrity).
+- This prompt now comes **before** recovery (09). Compaction has been off
+  since 05; this prompt brings it back natively, so no Vec-rewrite adapter
+  ever exists.
 - When implementation is finished, **run the review agent**
   (`.craft/agents/reviewer.md`) as described in [Finish](#finish).
 
@@ -16,7 +21,7 @@ conversation (README decision 5):
 
 - **`Compactor`**: conversation-level plans (`Remove`/`Replace`/`Insert`)
   committed atomically. This covers the LLM summary and VCC, and replaces
-  in-place `Vec<Message>` rewrites and 08's rewrite adapter.
+  the in-place `Vec<Message>` rewrites that 05 switched off.
 - **`Alteration`**: per-message revisions of the latest active content, with
   the original and earlier revisions kept. This covers durable versions of
   today's per-step request-view rewrites: tool-output pre-compression,
@@ -38,8 +43,9 @@ Originals then live in entry sources, so the `retrieve` tool and the TUI's
   - Neither drops revisions: `Remove` deactivates, and `Replace` appends.
     Only the agent squashes, and only its own in-flight tool-result entry;
     alteration and compaction revisions are never squashed.
-  - Every committed edit appears in the history change feed, which 11
-    persists. Passes don't report their edits separately.
+  - Every committed edit appears in the history change feed, which 05's
+    persister already writes. Passes don't report their edits separately,
+    and there is nothing to add to persistence here.
   - VCC keeps every `Role::System` message and everything after the first one
     verbatim, so an early system instruction can block VCC entirely.
   - Any history edit during an `Agent::run` makes the agent's next commit fail
@@ -56,9 +62,14 @@ Originals then live in entry sources, so the `retrieve` tool and the TUI's
 ## Work
 
 1. **Where edits happen:**
-   - **Between runs** (the driver, before `Agent::run` and after it returns):
-     alteration passes, then compaction-engine stages.
-   - **Inside `recover`** (08): overflow compaction only.
+   - **Between runs**: the driver, at the call site 05 left, before
+     `Agent::run` and after it returns. Alteration passes first, then
+     compaction-engine stages. `/compact` calls the same function.
+   - **Inside `recover`**: overflow compaction only. 09 wires it to the
+     compactors this prompt builds. Expose one `async fn` that takes the
+     `History` handle and the compaction state, and that 09 can call from
+     `RecoveryLayer::recover` (which reaches the history via
+     `agent.history()`).
    - **Never** concurrently with a run. The driver owns the sequencing, and
      `Conflict` is handled explicitly: between runs, retry once with a fresh
      snapshot; never re-run LLM work implicitly.
@@ -95,7 +106,8 @@ Originals then live in entry sources, so the `retrieve` tool and the TUI's
      revision) by `tool_use_id`, reading from the conversation's `History`
      handle. Inject the handle into the tool at registration.
    - Delete `SharedCompressionStore`, plus the session `tool_outputs` map and
-     its pruning (11 drops its record type).
+     its pruning. Stop writing the `tool_outputs` record; 11's loader folds
+     old ones into entry sources.
    - Keep the retrieval marker text format, or change it everywhere at once.
 5. **The plan contract** (compactors):
    - Edits index the snapshot's `entries()`, inactive entries included.
@@ -126,8 +138,9 @@ Originals then live in entry sources, so the `retrieve` tool and the TUI's
    scoring over `estimate.rs` of `history.current()`. It runs from the driver
    between runs, which moves pre-turn compaction out of the surfaces so they
    behave identically, and from `recover`.
-   - After a commit, reset guardrails and doom state, and emit
-     `CompactionDone`.
+   - After a commit, call `reset()` on the guardrail state's typed handle
+     (07), and send `CompactionDone` to the event sink.
+   - Un-ignore the 08-tagged tests from 05.
    - `CompactionState`'s carry-anchor and `protect_from` re-index against
      snapshot entries.
 9. **Estimation.** `estimate.rs` works over animist `Message`s plus `RequestOverhead`,
@@ -143,7 +156,8 @@ Originals then live in entry sources, so the `retrieve` tool and the TUI's
   - an alteration racing a concurrent `add` gives `Conflict` with nothing
     committed.
 - `retrieve` returns the original output after compression and after
-  compaction, including after a session reload in 11.
+  compaction, in a later turn of the same conversation, and after a session
+  reload (05's persister writes entry sources).
 - Compactors: plan indices are correct with prior inactive entries present;
   exchanges are never split; summaries are tagged; the LLM summarizer is never
   called twice after a conflict.
@@ -154,8 +168,8 @@ Originals then live in entry sources, so the `retrieve` tool and the TUI's
 
 ## Acceptance
 
-- No code mutates a `Vec<Message>` and writes it back as history. 08's rewrite
-  adapter is deleted.
+- No code mutates a `Vec<Message>` and writes it back as history.
+- No test is left ignored with an 08 reason.
 - `SharedCompressionStore` and session `tool_outputs` are gone, and `retrieve`
   reads history.
 - `compaction/vcc/` has shrunk to the extractor and its helpers. Report the line
@@ -167,9 +181,13 @@ Originals then live in entry sources, so the `retrieve` tool and the TUI's
 2. **Run the review agent** (`.craft/agents/reviewer.md`) over this prompt's
    full diff. Address its findings, re-run validation, and repeat until the
    verdict is clean.
-3. Append a completion note: the alteration passes and their tags, the
-   prompt-cache and request-size measurements, the VCC differences, and any
-   new followups.
+3. Append a completion note:
+   - the alteration passes and their tags;
+   - the prompt-cache and request-size measurements;
+   - the VCC differences;
+   - new followups;
+   - the test-inventory diff;
+   - the indirection rows closed.
 
 ## Completion note
 

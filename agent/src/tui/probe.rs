@@ -157,7 +157,11 @@ fn query_truecolor() -> Option<bool> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return None;
     }
-    let reply = read_tty_reply(XTGETTCAP_TC_QUERY, TRUECOLOR_PROBE_TIMEOUT, xtgettcap_complete)?;
+    let reply = read_tty_reply(
+        XTGETTCAP_TC_QUERY,
+        TRUECOLOR_PROBE_TIMEOUT,
+        xtgettcap_complete,
+    )?;
     Some(parse_xtgettcap_tc(&reply))
 }
 

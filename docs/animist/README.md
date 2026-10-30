@@ -37,8 +37,8 @@ is still open: [F08, usage cost](#remaining-animist-gap).
 ## Execute in order
 
 Each prompt is self-contained. Run them in order, one per branch commit series.
-Every prompt must end with `cargo test -p craft` green. Prompts 05–08 leave
-temporary parity gaps (retry and continuations land in 08). **Merge the
+Every prompt must end with `cargo test -p craft` green. Prompts 05–09 leave
+temporary parity gaps (retry and continuations land in 09). **Merge the
 migration branch to `main` only after 11.**
 
 | # | Prompt | Outcome |
@@ -47,13 +47,13 @@ migration branch to `main` only after 11.**
 | 02 | [Provider cutover on animist](02-provider-registry.md) (fused with 03) | Providers rewritten in place on animist, every model call through animist, rig provider code/mocks/bridges deleted; Bedrock entirely on animist |
 | 03 | [Inference seam cutover](03-inference-seam.md) | *Absorbed into 02* |
 | 04 | [History types](04-history-types.md) | `crate::history` *is* animist history; legacy sessions load; `edge.rs` gone |
-| 05 | [Agent runtime core](05-agent-runtime-core.md) | `animist::agent::Agent` runs every turn behind a `run::run` facade; a temporary rig-tool bridge; request and dedup layers; event bridge |
+| 05 | [Agent runtime core](05-agent-runtime-core.md) | Surfaces own a long-lived `harness::Conversation` on `animist::agent::Agent`; no `run::run` facade, the old loop deleted; a temporary rig-tool bridge; first layers (interim policy, dedup, request, snapshot, persist); event sink |
 | 06 | [Native async tools](06-tools.md) | Tools are `ToolImpl` with scheduling claims; async I/O; global workspace lock and rig removed |
 | 07 | [Tool policy layers](07-tool-policy-layers.md) | Approval, plan mode, guardrails, doom loop, auto-review as layers |
-| 08 | [Recovery and continuation](08-recovery-and-continuation.md) | Retry, fallback, reauth and overflow via `recover`/`prepare_request`; `MaxTokens` continuation and nudge via `step_end`; advisor in the driver |
-| 09 | [Compaction and alterations on History](09-compaction-on-history.md) | `Compactor` plans for LLM/VCC; `Alteration` passes for output compression and read lifecycle; originals replace the compression store |
+| 08 | [Compaction and alterations on History](08-compaction-on-history.md) | `Compactor` plans for LLM/VCC; `Alteration` passes for output compression and read lifecycle; originals replace the compression store |
+| 09 | [Recovery and continuation](09-recovery-and-continuation.md) | Retry, fallback, reauth and overflow via `recover`/`prepare_request` (overflow calls 08's compactors); `MaxTokens` continuation and nudge via `step_end`; advisor in the driver |
 | 10 | [Subagents and batch](10-subagents-and-batch.md) | Child `Agent`s for `task`; parallel `batch` via `ToolContext::dispatch_all` |
-| 11 | [Surfaces own the conversation](11-surfaces-and-sessions.md) | TUI, ACP and headless hold a `Conversation`; sessions persist the history change feed; facade removed |
+| 11 | [Sessions: loader, resume, fork, undo](11-surfaces-and-sessions.md) | One loader for every historical session shape; resume, continue, fork and `/undo` over `HistoryEntry`s; crash safety; module layout |
 | 12 | [Cleanup, docs, conformance](12-cleanup-and-conformance.md) | Dead code gone, docs updated, conformance and smoke tests, async audit |
 
 Keep a short completion note at the bottom of each prompt file when it is done:
@@ -142,25 +142,29 @@ surface (TUI / ACP / headless / print)
        │                               fallback model
        │         4. RecoveryLayer      recover: backoff, key rotation, fallback, reauth, overflow compaction
        │         5. ContinuationLayer  step_end: MaxTokens continuation, stalled-turn nudge
-       ├─ harness::tools             HarnessExecutor decorator (snapshots for /undo)
-       ├─ harness::events            AgentEvent → craft run::Event bridge (+ craft-only events)
+       │         6. SnapshotLayer      pre_tool_exec: /undo capture at the tail, so only
+       │         │                               calls that will really run are captured
+       │         7. PersistLayer       step_end + turn_end: flush the history change feed
+       ├─ harness::events            harness::Event = Agent(AgentEvent) | Craft(CraftEvent)
        ├─ harness::persist           History change feed → session records
        └─ harness::driver            Agent::run around: advisor follow-ups, cancel/fail markers,
                                      overflow re-runs; between-run compaction and alteration passes
 ```
 
-The final layer order is settled in 07/08. Preserve today's
+The final layer order is settled in 07/09. Preserve today's
 `ToolDispatch::execute` order (approval → plan mode → guardrails →
 dedup/execute → after hook) unless a test proves a reorder is safe.
 
-Layers are agent-scoped, but much craft state is per run. Per-run state goes in
-a `RunScope` that the driver installs before `Agent::run` and clears afterwards.
-Layers read it through a shared handle.
+Layers are agent-scoped, but much craft state is per run. Per-run state is a
+field the layer resets in `turn_start` and finalizes in `turn_end`; there is
+no driver-installed `RunScope`. Layers belong to one `Conversation` and are
+reused when the `Agent` is rebuilt; they are never shared between agents.
 
-Keep `crate::run::events::Event` as the surface contract. The bridge translates
-`AgentEvent` (including `MessagesAppended` from `step_end`) and adds the
-craft-only events (Retry, AutoCompacting, Nudge, StagnationDetected,
-AuthRequired, AdvisorNote, AutoReview*).
+The surface event contract is `harness::Event`:
+`Agent(animist::agent::AgentEvent)` (including `MessagesAppended` from
+`step_end`) plus `Craft(CraftEvent)` for the craft-only events (Retry,
+AutoCompacting, CompactionDone, Nudge, StagnationDetected, AuthRequired,
+AdvisorNote, AutoReview*, Subagent, Done).
 
 ## Concept mapping
 
@@ -176,7 +180,7 @@ AuthRequired, AdvisorNote, AutoReview*).
 | `ToolResultContent::{Text,Json,Image}` | `ToolContent::{Text,Image}`; JSON is rendered to text by the tool |
 | `AssistantContent::Reasoning` (rig `Origin`, native item) | `ContentBlock::Thinking { signature }` / `RedactedThinking` |
 | Markers (`CANCEL_MARKER`, `END_MARKER`, `[Run failed: …]`, grace, nudge) | `Message { kind: Observation }` with a `craft.marker` tag; grace, nudge and continuation are `step_end` appends |
-| `run::run(&mut Vec<Message>, …)` | `Agent::run(StoredMessage, RunOptions) -> RunReport` + craft driver |
+| `run::run(&mut Vec<Message>, …)` | `harness::driver::run_turn(&Conversation, …)` around `Agent::run(StoredMessage, RunOptions) -> RunReport` |
 | `RunOutcome::*` | `RunStatus::*` + driver policy |
 | `PortableTool` / `DynamicTool` / `ToolExecutionError` | `ToolImpl` / `ToolExecutor` / `ToolError` |
 | `ToolDispatch` + `BeforeExecute`/`AfterExecute` | `ToolRegistry` + `pre_tool_exec`/`post_tool_exec` |
@@ -236,8 +240,12 @@ wrong.
 2. **Order: agent runtime (05) before tools (06).** `ToolContext` only exists
    inside `Agent`, so native tools need the agent. 05 bridges the existing rig
    tools into `ToolExecutor` temporarily, and 06 replaces the bridge.
-3. **The surface event contract stays craft's `Event` (05)**, fed by a bridge.
-4. **A `run::run` facade bridges 05–10**, and 11 removes it.
+3. **The surface event contract is `harness::Event` (05)**
+   (`Agent(animist AgentEvent) | Craft(CraftEvent)`); surfaces match animist
+   events directly.
+4. **No facade.** `run::run`/`run_with_images` are never rebuilt on animist.
+   Every surface owns a long-lived `harness::Conversation` from 05, and 05
+   deletes the old loop in the same prompt.
 5. **History editing vocabulary:**
    - `Compactor` plans for summarization (LLM, VCC);
    - `Alteration` revisions, applied between runs, for durable per-message
@@ -248,12 +256,13 @@ wrong.
 
    Originals stay in entry sources, so `retrieve` reads them from history.
    That retires `SharedCompressionStore` and the session's raw `tool_outputs`
-   map (09).
-6. **Session format.** 04 moves message records to animist shapes and loads
-   legacy records. 11 persists `HistoryEntry` deltas read from animist's
-   change feed (`History::changes_since`): append, insert, revise, deactivate,
-   and replace (the agent's tool-result squash). One loader handles every
-   older shape.
+   map (08).
+6. **Session format.** One format bump, in 04: records become animist entry
+   records (legacy records still load), and there is no intermediate
+   `StoredMessage` record format. From 05 on, the persister writes whatever
+   animist's change feed (`History::changes_since`) reports: append, insert,
+   revise, deactivate, and replace (the agent's tool-result squash). One
+   loader handles every older shape (11).
 7. **Placeholder revisions.** The agent writes a placeholder result message and
    revises it as each call finishes. Once every call in the step has a result,
    animist squashes the entry to the placeholder source plus one final
@@ -290,16 +299,16 @@ instead; none of the workarounds should be built.
 
 | Followup | 0.7.0 API | Used in |
 | --- | --- | --- |
-| F01 step-boundary messages | `LayerImpl::step_end` → `StepAction { messages, continue_run }`; `AgentEvent::MessagesAppended`; `AgentError::UnsupportedContinuation` | 07 (grace), 08 (nudge, `MaxTokens` continuation) |
+| F01 step-boundary messages | `LayerImpl::step_end` → `StepAction { messages, continue_run }`; `AgentEvent::MessagesAppended`; `AgentError::UnsupportedContinuation` | 07 (grace), 09 (nudge, `MaxTokens` continuation) |
 | F02 parallel child dispatch | `ToolContext::dispatch_all(Vec<ToolCall>) -> Result<Vec<ToolOutput>>`; nested calls fail with `NestedConcurrentDispatch` | 10 (`batch`) |
 | F03 tool test context | `agent::testing::ToolHarness` (feature `testing`) | 06 |
 | F04 revision squash | Agent squashes tool-result entries to source + final revision before `StepFinished` | 11 (no pruning) |
-| F05 history change feed | `HistorySnapshot::generation()`, `History::changes_since(&HistoryVersion)`, `HistoryChange::{Appended, Revised, Deactivated, Inserted, EntryReplaced}`; `HistoryError::{ChangesTooOld, ForeignVersion}` | 11 |
+| F05 history change feed | `HistorySnapshot::generation()`, `History::changes_since(&HistoryVersion)`, `HistoryChange::{Appended, Revised, Deactivated, Inserted, EntryReplaced}`; `HistoryError::{ChangesTooOld, ForeignVersion}` | 05, 11 |
 | F06 tool decision with a response | `ToolDecision::Respond { output }` | 05, 07 (dedup) |
 | F07 panic-safe tools | `ToolError::Panicked { message }`, model-visible error result | 05 (no `catch_unwind`) |
 | F09 Bedrock client, listing, Converse | `ListingMode::ControlPlane`, `Protocol::Converse`, injectable client (craft doesn't inject one) | 02 |
 | F10 tool name on results | `ContentBlock::ToolResult { name: Option<String>, .. }` | 04 |
-| 0.6.0 at-depth system messages | `Role::System`, `RequestOptions::system_message_policy` | 03, 04 |
+| 0.6.0 at-depth system messages | `Role::System`, `RequestOptions::system_message_policy` | 02, 04 |
 
 Chat Completions still rejects tool-result images; `RequestLayer` moves them
 into a following user message. That is a provider limitation, not an animist

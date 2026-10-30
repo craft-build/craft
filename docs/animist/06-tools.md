@@ -5,7 +5,9 @@
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt),
-  including the [async rules](README.md#async-native).
+  including the [async rules](README.md#async-native), and the
+  [harness design rules](harness-design.md). Start with the
+  [test inventory](harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
   (`.craft/agents/reviewer.md`) as described in [Finish](#finish).
 
@@ -42,8 +44,11 @@ Delete 05's rig bridge and the `rig-core` dependency.
 
 ## Work
 
-1. **Tool definitions.** Replace `impl_tool!` with a macro, or plain impls, that
-   implements `ToolImpl` for each tool:
+1. **Tool definitions.** Replace `impl_tool!` with plain `ToolImpl` impls.
+   Use a macro only if it removes real repetition that a helper function
+   can't, and keep it under ~30 lines. Each tool holds what it uses directly
+   (workspace root, path-lock table, config slice). No dispatcher object
+   sits between the registry and the tool. In each impl:
    - `Args` are the existing typed structs (serde decode is animist's, and
      argument errors become model-visible error results).
    - `Output: IntoToolOutput`. Keep the readable-text contract for the model
@@ -99,9 +104,18 @@ Delete 05's rig bridge and the `rig-core` dependency.
    - cancellation comes from `context.run.cancellation`;
    - outputs and images map to `ToolContents`;
    - builtin-name collision rejection is kept.
-6. **Registration.** `Workspace::register` fills an `animist::agent::tool::ToolRegistry`,
-   each tool wrapped in 05's `HarnessExecutor`. Delete the rig bridge,
-   `ToolDispatch` remnants and `SharedDispatch`, if 10 doesn't need it.
+6. **Registration.** One function builds the `animist::agent::tool::ToolRegistry`
+   from config, registering each tool directly: no decorator (snapshots are
+   05's `SnapshotLayer`). `Conversation` calls it when it builds or
+   rebuilds the agent.
+   - `Workspace` either becomes a plain value (root, path locks, env) shared
+     by the tools, or disappears. It no longer runs or dispatches anything.
+   - Delete the rig bridge, the `ToolDispatch` remnants and
+     `SharedDispatch`. `batch` gets its children from
+     `ToolContext::dispatch_all`, not from a back-reference.
+   - Keep `AskQuestions` and `SpawnSubagent` only as surface seams. Each has
+     several real implementations (TUI, ACP, headless, tests); name them in
+     the completion note, or inline the trait.
 7. **Test harness** (README decision 1). Build on animist's
    `agent::testing::ToolHarness` (dev-dependency feature `testing`, added in
    01). No provider, model or one-shot agent is involved.
@@ -153,8 +167,14 @@ Delete 05's rig bridge and the `rig-core` dependency.
 2. **Run the review agent** (`.craft/agents/reviewer.md`) over this prompt's
    full diff. Address its findings, re-run validation, and repeat until the
    verdict is clean.
-3. Append a completion note: the claim table per tool, the key scheme, the
-   error-text decision, and the remaining `spawn_blocking` sites.
+3. Append a completion note:
+   - the claim table per tool;
+   - the key scheme;
+   - the error-text decision;
+   - the remaining `spawn_blocking` sites;
+   - the test-inventory diff;
+   - the indirection rows closed;
+   - which tool-side traits survived, and why.
 
 ## Completion note
 

@@ -4,7 +4,13 @@
 
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
-- Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt).
+- Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
+  and the [harness design rules](harness-design.md). The design rules win
+  where they disagree with the README. Start with the
+  [test inventory](harness-design.md#test-integrity).
+- Read the 02/03 completion notes first. If the merged 02/03 cutover already
+  removed `edge.rs` or changed `crate::history`, skip the steps below that it
+  already covered, and say so in the completion note.
 - When implementation is finished, **run the review agent**
   (`.craft/agents/reviewer.md`) as described in [Finish](#finish).
 
@@ -14,8 +20,12 @@
 loop, TUI, ACP, headless, compaction, sessions) speaks
 `animist::history::{Message, ContentBlock, ToolContents, ToolContent,
 ImageSource, Role, MessageKind, StoredMessage}`. Old session files still load.
-`edge.rs` is deleted. The run loop is still craft's (`Vec<Message>`); the
-`History` handle comes in 05/11.
+`edge.rs` is deleted. The run loop is still craft's until 05, running over
+`Vec<StoredMessage>`. The `History` handle comes in 05.
+
+This prompt also makes the **only** session format bump of the migration: the
+final entry-record vocabulary is defined here, and 05's change-feed persister
+writes into it.
 
 ## Read first
 
@@ -35,9 +45,11 @@ ImageSource, Role, MessageKind, StoredMessage}`. Old session files still load.
 
 ## Work
 
-1. **The module.** `crate::history` re-exports the animist types and adds an
-   extension module (`history::ext`, an extension trait) for what craft relies
-   on:
+1. **The module.** `crate::history` re-exports the animist types. Add helpers
+   only for what animist lacks: check `Message`, `ContentBlock` and
+   `StoredMessage` first, and don't wrap anything animist already provides.
+   Prefer free functions in `history::ext` over an extension trait unless
+   method syntax removes real noise at call sites. Expected helpers:
    - `text()`, plus constructors `user_text`, `assistant_text`, `observation`;
    - `tool_calls()` and `tool_results()` iterators;
    - `tool_name(&ContentBlock, &[Message])`: the result's stored `name`, else
@@ -69,29 +81,49 @@ ImageSource, Role, MessageKind, StoredMessage}`. Old session files still load.
      Observation }`, stored with a `craft.marker = cancel|end|failed|grace|nudge|continuation`
      tag. Check marker identity by tag, not by text. That fixes the
      text-equality fragility hardening/27 describes.
-     - While the loop still uses `Vec<Message>`, keep the tag in a side map,
-       or keep `Vec<StoredMessage>` in the loop if that is simpler. Prefer
-       `Vec<StoredMessage>` if the churn is comparable, because 05 needs
-       stored messages anyway.
+     - Tags live on `StoredMessage`, not `Message`. The loop, the surfaces
+       and the session store therefore move to `Vec<StoredMessage>` in this
+       prompt. **No side map**: a parallel tag store goes out of sync on
+       every compaction and is thrown away in 05 anyway.
+     - Provider calls take `current`-style `Vec<Message>`, mapped at the
+       call site.
 3. **The legacy converter.** Move the old craft enums into
    `storage/sessions/legacy_messages.rs` as serde-only types, with a
    `legacy::Message → Vec<StoredMessage>` converter (03's `edge.rs` mapping, in
    the history direction). Recognize old marker texts and tag them.
    Old-session timestamps come from the session's `created_at`/`updated_at`;
    document the approximation.
-4. **The session format.** Bump the session `version`:
-   - New message records serialize animist `StoredMessage`.
-   - The loader accepts both versions, plus the existing `.json` legacy path:
-     try the new shape, otherwise decode as a legacy record and convert.
+4. **The session format: the one bump.** Bump the session `version` and
+   define the final record vocabulary, mapping one to one onto animist's
+   `HistoryChange` (05 writes all of them; this prompt writes only `entry`):
+   - `entry { entry: HistoryEntry }` ← `Appended`;
+   - `insert { index, entry }` ← `Inserted`;
+   - `revise { index, message: StoredMessage }` ← `Revised`;
+   - `deactivate { index }` ← `Deactivated`;
+   - `replace { index, entry }` ← `EntryReplaced`.
+
+   Indices refer to the entry list at the time of each record, as animist
+   defines them, so replaying records in order reproduces the snapshot. Unit
+   test the replay function for all five record kinds now, using
+   hand-built `HistoryEntry`s, even though only `entry` is written yet.
+   - Each saved message is an `entry` record holding a source-only
+     `HistoryEntry` (`HistoryEntry` is serde in 0.7.0).
+   - The loader accepts the new records, the current JSONL records and the
+     `.json` legacy path. Try the new shape first; otherwise decode as legacy
+     and convert. Put it all in one loader module.
    - Saving a loaded legacy session rewrites it in the new shape, the way
      `.json` → `.jsonl` works today.
-   - `subagent_messages` and `tool_outputs` (`Arc<T>`, where `T` was
-     `history::ToolResult`) move to the animist shapes. Tool outputs store the
-     animist `ToolResult` block itself, which now carries the name.
+   - `subagent_messages` become entry lists too.
+   - `tool_outputs` stays readable but is no longer written; its raw copies
+     move into entry sources in 08. Until then, keep writing it in its
+     animist shape (`ContentBlock::ToolResult`, which now carries the name).
+     Note that this record goes away in 08.
 5. **Delete `edge.rs`.** The provider call takes animist messages directly. The
    request-shaping rules from 03 (user coalescing, image relocation for Chat
-   Completions) move into `run/view.rs` as request-view functions. 05 lifts them
-   into the `RequestLayer`.
+   Completions) become pure `fn(Vec<Message>) -> Vec<Message>` functions in
+   `run/view.rs`, with no trait and no state. 05 calls them from
+   `RequestLayer::prepare_request`. Delete user coalescing if no animist
+   adapter needs it: check the adapters, and record the answer.
 6. **Callers.** Update every crate user (about 60 files reference `history::`).
    - TUI rendering: thinking blocks, tool cards, images, markers styled by tag.
    - ACP `session/load` replay, headless JSON output, print mode.
@@ -110,6 +142,9 @@ ImageSource, Role, MessageKind, StoredMessage}`. Old session files still load.
   references.
 - Marker detection by tag: a user message whose text equals `CANCEL_MARKER`
   is not treated as a marker.
+- Record replay: each of the five record kinds, applied to a hand-built
+  entry list, gives the expected `HistoryEntry`s, including indices after
+  an earlier `insert`.
 
 ## Acceptance
 
@@ -126,7 +161,8 @@ ImageSource, Role, MessageKind, StoredMessage}`. Old session files still load.
    full diff. Address its findings, re-run validation, and repeat until the
    verdict is clean.
 3. Append a completion note: how captions and `Usage` were decided, the new
-   format version, and the downgrade caveat.
+   format version, the downgrade caveat, the test-inventory diff, and the
+   [indirection rows](harness-design.md#no-indirection-without-a-job) closed.
 
 ## Completion note
 

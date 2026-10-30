@@ -745,7 +745,12 @@ mod tests {
     #[test]
     fn color_depth_precedence_chain_is_preserved() {
         assert_eq!(
-            color_depth_for(Some("1"), Some("truecolor"), Some("xterm-ghostty"), Some(true)),
+            color_depth_for(
+                Some("1"),
+                Some("truecolor"),
+                Some("xterm-ghostty"),
+                Some(true)
+            ),
             slt::ColorDepth::NoColor
         );
         assert_eq!(
