@@ -189,9 +189,6 @@ mod tests {
             api_key_env: None,
             base_url: base_url.map(str::to_string),
             api_version: None,
-            account_id: None,
-            region: None,
-            profile: None,
             discover_models: false,
             models: Default::default(),
         }
@@ -231,9 +228,6 @@ mod tests {
             api_key_env: None,
             base_url: None,
             api_version: None,
-            account_id: None,
-            region: None,
-            profile: None,
             discover_models: false,
             models: Default::default(),
         };

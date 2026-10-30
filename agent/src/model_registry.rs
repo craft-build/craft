@@ -138,40 +138,10 @@ static OPENAI: &[StaticModel] = &[
     },
 ];
 
-static COPILOT: &[StaticModel] = &[
-    StaticModel {
-        prefixes: &[
-            "gpt-5-mini",
-            "gpt-5.4-mini",
-            "gpt-5.4-nano",
-            "claude-haiku-4.5",
-        ],
-        tier: ModelTier::Weak,
-        default: false,
-    },
-    StaticModel {
-        prefixes: &["claude-sonnet-4.5", "claude-sonnet-4.6", "claude-sonnet-5"],
-        tier: ModelTier::Medium,
-        default: false,
-    },
-    StaticModel {
-        prefixes: &[
-            "claude-opus-5",
-            "claude-opus-4.8",
-            "claude-opus-4.7",
-            "claude-opus-4.6",
-            "claude-opus-4.5",
-        ],
-        tier: ModelTier::Strong,
-        default: true,
-    },
-];
-
 fn manifest(kind: &str) -> Option<ProviderManifest> {
     let (accepts_arbitrary_models, models) = match kind {
         "anthropic" => (false, ANTHROPIC),
-        "openai" | "deepseek" => (false, OPENAI),
-        "copilot" => (true, COPILOT),
+        "openai" => (false, OPENAI),
         _ => return None,
     };
     Some(ProviderManifest {
@@ -339,8 +309,7 @@ impl ModelRegistry {
         }
 
         let candidate = if self.tiers_from_discovery(provider) {
-            self.discovered_static_candidate(provider, tier)
-                .or_else(|| self.metadata_candidate(provider, tier))
+            self.metadata_candidate(provider, tier)
                 .or_else(|| self.static_candidate(provider, tier))
                 .or_else(|| self.positional_candidate(provider, tier))
         } else {
@@ -348,14 +317,6 @@ impl ModelRegistry {
         }?;
 
         (!self.claimed_elsewhere(&candidate, tier)).then_some(candidate)
-    }
-
-    /// The curated default the provider actually offers, so discovery cannot
-    /// replace a still available default with whatever it lists first.
-    fn discovered_static_candidate(&self, provider: &str, tier: ModelTier) -> Option<String> {
-        self.static_prefixes(provider, tier)
-            .find(|prefix| self.discovered(provider, prefix).is_some())
-            .map(|prefix| format!("{provider}/{prefix}"))
     }
 
     /// Lowest ID wins, so the tier default survives provider list reordering.
@@ -540,8 +501,8 @@ mod tests {
     fn make_tiered(models: &[(&str, ModelTier)]) -> ModelRegistry {
         let mut reg = ModelRegistry::default();
         reg.set_known_models(
-            "copilot",
-            "copilot",
+            "ollama",
+            "ollama",
             models
                 .iter()
                 .map(|&(id, tier)| ModelInfo {
@@ -562,20 +523,17 @@ mod tests {
         ]);
 
         assert_eq!(
-            reg.tier_for("copilot/gpt-5.6-sol", "copilot", Some(ModelTier::Medium)),
+            reg.tier_for("ollama/gpt-5.6-sol", "ollama", Some(ModelTier::Medium)),
             ModelTier::Strong
         );
         assert_eq!(
-            reg.tier_for("copilot/terra", "copilot", None),
+            reg.tier_for("ollama/terra", "ollama", None),
             ModelTier::Medium
         );
+        assert_eq!(reg.tier_for("ollama/luna", "ollama", None), ModelTier::Weak);
         assert_eq!(
-            reg.tier_for("copilot/luna", "copilot", None),
-            ModelTier::Weak
-        );
-        assert_eq!(
-            reg.spec_for_tier("copilot", ModelTier::Strong),
-            Some("copilot/gpt-5.6-sol".into())
+            reg.spec_for_tier("ollama", ModelTier::Strong),
+            Some("ollama/gpt-5.6-sol".into())
         );
     }
 
@@ -601,16 +559,12 @@ mod tests {
         );
     }
 
-    #[test_case(&[("gpt-5.4", ModelTier::Strong), ("claude-opus-4.7", ModelTier::Strong)], "copilot/claude-opus-4.7"; "curated default beats discovered tier")]
-    #[test_case(&[("claude-opus-4.6", ModelTier::Strong), ("alpha", ModelTier::Strong)], "copilot/claude-opus-4.6"; "later curated prefix when first is unavailable")]
-    #[test_case(&[("zeta", ModelTier::Strong), ("alpha", ModelTier::Strong)], "copilot/alpha"; "lowest id when no curated default is entitled")]
-    fn spec_for_tier_prefers_entitled_curated_default(
-        models: &[(&str, ModelTier)],
-        expected: &str,
-    ) {
+    #[test_case(&[("gpt-5.4", ModelTier::Strong), ("claude-opus-4.7", ModelTier::Strong)], "ollama/claude-opus-4.7"; "lowest id wins among equally tiered models")]
+    #[test_case(&[("claude-opus-4.6", ModelTier::Strong), ("alpha", ModelTier::Strong)], "ollama/alpha"; "lowest id when tiers tie across families")]
+    fn spec_for_tier_picks_the_lowest_id_of_the_tier(models: &[(&str, ModelTier)], expected: &str) {
         let reg = make_tiered(models);
         assert_eq!(
-            reg.spec_for_tier("copilot", ModelTier::Strong),
+            reg.spec_for_tier("ollama", ModelTier::Strong),
             Some(expected.into())
         );
     }
@@ -626,8 +580,8 @@ mod tests {
         reversed.reverse();
 
         assert_eq!(
-            make_tiered(&models).spec_for_tier("copilot", ModelTier::Strong),
-            make_tiered(&reversed).spec_for_tier("copilot", ModelTier::Strong)
+            make_tiered(&models).spec_for_tier("ollama", ModelTier::Strong),
+            make_tiered(&reversed).spec_for_tier("ollama", ModelTier::Strong)
         );
     }
 

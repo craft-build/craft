@@ -963,7 +963,6 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-async",
- "aws-smithy-eventstream 0.61.6",
  "aws-smithy-http",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
@@ -978,59 +977,6 @@ dependencies = [
  "pin-project-lite",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "aws-sdk-bedrock"
-version = "1.165.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "086d90d6919e0d36b1ed5d83b3773e15a98f8cfa6d30b264936b0f7f1215dec6"
-dependencies = [
- "arc-swap",
- "aws-credential-types",
- "aws-runtime",
- "aws-smithy-async",
- "aws-smithy-http",
- "aws-smithy-json",
- "aws-smithy-observability",
- "aws-smithy-runtime",
- "aws-smithy-runtime-api",
- "aws-smithy-schema",
- "aws-smithy-types",
- "aws-types",
- "bytes",
- "fastrand 2.5.0",
- "http",
- "regex-lite",
- "tracing",
-]
-
-[[package]]
-name = "aws-sdk-bedrockruntime"
-version = "1.152.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd3ff1fc9e5e8a2ac61bcc6ac82b13a57d431d6804d4461f9570a3b788b9549a"
-dependencies = [
- "arc-swap",
- "aws-credential-types",
- "aws-runtime",
- "aws-sigv4",
- "aws-smithy-async",
- "aws-smithy-eventstream 0.61.6",
- "aws-smithy-http",
- "aws-smithy-json",
- "aws-smithy-observability",
- "aws-smithy-runtime",
- "aws-smithy-runtime-api",
- "aws-smithy-schema",
- "aws-smithy-types",
- "aws-types",
- "bytes",
- "fastrand 2.5.0",
- "http",
- "http-body-util",
- "regex-lite",
- "tracing",
 ]
 
 [[package]]
@@ -1116,7 +1062,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f385da9b7757ed4c8214797ad663ff534fb622006143530aa80e21f8e06ff85c"
 dependencies = [
  "aws-credential-types",
- "aws-smithy-eventstream 0.61.6",
  "aws-smithy-http",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
@@ -1143,34 +1088,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "aws-smithy-eventstream"
-version = "0.60.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78d8391e65fcea47c586a22e1a41f173b38615b112b2c6b7a44e80cec3e6b706"
-dependencies = [
- "aws-smithy-types",
- "bytes",
- "crc32fast",
-]
-
-[[package]]
-name = "aws-smithy-eventstream"
-version = "0.61.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14c8a643d0e114cae39e45415e3225793a6396698b7779a0c9e3ede731d8fc71"
-dependencies = [
- "aws-smithy-types",
- "bytes",
- "crc32fast",
-]
-
-[[package]]
 name = "aws-smithy-http"
 version = "0.64.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19af609dd5edf8b056cd0bb001c706c8b3b1458055328b334ec13d7f46f6aaa8"
 dependencies = [
- "aws-smithy-eventstream 0.61.6",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
@@ -1313,7 +1235,6 @@ dependencies = [
  "base64-simd",
  "bytes",
  "bytes-utils",
- "futures-core",
  "http",
  "http-body",
  "http-body-util",
@@ -1323,8 +1244,6 @@ dependencies = [
  "ryu",
  "serde",
  "time",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -2443,11 +2362,6 @@ dependencies = [
  "arc-swap",
  "argosy",
  "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-bedrock",
- "aws-sdk-bedrockruntime",
- "aws-smithy-types",
  "barkml",
  "base64 0.23.1",
  "bs58",
@@ -2469,7 +2383,6 @@ dependencies = [
  "nucleo-matcher",
  "regex",
  "reqwest",
- "rig-bedrock",
  "rig-core",
  "rig-reqwest",
  "rmcp",
@@ -7309,31 +7222,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 dependencies = [
  "bytemuck",
-]
-
-[[package]]
-name = "rig-bedrock"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "182065e388df2229dba9edd7f38094994e63d9c49b58becc03f06551e1626854"
-dependencies = [
- "async-stream",
- "aws-config",
- "aws-sdk-bedrockruntime",
- "aws-smithy-eventstream 0.60.21",
- "aws-smithy-runtime-api",
- "aws-smithy-types",
- "base64 0.22.1",
- "bytes",
- "futures",
- "http-body",
- "rig-core",
- "schemars 1.2.3",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
 ]
 
 [[package]]

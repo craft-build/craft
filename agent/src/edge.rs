@@ -526,9 +526,7 @@ fn media_rig_to_own(media: ImageMediaType) -> history::ImageMedia {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_bedrock::completion::Converse;
     use rig_core::completion::message::ToolFunction;
-    use rig_core::wire::Wire;
 
     fn part(index: u32) -> Part {
         serde_json::from_value(serde_json::json!(index)).expect("part index")
@@ -906,160 +904,19 @@ mod tests {
         ));
     }
 
-    /// Regression for the Bedrock failure "reasoning conversion requires at
-    /// least one text or summary block": an adaptive-thinking block is
-    /// signature-only, and the signature must survive the stream fold into
-    /// history. The canonical 0.44 wire form carries signatures only in
-    /// provider-native items a generic mapping cannot mint, so the replay
-    /// copy drops the empty block instead of sending thinking Bedrock
-    /// rejects — exactly the failure this guards against.
-    /// Regression for craft-build/craft#17: rig-bedrock 0.44 keeps the
-    /// thinking signature nested in the native item
-    /// (`reasoningContent.reasoningText.signature`), and the only replayable
-    /// form of signed thinking is the native item itself. The decode must
-    /// find the nested signature, keep the item, and the encode must
-    /// re-attach both the item and the turn origin so the wire replays the
-    /// block verbatim instead of demoting it to text.
-    #[test]
-    fn bedrock_signed_thinking_replays_through_its_native_item() {
-        let native = r#"{"reasoningContent":{"reasoningText":{"text":"Thinking about it.","signature":"sig-bedrock"}}}"#;
-        let mut parts = StreamedParts::default();
-        fold_streamed_event(
-            &mut parts,
-            &reasoning_event(
-                0,
-                reasoning_with_native(
-                    RigReasoning {
-                        text: "Thinking about it.".into(),
-                        redacted: false,
-                        native: None,
-                    },
-                    native,
-                ),
-            ),
-        );
-        let origin = Origin::new(
-            "bedrock.converse",
-            "bedrock",
-            "us.anthropic.claude-opus-5-5",
-        );
-        let message = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
-        let history::Message::Assistant { content } = &message else {
-            panic!("assistant message");
-        };
-        let history::AssistantContent::Reasoning(reasoning) = &content[0] else {
-            panic!("reasoning block");
-        };
-        // The nested Bedrock signature is extracted...
-        match &reasoning.content[0] {
-            history::ReasoningContent::Text {
-                signature, native, ..
-            } => {
-                assert_eq!(signature, &Some("sig-bedrock".into()));
-                assert!(native.is_some(), "the provider item must be kept");
-            }
-            other => panic!("expected text reasoning, got {other:?}"),
-        }
-        // ...and the turn origin rides the history for same-wire replay.
-        assert!(reasoning.origin.is_some());
-
-        let rig = own_to_rig(&[message]);
-        let RigMessage::Assistant(assistant) = &rig[0] else {
-            panic!("assistant message");
-        };
-        // The origin names the wire that produced the turn...
-        assert_eq!(assistant.origin.as_ref(), Some(&origin));
-        // ...and the native item is re-attached with a current fingerprint,
-        // so rig's encoders replay the signed block verbatim.
-        let item: serde_json::Value = serde_json::from_str(native).unwrap();
-        assert_eq!(
-            assistant
-                .content
-                .first()
-                .and_then(|block| block.native_item()),
-            Some(&item)
-        );
-    }
-
     /// The turn origin from the response reaches the replayed message even
     /// when the reasoning arrived as deltas only (no complete block).
     #[test]
     fn origin_rides_unsigned_reasoning_turns_too() {
         let mut parts = StreamedParts::default();
         fold_streamed_event(&mut parts, &reasoning_delta(0, "hmm"));
-        let origin = Origin::new(
-            "bedrock.converse",
-            "bedrock",
-            "us.anthropic.claude-opus-5-5",
-        );
+        let origin = Origin::new("anthropic.messages", "anthropic", "claude-opus-5-5");
         let message = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
         let rig = own_to_rig(&[message]);
         let RigMessage::Assistant(assistant) = &rig[0] else {
             panic!("assistant message");
         };
         assert_eq!(assistant.origin.as_ref(), Some(&origin));
-    }
-
-    /// End-to-end against the real rig-bedrock encoder: a Bedrock turn whose
-    /// signed thinking was captured with its native item and origin must go
-    /// back over the wire as `reasoningContent` with the signature — not be
-    /// demoted to a plain text block, which is what broke craft-build/craft#17.
-    #[test]
-    fn bedrock_wire_replays_signed_thinking_verbatim() {
-        let model = "us.anthropic.claude-opus-5-5";
-        let native = r#"{"reasoningContent":{"reasoningText":{"text":"Thinking about it.","signature":"sig-bedrock"}}}"#;
-        let mut parts = StreamedParts::default();
-        parts.text.push_str("Hello there.");
-        fold_streamed_event(
-            &mut parts,
-            &reasoning_event(
-                0,
-                reasoning_with_native(
-                    RigReasoning {
-                        text: "Thinking about it.".into(),
-                        redacted: false,
-                        native: None,
-                    },
-                    native,
-                ),
-            ),
-        );
-        // The origin a Bedrock response carries: rig's provider descriptor
-        // name, not craft's config spelling.
-        let origin = Origin::new("bedrock.converse", "aws_bedrock", model);
-        let turn = assistant_from_stream(&[], Some(&origin), &HashMap::new(), &parts);
-        let request = to_request(
-            &[turn, history::Message::user("next")],
-            &[],
-            None,
-            None,
-            None,
-        );
-        let encoded = Converse::new(model)
-            .encode(request, rig_core::wire::Mode::Streaming)
-            .expect("the request is representable");
-        let body = serde_json::to_value(&encoded.body).expect("body is JSON");
-        let messages = body
-            .pointer("/messages")
-            .and_then(|m| m.as_array())
-            .expect("messages");
-        // [assistant reasoning+text, user "next"]: the reasoning must be the
-        // first block of the assistant message, still signed.
-        let assistant = messages
-            .iter()
-            .find(|m| m.get("role") == Some(&serde_json::json!("assistant")))
-            .expect("assistant message");
-        let blocks = assistant
-            .get("content")
-            .and_then(|c| c.as_array())
-            .expect("content");
-        assert_eq!(
-            blocks
-                .first()
-                .and_then(|b| b.pointer("/reasoningContent/reasoningText/signature")),
-            Some(&serde_json::json!("sig-bedrock")),
-            "signed thinking must replay as reasoningContent, not text: {blocks:?}"
-        );
     }
 
     #[test]

@@ -128,10 +128,7 @@ impl DynamicModel {
                 id,
                 settings,
             );
-            if request.max_tokens.is_none()
-                && (kind == super::ProviderKind::Anthropic
-                    || (kind == super::ProviderKind::Bedrock && id.contains("claude")))
-            {
+            if request.max_tokens.is_none() && kind == super::ProviderKind::Anthropic {
                 let fallback = info.max_output.unwrap_or(8192);
                 if info.max_output.is_none() {
                     // Claude requires an explicit maxTokens; 8192 is the
@@ -152,14 +149,12 @@ impl DynamicModel {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             };
-            if matches!(
-                kind,
-                super::ProviderKind::Anthropic | super::ProviderKind::Bedrock
-            ) && extra
-                .pointer("/thinking/budget_tokens")
-                .and_then(serde_json::Value::as_u64)
-                .zip(effective_output)
-                .is_some_and(|(thinking, output)| thinking > output / 2)
+            if kind == super::ProviderKind::Anthropic
+                && extra
+                    .pointer("/thinking/budget_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .zip(effective_output)
+                    .is_some_and(|(thinking, output)| thinking > output / 2)
             {
                 return Err(ProviderError::request(
                     "output cap is too small for the minimum thinking budget and an answer; increase agent.max_tokens",
@@ -310,7 +305,11 @@ mod tests {
     }
 
     #[test]
-    fn bedrock_claude_supplies_output_cap_with_thinking() {
+    fn anthropic_supplies_output_cap_with_thinking() {
+        // Hermetic catalog: without an anthropic entry the fallback ceiling
+        // (8192) and its half-budget (4096) are deterministic.
+        let _guard = crate::models_dev::testing::GLOBAL_LOCK.blocking_lock();
+        let previous = crate::models_dev::testing::install(r#"{"other":{"models":{"m":{}}}}"#);
         let mut request = crate::edge::to_request(
             &[crate::history::Message::user("hello")],
             &[],
@@ -319,49 +318,14 @@ mod tests {
             None,
         );
         crate::thinking::attach(&mut request, ThinkingConfig::Budget(99_999));
-        let prepared = model(ProviderKind::Bedrock, "us.anthropic.claude-sonnet-4-5")
+        let prepared = model(ProviderKind::Anthropic, "claude-sonnet-4-5")
             .prepare(request)
             .unwrap();
+        crate::models_dev::testing::restore(previous);
         assert_eq!(prepared.max_tokens, Some(8192));
         assert_eq!(
             prepared.additional_params.unwrap()["thinking"]["budget_tokens"],
             4096
-        );
-    }
-
-    /// The manual escape hatch for a missing catalog entry —
-    /// `model "id" { max_output_tokens = N }` — must survive to the wire,
-    /// not just the catalog: the request cap and the thinking ceiling both
-    /// come from the same settings lookup.
-    #[test]
-    fn bedrock_claude_honors_configured_max_output_tokens() {
-        let config = crate::config::Config::parse(
-            "provider \"aws\" {\n  kind = \"amazon-bedrock\"\n  region = \"us-east-1\"\n  \
-             model \"us.anthropic.claude-sonnet-4-6\" { max_output_tokens = 24000 }\n}",
-        )
-        .unwrap();
-        let provider = crate::providers::Provider::from_config_with(
-            &config.providers["aws"],
-            crate::providers::Timeouts::default(),
-            &|_| Ok("unused".into()),
-        )
-        .unwrap();
-        let model = provider
-            .configured_model(&config.providers["aws"], "us.anthropic.claude-sonnet-4-6")
-            .unwrap();
-        let mut request = crate::edge::to_request(
-            &[crate::history::Message::user("hello")],
-            &[],
-            None,
-            None,
-            None,
-        );
-        crate::thinking::attach(&mut request, ThinkingConfig::Effort(Effort::High));
-        let prepared = model.prepare(request).unwrap();
-        assert_eq!(
-            prepared.max_tokens,
-            Some(24_000),
-            "the configured cap replaces the 8192 fallback"
         );
     }
 }

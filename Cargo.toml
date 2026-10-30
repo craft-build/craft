@@ -16,11 +16,6 @@ arboard = { version = "3", default-features = false, features = ["image-data"] }
 arc-swap = "1"
 argosy = "0.7"
 async-trait = "0.1"
-aws-sdk-bedrock = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
-aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
-aws-config = "1"
-aws-credential-types = "1"
-aws-smithy-types = "1"
 barkml = "0.10"
 base64 = "0.23"
 bs58 = "0.5"
@@ -41,7 +36,6 @@ minijinja = "3"
 nucleo-matcher = "0.3"
 regex = "1"
 reqwest = "0.13"
-rig-bedrock = "0.44"
 rig-core = { version = "0.44", features = ["reqwest"] }
 rig-reqwest = "0.44"
 rmcp = {

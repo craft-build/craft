@@ -3,7 +3,6 @@
 //! [`DynamicModel`] erases the concrete model type behind rig-core's
 //! `DynModel` so the rest of the crate never names a provider type.
 
-mod bedrock;
 mod catalog;
 mod dynamic;
 mod openai_compat;
@@ -17,10 +16,9 @@ pub use reauth::reauth_hook;
 pub use registry::{Provider, ProviderKind};
 pub use usage_fetch::{ModelUsageRow, ProviderUsage, UsageLimit};
 
-use std::future::Future;
 use std::time::Duration;
 
-use rig_core::providers::{anthropic, chatgpt, cohere, copilot, gemini, ollama, openai, voyageai};
+use rig_core::providers::{anthropic, cohere, gemini, ollama, openai, voyageai};
 use snafu::{OptionExt, ResultExt};
 
 use crate::config::ProviderConfig;
@@ -374,141 +372,6 @@ pub(crate) fn build_azure(
         .connect(timeout_client(timeouts)?))
 }
 
-/// Bedrock has no craft-side credential or base URL: the AWS SDK's default
-/// chain (environment credentials, `~/.aws` profiles including SSO and
-/// assume-role, web identity, container and IMDS roles) supplies both
-/// credentials and region through one craft-owned, cached SDK config —
-/// with a fast-failing IMDS probe so non-EC2 machines neither stall nor
-/// wait through multi-second SDK defaults (see [`crate::providers::bedrock`]).
-/// `region`/`profile` in the provider config override the region and name
-/// the shared-config profile (e.g. an assume-role or SSO account that is
-/// not the default profile); `AWS_PROFILE` flows through the chain
-/// natively. A missing region fails here with the fixes spelled out
-/// instead of an opaque "dispatch failure" on the first request. The AWS
-/// SDK owns its transport, so craft's `Timeouts` map onto the SDK's
-/// connect/stall timeouts rather than the shared reqwest policy.
-pub(crate) fn build_bedrock(
-    config: &ProviderConfig,
-    timeouts: Timeouts,
-    _: &dyn Fn(&str) -> Result<String>,
-) -> Result<rig_bedrock::client::BedrockRuntime> {
-    let sdk_config = bedrock::sdk_config_blocking(config, timeouts)?;
-    Ok(rig_bedrock::client::BedrockRuntime::from(
-        aws_sdk_bedrockruntime::Client::new(&sdk_config),
-    ))
-}
-
-/// The OAuth and GitHub-token device flows are async; providers are still
-/// built synchronously. On the multi-threaded app runtime the flow parks the
-/// calling thread onto the reactor; outside any runtime a private
-/// current-thread runtime runs it to completion. Test credential injection
-/// never takes these branches.
-fn block_on_auth<F: Future>(future: F) -> Result<F::Output> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => Ok(tokio::task::block_in_place(|| handle.block_on(future))),
-        Err(_) => Ok(tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(crate::error::client_error)?
-            .block_on(future)),
-    }
-}
-
-pub(crate) fn build_chatgpt(
-    config: &ProviderConfig,
-    timeouts: Timeouts,
-    credential: &dyn Fn(&str) -> Result<String>,
-) -> Result<openai::OpenAI> {
-    let mut provider = if let Some(name) = &config.api_key_env {
-        openai::OpenAIConfig::with_key(&chatgpt::DIALECT, credential(name)?)
-    } else if let Ok(access_token) = std::env::var("CHATGPT_ACCESS_TOKEN") {
-        let mut provider = openai::OpenAIConfig::with_key(&chatgpt::DIALECT, access_token);
-        if let Ok(account_id) = std::env::var("CHATGPT_ACCOUNT_ID") {
-            provider.account_id = Some(account_id);
-        }
-        provider
-    } else {
-        let authenticator = chatgpt::auth::Authenticator::new(
-            chatgpt::auth::AuthSource::OAuth,
-            None,
-            chatgpt::auth::DeviceCodeHandler::default(),
-            true,
-        );
-        let mut provider = openai::OpenAIConfig::with_key(&chatgpt::DIALECT, String::new());
-        if let Some(base_url) = &config.base_url {
-            provider = provider.with_base_url(base_url.clone());
-        }
-        let client = provider.connect(timeout_client(timeouts)?);
-        return block_on_auth(async { client.authenticate(&authenticator).await })?
-            .map_err(crate::error::client_error);
-    };
-    if let Some(account_id) = &config.account_id {
-        provider.account_id = Some(account_id.clone());
-    }
-    if let Some(base_url) = &config.base_url {
-        provider = provider.with_base_url(base_url.clone());
-    }
-    Ok(provider.connect(timeout_client(timeouts)?))
-}
-
-pub(crate) fn build_copilot(
-    config: &ProviderConfig,
-    timeouts: Timeouts,
-    credential: &dyn Fn(&str) -> Result<String>,
-) -> Result<copilot::Copilot> {
-    use copilot::auth::{AuthSource, Authenticator, DeviceCodeHandler};
-
-    // Exchanged session keys are used as-is.
-    if let Some(key) = config
-        .api_key_env
-        .as_deref()
-        .map(credential)
-        .transpose()?
-        .or_else(|| first_env(&["GITHUB_COPILOT_API_KEY", "COPILOT_API_KEY"]))
-    {
-        let mut provider = copilot::CopilotConfig::new(key);
-        if let Some(base_url) = &config.base_url {
-            provider = provider.with_base_url(base_url.clone());
-        }
-        return Ok(provider.connect(timeout_client(timeouts)?));
-    }
-
-    // GitHub tokens need the exchange; OAuth runs the cached device flow.
-    let source = if let Some(token) = first_env(&["COPILOT_GITHUB_ACCESS_TOKEN", "GITHUB_TOKEN"]) {
-        AuthSource::GitHubAccessToken(token)
-    } else {
-        AuthSource::OAuth
-    };
-    let (access_token_file, api_key_file) = copilot::auth::default_token_dir()
-        .map(|dir| {
-            (
-                Some(dir.join("access-token")),
-                Some(dir.join("api-key.json")),
-            )
-        })
-        .unwrap_or((None, None));
-    let authenticator = Authenticator::new(
-        source,
-        access_token_file,
-        api_key_file,
-        DeviceCodeHandler::default(),
-        true,
-    );
-    let mut provider = copilot::CopilotConfig::new("");
-    if let Some(base_url) = &config.base_url {
-        provider = provider.with_base_url(base_url.clone());
-    }
-    let client = provider.connect(timeout_client(timeouts)?);
-    block_on_auth(async { client.authenticate(&authenticator).await })?
-        .map_err(crate::error::client_error)
-}
-
-fn first_env(names: &[&str]) -> Option<String> {
-    names
-        .iter()
-        .find_map(|name| std::env::var(name).ok().filter(|s| !s.trim().is_empty()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,11 +385,7 @@ mod tests {
     };
 
     fn config(kind: ProviderKind, base_url: &str) -> ProviderConfig {
-        // Bedrock takes neither credentials nor a base URL: the AWS default
-        // credential chain owns both. It does need a resolvable region —
-        // the fixture pins one so provider construction stays offline
-        // (no IMDS probing, no region guard).
-        let auth = if matches!(kind, ProviderKind::Llamafile | ProviderKind::Bedrock) {
+        let auth = if matches!(kind, ProviderKind::Llamafile) {
             ""
         } else {
             "api_key_env = \"CRAFT_TEST_KEY\"\n"
@@ -536,18 +395,8 @@ mod tests {
         } else {
             ""
         };
-        let base = if kind == ProviderKind::Bedrock {
-            String::new()
-        } else {
-            format!("  base_url = \"{base_url}\"\n")
-        };
-        let region = if kind == ProviderKind::Bedrock {
-            "  region = \"us-east-1\"\n"
-        } else {
-            ""
-        };
         Config::parse(&format!(
-            "provider \"test\" {{\n  kind = \"{}\"\n{region}{base}{auth}{azure}  model \"manual\" {{ name = \"Manual model\" }}\n}}",
+            "provider \"test\" {{\n  kind = \"{}\"\n  base_url = \"{base_url}\"\n{auth}{azure}  model \"manual\" {{ name = \"Manual model\" }}\n}}",
             kind.as_str(),
         ))
         .unwrap()
@@ -730,22 +579,6 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_discovery_uses_configured_models() {
-        // Bedrock now discovers through the AWS control-plane API; without
-        // credentials that surfaces as an error instead of an empty list,
-        // and discover_models = false restores the configured-only catalog.
-        let mut parsed = Config::parse(
-            "provider \"test\" { kind = \"amazon-bedrock\"\n  region = \"us-east-1\"\n  model \"m\" { name = \"Manual\" }\n  discover_models = false }",
-        )
-        .unwrap();
-        let bedrock = parsed.providers.remove("test").unwrap();
-        assert_eq!(
-            build(&bedrock)
-                .models_with(&bedrock, &|_| Ok("test-key".into()))
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
         for kind in [ProviderKind::Voyageai] {
             let config = config(kind, "http://127.0.0.1:1");
             assert!(config.discover_models);

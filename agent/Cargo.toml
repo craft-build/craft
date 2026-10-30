@@ -36,7 +36,6 @@ minijinja.workspace = true
 nucleo-matcher.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-rig-bedrock.workspace = true
 rig-core.workspace = true
 rig-reqwest.workspace = true
 rmcp.workspace = true
@@ -64,11 +63,6 @@ unicode-normalization.workspace = true
 unicode-width.workspace = true
 url.workspace = true
 uuid.workspace = true
-aws-sdk-bedrock.workspace = true
-aws-sdk-bedrockruntime.workspace = true
-aws-config.workspace = true
-aws-credential-types.workspace = true
-aws-smithy-types.workspace = true
 
 [dev-dependencies]
 animist = { workspace = true, features = ["testing"] }

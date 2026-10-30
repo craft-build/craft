@@ -11,19 +11,18 @@ use super::catalog::{CatalogModel, merge_catalog};
 use super::dynamic::DynamicModel;
 use super::openai_compat::list_openai_compatible_models;
 use super::{
-    Timeouts, build_anthropic, build_azure, build_bedrock, build_chatgpt, build_cohere,
-    build_copilot, build_deepseek, build_doubleword, build_gemini, build_groq, build_huggingface,
-    build_hyperbolic, build_llamafile, build_minimax, build_mira, build_mistral, build_moonshot,
-    build_ollama, build_openai, build_openai_compatible, build_openrouter, build_perplexity,
-    build_together, build_venice, build_voyageai, build_xai, build_xiaomimimo, build_zai,
-    credential,
+    Timeouts, build_anthropic, build_azure, build_cohere, build_deepseek, build_doubleword,
+    build_gemini, build_groq, build_huggingface, build_hyperbolic, build_llamafile, build_minimax,
+    build_mira, build_mistral, build_moonshot, build_ollama, build_openai, build_openai_compatible,
+    build_openrouter, build_perplexity, build_together, build_venice, build_voyageai, build_xai,
+    build_xiaomimimo, build_zai, credential,
 };
 use crate::config::ProviderConfig;
 use crate::error::{
     CreateProviderSnafu, InvalidSnafu, NoCompletionSnafu, Result, SelectModelSnafu,
 };
 use rig_core::model::ModelList;
-use rig_core::providers::{anthropic, cohere, copilot, gemini, ollama, openai, voyageai};
+use rig_core::providers::{anthropic, cohere, gemini, ollama, openai, voyageai};
 
 macro_rules! list_models {
     ($client:expr, yes) => {
@@ -195,10 +194,6 @@ macro_rules! providers {
                 let discovered = if config.discover_models {
                     if matches!(self, Self::OpenaiCompatible(_)) && config.base_url.is_some() {
                         list_openai_compatible_models(config, credential).await?
-                    } else if matches!(self, Self::Bedrock(_)) {
-                        // The rig-bedrock data-plane client has no listing;
-                        // inference profiles come from the control-plane API.
-                        super::bedrock::list_models(config, Timeouts::default()).await?
                     } else {
                         match self {
                             $(Self::$variant(client) => list_models!(client, $listing),)+
@@ -227,10 +222,7 @@ macro_rules! providers {
 providers! {
     Anthropic, "anthropic", anthropic::Anthropic, "ANTHROPIC_API_KEY", build_anthropic, yes, yes;
     Azure, "azure", openai::OpenAI, build_azure, build_azure, no, yes;
-    Bedrock, "amazon-bedrock", rig_bedrock::client::BedrockRuntime, build_bedrock, build_bedrock, no, yes;
-    Chatgpt, "chatgpt", openai::OpenAI, build_chatgpt, build_chatgpt, no, yes;
     Cohere, "cohere", cohere::Cohere, "COHERE_API_KEY", build_cohere, no, yes;
-    Copilot, "copilot", copilot::Copilot, build_copilot, build_copilot, yes, yes;
     Deepseek, "deepseek", openai::OpenAI, "DEEPSEEK_API_KEY", build_deepseek, yes, yes;
     Doubleword, "doubleword", openai::OpenAI, "DOUBLEWORD_API_KEY", build_doubleword, no, yes;
     Gemini, "gemini", gemini::Gemini, "GEMINI_API_KEY", build_gemini, yes, yes;

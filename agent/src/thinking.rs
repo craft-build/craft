@@ -399,8 +399,7 @@ pub fn model_choices(
             dialect(kind, id, &info.options).levels
         } else if info.options.iter().any(|o| o.kind == "budget_tokens")
             || matches!(kind, ProviderKind::Llamafile)
-            || matches!(kind, ProviderKind::Anthropic | ProviderKind::Bedrock)
-                && !uses_adaptive_claude(id)
+            || (matches!(kind, ProviderKind::Anthropic) && !uses_adaptive_claude(id))
         {
             // These are budget presets, not discrete provider effort values.
             crate::thinking::Effort::ALL.to_vec()
@@ -518,8 +517,6 @@ pub(crate) fn provider_catalog_key(provider: &crate::config::ProviderConfig) -> 
 pub fn catalog_key(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::Gemini => "google",
-        ProviderKind::Chatgpt => "openai",
-        ProviderKind::Copilot => "github-copilot",
         ProviderKind::Moonshot => "moonshotai",
         _ => kind.as_str(),
     }
@@ -553,8 +550,8 @@ fn dialect(kind: ProviderKind, id: &str, options: &[ReasoningOption]) -> Dialect
         Deepseek => (vec![Max], false, None),
         Zai => (vec![High, XHigh], true, Some(High)),
         Xai => (vec![Low, Medium, High, XHigh], false, Some(High)),
-        Anthropic | Bedrock => (vec![Low, Medium, High], false, None),
-        Openai | Chatgpt | Azure | Copilot => {
+        Anthropic => (vec![Low, Medium, High], false, None),
+        Openai | Azure => {
             // Family fallback only when discovery is unavailable.
             if id.contains("gpt-5.2") || id.contains("gpt-5.3") || id.contains("gpt-5.4") {
                 (vec![Low, Medium, High, XHigh], true, Some(Medium))
@@ -577,10 +574,10 @@ fn known_support(kind: ProviderKind, id: &str) -> bool {
     let id = id.to_ascii_lowercase();
     match kind {
         ProviderKind::Cohere | ProviderKind::Voyageai => false,
-        ProviderKind::Anthropic | ProviderKind::Bedrock => {
+        ProviderKind::Anthropic => {
             id.contains("claude") && (id.contains("3-7") || id.contains("-4") || id.contains("-5"))
         }
-        ProviderKind::Openai | ProviderKind::Azure | ProviderKind::Chatgpt => {
+        ProviderKind::Openai | ProviderKind::Azure => {
             id.starts_with("gpt-5") || ["o1", "o3", "o4"].iter().any(|p| id.starts_with(p))
         }
         ProviderKind::Gemini => {
@@ -719,18 +716,7 @@ pub fn wire(
     }
 
     match kind {
-        ProviderKind::Bedrock if !id.contains("claude") => {
-            // Converse hosts unrelated model families. They must not receive
-            // Claude parameters; custom thinking_fields can define their knobs.
-            if config.is_enabled() {
-                tracing::warn!(
-                    model = id,
-                    "Bedrock thinking controls require a Claude model or configured thinking_fields"
-                );
-            }
-            json!({})
-        }
-        ProviderKind::Anthropic | ProviderKind::Bedrock => {
+        ProviderKind::Anthropic => {
             if config == Off {
                 return json!({});
             }
@@ -844,14 +830,8 @@ pub fn wire(
             }
             body
         }
-        ProviderKind::Chatgpt
-        | ProviderKind::Xai
-        | ProviderKind::Openai
-        | ProviderKind::Openrouter => {
+        ProviderKind::Xai | ProviderKind::Openai | ProviderKind::Openrouter => {
             // rig openai::Client defaults to Responses, not CompletionsClient.
-            effort.map_or_else(|| json!({}), |e| json!({"reasoning": {"effort": e}}))
-        }
-        ProviderKind::Copilot if id.to_ascii_lowercase().contains("codex") => {
             effort.map_or_else(|| json!({}), |e| json!({"reasoning": {"effort": e}}))
         }
         ProviderKind::Llamafile => {
@@ -1216,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn required_support_wins_and_non_claude_bedrock_gets_no_claude_fields() {
+    fn required_support_wins_over_off() {
         let info = ModelThinking {
             supports: Some(false),
             required: true,
@@ -1239,20 +1219,6 @@ mod tests {
                 &info
             ),
             ThinkingConfig::Effort(Effort::High)
-        );
-        let info = ModelThinking {
-            supports: Some(true),
-            ..Default::default()
-        };
-        assert_eq!(
-            wire(
-                ThinkingConfig::Budget(4096),
-                ProviderKind::Bedrock,
-                "amazon.nova-2-pro",
-                &info,
-                None
-            ),
-            json!({})
         );
     }
 

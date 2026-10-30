@@ -360,8 +360,6 @@ pub fn context_for(provider: &str, model_id: &str) -> Option<(u32, u32)> {
 pub fn enrich_catalog<M: crate::providers::CatalogEntry>(provider_kind: &str, models: &mut [M]) {
     let provider_kind = match provider_kind {
         "gemini" => "google",
-        "chatgpt" => "openai",
-        "copilot" => "github-copilot",
         "moonshot" => "moonshotai",
         other => other,
     };
