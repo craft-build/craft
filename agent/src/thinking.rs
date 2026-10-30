@@ -1,18 +1,16 @@
-//! User preferences are provider-independent. Only the DynamicModel boundary
-//! resolves them to wire fields, including when a retry changes providers.
+//! User thinking preferences, provider-independent. Resolution to wire
+//! fields belongs to animist's adapters; this module parses and projects
+//! the preference (config, TUI/ACP pickers, session storage) and maps it
+//! onto animist's [`ThinkingConfig`](animist::provider::ThinkingConfig) at
+//! request time.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Value, json};
-
-use crate::providers::ProviderKind;
+use serde_json::Value;
 
 pub const MIN_THINKING_BUDGET: u32 = 1024;
-const FALLBACK_MAX: u32 = 32_768;
-const REQUEST_KEY: &str = "__craft_thinking";
 pub const THINKING_USAGE: &str =
     "Use off, adaptive, minimal, low, medium, high, xhigh, max, or a positive token budget";
 
@@ -84,6 +82,29 @@ impl Effort {
             .max()
             .unwrap_or_else(|| *supported.iter().min().unwrap())
     }
+
+    fn from_animist(effort: animist::provider::Effort) -> Option<Self> {
+        match effort {
+            animist::provider::Effort::Minimal => Some(Self::Minimal),
+            animist::provider::Effort::Low => Some(Self::Low),
+            animist::provider::Effort::Medium => Some(Self::Medium),
+            animist::provider::Effort::High => Some(Self::High),
+            animist::provider::Effort::XHigh => Some(Self::XHigh),
+            animist::provider::Effort::Max => Some(Self::Max),
+            animist::provider::Effort::Adaptive => None,
+        }
+    }
+
+    fn to_animist(self) -> animist::provider::Effort {
+        match self {
+            Self::Minimal => animist::provider::Effort::Minimal,
+            Self::Low => animist::provider::Effort::Low,
+            Self::Medium => animist::provider::Effort::Medium,
+            Self::High => animist::provider::Effort::High,
+            Self::XHigh => animist::provider::Effort::XHigh,
+            Self::Max => animist::provider::Effort::Max,
+        }
+    }
 }
 
 impl fmt::Display for Effort {
@@ -127,6 +148,7 @@ impl ThinkingConfig {
         input.trim().parse()
     }
 
+    /// The full static list, used when no model metadata exists.
     pub fn choices() -> Vec<Self> {
         [Self::Off, Self::Adaptive]
             .into_iter()
@@ -149,6 +171,16 @@ impl ThinkingConfig {
             Self::Adaptive => "thinking".into(),
             _ => format!("thinking: {self}"),
         })
+    }
+
+    /// The wire form animist's adapters resolve.
+    pub fn to_animist(self) -> animist::provider::ThinkingConfig {
+        match self {
+            Self::Off => animist::provider::ThinkingConfig::Off,
+            Self::Adaptive => animist::provider::ThinkingConfig::Adaptive,
+            Self::Effort(effort) => animist::provider::ThinkingConfig::Effort(effort.to_animist()),
+            Self::Budget(n) => animist::provider::ThinkingConfig::Budget(n),
+        }
     }
 }
 
@@ -200,227 +232,72 @@ impl<'de> Deserialize<'de> for ThinkingConfig {
     }
 }
 
-/// models.dev and discovery declare knobs rather than assuming three levels.
-/// Unknown option types remain readable and do not break catalog startup.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct ReasoningOption {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub values: Vec<String>,
-    pub min: Option<u32>,
-    pub max: Option<u32>,
-}
-
-/// The live models.dev payload is rougher than any schema: effort lists
-/// carry `null` slots (sarvam), budget floors can be `-1` (nvidia), and
-/// one unreadable knob must never cost a whole catalog parse — when it
-/// did, every lookup silently returned `None` and no limits were found.
-/// Decode leniently: non-string values drop, and bounds outside u32 read
-/// as unset.
-impl<'de> Deserialize<'de> for ReasoningOption {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        let Some(object) = value.as_object() else {
-            return Err(serde::de::Error::custom(
-                "reasoning option entries must be objects",
-            ));
-        };
-        let kind = object
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let values = object
-            .get("values")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let bound = |field: &str| {
-            object
-                .get(field)
-                .and_then(Value::as_u64)
-                .and_then(|n| u32::try_from(n).ok())
-        };
-        Ok(Self {
-            kind,
-            values,
-            min: bound("min"),
-            max: bound("max"),
-        })
-    }
-}
-
-/// Local chat templates may use arbitrary request fragments for each mode.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ThinkingFields {
-    pub off: Option<Value>,
-    pub adaptive: Option<Value>,
-    #[serde(flatten)]
-    pub levels: BTreeMap<Effort, Value>,
-}
-
-/// Per-model overrides take precedence over remote metadata and family defaults.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ModelThinking {
-    pub supports: Option<bool>,
-    pub required: bool,
-    pub options: Vec<ReasoningOption>,
-    pub max_output: Option<u32>,
-    pub fields: Option<ThinkingFields>,
-}
-
-pub fn model_info(
-    kind: ProviderKind,
-    id: &str,
-    settings: Option<&crate::config::ModelConfig>,
-) -> ModelThinking {
-    model_info_in_catalog(catalog_key(kind), id, settings)
-}
-
-pub(crate) fn model_info_in_catalog(
-    catalog: &str,
-    id: &str,
-    settings: Option<&crate::config::ModelConfig>,
-) -> ModelThinking {
-    let meta = crate::models_dev::metadata_for(catalog, id);
-    ModelThinking {
-        supports: settings
-            .and_then(|s| s.supports_thinking)
-            .or_else(|| meta.as_ref().and_then(|m| m.supports_thinking)),
-        required: settings.and_then(|s| s.requires_thinking).unwrap_or(false),
-        options: settings
-            .and_then(|s| s.reasoning_options.clone())
-            .unwrap_or_else(|| {
-                meta.as_ref()
-                    .map(|m| m.reasoning_options.clone())
-                    .unwrap_or_default()
-            }),
-        max_output: settings
-            .and_then(|s| s.max_output_tokens)
-            .or_else(|| meta.as_ref().map(|m| m.output)),
-        fields: settings.and_then(|s| s.thinking_fields.clone()),
-    }
-}
-
-/// Selectable policies for this model, using the same metadata and dialect as
-/// request generation. Saved cross-provider efforts must not expand this list.
+/// The levels a picker offers for a model: off/adaptive always, the
+/// efforts the model's metadata reports, and a saved budget stays
+/// editable. `None` (no metadata) offers the full static list.
 pub fn choices_for(
     current: ThinkingConfig,
-    provider: &crate::config::ProviderConfig,
-    id: &str,
+    info: Option<&animist::provider::ModelInfo>,
 ) -> Vec<ThinkingConfig> {
-    let info = model_info_for(provider, id);
-    model_choices(current, provider.kind, id, &info)
-}
-
-// Rig's model-list DTO has no reasoning capabilities. Keep the richer live
-// discovery data by endpoint and exact model ID, never by provider alias.
-type DiscoveredThinking = BTreeMap<(String, String), ModelThinking>;
-static DISCOVERED: std::sync::LazyLock<std::sync::RwLock<DiscoveredThinking>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(BTreeMap::new()));
-
-pub(crate) fn record_discovered(endpoint: &str, id: &str, info: ModelThinking) {
-    DISCOVERED.write().unwrap().insert(
-        (endpoint.trim_end_matches('/').to_owned(), id.to_owned()),
-        info,
-    );
-}
-
-pub fn model_info_for(provider: &crate::config::ProviderConfig, id: &str) -> ModelThinking {
-    model_info_for_endpoint(
-        provider_catalog_key(provider),
-        provider.base_url.as_deref(),
-        id,
-        provider.models.get(id),
-    )
-}
-
-pub(crate) fn model_info_for_endpoint(
-    catalog: &str,
-    endpoint: Option<&str>,
-    id: &str,
-    settings: Option<&crate::config::ModelConfig>,
-) -> ModelThinking {
-    let mut info = model_info_in_catalog(catalog, id, settings);
-    let guard = DISCOVERED.read().unwrap();
-    let live = endpoint.and_then(|endpoint| {
-        guard.get(&(endpoint.trim_end_matches('/').to_owned(), id.to_owned()))
-    });
-    if let Some(live) = live {
-        if settings.and_then(|s| s.supports_thinking).is_none() {
-            info.supports = live.supports.or(info.supports);
-        }
-        if settings
-            .and_then(|s| s.reasoning_options.as_ref())
-            .is_none()
-        {
-            info.options = live.options.clone();
-        }
-        if settings.and_then(|s| s.max_output_tokens).is_none() {
-            info.max_output = live.max_output.or(info.max_output);
-        }
-    }
-    info
-}
-
-pub fn model_choices(
-    current: ThinkingConfig,
-    kind: ProviderKind,
-    id: &str,
-    info: &ModelThinking,
-) -> Vec<ThinkingConfig> {
-    use ThinkingConfig::*;
-    let required = requires_reasoning(kind, info);
-    if !required
-        && !info
-            .supports
-            .unwrap_or_else(|| info.fields.is_some() || known_support(kind, id))
-    {
-        return vec![Off];
+    let Some(info) = info else {
+        return ThinkingConfig::choices();
+    };
+    let thinking = &info.features.thinking;
+    if !thinking.supported && !thinking.required {
+        return vec![ThinkingConfig::Off];
     }
     let mut choices = Vec::new();
-    if !required {
-        choices.push(Off);
+    if !thinking.required {
+        choices.push(ThinkingConfig::Off);
     }
-    let levels = if let Some(fields) = &info.fields {
-        if fields.adaptive.is_some() {
-            choices.push(Adaptive);
-        }
-        fields.levels.keys().copied().collect()
-    } else {
-        choices.push(Adaptive);
-        if info.options.iter().any(|o| o.kind == "effort") {
-            dialect(kind, id, &info.options).levels
-        } else if info.options.iter().any(|o| o.kind == "budget_tokens")
-            || matches!(kind, ProviderKind::Llamafile)
-            || (matches!(kind, ProviderKind::Anthropic) && !uses_adaptive_claude(id))
-        {
-            // These are budget presets, not discrete provider effort values.
-            crate::thinking::Effort::ALL.to_vec()
-        } else if !info.options.is_empty()
-            || matches!(kind, ProviderKind::Zai | ProviderKind::Ollama) && !id.contains("gpt-oss")
-        {
-            Vec::new()
-        } else {
-            dialect(kind, id, &info.options).levels
-        }
-    };
-    choices.extend(levels.into_iter().map(Effort));
-    if choices.is_empty() {
-        choices.push(Adaptive);
-    }
-    // An explicitly entered token budget remains editable, but an unsupported
-    // saved effort is never added back to the advertised model levels.
-    if matches!(current, Budget(_)) {
+    choices.push(ThinkingConfig::Adaptive);
+    let mut efforts: Vec<Effort> = thinking
+        .efforts
+        .iter()
+        .filter_map(|effort| Effort::from_animist(effort.clone()))
+        .collect();
+    efforts.sort();
+    efforts.dedup();
+    choices.extend(efforts.into_iter().map(ThinkingConfig::Effort));
+    // An explicitly entered token budget remains editable even when the
+    // model reports only discrete efforts.
+    if matches!(current, ThinkingConfig::Budget(_)) && !choices.contains(&current) {
         choices.push(current);
     }
+    if choices.len() == 1 && matches!(choices[0], ThinkingConfig::Off) {
+        return choices;
+    }
+    if choices.len() == 1 && choices[0] == ThinkingConfig::Adaptive && !thinking.required {
+        // Optional thinking with no discrete efforts: off plus adaptive;
+        // a required-reasoning model offers adaptive alone.
+        choices.insert(0, ThinkingConfig::Off);
+    }
     choices
+}
+
+/// Capability reconciliation for session surfaces: a model that cannot
+/// reason never keeps an enabled preference; a model that must reason
+/// never keeps `off`. `None` leaves the preference untouched, like the
+/// no-provider branch call sites already have.
+pub fn reconcile_for(
+    config: ThinkingConfig,
+    info: Option<&animist::provider::ModelInfo>,
+) -> ThinkingConfig {
+    let Some(info) = info else {
+        return config;
+    };
+    let thinking = &info.features.thinking;
+    if thinking.required {
+        if config == ThinkingConfig::Off {
+            ThinkingConfig::Effort(Effort::Minimal)
+        } else {
+            config
+        }
+    } else if !thinking.supported {
+        ThinkingConfig::Off
+    } else {
+        config
+    }
 }
 
 /// Project a saved preference onto a filtered picker without changing the
@@ -449,809 +326,145 @@ pub fn selected_choice(current: ThinkingConfig, choices: &[ThinkingConfig]) -> T
         .unwrap_or(ThinkingConfig::Off)
 }
 
-/// Capability reconciliation is also used by session surfaces so an
-/// unsupported model does not advertise an enabled thinking preference.
-/// Effort snapping stays at request time, never chained across providers.
-pub fn reconcile(
-    config: ThinkingConfig,
-    kind: ProviderKind,
-    id: &str,
-    info: &ModelThinking,
-) -> ThinkingConfig {
-    if requires_reasoning(kind, info) {
-        if config == ThinkingConfig::Off {
-            ThinkingConfig::Effort(Effort::Minimal)
-        } else {
-            config
-        }
-    } else if !info
-        .supports
-        .unwrap_or_else(|| info.fields.is_some() || known_support(kind, id))
-    {
-        ThinkingConfig::Off
-    } else {
-        config
-    }
-}
-
-fn requires_reasoning(kind: ProviderKind, info: &ModelThinking) -> bool {
-    info.required
-        || info.supports != Some(false)
-            && info.fields.is_none()
-            && matches!(kind, ProviderKind::Zai | ProviderKind::OpenaiCompatible)
-            && info.options.iter().any(|option| {
-                option.kind == "effort" && !option.values.iter().any(|value| value == "none")
-            })
-}
-
-pub fn reconcile_for(
-    config: ThinkingConfig,
-    provider: &crate::config::ProviderConfig,
-    id: &str,
-) -> ThinkingConfig {
-    reconcile(config, provider.kind, id, &model_info_for(provider, id))
-}
-
-/// Protocol kind alone cannot identify catalogs behind compatible gateways.
-pub(crate) fn provider_catalog_key(provider: &crate::config::ProviderConfig) -> &'static str {
-    if let Some(url) = provider
-        .base_url
-        .as_deref()
-        .and_then(|url| url::Url::parse(url).ok())
-    {
-        if provider.kind == ProviderKind::OpenaiCompatible
-            && url.host_str() == Some("api.synthetic.new")
-        {
-            return "synthetic";
-        }
-        if provider.kind == ProviderKind::Zai
-            && url.host_str() == Some("api.z.ai")
-            && url.path().starts_with("/api/coding/")
-        {
-            return "zai-coding-plan";
-        }
-    }
-    catalog_key(provider.kind)
-}
-
-pub fn catalog_key(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Gemini => "google",
-        ProviderKind::Moonshot => "moonshotai",
-        _ => kind.as_str(),
-    }
-}
-
-struct Dialect {
-    levels: Vec<Effort>,
-    off: bool,
-    adaptive: Option<Effort>,
-}
-
-fn dialect(kind: ProviderKind, id: &str, options: &[ReasoningOption]) -> Dialect {
-    use Effort::*;
-    use ProviderKind::*;
-    if let Some(option) = options.iter().find(|o| o.kind == "effort") {
-        let mut levels: Vec<_> = option
-            .values
-            .iter()
-            .filter_map(|v| v.parse().ok())
-            .collect();
-        levels.sort();
-        levels.dedup();
-        return Dialect {
-            levels,
-            off: option.values.iter().any(|s| s == "none"),
-            adaptive: None,
-        };
-    }
-    let (levels, off, adaptive) = match kind {
-        Mistral => (vec![High], false, Some(High)),
-        Deepseek => (vec![Max], false, None),
-        Zai => (vec![High, XHigh], true, Some(High)),
-        Xai => (vec![Low, Medium, High, XHigh], false, Some(High)),
-        Anthropic => (vec![Low, Medium, High], false, None),
-        Openai | Azure => {
-            // Family fallback only when discovery is unavailable.
-            if id.contains("gpt-5.2") || id.contains("gpt-5.3") || id.contains("gpt-5.4") {
-                (vec![Low, Medium, High, XHigh], true, Some(Medium))
-            } else if id.contains("gpt-5") {
-                (vec![Minimal, Low, Medium, High], false, Some(Medium))
-            } else {
-                (vec![Low, Medium, High], false, Some(Medium))
-            }
-        }
-        _ => (vec![Low, Medium, High], false, Some(High)),
-    };
-    Dialect {
-        levels,
-        off,
-        adaptive,
-    }
-}
-
-fn known_support(kind: ProviderKind, id: &str) -> bool {
-    let id = id.to_ascii_lowercase();
-    match kind {
-        ProviderKind::Cohere | ProviderKind::Voyageai => false,
-        ProviderKind::Anthropic => {
-            id.contains("claude") && (id.contains("3-7") || id.contains("-4") || id.contains("-5"))
-        }
-        ProviderKind::Openai | ProviderKind::Azure => {
-            id.starts_with("gpt-5") || ["o1", "o3", "o4"].iter().any(|p| id.starts_with(p))
-        }
-        ProviderKind::Gemini => {
-            id.contains("2.5") || id.contains("gemini-3") || id.contains("latest")
-        }
-        ProviderKind::Mistral => id.contains("magistral"),
-        ProviderKind::Xai => id.contains("grok-3-mini") || id.contains("grok-4"),
-        ProviderKind::Deepseek | ProviderKind::Zai => true,
-        // For custom/local gateways, an explicit preference remains usable
-        // without an online catalog. Off sends no unsupported effort field.
-        _ => true,
-    }
-}
-
-pub(crate) fn uses_adaptive_claude(id: &str) -> bool {
-    let bare = id.rsplit('/').next().unwrap_or(id);
-    let bare = bare.split("claude-").nth(1).unwrap_or("");
-    let mut parts = bare.split(['-', '.']);
-    let family = parts.next().unwrap_or("");
-    let major = parts
-        .next()
-        .and_then(|p| p.parse::<u32>().ok())
-        .unwrap_or(0);
-    let minor = parts
-        .next()
-        .and_then(|p| p.parse::<u32>().ok())
-        .unwrap_or(0);
-    (major, minor) >= if family == "opus" { (4, 7) } else { (5, 0) }
-}
-
-fn budget(config: ThinkingConfig, ceiling: Option<u32>, floor: u32) -> Option<u32> {
-    let n = match config {
-        ThinkingConfig::Budget(n) => n,
-        ThinkingConfig::Effort(e) => e.budget(ceiling.unwrap_or(FALLBACK_MAX)),
-        _ => return None,
-    };
-    Some(match ceiling {
-        Some(max) => n.clamp(floor, max.max(floor)),
-        None => n.max(floor),
-    })
-}
-
-/// Deep merge preserves unrelated caller parameters (sampling, schemas, etc.).
-pub fn merge(target: &mut Value, extra: Value) {
-    match (target, extra) {
-        (Value::Object(target), Value::Object(extra)) => {
-            for (key, value) in extra {
-                merge(target.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (target, extra) => *target = extra,
-    }
-}
-
-/// Encode only at the provider boundary. Output caps constrain the thinking
-/// budget too: half the effective output window is reserved for the answer.
-pub fn wire(
-    config: ThinkingConfig,
-    kind: ProviderKind,
-    id: &str,
-    info: &ModelThinking,
-    request_cap: Option<u64>,
-) -> Value {
-    use ThinkingConfig::*;
-    let supports = info
-        .supports
-        .unwrap_or_else(|| info.fields.is_some() || known_support(kind, id));
-    if !supports && !requires_reasoning(kind, info) {
-        return json!({});
-    }
-    let config = reconcile(config, kind, id, info);
-    let output = match (info.max_output.map(u64::from), request_cap) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
-    let mut ceiling = output.map(|n| (n / 2).min(u64::from(u32::MAX)) as u32);
-    let budget_option = info.options.iter().find(|o| o.kind == "budget_tokens");
-    if let Some(max) = budget_option.and_then(|o| o.max) {
-        ceiling = Some(ceiling.map_or(max, |n| n.min(max)));
-    }
-    let floor = budget_option
-        .and_then(|o| o.min)
-        .unwrap_or(MIN_THINKING_BUDGET);
-    let d = dialect(kind, id, &info.options);
-    let effort = match config {
-        Off => {
-            if d.off {
-                Some("none")
-            } else {
-                // Effort-only models that advertise no disabling value still
-                // need an explicit minimum, rather than an expensive API default.
-                info.options
-                    .iter()
-                    .any(|o| o.kind == "effort")
-                    .then(|| d.levels.first().map(|e| e.as_str()))
-                    .flatten()
-            }
-        }
-        Adaptive => d.adaptive.map(|e| e.as_str()),
-        Effort(e) => (!d.levels.is_empty()).then(|| e.snap(&d.levels).as_str()),
-        Budget(n) => (!d.levels.is_empty()).then(|| {
-            crate::thinking::Effort::from_budget(n, ceiling.unwrap_or(FALLBACK_MAX))
-                .snap(&d.levels)
-                .as_str()
-        }),
-    };
-
-    if let Some(fields) = &info.fields {
-        let fragment = match config {
-            Off => fields.off.as_ref(),
-            Adaptive => fields.adaptive.as_ref(),
-            Effort(e) => fields
-                .levels
-                .get(&e.snap(&fields.levels.keys().copied().collect::<Vec<_>>())),
-            Budget(n) => fields.levels.get(
-                &crate::thinking::Effort::from_budget(n, ceiling.unwrap_or(FALLBACK_MAX))
-                    .snap(&fields.levels.keys().copied().collect::<Vec<_>>()),
-            ),
-        };
-        let fragment = fragment.or_else(|| {
-            config
-                .is_enabled()
-                .then_some(fields.adaptive.as_ref())
-                .flatten()
-        });
-        if let Some(fragment) = fragment {
-            let mut fragment = fragment.clone();
-            if matches!(config, Budget(_)) && fields.levels.is_empty() {
-                merge(
-                    &mut fragment,
-                    json!({"thinking_budget_tokens": budget(config, ceiling, floor)}),
-                );
-            }
-            return fragment;
-        }
-    }
-
-    match kind {
-        ProviderKind::Anthropic => {
-            if config == Off {
-                return json!({});
-            }
-            if uses_adaptive_claude(id) {
-                let mut body = json!({"thinking": {"type": "adaptive", "display": "summarized"}});
-                if let Some(effort) = effort {
-                    body["output_config"] = json!({"effort": effort});
-                }
-                body
-            } else {
-                match budget(config, ceiling, floor.max(MIN_THINKING_BUDGET)) {
-                    Some(n) => json!({"thinking": {"type": "enabled", "budget_tokens": n}}),
-                    None => json!({"thinking": {"type": "enabled", "budget_tokens":
-                        crate::thinking::Effort::High.budget(ceiling.unwrap_or(FALLBACK_MAX))}}),
-                }
-            }
-        }
-        ProviderKind::Gemini => {
-            let has_levels =
-                info.options.iter().any(|o| o.kind == "effort") || id.contains("gemini-3");
-            let thinking = if has_levels {
-                // Rig's native enum accepts exactly these four levels.
-                let levels = [
-                    crate::thinking::Effort::Minimal,
-                    crate::thinking::Effort::Low,
-                    crate::thinking::Effort::Medium,
-                    crate::thinking::Effort::High,
-                ];
-                let level = match config {
-                    _ if d.levels.is_empty() => None,
-                    Off => Some(
-                        crate::thinking::Effort::Minimal
-                            .snap(&d.levels)
-                            .snap(&levels),
-                    ),
-                    Effort(e) => Some(e.snap(&d.levels).snap(&levels)),
-                    Budget(n) => Some(
-                        crate::thinking::Effort::from_budget(n, ceiling.unwrap_or(FALLBACK_MAX))
-                            .snap(&d.levels)
-                            .snap(&levels),
-                    ),
-                    Adaptive => None,
-                };
-                match level {
-                    Some(level) => {
-                        json!({"thinkingLevel": level.as_str(), "includeThoughts": config != Off})
-                    }
-                    None => json!({"includeThoughts": config != Off}),
-                }
-            } else {
-                let cap = if id.contains("flash") { 24_576 } else { 32_768 };
-                let ceiling = Some(ceiling.map_or(cap, |n| n.min(cap)));
-                match config {
-                    Off => json!({"thinkingBudget": budget_option.and_then(|o| o.min)
-                        .unwrap_or(if id.contains("pro") { 128 } else { 0 })}),
-                    Adaptive => json!({"includeThoughts": true}),
-                    _ => {
-                        json!({"thinkingBudget": budget(config, ceiling, floor), "includeThoughts": true})
-                    }
-                }
-            };
-            json!({"generationConfig": {"thinkingConfig": thinking}})
-        }
-        ProviderKind::Ollama => {
-            // The /v1 OpenAI-compatible route spells effort
-            // `reasoning_effort`, snapped to the levels the server declares
-            // (gpt-oss); toggle models turn off with "none".
-            let has_levels =
-                id.contains("gpt-oss") || info.options.iter().any(|o| o.kind == "effort");
-            match config {
-                Off => json!({"reasoning_effort": "none"}),
-                Adaptive if has_levels && !d.levels.is_empty() => {
-                    let levels = [
-                        crate::thinking::Effort::Low,
-                        crate::thinking::Effort::Medium,
-                        crate::thinking::Effort::High,
-                        crate::thinking::Effort::Max,
-                    ];
-                    let e: crate::thinking::Effort = effort
-                        .unwrap_or("high")
-                        .parse()
-                        .unwrap_or(crate::thinking::Effort::High);
-                    json!({"reasoning_effort": e.snap(&levels).as_str()})
-                }
-                Adaptive => json!({}),
-                _ if has_levels && !d.levels.is_empty() => {
-                    let levels = [
-                        crate::thinking::Effort::Low,
-                        crate::thinking::Effort::Medium,
-                        crate::thinking::Effort::High,
-                        crate::thinking::Effort::Max,
-                    ];
-                    let e: crate::thinking::Effort = effort
-                        .unwrap_or("high")
-                        .parse()
-                        .unwrap_or(crate::thinking::Effort::High);
-                    json!({"reasoning_effort": e.snap(&levels).as_str()})
-                }
-                _ => json!({}),
-            }
-        }
-        ProviderKind::Deepseek | ProviderKind::Zai => {
-            let mut body =
-                json!({"thinking": {"type": if config == Off { "disabled" } else { "enabled" }}});
-            let declares_effort = info.options.iter().any(|o| o.kind == "effort");
-            if config != Off
-                && (kind == ProviderKind::Deepseek || declares_effort)
-                && let Some(effort) = effort
-            {
-                body["reasoning_effort"] = json!(effort);
-            }
-            body
-        }
-        ProviderKind::Xai | ProviderKind::Openai | ProviderKind::Openrouter => {
-            // rig openai::Client defaults to Responses, not CompletionsClient.
-            effort.map_or_else(|| json!({}), |e| json!({"reasoning": {"effort": e}}))
-        }
-        ProviderKind::Llamafile => {
-            let n = match config {
-                Off => 0_i64,
-                Adaptive => -1,
-                _ => i64::from(budget(config, ceiling, floor).unwrap()),
-            };
-            json!({"thinking_budget_tokens": n})
-        }
-        ProviderKind::Cohere | ProviderKind::Voyageai => json!({}),
-        _ => effort.map_or_else(|| json!({}), |e| json!({"reasoning_effort": e})),
-    }
-}
-
-/// Internal request envelope. It is removed before invoking rig; keeping raw
-/// preferences here lets retry/fallback handles choose their own dialect.
-pub fn attach(request: &mut rig_core::completion::CompletionRequest, thinking: ThinkingConfig) {
-    let params = request.additional_params.get_or_insert_with(|| json!({}));
-    params[REQUEST_KEY] = json!(thinking);
-}
-
-pub fn take(
-    request: &mut rig_core::completion::CompletionRequest,
-) -> Result<ThinkingConfig, String> {
-    let value = request
-        .additional_params
-        .as_mut()
-        .and_then(Value::as_object_mut)
-        .and_then(|map| map.remove(REQUEST_KEY));
-    match value {
-        Some(value) => serde_json::from_value(value).map_err(|e| e.to_string()),
-        None => Ok(ThinkingConfig::Off),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn gateway_catalogs_follow_endpoint_not_provider_alias() {
-        let config = crate::config::Config::parse(
-            r#"
-            provider "custom-name" {
-                kind = "openai-compatible"
-                base_url = "https://api.synthetic.new/openai/v1"
-            }
-            provider "coding" {
-                kind = "zai"
-                base_url = "https://api.z.ai/api/coding/paas/v4"
-            }
-            provider "standard" {
-                kind = "zai"
-                base_url = "https://api.z.ai/api/paas/v4"
-            }
-            provider "local" {
-                kind = "openai-compatible"
-                base_url = "http://localhost:8080/v1"
-            }
-            "#,
-        )
-        .unwrap();
-        assert_eq!(
-            provider_catalog_key(&config.providers["custom-name"]),
-            "synthetic"
-        );
-        assert_eq!(
-            provider_catalog_key(&config.providers["coding"]),
-            "zai-coding-plan"
-        );
-        assert_eq!(provider_catalog_key(&config.providers["standard"]), "zai");
-        assert_eq!(
-            provider_catalog_key(&config.providers["local"]),
-            catalog_key(ProviderKind::OpenaiCompatible)
-        );
-    }
-
-    #[test]
-    fn model_choices_restrict_efforts_and_do_not_restore_saved_levels() {
-        use ThinkingConfig::*;
-        for kind in [ProviderKind::OpenaiCompatible, ProviderKind::Zai] {
-            let info = ModelThinking {
-                supports: Some(true),
-                options: vec![ReasoningOption {
-                    kind: "effort".into(),
-                    values: vec!["max".into(), "low".into(), "high".into(), "low".into()],
-                    min: None,
-                    max: None,
-                }],
-                ..Default::default()
-            };
-            assert_eq!(
-                model_choices(
-                    Effort(crate::thinking::Effort::Medium),
-                    kind,
-                    "glm-5.3",
-                    &info
-                ),
-                vec![
-                    Adaptive,
-                    Effort(crate::thinking::Effort::Low),
-                    Effort(crate::thinking::Effort::High),
-                    Effort(crate::thinking::Effort::Max),
-                ]
-            );
-            let mut required = info.clone();
-            required.required = true;
-            assert!(!model_choices(Off, kind, "glm-5.3", &required).contains(&Off));
-            let body = wire(Off, kind, "glm-5.3", &info, None);
-            if kind == ProviderKind::Zai {
-                assert_eq!(body["thinking"]["type"], "enabled");
-                assert_eq!(body["reasoning_effort"], "low");
-            }
-        }
-    }
-
-    #[test]
-    fn model_choices_respect_toggle_unsupported_and_local_fields() {
-        use ThinkingConfig::*;
-        let info = ModelThinking {
-            supports: Some(true),
-            options: vec![ReasoningOption {
-                kind: "toggle".into(),
-                values: vec![],
-                min: None,
-                max: None,
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            model_choices(Off, ProviderKind::Zai, "glm-4.7", &info),
-            vec![Off, Adaptive]
-        );
-        assert_eq!(
-            model_choices(
-                Budget(4096),
-                ProviderKind::OpenaiCompatible,
-                "unsupported",
-                &ModelThinking {
-                    supports: Some(false),
-                    ..Default::default()
-                },
-            ),
-            vec![Off]
-        );
-        let info = ModelThinking {
-            fields: Some(ThinkingFields {
-                off: Some(json!({"think": false})),
-                levels: BTreeMap::from([(crate::thinking::Effort::High, json!({"think": true}))]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            model_choices(Off, ProviderKind::Ollama, "local", &info),
-            vec![Off, Effort(crate::thinking::Effort::High)]
-        );
-    }
-
-    #[test]
-    fn parse_cycle_and_serialization() {
-        for c in ThinkingConfig::choices()
-            .into_iter()
-            .chain([ThinkingConfig::Budget(4096)])
-        {
-            assert_eq!(c.to_string().parse::<ThinkingConfig>().unwrap(), c);
-            assert_eq!(
-                serde_json::from_value::<ThinkingConfig>(json!(c)).unwrap(),
-                c
-            );
-        }
-        for value in ["0", "-1", "ultra", ""] {
-            assert!(value.parse::<ThinkingConfig>().is_err());
-        }
-        assert_eq!(
-            ThinkingConfig::parse("", ThinkingConfig::Off).unwrap(),
-            ThinkingConfig::Adaptive
-        );
-        assert_eq!(
-            ThinkingConfig::Effort(Effort::Max).cycle(),
-            ThinkingConfig::Off
-        );
+    fn efforts_info(
+        efforts: &[animist::provider::Effort],
+        supported: bool,
+        required: bool,
+    ) -> animist::provider::ModelInfo {
+        let mut info = animist::provider::ModelInfo::default();
+        info.ids = vec!["m".to_owned()];
+        info.features.thinking = animist::provider::Thinking::builder()
+            .supported(supported)
+            .required(required)
+            .efforts(efforts.to_vec())
+            .build();
+        info
     }
 
     #[test]
     fn effort_math_and_snapping() {
-        assert_eq!(Effort::Low.budget(32_768), 6553);
-        assert_eq!(Effort::Minimal.budget(1024), 1024);
+        assert_eq!(Effort::Low.budget(10_000), 2_000);
+        // The budget never drops below the floor.
+        assert_eq!(Effort::Minimal.budget(500), MIN_THINKING_BUDGET);
+        assert_eq!(Effort::from_budget(2_000, 10_000), Effort::Low);
+        assert_eq!(Effort::from_budget(9_999, 10_000), Effort::Max);
+        // Exact match stays; unsupported snaps to the closest lower level,
+        // else the lowest supported.
         assert_eq!(
-            Effort::XHigh.snap(&[Effort::Low, Effort::High]),
+            Effort::High.snap(&[Effort::Low, Effort::High]),
             Effort::High
         );
-        assert_eq!(Effort::Minimal.snap(&[Effort::High]), Effort::High);
         assert_eq!(
-            budget(ThinkingConfig::Budget(999_999), Some(16_384), 1024),
-            Some(16_384)
+            Effort::Max.snap(&[Effort::Low, Effort::Medium]),
+            Effort::Medium
         );
-        assert_eq!(
-            budget(ThinkingConfig::Budget(999_999), None, 1024),
-            Some(999_999)
-        );
+        assert_eq!(Effort::Minimal.snap(&[Effort::Low]), Effort::Low);
     }
 
     #[test]
-    fn adaptive_and_budget_claude() {
-        let info = ModelThinking {
-            max_output: Some(64_000),
-            ..Default::default()
-        };
-        let c = ThinkingConfig::Budget(90_000);
+    fn parse_cycle_and_serialization() {
+        for text in [
+            "off", "adaptive", "minimal", "low", "medium", "high", "xhigh", "max", "4096",
+        ] {
+            let parsed: ThinkingConfig = text.parse().expect(text);
+            assert_eq!(parsed.to_string(), text, "{text} round trips");
+            let json = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(
+                parsed,
+                serde_json::from_str::<ThinkingConfig>(&json).unwrap()
+            );
+        }
+        // Booleans deserialize to the toggle states.
         assert_eq!(
-            wire(
-                c,
-                ProviderKind::Anthropic,
-                "claude-sonnet-4-5",
-                &info,
-                Some(4096)
-            )["thinking"]["budget_tokens"],
-            2048
+            serde_json::from_str::<ThinkingConfig>("true").unwrap(),
+            ThinkingConfig::Adaptive
+        );
+        assert!("nonsense".parse::<ThinkingConfig>().is_err());
+    }
+
+    /// No metadata offers the full static list; a thinking-capable model
+    /// lists off/adaptive plus its discrete efforts, and a saved budget
+    /// stays editable even when the model reports only efforts.
+    #[test]
+    fn choices_follow_model_metadata() {
+        assert_eq!(
+            choices_for(ThinkingConfig::Off, None),
+            ThinkingConfig::choices()
+        );
+        let info = efforts_info(
+            &[
+                animist::provider::Effort::Low,
+                animist::provider::Effort::High,
+            ],
+            true,
+            false,
         );
         assert_eq!(
-            wire(
+            choices_for(ThinkingConfig::Off, Some(&info)),
+            vec![
+                ThinkingConfig::Off,
+                ThinkingConfig::Adaptive,
                 ThinkingConfig::Effort(Effort::Low),
-                ProviderKind::Anthropic,
-                "anthropic/claude-opus-4-7",
-                &info,
-                None
-            )["output_config"]["effort"],
-            "low"
-        );
-    }
-
-    #[test]
-    fn per_model_levels_and_explicit_off() {
-        let info = ModelThinking {
-            supports: Some(true),
-            options: vec![ReasoningOption {
-                kind: "effort".into(),
-                values: vec!["none".into(), "low".into(), "xhigh".into()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            wire(
                 ThinkingConfig::Effort(Effort::High),
-                ProviderKind::Openai,
-                "gpt-5.2",
-                &info,
-                None
-            ),
-            json!({"reasoning": {"effort": "low"}})
+            ]
         );
-        assert_eq!(
-            wire(
-                ThinkingConfig::Off,
-                ProviderKind::Openai,
-                "gpt-5.2",
-                &info,
-                None
-            ),
-            json!({"reasoning": {"effort": "none"}})
+        // A budget the model does not list remains selectable.
+        assert!(
+            choices_for(ThinkingConfig::Budget(4096), Some(&info))
+                .contains(&ThinkingConfig::Budget(4096))
         );
+        // Unsupported: off only. Required: no off.
         assert_eq!(
-            wire(
-                ThinkingConfig::Off,
-                ProviderKind::Zai,
-                "glm-4.6",
-                &info,
-                None
+            choices_for(
+                ThinkingConfig::Adaptive,
+                Some(&efforts_info(&[], false, false))
             ),
-            json!({"thinking": {"type": "disabled"}})
+            vec![ThinkingConfig::Off]
+        );
+        assert!(
+            !choices_for(ThinkingConfig::Off, Some(&efforts_info(&[], true, true)))
+                .contains(&ThinkingConfig::Off)
         );
     }
 
     #[test]
-    fn unsupported_models_send_no_controls() {
-        let info = ModelThinking {
-            supports: Some(false),
-            ..Default::default()
-        };
+    fn reconcile_snaps_preference_to_capability() {
+        // A required-reasoning model never keeps `off`.
         assert_eq!(
-            wire(
-                ThinkingConfig::Effort(Effort::High),
-                ProviderKind::Openai,
-                "gpt-4o",
-                &info,
-                None
-            ),
-            json!({})
-        );
-    }
-
-    #[test]
-    fn gemini_and_local_shapes() {
-        let info = ModelThinking {
-            supports: Some(true),
-            ..Default::default()
-        };
-        assert_eq!(
-            wire(
-                ThinkingConfig::Off,
-                ProviderKind::Gemini,
-                "gemini-2.5-flash",
-                &info,
-                None
-            )["generationConfig"]["thinkingConfig"]["thinkingBudget"],
-            0
-        );
-        assert_eq!(
-            wire(
-                ThinkingConfig::Off,
-                ProviderKind::Ollama,
-                "qwen3",
-                &info,
-                None
-            ),
-            json!({"reasoning_effort": "none"})
-        );
-        assert_eq!(
-            wire(
-                ThinkingConfig::Effort(Effort::Low),
-                ProviderKind::Xai,
-                "grok-4.6",
-                &info,
-                None
-            ),
-            json!({"reasoning": {"effort": "low"}})
-        );
-    }
-
-    #[test]
-    fn local_adaptive_fragment_keeps_explicit_budget() {
-        let info = ModelThinking {
-            fields: Some(ThinkingFields {
-                adaptive: Some(json!({"chat_template_kwargs": {"enable_thinking": true}})),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            wire(
-                ThinkingConfig::Budget(4096),
-                ProviderKind::Llamafile,
-                "local",
-                &info,
-                None
-            ),
-            json!({"chat_template_kwargs": {"enable_thinking": true}, "thinking_budget_tokens": 4096})
-        );
-        assert_eq!(
-            wire(
-                ThinkingConfig::Effort(Effort::Low),
-                ProviderKind::Llamafile,
-                "local",
-                &info,
-                None
-            ),
-            json!({"chat_template_kwargs": {"enable_thinking": true}})
-        );
-    }
-
-    #[test]
-    fn required_support_wins_over_off() {
-        let info = ModelThinking {
-            supports: Some(false),
-            required: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            reconcile(
-                ThinkingConfig::Off,
-                ProviderKind::Openai,
-                "mandatory",
-                &info
-            ),
+            reconcile_for(ThinkingConfig::Off, Some(&efforts_info(&[], true, true))),
             ThinkingConfig::Effort(Effort::Minimal)
         );
+        // An incapable model never keeps an enabled preference.
         assert_eq!(
-            reconcile(
+            reconcile_for(
                 ThinkingConfig::Effort(Effort::High),
-                ProviderKind::Openai,
-                "mandatory",
-                &info
+                Some(&efforts_info(&[], false, false))
             ),
+            ThinkingConfig::Off
+        );
+        // No metadata leaves the preference untouched.
+        assert_eq!(
+            reconcile_for(ThinkingConfig::Effort(Effort::High), None),
             ThinkingConfig::Effort(Effort::High)
         );
     }
 
     #[test]
-    fn unknown_declared_efforts_never_fall_back_to_unadvertised_levels() {
-        let info = ModelThinking {
-            supports: Some(true),
-            options: vec![ReasoningOption {
-                kind: "effort".into(),
-                values: vec!["none".into(), "default".into()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+    fn selected_choice_projects_without_mutation() {
+        let choices = vec![ThinkingConfig::Off, ThinkingConfig::Effort(Effort::Low)];
         assert_eq!(
-            wire(
-                ThinkingConfig::Effort(Effort::High),
-                ProviderKind::Openai,
-                "future",
-                &info,
-                None
-            ),
-            json!({})
+            selected_choice(ThinkingConfig::Effort(Effort::High), &choices),
+            ThinkingConfig::Effort(Effort::Low),
+            "snaps to the closest supported effort"
         );
         assert_eq!(
-            wire(
-                ThinkingConfig::Off,
-                ProviderKind::Openai,
-                "future",
-                &info,
-                None
-            ),
-            json!({"reasoning": {"effort": "none"}})
+            selected_choice(ThinkingConfig::Adaptive, &choices),
+            ThinkingConfig::Effort(Effort::Low),
+            "an enabled preference stays on the enabled axis"
         );
     }
 }

@@ -1077,7 +1077,7 @@ mod tests {
         let mut app = App::new();
         app.run_slash("/usage", &mpsc::unbounded_channel().0);
         app.handle_event(AgentEvent::UsageQuota(UsageFetchState::Ready(
-            crate::providers::ProviderUsage {
+            crate::usage_fetch::ProviderUsage {
                 plan: Some("lite".into()),
                 limits: Vec::new(),
                 by_model_today: Vec::new(),

@@ -9,7 +9,6 @@ use crate::compaction::CompactionEngine;
 use crate::config::Config;
 use crate::history;
 use crate::permissions::PermissionManager;
-use crate::providers::Provider as ClientProvider;
 use crate::run::{self, AgentMode, CancelToken, RunOutcome};
 use crate::tools::Workspace;
 
@@ -325,13 +324,17 @@ fn emit_reply(tx: &mpsc::UnboundedSender<AgentEvent>, streamed: bool, reply: &st
 pub(super) async fn resolve_model(
     config: &Config,
     selection: &Selection,
-) -> Result<crate::providers::DynamicModel, String> {
+) -> Result<crate::provider::ModelHandle, String> {
     let Some(provider_config) = config.providers.get(&selection.provider) else {
         return Err(format!("unknown provider {:?}", selection.provider));
     };
-    let provider = ClientProvider::from_config(provider_config).map_err(report)?;
+    let catalog = crate::provider::load_catalog().await;
+    let provider = crate::provider::ProviderHandle::from_config(provider_config, Some(&catalog))
+        .await
+        .map_err(report)?;
     provider
-        .configured_model(provider_config, &selection.model)
+        .model(provider_config, Some(&catalog), &selection.model)
+        .await
         .map_err(report)
 }
 
@@ -340,7 +343,7 @@ pub(super) async fn resolve_model(
 async fn compact_history(
     state: &Arc<Mutex<SessionState>>,
     config: &Config,
-    model: &crate::providers::DynamicModel,
+    model: &crate::provider::ModelHandle,
     history: &mut Vec<history::Message>,
     context_length: Option<u32>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
@@ -600,9 +603,9 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
 
     {
         let mut session = state.lock().await;
-        if let Some(provider) = config.providers.get(&selection.provider) {
+        {
             let effective =
-                crate::thinking::reconcile_for(session.thinking, provider, &selection.model);
+                crate::thinking::reconcile_for(session.thinking, Some(&model.model.info));
             if effective != session.thinking {
                 session.thinking = effective;
                 if let Some(store) = &mut session.store {

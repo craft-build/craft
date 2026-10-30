@@ -13,9 +13,9 @@
 //! most one note per update. Off by default (`agent.advisor.enabled`).
 //!
 //! Ported from the reference `craft-agent/src/agent/advisor.rs` +
-//! `agent/run/flow.rs` wiring, re-expressed for this repo's Rig edge: the
-//! review call goes through [`crate::edge::to_request`] +
-//! `CompletionSource::completion`, like the auto-reviewer. Deviations from the
+//! `agent/run/flow.rs` wiring, re-expressed for the animist edge: the
+//! review call goes through [`crate::provider::complete_text`], like the
+//! auto-reviewer. Deviations from the
 //! reference: no advisor model-role/spec resolution (the run's model serves
 //! the review, which is the reference's own fallback), no cancel-raced
 //! provider stream (the caller checks the token and the deadline bounds the
@@ -23,13 +23,11 @@
 
 use std::collections::VecDeque;
 
-use crate::providers::CompletionSource;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::warn;
 
 use crate::config::{AdvisorAutoAct, AdvisorConfig};
-use crate::edge;
 use crate::history::Message;
 
 const ADVISOR_SYSTEM: &str = "\
@@ -173,8 +171,8 @@ impl AdvisorState {
 /// Review the transcript delta. Returns `Ok(None)` when the advisor is
 /// silent, the note is content-free, or a duplicate. Provider failures are
 /// logged and swallowed — an advisor problem must never fail the run.
-pub async fn review<M: CompletionSource>(
-    model: &M,
+pub async fn review(
+    model: &crate::provider::ModelHandle,
     state: &mut AdvisorState,
     history: &[Message],
 ) -> Option<AdvisorNote> {
@@ -186,9 +184,13 @@ pub async fn review<M: CompletionSource>(
 
     let user_msg = format!("# Agent delta\n{delta}\n\nReview this delta. One line, or OK.");
     let messages = vec![Message::user(user_msg)];
-    let request = edge::to_request(&messages, &[], Some(ADVISOR_SYSTEM), None, None);
-    let response = match timeout(REVIEW_DEADLINE, model.completion(request)).await {
-        Ok(Ok(response)) => response,
+    let text = match timeout(
+        REVIEW_DEADLINE,
+        crate::provider::complete_text(model, &messages, ADVISOR_SYSTEM),
+    )
+    .await
+    {
+        Ok(Ok(text)) => text,
         Ok(Err(e)) => {
             warn!(error = %e, "advisor review failed");
             return None;
@@ -198,15 +200,6 @@ pub async fn review<M: CompletionSource>(
             return None;
         }
     };
-    let text = response
-        .choice
-        .iter()
-        .filter_map(|block| match block {
-            rig_core::completion::message::AssistantContent::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     let note = parse_note(&text)?;
     state.guard.admit(note)
 }
@@ -327,7 +320,6 @@ fn parse_severity(line: &str) -> Option<(AdvisorSeverity, &str)> {
 mod tests {
     use super::*;
     use crate::config::AdvisorAutoAct;
-    use rig_core::test_utils::{MockCompletionModel, MockTurn};
 
     fn cfg(dedup: usize) -> AdvisorConfig {
         AdvisorConfig {
@@ -474,17 +466,38 @@ mod tests {
         ));
     }
 
+    /// An advisor model over the scripted replies, and its recorder.
+    fn advisor_model(
+        turns: Vec<crate::testing::Attempt>,
+    ) -> (
+        crate::provider::ModelHandle,
+        crate::testing::ScriptedProvider,
+    ) {
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        for turn in turns {
+            provider.push(turn);
+        }
+        (
+            crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+                &provider,
+                crate::testing::model_info("advisor", 200_000, 8_192, false, false),
+            )),
+            provider,
+        )
+    }
+
     #[tokio::test]
     async fn review_returns_none_on_empty_history() {
-        let model = MockCompletionModel::from_turns(Vec::<MockTurn>::new());
+        let (model, provider) = advisor_model(Vec::new());
         let mut state = AdvisorState::with_dedup(8);
         assert!(review(&model, &mut state, &[]).await.is_none());
-        assert_eq!(model.request_count(), 0);
+        assert!(provider.requests().is_empty());
     }
 
     #[tokio::test]
     async fn review_parses_and_admits_a_note() {
-        let model = MockCompletionModel::from_turns([MockTurn::text("concern: unchecked unwrap")]);
+        let (model, provider) =
+            advisor_model(vec![crate::testing::text_turn("concern: unchecked unwrap")]);
         let mut state = AdvisorState::with_dedup(8);
         let history = vec![Message::user("do the thing"), Message::assistant("done")];
         let note = review(&model, &mut state, &history).await.unwrap();
@@ -492,17 +505,17 @@ mod tests {
         assert_eq!(note.message, "unchecked unwrap");
         assert_eq!(state.last_reviewed, history.len());
         // Exactly one locked-down call: no tools, advisor preamble.
-        assert_eq!(model.request_count(), 1);
-        let request = &model.requests()[0];
+        assert_eq!(provider.requests().len(), 1);
+        let request = &provider.requests()[0];
         assert!(request.tools.is_empty());
-        assert_eq!(request.system_instructions(), Some(ADVISOR_SYSTEM));
+        assert_eq!(request.system, ADVISOR_SYSTEM);
     }
 
     #[tokio::test]
     async fn review_swallows_provider_errors_and_dedupes_repeats() {
-        let model = MockCompletionModel::from_turns([
-            MockTurn::text("blocker: real bug"),
-            MockTurn::text("blocker: real bug"),
+        let (model, _provider) = advisor_model(vec![
+            crate::testing::text_turn("blocker: real bug"),
+            crate::testing::text_turn("blocker: real bug"),
         ]);
         let mut state = AdvisorState::with_dedup(8);
         let history = vec![Message::user("go")];
@@ -510,7 +523,8 @@ mod tests {
         // Same note again: deduped to silence.
         assert!(review(&model, &mut state, &history).await.is_none());
 
-        let failing = MockCompletionModel::from_turns([MockTurn::error("rate limited")]);
+        let (failing, _provider) =
+            advisor_model(vec![crate::testing::http_error(429, "rate limited")]);
         let mut state = AdvisorState::with_dedup(8);
         assert!(review(&failing, &mut state, &history).await.is_none());
     }

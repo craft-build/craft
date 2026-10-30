@@ -230,6 +230,7 @@ mod tests {
                 provider: "anthropic".into(),
                 model: "claude-sonnet-5".into(),
                 label: "claude-sonnet-5".into(),
+                vision: true,
                 provider_label: "anthropic".into(),
                 thinking_choices: crate::thinking::ThinkingConfig::choices(),
             }],
@@ -402,15 +403,15 @@ mod tests {
         app.overlays.modal = crate::tui::modals::Modal::Usage(app.overlays.usage.clone());
 
         app.overlays.usage_quota =
-            crate::tui::provider::UsageFetchState::Ready(crate::providers::ProviderUsage {
+            crate::tui::provider::UsageFetchState::Ready(crate::usage_fetch::ProviderUsage {
                 plan: Some("lite".into()),
-                limits: vec![crate::providers::UsageLimit {
+                limits: vec![crate::usage_fetch::UsageLimit {
                     label: "5-hour window".into(),
                     percentage: Some(14),
                     reset_at: Some(1_800_000_000_000),
                     detail: None,
                 }],
-                by_model_today: vec![crate::providers::ModelUsageRow {
+                by_model_today: vec![crate::usage_fetch::ModelUsageRow {
                     model: "claude-sonnet-5".into(),
                     input_tokens: 1,
                     output_tokens: 2,
@@ -491,6 +492,7 @@ mod tests {
                 provider: "p".into(),
                 model: format!("m{i:02}"),
                 label: format!("m{i:02}"),
+                vision: true,
                 provider_label: "p".into(),
                 thinking_choices: crate::thinking::ThinkingConfig::choices(),
             })

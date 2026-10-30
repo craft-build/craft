@@ -20,26 +20,22 @@ use crate::tui::provider::{LoadedMessage, Tone};
 /// rejects a spec whose provider or model has since gone away.
 #[test]
 fn selection_for_spec_resolves_against_the_catalog() {
-    let catalogs: BTreeMap<String, Vec<CatalogModel>> = BTreeMap::from([
+    let catalogs: BTreeMap<String, Vec<animist::provider::ModelInfo>> = BTreeMap::from([
         (
             "zai".to_string(),
-            vec![CatalogModel {
-                id: "glm-5.3".into(),
-                name: Some("GLM-5.3".into()),
-                description: None,
-                context_length: Some(200_000),
-                max_output_tokens: None,
-            }],
+            vec![crate::testing::model_info_with(
+                "glm-5.3",
+                Some(200_000),
+                None,
+            )],
         ),
         (
             "openrouter".to_string(),
-            vec![CatalogModel {
-                id: "anthropic/claude-sonnet-4".into(),
-                name: None,
-                description: None,
-                context_length: None,
-                max_output_tokens: None,
-            }],
+            vec![crate::testing::model_info_with(
+                "anthropic/claude-sonnet-4",
+                None,
+                None,
+            )],
         ),
     ]);
 
@@ -207,13 +203,11 @@ async fn selecting_a_model_persists_it_to_the_session() {
     let mut ctx = test_ctx(Arc::new(Mutex::new(state)));
     ctx.catalogs = BTreeMap::from([(
         "anthropic".to_string(),
-        vec![CatalogModel {
-            id: "claude-sonnet-4".into(),
-            name: None,
-            description: None,
-            context_length: Some(200_000),
-            max_output_tokens: None,
-        }],
+        vec![crate::testing::model_info_with(
+            "claude-sonnet-4",
+            Some(200_000),
+            None,
+        )],
     )]);
     let mut selection = Selection {
         provider: "zai".into(),
@@ -238,6 +232,7 @@ async fn selecting_a_model_persists_it_to_the_session() {
 /// ``shell`, and `wake` are exercised.
 fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
     LoopCtx {
+        catalog: Arc::new(animist::catalog::Catalog::default()),
         state,
         files: Files::default(),
         cancel_flag: run::cancel_channel().0,
@@ -321,6 +316,12 @@ async fn unsupported_thinking_is_reconciled_in_session_and_badge() {
         )
         .unwrap(),
     );
+    // The catalogs row as discovery + the manual-table merge produce it.
+    ctx.catalogs = BTreeMap::from([("mock".to_owned(), {
+        let mut info = crate::testing::model_info_with("plain", None, None);
+        info.features.thinking.supported = false;
+        vec![info]
+    })]);
     let selection = Selection {
         provider: "mock".into(),
         model: "plain".into(),
@@ -797,7 +798,11 @@ async fn run_turn_sends_the_resolved_preamble_exactly_once() {
          api_key_env = \"CRAFT_TEST_KEY\"\n  model \"manual\" {{ name = \"Manual model\" }}\n}}",
     ))
     .unwrap();
-    config.providers.get_mut("test").unwrap().discover_models = false;
+    config
+        .providers
+        .get_mut("test")
+        .unwrap()
+        .set_discover_models(false);
     // The resolved preamble, as `main`'s `apply_prompt_overrides` leaves it.
     config.agent.preamble = "BASELINE-PREAMBLE\n\nMARKER".into();
 

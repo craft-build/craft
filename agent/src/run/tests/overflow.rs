@@ -3,30 +3,20 @@
 
 use super::*;
 use crate::run::*;
-use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 // --- Context-overflow recovery (C.5) ---
-fn overflow_error_turn() -> Vec<MockStreamEvent> {
-    // The requested size must exceed the run's overhead-inclusive estimate
-    // (history + tool schemas) for recalibration to trigger.
-    vec![MockStreamEvent::Error(
-        rig_core::test_utils::MockError::provider(
-            "This model's maximum context length is 131072 tokens. However, you requested 131072 tokens.",
-        ),
-    )]
+fn overflow_error_turn() -> crate::testing::Attempt {
+    // The body must name a size beyond the run's overhead-inclusive
+    // estimate (history + tool schemas) for recalibration to trigger.
+    crate::testing::context_overflow_http()
 }
 
-fn rate_limit_turn() -> Vec<MockStreamEvent> {
-    vec![MockStreamEvent::Error(
-        rig_core::test_utils::MockError::provider("rate limit exceeded, retry after 30s"),
-    )]
+fn rate_limit_turn() -> crate::testing::Attempt {
+    crate::testing::http_error(429, "rate limit exceeded, retry after 30s")
 }
 
-fn done_turn(text: &str) -> Vec<MockStreamEvent> {
-    vec![
-        MockStreamEvent::text(text),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]
+fn done_turn(text: &str) -> crate::testing::Attempt {
+    crate::testing::text_turn(text)
 }
 
 fn overflow_history() -> Vec<Message> {
@@ -40,12 +30,15 @@ fn overflow_history() -> Vec<Message> {
         messages.push(ts::user(&format!(
             "do task {i} with a fairly long instruction"
         )));
+        // Wire tool-call ids must be unique across the whole history
+        // (replay validation rejects duplicates), so each round mints its
+        // own while the args keep the per-task variety.
         messages.push(ts::assistant_tool_args(
-            &format!("t{i}"),
+            &format!("t{round}"),
             "bash",
             serde_json::json!({"command": format!("echo {i}")}),
         ));
-        messages.push(ts::tool_result_of(&format!("t{i}"), &"x".repeat(200)));
+        messages.push(ts::tool_result_of(&format!("t{round}"), &"x".repeat(200)));
     }
     messages
 }
@@ -73,7 +66,7 @@ fn recovery_setup() -> (RunParams, SharedCompactionState) {
 
 #[tokio::test]
 async fn overflow_recovers_compacts_and_retries() {
-    let (model, _turns) = stream_turns(vec![overflow_error_turn(), done_turn("recovered")]);
+    let (model, provider) = stream_turns(vec![overflow_error_turn(), done_turn("recovered")]);
     let (params, shared) = recovery_setup();
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
@@ -92,7 +85,7 @@ async fn overflow_recovers_compacts_and_retries() {
     .await;
     assert!(matches!(&outcome, RunOutcome::Done { reply } if reply == "recovered"));
     // The retried request was rebuilt from the compacted history.
-    assert_eq!(model.requests().len(), 2);
+    assert_eq!(provider.requests().len(), 2);
     // Compaction events fired around the recovery.
     let guard = events.lock().unwrap();
     assert!(
@@ -117,7 +110,7 @@ async fn overflow_recovers_compacts_and_retries() {
 
 #[tokio::test]
 async fn second_consecutive_overflow_surfaces_the_error() {
-    let (model, _turns) = stream_turns(vec![overflow_error_turn(), overflow_error_turn()]);
+    let (model, provider) = stream_turns(vec![overflow_error_turn(), overflow_error_turn()]);
     let (params, _shared) = recovery_setup();
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
@@ -146,7 +139,7 @@ async fn second_consecutive_overflow_surfaces_the_error() {
     // Both requests failed; the budget allowed exactly one recovery
     // attempt (the second overflow surfaces the error without
     // compacting again).
-    assert_eq!(model.requests().len(), 2);
+    assert_eq!(provider.requests().len(), 2);
     assert_eq!(
         events
             .lock()
@@ -160,12 +153,13 @@ async fn second_consecutive_overflow_surfaces_the_error() {
 
 #[tokio::test]
 async fn success_between_overflows_rearms_recovery() {
-    let (model, _turns) = stream_turns(vec![
+    let (model, provider) = stream_turns(vec![
         overflow_error_turn(),
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path":"file.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path":"file.txt"}),
+        )]),
         overflow_error_turn(),
         done_turn("done"),
     ]);
@@ -187,16 +181,14 @@ async fn success_between_overflows_rearms_recovery() {
     .await;
     // Without the reset-on-success the second overflow would fail.
     assert!(matches!(&outcome, RunOutcome::Done { reply } if reply == "done"));
-    assert_eq!(model.requests().len(), 4);
+    assert_eq!(provider.requests().len(), 4);
 }
 
 #[tokio::test]
 async fn fatal_errors_fail_immediately() {
     // Rate limits are retryable by design since C.2; a fatal error must
     // still surface without a retry or compaction event.
-    let (model, _turns) = stream_turns(vec![vec![MockStreamEvent::Error(
-        rig_core::test_utils::MockError::provider("invalid api key"),
-    )]]);
+    let (model, provider) = stream_turns(vec![crate::testing::http_error(400, "invalid api key")]);
     let (params, _shared) = recovery_setup();
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
@@ -219,7 +211,7 @@ async fn fatal_errors_fail_immediately() {
         }
         other => panic!("expected Failed, got {other:?}"),
     }
-    assert_eq!(model.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
     let guard = events.lock().unwrap();
     assert!(
         !guard
@@ -231,7 +223,7 @@ async fn fatal_errors_fail_immediately() {
 
 #[tokio::test]
 async fn overflow_without_compaction_context_fails_as_before() {
-    let (model, _turns) = stream_turns(vec![overflow_error_turn()]);
+    let (model, _provider) = stream_turns(vec![overflow_error_turn()]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = cancel_channel();
@@ -257,7 +249,7 @@ async fn overflow_without_compaction_context_fails_as_before() {
 // --- Streaming retry state machine (C.2) ---
 #[tokio::test]
 async fn rate_limited_stream_is_retried_and_recovers() {
-    let (model, _turns) = stream_turns(vec![rate_limit_turn(), done_turn("recovered")]);
+    let (model, provider) = stream_turns(vec![rate_limit_turn(), done_turn("recovered")]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = cancel_channel();
@@ -274,7 +266,7 @@ async fn rate_limited_stream_is_retried_and_recovers() {
     )
     .await;
     assert!(matches!(&outcome, RunOutcome::Done { reply } if reply == "recovered"));
-    assert_eq!(model.requests().len(), 2);
+    assert_eq!(provider.requests().len(), 2);
     let retries: Vec<_> = events
         .lock()
         .unwrap()
@@ -295,10 +287,7 @@ async fn rate_limited_stream_is_retried_and_recovers() {
 
 #[tokio::test]
 async fn cancel_mid_stream_commits_the_partial_reply_with_marker() {
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::text("partial answer"),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, _provider) = stream_turns(vec![crate::testing::text_turn("partial answer")]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (flag, cancel) = cancel_channel();
@@ -329,10 +318,8 @@ async fn cancel_mid_stream_commits_the_partial_reply_with_marker() {
 }
 
 // --- Auth-error reauth wait (E.10) ---
-fn auth_error_turn() -> Vec<MockStreamEvent> {
-    vec![MockStreamEvent::Error(
-        rig_core::test_utils::MockError::provider("401 unauthorized: invalid credentials"),
-    )]
+fn auth_error_turn() -> crate::testing::Attempt {
+    crate::testing::http_error(401, "401 unauthorized: invalid credentials")
 }
 
 fn ok_reauth(attempts: std::sync::Arc<std::sync::atomic::AtomicU32>) -> ReauthHook {
@@ -346,15 +333,15 @@ fn ok_reauth(attempts: std::sync::Arc<std::sync::atomic::AtomicU32>) -> ReauthHo
 /// The shared body of the reauth tests: a fresh workspace, a run over
 /// `turns`, and the emitted events.
 async fn reauth_run(
-    turns: Vec<Vec<MockStreamEvent>>,
+    turns: Vec<crate::testing::Attempt>,
     params: &RunParams,
     cancel: &CancelToken,
 ) -> (
-    MockCompletionModel,
+    crate::testing::ScriptedProvider,
     RunOutcome,
     std::sync::Arc<std::sync::Mutex<Vec<Event>>>,
 ) {
-    let (model, _turns) = stream_turns(turns);
+    let (model, provider) = stream_turns(turns);
     let dir = tempfile::tempdir().unwrap();
     // Some tests use a read tool call; keep a file for it.
     std::fs::write(dir.path().join("file.txt"), "content\n").unwrap();
@@ -372,7 +359,7 @@ async fn reauth_run(
         &move |event| recorded.lock().unwrap().push(event),
     )
     .await;
-    (model, outcome, events)
+    (provider, outcome, events)
 }
 
 fn auth_event_count(events: &[Event]) -> usize {
@@ -384,7 +371,7 @@ fn auth_event_count(events: &[Event]) -> usize {
 
 #[tokio::test]
 async fn auth_error_without_responder_fails_as_before() {
-    let (model, outcome, events) = reauth_run(
+    let (provider, outcome, events) = reauth_run(
         vec![auth_error_turn()],
         &RunParams::default(),
         &cancel_channel().1,
@@ -396,7 +383,7 @@ async fn auth_error_without_responder_fails_as_before() {
         }
         other => panic!("expected Failed, got {other:?}"),
     }
-    assert_eq!(model.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
     assert_eq!(auth_event_count(&events.lock().unwrap()), 0);
 }
 
@@ -407,7 +394,7 @@ async fn auth_error_with_responder_waits_and_recovers() {
         reauth: Some(ok_reauth(attempts.clone())),
         ..RunParams::default()
     };
-    let (model, outcome, events) = reauth_run(
+    let (provider, outcome, events) = reauth_run(
         vec![auth_error_turn(), done_turn("recovered")],
         &params,
         &cancel_channel().1,
@@ -417,7 +404,7 @@ async fn auth_error_with_responder_waits_and_recovers() {
         matches!(&outcome, RunOutcome::Done { reply } if reply == "recovered"),
         "got {outcome:?}"
     );
-    assert_eq!(model.requests().len(), 2, "the turn was retried");
+    assert_eq!(provider.requests().len(), 2, "the turn was retried");
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     let guard = events.lock().unwrap();
     assert_eq!(auth_event_count(&guard), 1);
@@ -436,7 +423,7 @@ async fn persistent_auth_errors_stop_after_max_attempts() {
         reauth: Some(ok_reauth(attempts.clone())),
         ..RunParams::default()
     };
-    let (model, outcome, events) = reauth_run(
+    let (provider, outcome, events) = reauth_run(
         vec![auth_error_turn(), auth_error_turn(), auth_error_turn()],
         &params,
         &cancel_channel().1,
@@ -451,7 +438,7 @@ async fn persistent_auth_errors_stop_after_max_attempts() {
         attempts.load(std::sync::atomic::Ordering::SeqCst),
         crate::run::MAX_REAUTH_ATTEMPTS
     );
-    assert_eq!(model.requests().len(), 3);
+    assert_eq!(provider.requests().len(), 3);
     assert_eq!(auth_event_count(&events.lock().unwrap()), 2);
 }
 
@@ -463,16 +450,15 @@ async fn success_between_auth_errors_rearms_attempts() {
         ))),
         ..RunParams::default()
     };
-    let (model, _outcome, events) = reauth_run(
+    let (provider, _outcome, events) = reauth_run(
         vec![
             auth_error_turn(),
             auth_error_turn(),
-            // A tool call keeps the run alive past this turn (a plain
-            // reply would end it in Done).
-            vec![
-                tool_event("t1", "read", serde_json::json!({"path":"file.txt"})),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::tool_turn(vec![tool_event(
+                "t1",
+                "read",
+                serde_json::json!({"path":"file.txt"}),
+            )]),
             auth_error_turn(),
             done_turn("done"),
         ],
@@ -482,7 +468,7 @@ async fn success_between_auth_errors_rearms_attempts() {
     .await;
     // Without the reset-on-success the third auth error (fourth request)
     // would have exceeded the budget.
-    assert_eq!(model.requests().len(), 5);
+    assert_eq!(provider.requests().len(), 5);
     assert_eq!(auth_event_count(&events.lock().unwrap()), 3);
 }
 
@@ -495,13 +481,13 @@ async fn cancelling_during_reauth_wait_ends_cancelled() {
     let params = RunParams {
         reauth: Some(std::sync::Arc::new(|_attempt| {
             Box::pin(futures::future::pending::<
-                Result<Option<crate::providers::DynamicModel>, String>,
+                Result<Option<crate::provider::ModelHandle>, String>,
             >())
         })),
         ..RunParams::default()
     };
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (model, _turns) = stream_turns(vec![auth_error_turn(), done_turn("never")]);
+    let (model, _provider) = stream_turns(vec![auth_error_turn(), done_turn("never")]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let mut history = Vec::new();
@@ -547,7 +533,7 @@ async fn failing_responder_fails_the_run() {
         })),
         ..RunParams::default()
     };
-    let (model, outcome, _) = reauth_run(
+    let (provider, outcome, _) = reauth_run(
         vec![auth_error_turn(), done_turn("never")],
         &params,
         &cancel_channel().1,
@@ -557,7 +543,7 @@ async fn failing_responder_fails_the_run() {
         matches!(&outcome, RunOutcome::Failed(m) if m == "reauth failed"),
         "got {outcome:?}"
     );
-    assert_eq!(model.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
 }
 
 /// Poll until `condition` holds, bounded; avoids sleeping on a guess.
@@ -576,7 +562,7 @@ async fn declined_compaction_fails_without_a_blind_retry() {
     // Overflow, then a scripted success waiting: with no compaction
     // stage able to run, the run must fail with the provider's error
     // instead of resubmitting the identical oversized prompt.
-    let (model, _turns) = stream_turns(vec![overflow_error_turn(), done_turn("never reached")]);
+    let (model, provider) = stream_turns(vec![overflow_error_turn(), done_turn("never reached")]);
     let (mut params, _shared) = recovery_setup();
     params
         .compaction
@@ -609,7 +595,7 @@ async fn declined_compaction_fails_without_a_blind_retry() {
         other => panic!("expected Failed, got {other:?}"),
     }
     assert_eq!(
-        model.requests().len(),
+        provider.requests().len(),
         1,
         "no blind retry of the identical oversized prompt"
     );
@@ -630,7 +616,7 @@ async fn failed_run_after_overflow_compaction_restores_prefix_and_commits_turn()
     // run fails. The compaction ran on the caller's history in place; a
     // failed run restores the prior bytes, then commits the failed turn:
     // compaction must not leak, but what already happened stays.
-    let (model, _turns) = stream_turns(vec![overflow_error_turn(), overflow_error_turn()]);
+    let (model, provider) = stream_turns(vec![overflow_error_turn(), overflow_error_turn()]);
     let (params, shared) = recovery_setup();
     shared.lock().unwrap().protect_from(3);
     let dir = tempfile::tempdir().unwrap();
@@ -650,7 +636,7 @@ async fn failed_run_after_overflow_compaction_restores_prefix_and_commits_turn()
     .await;
     assert!(matches!(outcome, RunOutcome::Failed(_)));
     assert_eq!(
-        model.requests().len(),
+        provider.requests().len(),
         2,
         "recovery compacted and retried once on the compacted history"
     );
@@ -674,10 +660,8 @@ async fn failed_run_after_overflow_compaction_restores_prefix_and_commits_turn()
 async fn overflow_body_without_a_prompt_size_leaves_the_estimator_alone() {
     // Recovery still works when the body names no size; the estimator
     // simply does not recalibrate to a bogus value.
-    let (model, _turns) = stream_turns(vec![
-        vec![MockStreamEvent::Error(
-            rig_core::test_utils::MockError::provider("context window"),
-        )],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::http_error(400, "context window"),
         done_turn("recovered"),
     ]);
     let (params, shared) = recovery_setup();

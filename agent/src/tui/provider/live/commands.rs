@@ -70,6 +70,7 @@ impl CraftProvider {
         let instructions_text = self.instructions.text;
         let config = self.config;
         let catalogs = self.catalogs;
+        let catalog = self.catalog.clone();
         let ctx = LoopCtx {
             state,
             files,
@@ -81,6 +82,7 @@ impl CraftProvider {
             workspace,
             instructions_text,
             catalogs,
+            catalog,
             snapshots,
             state_dir: state_dir.clone(),
             cwd,
@@ -580,7 +582,7 @@ async fn handle_fetch_usage(
         return;
     };
     tokio::spawn(async move {
-        let state = match crate::providers::usage_fetch::fetch_usage(&config).await {
+        let state = match crate::usage_fetch::fetch_usage(&config).await {
             Ok(Some(usage)) => UsageFetchState::Ready(usage),
             Ok(None) => UsageFetchState::Unsupported,
             Err(error) => UsageFetchState::Error(report(error)),
@@ -703,12 +705,18 @@ async fn reset_session(
     // working dedup/guardrails handles; a bare default would strand the
     // caches the dispatcher still points at.
     let thinking = ctx.state.lock().await.thinking;
-    let thinking = ctx
-        .config
-        .providers
-        .get(&selection.provider)
-        .map(|p| crate::thinking::reconcile_for(thinking, p, &selection.model))
-        .unwrap_or(thinking);
+    let thinking = {
+        let info = ctx
+            .catalogs
+            .get(&selection.provider)
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|info| info.ids.first().is_some_and(|id| id == &selection.model))
+            })
+            .cloned();
+        crate::thinking::reconcile_for(thinking, info.as_ref())
+    };
     *ctx.state.lock().await = SessionState::linked().with_thinking(thinking).with_store(
         ctx.state_dir.as_ref(),
         &ctx.cwd,
@@ -737,12 +745,16 @@ pub(super) async fn handle_set_thinking(
     selection: &Selection,
     thinking: crate::thinking::ThinkingConfig,
 ) {
-    let effective = ctx
-        .config
-        .providers
+    let info = ctx
+        .catalogs
         .get(&selection.provider)
-        .map(|p| crate::thinking::reconcile_for(thinking, p, &selection.model))
-        .unwrap_or(thinking);
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|info| info.ids.first().is_some_and(|id| id == &selection.model))
+        })
+        .cloned();
+    let effective = crate::thinking::reconcile_for(thinking, info.as_ref());
     if thinking != effective {
         let _ = ctx.evt_tx.send(AgentEvent::Notice {
             tone: Tone::Warning,
@@ -791,14 +803,18 @@ pub(super) async fn handle_select_model(
     let found = ctx
         .catalogs
         .get(&provider)
-        .and_then(|models| models.iter().find(|m| m.id == model))
-        .map(|m| m.context_length);
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|info| info.ids.first().is_some_and(|id| id.as_str() == model))
+        })
+        .and_then(|info| info.config.context_window);
     match found {
         Some(context_length) => {
             *selection = Selection {
                 provider,
                 model,
-                context_length,
+                context_length: Some(context_length),
             };
             let mut guard = ctx.state.lock().await;
             if let Some(store) = &mut guard.store {

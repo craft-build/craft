@@ -6,41 +6,42 @@
 //! ("set an API key … or use -m"). Despite the comparison entry's
 //! "interactive" wording, the reference has no wizard — trust the code.
 //!
-//! Adapted to this repo's config-driven Rig architecture: when
-//! `craft.bml` configures no providers, auto-detect providers from
-//! credential environment variables and inject them as in-memory config
-//! entries (priority order preserved as the config key order, which the
-//! default model selection then walks). Explicit configuration always
-//! wins; auto-detection only fills an empty provider map.
+//! Adapted to this repo's config-driven architecture: when `craft.bml`
+//! configures no providers, auto-detect providers from credential
+//! environment variables and inject them as in-memory config entries
+//! (priority order preserved as the config key order, which the default
+//! model selection then walks). Explicit configuration always wins;
+//! auto-detection only fills an empty provider map.
 
-use crate::config::{Config, ProviderConfig};
-use crate::providers::ProviderKind;
+use crate::config::{Config, ProviderConfig, ProviderEntry};
 
 /// Credential-bearing kinds in preference order, adapted from the
-/// reference's `PROVIDER_PRIORITY` (anthropic, openai, xai, …) to the
-/// kinds whose default key env var this repo's registry table names.
-/// Local/factory-auth kinds (ollama, llamafile, azure, chatgpt, copilot)
-/// never carry a default key env var and are skipped.
-const PROVIDER_PRIORITY: &[ProviderKind] = &[
-    ProviderKind::Anthropic,
-    ProviderKind::Openai,
-    ProviderKind::Xai,
-    ProviderKind::Deepseek,
-    ProviderKind::Gemini,
-    ProviderKind::Groq,
-    ProviderKind::Mistral,
-    ProviderKind::Openrouter,
-    ProviderKind::Together,
-    ProviderKind::Moonshot,
-    ProviderKind::Zai,
-    ProviderKind::Perplexity,
-    ProviderKind::Cohere,
-    ProviderKind::Hyperbolic,
-    ProviderKind::Venice,
-    ProviderKind::Minimax,
-    ProviderKind::Mira,
-    ProviderKind::Xiaomimimo,
-];
+/// reference's `PROVIDER_PRIORITY` to the kinds whose default key env var
+/// the animist configs name. Local kinds (ollama, llama-cpp, omlx) carry
+/// no default key env var and are skipped.
+const PROVIDER_PRIORITY: &[&str] = &["anthropic", "openai", "synthetic", "zai-coding-plan"];
+
+/// The default credential env var for a supported kind, when it has one.
+fn default_env(kind: &str) -> Option<&'static str> {
+    match kind {
+        "anthropic" => Some("ANTHROPIC_API_KEY"),
+        "openai" => Some("OPENAI_API_KEY"),
+        "synthetic" => Some("SYNTHETIC_API_KEY"),
+        "zai-coding-plan" => Some("ZHIPU_API_KEY"),
+        _ => None,
+    }
+}
+
+/// A config with only its kind set, every provider field at its default.
+fn default_config(kind: &str) -> Option<ProviderConfig> {
+    match kind {
+        "anthropic" => Some(ProviderConfig::Anthropic(ProviderEntry::default())),
+        "openai" => Some(ProviderConfig::Openai(ProviderEntry::default())),
+        "synthetic" => Some(ProviderConfig::Synthetic(ProviderEntry::default())),
+        "zai-coding-plan" => Some(ProviderConfig::ZaiCodingPlan(ProviderEntry::default())),
+        _ => None,
+    }
+}
 
 /// One auto-detected provider: config name equals the kind slug.
 pub struct DetectedProvider {
@@ -56,19 +57,13 @@ pub fn detect_providers(env: &dyn Fn(&str) -> Option<String>) -> Vec<DetectedPro
     PROVIDER_PRIORITY
         .iter()
         .filter_map(|&kind| {
-            let env_var = kind.api_key_env_default()?;
+            let env_var = default_env(kind)?;
+            let config = default_config(kind)?;
             let available = env(env_var).is_some_and(|v| !v.trim().is_empty());
             available.then(|| DetectedProvider {
-                name: kind.as_str().to_owned(),
+                name: kind.to_owned(),
                 env_var,
-                config: ProviderConfig {
-                    kind,
-                    api_key_env: None,
-                    base_url: None,
-                    api_version: None,
-                    discover_models: true,
-                    models: Default::default(),
-                },
+                config,
             })
         })
         .collect()
@@ -118,11 +113,11 @@ mod tests {
 
     #[test]
     fn detection_follows_priority_order_not_env_order() {
-        // xai's key is listed first, but anthropic outranks it.
-        let env = env_of(&[("XAI_API_KEY", "k"), ("ANTHROPIC_API_KEY", "k")]);
+        // The z.ai key is listed first, but anthropic outranks it.
+        let env = env_of(&[("ZHIPU_API_KEY", "k"), ("ANTHROPIC_API_KEY", "k")]);
         assert_eq!(
             detected_names(&env),
-            vec!["anthropic".to_owned(), "xai".to_owned()]
+            vec!["anthropic".to_owned(), "zai-coding-plan".to_owned()]
         );
     }
 
@@ -141,9 +136,11 @@ mod tests {
     fn detected_config_uses_default_credential_env() {
         let env = env_of(&[("OPENAI_API_KEY", "sk-x")]);
         let detected = detect_providers(&env).pop().expect("one provider");
-        assert_eq!(detected.config.kind, ProviderKind::Openai);
-        // api_key_env stays None so the registry's default env var applies.
-        assert!(detected.config.api_key_env.is_none());
+        assert_eq!(
+            crate::provider::config_kind_str(&detected.config),
+            "openai",
+            "api_key_env stays at the provider default"
+        );
         assert!(detected.config.validate().is_ok());
     }
 
@@ -152,14 +149,7 @@ mod tests {
         let mut config = Config::default();
         config.providers.insert(
             "mine".to_owned(),
-            ProviderConfig {
-                kind: ProviderKind::Anthropic,
-                api_key_env: None,
-                base_url: None,
-                api_version: None,
-                discover_models: true,
-                models: Default::default(),
-            },
+            ProviderConfig::Anthropic(ProviderEntry::default()),
         );
         // ANTHROPIC_API_KEY is set in the test environment on this machine;
         // explicit config must still win.

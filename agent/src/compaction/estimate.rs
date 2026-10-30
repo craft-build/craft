@@ -3,7 +3,6 @@
 //! effectiveness score keeps behavior safe when estimates drift.
 
 use crate::history::{AssistantContent, Message, ReasoningContent, ToolResultContent, UserContent};
-use rig_core::completion::ToolDefinition;
 
 const CHARS_PER_TOKEN: usize = 4;
 
@@ -141,16 +140,15 @@ pub struct RequestOverhead {
 }
 
 impl RequestOverhead {
-    /// Overhead from a preamble and the tool definitions the request will
-    /// actually carry (`rig_core`'s `ToolDefinition` is what the request
-    /// edge serializes). Per tool: name + description + serialized
-    /// parameters schema; all chars aggregated and rounded once.
-    pub fn from_parts(preamble: Option<&str>, tools: &[ToolDefinition]) -> Self {
+    /// Overhead from a preamble and the tool declarations the request will
+    /// actually carry. Per tool: name + description + serialized input
+    /// schema; all chars aggregated and rounded once.
+    pub fn from_parts(preamble: Option<&str>, tools: &[animist::provider::Tool]) -> Self {
         let mut chars = preamble.map(str::len).unwrap_or(0);
         for tool in tools {
             chars += tool.name.len();
             chars += tool.description.len();
-            chars += tool.parameters.to_string().len();
+            chars += tool.input_schema.to_string().len();
         }
         Self::from_chars(chars)
     }
@@ -180,7 +178,6 @@ pub fn estimate_prompt_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::message::ToolName;
 
     fn user(text: &str) -> Message {
         Message::User {
@@ -240,21 +237,21 @@ mod tests {
     #[test]
     fn request_overhead_sums_preamble_and_tool_schemas() {
         let tools = vec![
-            ToolDefinition {
-                name: ToolName::new("bash").expect("non-empty"),
-                description: "run a command".into(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-            ToolDefinition {
-                name: ToolName::new("read").expect("non-empty"),
-                description: "read".into(),
-                parameters: serde_json::Value::Null,
-            },
+            animist::provider::Tool::builder()
+                .name("bash")
+                .description("run a command")
+                .input_schema(serde_json::json!({"type": "object"}))
+                .build(),
+            animist::provider::Tool::builder()
+                .name("read")
+                .description("read")
+                .input_schema(serde_json::Value::Null)
+                .build(),
         ];
         let chars = "preamble text".len()
             + tools
                 .iter()
-                .map(|t| t.name.len() + t.description.len() + t.parameters.to_string().len())
+                .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
                 .sum::<usize>();
         let overhead = RequestOverhead::from_parts(Some("preamble text"), &tools);
         assert_eq!(overhead.tokens(), (chars / 4) as u64);

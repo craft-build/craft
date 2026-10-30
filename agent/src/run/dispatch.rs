@@ -190,9 +190,12 @@ impl ToolDispatch {
         self
     }
 
-    /// Provider-facing definitions for the request.
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(DynamicTool::definition).collect()
+    /// Provider-facing declarations for the request, converted from the
+    /// rig tool definitions until 06 makes the tools native.
+    pub fn definitions(&self) -> Vec<animist::provider::Tool> {
+        let definitions: Vec<ToolDefinition> =
+            self.tools.values().map(DynamicTool::definition).collect();
+        crate::tools::animist_definitions(&definitions)
     }
 
     pub fn is_empty(&self) -> bool {

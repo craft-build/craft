@@ -127,6 +127,31 @@ pub fn is_builtin_tool(name: &str) -> bool {
 /// Every native tool name the registry can serve: the builtin table plus
 /// the argosy natives. The CLI's tool-name validation checks against this
 /// so the valid-name list cannot drift from the registry.
+/// Convert rig tool definitions to animist provider declarations: the one
+/// conversion point until 06 makes the tools native.
+pub(crate) fn animist_definitions(definitions: &[ToolDefinition]) -> Vec<animist::provider::Tool> {
+    definitions
+        .iter()
+        .map(|definition| {
+            animist::provider::Tool::builder()
+                .name(definition.name.clone())
+                .description(definition.description.clone())
+                .input_schema(definition.parameters.clone())
+                .build()
+        })
+        .collect()
+}
+
+/// A validated rig tool name, tolerating degenerate records with empty
+/// names: those replay under a stable placeholder rather than failing the
+/// registration.
+pub(crate) fn tool_name(name: &str) -> rig_core::completion::message::ToolName {
+    rig_core::completion::message::ToolName::new(name).unwrap_or_else(|_| {
+        rig_core::completion::message::ToolName::new("unnamed")
+            .expect("placeholder tool name is non-empty")
+    })
+}
+
 pub fn native_tool_names() -> Vec<&'static str> {
     let mut names = BUILTIN_TOOL_NAMES.to_vec();
     names.extend(
@@ -480,14 +505,14 @@ impl Workspace {
     /// (including MCP tools and the self-describing `list_tools` entry):
     /// exactly what [`Self::register_with_mode`] sends, so surfaces
     /// computing request overhead cannot drift from the run's own table.
-    pub fn tool_definitions(&self, mode: &crate::run::AgentMode) -> Vec<ToolDefinition> {
+    pub fn tool_definitions(&self, mode: &crate::run::AgentMode) -> Vec<animist::provider::Tool> {
         let mut tools =
             self.mode_tool_set(mode, Batch(std::sync::Arc::new(std::sync::OnceLock::new())));
         let mut definitions: Vec<ToolDefinition> =
             tools.iter().map(DynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions.clone()))));
         definitions.push(tools.last().expect("list_tools just pushed").definition());
-        definitions
+        animist_definitions(&definitions)
     }
 
     /// The mode's full tool set (builtins + batch + MCP), before the
@@ -844,7 +869,7 @@ fn argosy_tools() -> Vec<(&'static str, DynamicTool)> {
             (
                 def.native,
                 DynamicTool::new(
-                    crate::edge::tool_name(def.native),
+                    tool_name(def.native),
                     def.description.clone(),
                     def.schema.clone(),
                     move |arguments| {
@@ -879,7 +904,7 @@ fn mcp_tools(
             let qualified = descriptor.qualified_name.clone();
             let cancel = cancel.clone();
             DynamicTool::new(
-                crate::edge::tool_name(&descriptor.wire_name),
+                tool_name(&descriptor.wire_name),
                 descriptor.description,
                 descriptor.parameters,
                 move |arguments| {
@@ -969,7 +994,7 @@ where
     T::Output: rig_core::tool::IntoToolOutput,
 {
     DynamicTool::new(
-        crate::edge::tool_name(T::NAME),
+        tool_name(T::NAME),
         tool.description(),
         tool.parameters(),
         move |arguments| {

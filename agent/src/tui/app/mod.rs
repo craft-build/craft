@@ -361,8 +361,7 @@ impl App {
         self.session
             .models
             .get(self.session.model_idx)
-            .and_then(|m| crate::models_dev::metadata_for(&m.provider, &m.model))
-            .is_none_or(|meta| meta.supports_vision)
+            .is_none_or(|m| m.vision)
     }
 
     /// Attach an image file by path (paste of an image path, F.6).

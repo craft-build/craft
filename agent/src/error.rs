@@ -90,7 +90,10 @@ pub enum Error {
     },
 
     #[snafu(display("summarization request failed"))]
-    Summarize { source: rig_core::ProviderError },
+    Summarize {
+        #[snafu(source(from(Error, Box::new)))]
+        source: Box<Error>,
+    },
 
     #[snafu(display("ACP connection failed"))]
     #[snafu(visibility(pub))] // used by the binary's `#[snafu::report]` main
@@ -106,7 +109,7 @@ pub enum Error {
     },
 }
 
-/// Box an arbitrary Rig provider error into [`Error::ProviderClient`].
+/// Box an arbitrary provider error into [`Error::ProviderClient`].
 pub(crate) fn client_error(error: impl std::error::Error + Send + Sync + 'static) -> Error {
     Error::ProviderClient {
         source: Box::new(error),

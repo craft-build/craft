@@ -23,7 +23,7 @@ use crate::id::SessionRef;
 use crate::permissions::{
     PermissionCheck, PermissionError, PermissionManager, ToolKey, scope_for_call,
 };
-use crate::providers::DynamicModel;
+use crate::provider::ModelHandle;
 use crate::run::dispatch::BeforeExecute;
 use crate::run::events::{SessionEvents, event_stream};
 use crate::run::{Event, RunParams, cancel_channel};
@@ -353,7 +353,7 @@ async fn auto_review_decide(
 /// A ready-to-run one-shot turn: model, run parameters, tools workspace,
 /// and the prompt to send.
 pub struct HeadlessParams {
-    pub model: DynamicModel,
+    pub model: ModelHandle,
     /// `provider/model` for pricing and the session header; `None` disables
     /// pricing and records the model as unknown.
     pub model_spec: Option<Arc<str>>,
@@ -510,7 +510,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
 /// A channel-driven interactive session: each input runs one multi-turn
 /// run against the shared history, which is persisted after every turn.
 pub struct InteractiveParams {
-    pub model: DynamicModel,
+    pub model: ModelHandle,
     pub model_spec: Option<Arc<str>>,
     pub run: RunParams,
     pub workspace: Workspace,
@@ -539,7 +539,7 @@ pub struct InteractiveHandle {
     /// the next turn starts).
     pub cancel_tx: mpsc::UnboundedSender<()>,
     /// Swap the model before the next turn; the last value wins.
-    pub model_tx: mpsc::UnboundedSender<(DynamicModel, Option<Arc<str>>)>,
+    pub model_tx: mpsc::UnboundedSender<(ModelHandle, Option<Arc<str>>)>,
     pub session_id: SessionRef,
     /// Why the session is not being persisted, if persistence failed to open.
     pub persistence_error: Option<String>,
@@ -560,7 +560,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
 
     let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
     let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
-    let (model_tx, model_rx) = mpsc::unbounded_channel::<(DynamicModel, Option<Arc<str>>)>();
+    let (model_tx, model_rx) = mpsc::unbounded_channel::<(ModelHandle, Option<Arc<str>>)>();
     let cancel_rx = Arc::new(tokio::sync::Mutex::new(cancel_rx));
 
     let opened = params
@@ -611,7 +611,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 model_spec = new_spec
                     .as_ref()
                     .map(|s| s.to_string())
-                    .or_else(|| model.label().map(str::to_owned));
+                    .or_else(|| Some(model.model.id.clone()));
             }
             run_params.model_spec = model_spec.clone().map(Arc::from);
 
@@ -733,7 +733,6 @@ mod tests {
 
     use super::StoredSession;
     use crate::storage::sessions::generate_title;
-    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
     const CWD: &str = "/project";
     const MODEL_SPEC: &str = "anthropic/claude-test";
@@ -754,11 +753,20 @@ mod tests {
         StoredSession::load(session_ref().id(), &state_dir(tmp)).unwrap()
     }
 
-    fn mock(turns: Vec<Vec<MockStreamEvent>>) -> DynamicModel {
-        crate::providers::DynamicModel::wrap(
-            Some("mock"),
-            MockCompletionModel::from_stream_turns(turns),
-        )
+    fn mock(turns: Vec<crate::testing::Attempt>) -> crate::provider::ModelHandle {
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        for turn in turns {
+            provider.push(turn);
+        }
+        crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+            &provider,
+            crate::testing::model_info("mock", 200_000, 8_192, false, false),
+        ))
+    }
+
+    /// One tool-call spec for `crate::testing::tool_turn`.
+    fn tool_event(id: &str, name: &str, args: serde_json::Value) -> crate::testing::ToolCallSpec {
+        (id.to_owned(), name.to_owned(), args)
     }
 
     #[test]
@@ -887,7 +895,11 @@ mod tests {
         Workspace::new(&root).unwrap()
     }
 
-    fn params(model: DynamicModel, prompt: &str, state: Option<StateDir>) -> HeadlessParams {
+    fn params(
+        model: crate::provider::ModelHandle,
+        prompt: &str,
+        state: Option<StateDir>,
+    ) -> HeadlessParams {
         HeadlessParams {
             model,
             model_spec: Some(Arc::from("mock/model")),
@@ -917,10 +929,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_streams_events_and_persists_the_turn() {
         let tmp = tempfile::tempdir().unwrap();
-        let model = mock(vec![vec![
-            MockStreamEvent::text("all done"),
-            MockStreamEvent::final_response_with_total_tokens(3),
-        ]]);
+        let model = mock(vec![crate::testing::text_turn("all done")]);
         let mut handle = spawn(params(model, "hello", Some(state_dir(&tmp))));
 
         let events = drain_until_done(&mut handle.events).await;
@@ -943,10 +952,7 @@ mod tests {
             let mut store = store_in(&tmp);
             store.record_turn(&[Message::user("earlier turn")], MODEL_SPEC.into());
         }
-        let model = mock(vec![vec![
-            MockStreamEvent::text("fresh reply"),
-            MockStreamEvent::final_response_with_total_tokens(2),
-        ]]);
+        let model = mock(vec![crate::testing::text_turn("fresh reply")]);
         let mut handle = spawn(HeadlessParams {
             session_id: Some(session_ref()),
             ..params(model, "hello", Some(state_dir(&tmp)))
@@ -965,10 +971,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_stream_closes_after_the_task_ends() {
-        let model = mock(vec![vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ]]);
+        let model = mock(vec![crate::testing::text_turn("done")]);
         let mut handle = spawn(params(model, "hello", None));
         let events = drain_until_done(&mut handle.events).await;
         assert!(events.iter().any(|e| matches!(e, Event::Done { .. })));
@@ -980,14 +983,8 @@ mod tests {
     async fn interactive_runs_and_persists_multiple_turns() {
         let tmp = tempfile::tempdir().unwrap();
         let model = mock(vec![
-            vec![
-                MockStreamEvent::text("one"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::text("two"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::text_turn("one"),
+            crate::testing::text_turn("two"),
         ]);
         let handle = spawn_interactive(InteractiveParams {
             model,
@@ -1021,14 +1018,8 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_applies_model_swap_before_next_turn() {
-        let first = mock(vec![vec![
-            MockStreamEvent::text("from first"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ]]);
-        let second = mock(vec![vec![
-            MockStreamEvent::text("from second"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ]]);
+        let first = mock(vec![crate::testing::text_turn("from first")]);
+        let second = mock(vec![crate::testing::text_turn("from second")]);
         let handle = spawn_interactive(InteractiveParams {
             model: first,
             model_spec: Some(Arc::from("mock/first")),
@@ -1067,18 +1058,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_last_queued_model_swap_wins() {
-        let initial = mock(vec![vec![
-            MockStreamEvent::text("from initial"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ]]);
-        let stale = mock(vec![vec![
-            MockStreamEvent::text("from stale"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ]]);
-        let latest = mock(vec![vec![
-            MockStreamEvent::text("from latest"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ]]);
+        let initial = mock(vec![crate::testing::text_turn("from initial")]);
+        let stale = mock(vec![crate::testing::text_turn("from stale")]);
+        let latest = mock(vec![crate::testing::text_turn("from latest")]);
         let handle = spawn_interactive(InteractiveParams {
             model: initial,
             model_spec: Some(Arc::from("mock/initial")),
@@ -1119,14 +1101,8 @@ mod tests {
     #[tokio::test]
     async fn stale_cancel_is_drained_before_the_next_turn() {
         let model = mock(vec![
-            vec![
-                MockStreamEvent::text("one"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::text("two"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::text_turn("one"),
+            crate::testing::text_turn("two"),
         ]);
         let handle = spawn_interactive(InteractiveParams {
             model,
@@ -1189,14 +1165,12 @@ mod tests {
     #[tokio::test]
     async fn interactive_cancel_mid_run_ends_the_turn_as_cancelled() {
         let model = mock(vec![
-            vec![
-                MockStreamEvent::tool_call("t1", "list", serde_json::json!({"path": "."})),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::text("never reached"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::tool_turn(vec![tool_event(
+                "t1",
+                "list",
+                serde_json::json!({"path": "."}),
+            )]),
+            crate::testing::text_turn("never reached"),
         ]);
         let gate = Arc::new(tokio::sync::Notify::new());
         let handle = spawn_interactive(InteractiveParams {
@@ -1495,7 +1469,7 @@ mod tests {
     /// A spawn-shaped [`HeadlessParams`] with the real gate installed:
     /// permissions rooted at `tmp`, workspace at `tmp`.
     fn gated(
-        model: DynamicModel,
+        model: crate::provider::ModelHandle,
         tmp: &tempfile::TempDir,
         permissions: Arc<PermissionManager>,
         reviewer: Option<crate::auto_review::Reviewer>,
@@ -1526,26 +1500,17 @@ mod tests {
         deny(&permissions, ToolKey::native("write"));
         let marker = tmp.path().join("marker");
         let model = mock(vec![
-            vec![
-                MockStreamEvent::tool_call(
-                    "t1",
-                    "bash",
-                    serde_json::json!({"command": format!("touch {}", marker.display())}),
-                ),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::tool_call(
-                    "t2",
-                    "write",
-                    serde_json::json!({"path": "blocked.rs", "content": "never"}),
-                ),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::text("done anyway"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::tool_turn(vec![tool_event(
+                "t1",
+                "bash",
+                serde_json::json!({"command": format!("touch {}", marker.display())}),
+            )]),
+            crate::testing::tool_turn(vec![tool_event(
+                "t2",
+                "write",
+                serde_json::json!({"path": "blocked.rs", "content": "never"}),
+            )]),
+            crate::testing::text_turn("done anyway"),
         ]);
         let mut handle = spawn(gated(model, &tmp, permissions, None));
         let events = drain_until_done(&mut handle.events).await;
@@ -1583,18 +1548,12 @@ mod tests {
         deny(&permissions, ToolKey::native("write"));
         permissions.set_yolo(true);
         let model = mock(vec![
-            vec![
-                MockStreamEvent::tool_call(
-                    "t1",
-                    "write",
-                    serde_json::json!({"path": "free.rs", "content": "made it"}),
-                ),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::text("done"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::tool_turn(vec![tool_event(
+                "t1",
+                "write",
+                serde_json::json!({"path": "free.rs", "content": "made it"}),
+            )]),
+            crate::testing::text_turn("done"),
         ]);
         let mut handle = spawn(gated(model, &tmp, permissions, None));
         drain_until_done(&mut handle.events).await;
@@ -1618,18 +1577,12 @@ mod tests {
         let (reviewer, _calls) = allow_reviewer();
         let marker = tmp.path().join("reviewed-marker");
         let model = mock(vec![
-            vec![
-                MockStreamEvent::tool_call(
-                    "t1",
-                    "bash",
-                    serde_json::json!({"command": format!("touch {}", marker.display())}),
-                ),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::text("done"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::tool_turn(vec![tool_event(
+                "t1",
+                "bash",
+                serde_json::json!({"command": format!("touch {}", marker.display())}),
+            )]),
+            crate::testing::text_turn("done"),
         ]);
         let mut handle = spawn(gated(model, &tmp, permissions, Some(reviewer)));
         let events = drain_until_done(&mut handle.events).await;
@@ -1652,20 +1605,12 @@ mod tests {
         });
         deny(&permissions, ToolKey::native("write"));
         let model = mock(vec![
-            vec![
-                MockStreamEvent::tool_call(
-                    "t1",
-                    "batch",
-                    serde_json::json!({"tool_calls": [
-                        {"tool": "write", "parameters": {"path": "child.rs", "content": "no"}}
-                    ]}),
-                ),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::text("done"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::tool_turn(vec![tool_event(
+                "t1",
+                "batch",
+                serde_json::json!({"tool_calls": [ {"tool": "write", "parameters": {"path": "child.rs", "content": "no"}} ]}),
+            )]),
+            crate::testing::text_turn("done"),
         ]);
         let mut handle = spawn(gated(model, &tmp, permissions, None));
         let events = drain_until_done(&mut handle.events).await;
@@ -1692,20 +1637,12 @@ mod tests {
     async fn question_calls_complete_as_dismissed_headlessly() {
         let tmp = tempfile::tempdir().unwrap();
         let model = mock(vec![
-            vec![
-                MockStreamEvent::tool_call(
-                    "t1",
-                    "question",
-                    serde_json::json!({"questions": [
-                        {"question": "which?", "options": [{"label": "a"}, {"label": "b"}]}
-                    ]}),
-                ),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-            vec![
-                MockStreamEvent::text("ok"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
+            crate::testing::tool_turn(vec![tool_event(
+                "t1",
+                "question",
+                serde_json::json!({"questions": [ {"question": "which?", "options": [{"label": "a"}, {"label": "b"}]} ]}),
+            )]),
+            crate::testing::text_turn("ok"),
         ]);
         let mut handle = spawn(gated(model, &tmp, manager(tmp.path()), None));
         let events = drain_until_done(&mut handle.events).await;

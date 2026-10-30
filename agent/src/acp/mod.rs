@@ -51,12 +51,8 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::{
-    config::Config,
-    history,
-    permissions::PermissionManager,
-    providers::{CatalogModel, Provider, ProviderKind},
-    run,
-    tools::Workspace,
+    config::Config, history, model_selection::CatalogModel, permissions::PermissionManager,
+    provider::ProviderHandle, run, tools::Workspace,
 };
 
 pub const PROVIDER_OPTION_ID: &str = "provider";
@@ -69,7 +65,7 @@ struct Session {
     instructions: crate::instructions::Instructions,
     history: Vec<history::Message>,
     provider_name: String,
-    models: Vec<CatalogModel>,
+    models: Vec<animist::provider::ModelInfo>,
     model: String,
     context_length: Option<u32>,
     thinking: crate::thinking::ThinkingConfig,
@@ -120,24 +116,17 @@ impl Session {
             )
             .category(SessionConfigOptionCategory::ModelConfig)
             .description("Configured inference provider from ~/.config/craft.bml"),
-            model_option(&self.models, &self.model),
-            thinking_option(
-                self.thinking,
-                config.providers.get(&self.provider_name),
-                &self.model,
-            ),
+            model_option(&self.model_rows(config), &self.model),
+            thinking_option(self.thinking, self.model_info(&self.model)),
         ]
     }
 }
 
 fn thinking_option(
     current: crate::thinking::ThinkingConfig,
-    provider: Option<&crate::config::ProviderConfig>,
-    model: &str,
+    info: Option<&animist::provider::ModelInfo>,
 ) -> SessionConfigOption {
-    let choices = provider.map_or_else(crate::thinking::ThinkingConfig::choices, |provider| {
-        crate::thinking::choices_for(current, provider, model)
-    });
+    let choices = crate::thinking::choices_for(current, info);
     let current = crate::thinking::selected_choice(current, &choices);
     SessionConfigOption::select(
         THINKING_OPTION_ID,
@@ -176,6 +165,20 @@ fn model_option(models: &[CatalogModel], current: &str) -> SessionConfigOption {
     .description("Model on the selected provider; the provider validates the ID on first use")
 }
 
+impl Session {
+    /// The listing rows as pickers see them.
+    fn model_rows(&self, config: &Config) -> Vec<CatalogModel> {
+        CatalogModel::rows(&self.models, config.providers.get(&self.provider_name))
+    }
+
+    /// The animist info for a model id, when the listing carries it.
+    fn model_info(&self, id: &str) -> Option<&animist::provider::ModelInfo> {
+        self.models
+            .iter()
+            .find(|info| info.ids.first().is_some_and(|listed| listed == id))
+    }
+}
+
 struct AppState {
     config: Config,
     sessions: Mutex<BTreeMap<String, Session>>,
@@ -205,19 +208,20 @@ impl AppState {
     async fn provider_catalog(
         &self,
         name: &str,
-    ) -> std::result::Result<(Provider, Vec<CatalogModel>), String> {
+    ) -> std::result::Result<(ProviderHandle, Vec<animist::provider::ModelInfo>), String> {
         let config = self
             .config
             .providers
             .get(name)
             .ok_or_else(|| format!("unknown provider {name:?}"))?;
-        if config.kind == ProviderKind::Voyageai {
-            return Err(format!(
-                "provider {name:?} does not support completion models"
-            ));
-        }
-        let provider = Provider::from_config(config).map_err(report)?;
-        let models: Vec<CatalogModel> = provider.models(config).await.map_err(report)?;
+        let catalog = crate::provider::load_catalog().await;
+        let provider = ProviderHandle::from_config(config, Some(&catalog))
+            .await
+            .map_err(report)?;
+        let models = provider
+            .models(config, Some(&catalog))
+            .await
+            .map_err(report)?;
         Ok((provider, models))
     }
 
@@ -293,10 +297,8 @@ impl AppState {
             context_length,
         );
         session.thinking = stored.meta.thinking.unwrap_or(session.thinking);
-        if let Some(provider) = self.config.providers.get(&session.provider_name) {
-            session.thinking =
-                crate::thinking::reconcile_for(session.thinking, provider, &session.model);
-        }
+        session.thinking =
+            crate::thinking::reconcile_for(session.thinking, session.model_info(&session.model));
         session.store = crate::headless::SessionStore::open_in(
             dir,
             session_ref,
@@ -349,7 +351,7 @@ impl AppState {
         permissions: Arc<PermissionManager>,
         history: Vec<history::Message>,
         provider_name: String,
-        models: Vec<CatalogModel>,
+        models: Vec<animist::provider::ModelInfo>,
         model: String,
         context_length: Option<u32>,
     ) -> Session {
@@ -360,12 +362,11 @@ impl AppState {
             .always_thinking
             .or(self.config.agent.thinking)
             .unwrap_or_default();
-        let thinking = self
-            .config
-            .providers
-            .get(&provider_name)
-            .map(|p| crate::thinking::reconcile_for(preference, p, &model))
-            .unwrap_or(preference);
+        let info = models
+            .iter()
+            .find(|info| info.ids.first().is_some_and(|id| id.as_str() == model))
+            .cloned();
+        let thinking = crate::thinking::reconcile_for(preference, info.as_ref());
         Session {
             workspace,
             instructions,
@@ -392,7 +393,10 @@ impl AppState {
 
 /// Serve the Craft agent loop over ACP on stdin/stdout until the client disconnects.
 pub async fn serve(config: Config) -> std::result::Result<(), Error> {
-    let _ = tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
+    // Session-scoped catalog: best-effort, bounded; metadata stays unknown
+    // without it. Held by the state it feeds.
+    crate::provider::load_catalog().await;
+
     let state = Arc::new(AppState::new(config));
 
     let init_state = state.clone();
@@ -512,8 +516,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         }
                     }
                     MODEL_OPTION_ID => {
-                        if let Some(model) = session.models.iter().find(|model| model.id == value) {
-                            session.context_length = model.context_length;
+                        if let Some(info) = session.model_info(&value) {
+                            session.context_length = info.config.context_window;
                             session.model = value;
                             Ok(())
                         } else {
@@ -530,10 +534,10 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     drop(sessions);
                     return respond_setup_error(responder, message);
                 }
-                if let Some(provider) = set_state.config.providers.get(&session.provider_name) {
-                    session.thinking =
-                        crate::thinking::reconcile_for(session.thinking, provider, &session.model);
-                }
+                session.thinking = crate::thinking::reconcile_for(
+                    session.thinking,
+                    session.model_info(&session.model),
+                );
                 if let Some(store) = &mut session.store {
                     store.set_thinking(session.thinking);
                     store.set_model(format!("{}/{}", session.provider_name, session.model));

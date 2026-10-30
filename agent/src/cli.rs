@@ -1934,7 +1934,11 @@ mod tests {
              api_key_env = \"CRAFT_TEST_KEY\"\n  model \"manual\" {{ name = \"Manual model\" }}\n}}",
         ))
         .unwrap();
-        config.providers.get_mut("test").unwrap().discover_models = false;
+        config
+            .providers
+            .get_mut("test")
+            .unwrap()
+            .set_discover_models(false);
         config
     }
 
@@ -2194,7 +2198,7 @@ async fn run_headless_query_with(
     q: HeadlessQuery,
     state_dir: Option<StateDir>,
 ) -> Result<()> {
-    let _ = tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
+    let catalog_data = crate::provider::load_catalog().await;
     let prompt = inject_context(&q.prompt, &q.context);
     // Fails fast: silently dropping an image the caller explicitly attached
     // would be worse than erroring.
@@ -2226,7 +2230,7 @@ async fn run_headless_query_with(
             None => config
                 .providers
                 .iter()
-                .find(|(_, c)| c.kind != crate::providers::ProviderKind::Voyageai)
+                .next()
                 .map(|(name, c)| (name.to_string(), c.clone()))
                 .ok_or_else(|| {
                     InvalidSnafu {
@@ -2235,11 +2239,12 @@ async fn run_headless_query_with(
                     .build()
                 })?,
         };
-    let provider = crate::providers::Provider::from_config(&provider_config)?;
+    let provider =
+        crate::provider::ProviderHandle::from_config(&provider_config, Some(&catalog_data)).await?;
     // Discovery feeds selection (implicit path) and metadata lookup; the
     // explicit `-m` id is never catalog-checked, so a discovery miss only
     // drops the metadata, never the run.
-    let catalog = provider.models(&provider_config).await;
+    let catalog = provider.models(&provider_config, Some(&catalog_data)).await;
     let model_id = match &q.model {
         Some(spec) => spec.split_once('/').expect("validated above").1.to_string(),
         None => {
@@ -2251,30 +2256,23 @@ async fn run_headless_query_with(
             })?;
             models
                 .first()
+                .and_then(|info| info.ids.first())
+                .cloned()
                 .ok_or_else(|| {
                     InvalidSnafu {
                         reason: format!("provider {provider_name:?} has no models"),
                     }
                     .build()
                 })?
-                .id
-                .clone()
         }
     };
-    let model = provider.configured_model(&provider_config, &model_id)?;
+    let model = provider
+        .model(&provider_config, Some(&catalog_data), &model_id)
+        .await?;
     // The context window feeds compaction thresholds; the output ceiling
-    // rides the model handle itself (per-model config, then the warmed
+    // rides the model handle's own info (per-model config, then the
     // models.dev catalog), where request shaping reads it.
-    let context_length = catalog
-        .as_ref()
-        .map(|models| {
-            crate::runtime::catalog_metadata(
-                &std::collections::BTreeMap::from([(provider_name.clone(), models.clone())]),
-                &provider_name,
-                &model_id,
-            )
-        })
-        .unwrap_or(None);
+    let context_length = model.context_length();
 
     let cwd = std::env::current_dir().map_err(|e| {
         crate::error::InvalidSnafu {

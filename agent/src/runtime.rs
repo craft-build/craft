@@ -21,7 +21,6 @@
 //! - plan mode: TUI and headless thread their [`AgentMode`] into the
 //!   prompt; ACP is always Build.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -29,7 +28,6 @@ use crate::config::Config;
 use crate::error::{InvalidSnafu, Result};
 use crate::instructions::Instructions;
 use crate::permissions::PermissionManager;
-use crate::providers::CatalogModel;
 use crate::run::{
     AgentMode, CompactionCtx, RecencySource, RetryCtx, RunParams, SharedCompactionState,
 };
@@ -138,8 +136,8 @@ pub async fn workspace_env(
 /// only: nothing here enforces catalog membership (headless `-m` and
 /// client-supplied ACP ids stay usable without catalog backing). Output
 /// ceilings are deliberately NOT carried here — they ride the model
-/// handle (`DynamicModel::max_output`: per-model config, then models.dev),
-/// the only place request shaping reads them.
+/// handle's `ModelInfo` (`ModelHandle::max_output`), the only place
+/// request shaping reads them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedModel {
     pub provider: String,
@@ -163,20 +161,6 @@ impl ResolvedModel {
     pub fn spec(&self) -> String {
         format!("{}/{}", self.provider, self.model_id)
     }
-}
-
-/// Look up a model's context window. `None` on any miss — the caller keeps
-/// its own selection policy; this only guarantees that whenever a catalog
-/// entry exists, its window travels with the choice.
-pub fn catalog_metadata(
-    catalogs: &BTreeMap<String, Vec<CatalogModel>>,
-    provider: &str,
-    model: &str,
-) -> Option<u32> {
-    catalogs
-        .get(provider)
-        .and_then(|models| models.iter().find(|entry| entry.id == model))
-        .and_then(|entry| entry.context_length)
 }
 
 // --- Compaction -------------------------------------------------------------
@@ -291,7 +275,7 @@ pub fn run_policy(inputs: RunPolicyInputs<'_>) -> RunParams {
         reauth: config
             .providers
             .get(&model.provider)
-            .map(|provider_config| crate::providers::reauth_hook(provider_config, &model.model_id)),
+            .map(|provider_config| crate::provider::reauth_hook(provider_config, &model.model_id)),
         model_spec: Some(model.spec().into()),
         retry,
         fast,
@@ -498,35 +482,6 @@ mod tests {
         assert!(params.reauth.is_none());
     }
 
-    // --- catalog metadata ---
-
-    fn entry(id: &str, context: Option<u32>) -> CatalogModel {
-        CatalogModel {
-            id: id.into(),
-            name: None,
-            description: None,
-            context_length: context,
-            // Windows are the only metadata `catalog_metadata` carries;
-            // output ceilings are the request path's business.
-            max_output_tokens: Some(4_000),
-        }
-    }
-
-    #[test]
-    fn catalog_metadata_travels_with_present_entries_only() {
-        let catalogs = BTreeMap::from([(
-            "acme".to_string(),
-            vec![entry("one", Some(8_000)), entry("two", None)],
-        )]);
-        assert_eq!(catalog_metadata(&catalogs, "acme", "one"), Some(8_000));
-        // Present but metadata-less: None, not a miss error.
-        assert_eq!(catalog_metadata(&catalogs, "acme", "two"), None);
-        // Misses never enforce membership.
-        assert_eq!(catalog_metadata(&catalogs, "acme", "gone"), None);
-        assert_eq!(catalog_metadata(&catalogs, "gone", "one"), None);
-        assert_eq!(catalog_metadata(&BTreeMap::new(), "acme", "one"), None);
-    }
-
     // --- workspace environment ---
 
     #[tokio::test]
@@ -621,18 +576,15 @@ mod tests {
     /// turn commits.
     #[tokio::test]
     async fn headless_policy_clamps_caps_and_recovers_from_overflow() {
-        use rig_core::test_utils::{MockCompletionModel, MockError, MockStreamEvent};
         let config =
             config("agent { max_tokens = 16384 }\ncompaction \"vcc\" { context = \"0.6\" }");
-        let model = MockCompletionModel::from_stream_turns(vec![
-            vec![MockStreamEvent::Error(MockError::provider(
-                "This model's maximum context length is 8192 tokens. However, you requested 16384 tokens.",
-            ))],
-            vec![
-                MockStreamEvent::text("recovered"),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ],
-        ]);
+        let scripted = crate::testing::ScriptedProvider::new(Vec::new());
+        scripted.push(crate::testing::context_overflow_http());
+        scripted.push(crate::testing::text_turn("recovered"));
+        let model = crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+            &scripted,
+            crate::testing::model_info("overflowing", 8_192, 4_096, false, false),
+        ));
 
         // Window sized so the output cap (16384) never fits: the clamp must
         // bite, but the floor keeps a usable budget.
@@ -690,14 +642,17 @@ mod tests {
         // The retried request was rebuilt from the compacted history, and
         // every request carried the window-clamped cap (the pre-fix
         // headless policy sent the configured 16384 untouched).
-        assert_eq!(model.requests().len(), 2);
-        for request in model.requests() {
-            let clamped = request.max_tokens.expect("the clamp must set a cap");
+        assert_eq!(scripted.requests().len(), 2);
+        for request in scripted.requests() {
+            let clamped = request
+                .options
+                .max_output_tokens
+                .expect("the clamp must set a cap");
             assert!(
                 clamped < 16384,
                 "the configured cap must be clamped into the window, got {clamped}"
             );
-            assert!(clamped <= u64::from(window), "never above the window");
+            assert!(clamped <= window, "never above the window");
             assert!(clamped >= 4096, "never below the output floor");
         }
         // Recovery events fired and the turn committed to history.

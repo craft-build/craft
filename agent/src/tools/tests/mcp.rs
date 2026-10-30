@@ -78,7 +78,7 @@ async fn mcp_tools_register_dispatch_and_clear() {
         .find(|d| d.name == "srv__echo")
         .expect("MCP tool registered under its wire name");
     assert_eq!(echo.description, "Echo through MCP");
-    assert_eq!(echo.parameters["type"], "object");
+    assert_eq!(echo.input_schema["type"], "object");
 
     use crate::history::ToolCall;
     let call = ToolCall::new("t1", "srv__echo", serde_json::json!({"message": "hi"}));

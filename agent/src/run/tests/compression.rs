@@ -4,7 +4,6 @@
 use super::*;
 use crate::history::UserContent;
 use crate::run::*;
-use rig_core::test_utils::MockStreamEvent;
 
 #[tokio::test]
 async fn recency_tail_rides_the_request_but_not_history() {
@@ -16,10 +15,7 @@ async fn recency_tail_rides_the_request_but_not_history() {
             facts
         }
     }
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::text("ok"),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, provider) = stream_turns(vec![crate::testing::text_turn("ok")]);
     let (_, cancel) = cancel_channel();
     let params = RunParams {
         recency: Some(std::sync::Arc::new(Turns)),
@@ -37,8 +33,8 @@ async fn recency_tail_rides_the_request_but_not_history() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::Done { .. }));
-    let requests = model.requests();
-    let sent = crate::edge::rig_to_own(&requests[0].chat_history);
+    let requests = provider.requests();
+    let sent = crate::testing::replay_history(&requests[0].messages);
     assert!(
         sent[0].text().contains("<turn-context>\n\nturn 0"),
         "tail must ride the request"
@@ -54,39 +50,38 @@ async fn read_lifecycle_marks_request_view_only() {
     // read → write the same file, with enough later read turns that the
     // early read falls outside the working-set lookback. The model's
     // later requests must see the stale marker; history keeps the raw text.
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path": "f.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            tool_event(
-                "t2",
-                "write",
-                serde_json::json!({"path": "f.txt", "content": "changed\n"}),
-            ),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            tool_event("t3", "read", serde_json::json!({"path": "g.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            tool_event("t4", "read", serde_json::json!({"path": "h.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            tool_event("t5", "read", serde_json::json!({"path": "i.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            tool_event("t6", "read", serde_json::json!({"path": "j.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path": "f.txt"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t2",
+            "write",
+            serde_json::json!({"path": "f.txt", "content": "changed\n"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t3",
+            "read",
+            serde_json::json!({"path": "g.txt"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t4",
+            "read",
+            serde_json::json!({"path": "h.txt"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t5",
+            "read",
+            serde_json::json!({"path": "i.txt"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t6",
+            "read",
+            serde_json::json!({"path": "j.txt"}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let long: String = (1..=40)
@@ -118,8 +113,8 @@ async fn read_lifecycle_marks_request_view_only() {
     };
     assert!(raw.content[0].to_text().contains("40: original line 40"));
     // The model's last request carried the stale marker for that read.
-    let requests = model.requests();
-    let sent = crate::edge::rig_to_own(&requests.last().unwrap().chat_history);
+    let requests = provider.requests();
+    let sent = crate::testing::replay_history(&requests.last().unwrap().messages);
     let Message::User { content } = &sent[2] else {
         panic!("tool result message on the wire");
     };
@@ -136,15 +131,13 @@ async fn read_lifecycle_marks_request_view_only() {
 
 #[tokio::test]
 async fn read_output_stays_verbatim_on_wire() {
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path": "big.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path": "big.txt"}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let body: String = (1..=100)
@@ -183,9 +176,9 @@ async fn read_output_stays_verbatim_on_wire() {
     ));
     // `read` output is caller-selected and must reach the model verbatim,
     // even though its `N: ` numbering looks like code to the detector.
-    let requests = model.requests();
+    let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    let sent = crate::edge::rig_to_own(&requests[1].chat_history);
+    let sent = crate::testing::replay_history(&requests[1].messages);
     let Message::User { content } = &sent[2] else {
         panic!("tool result message on the wire");
     };
@@ -256,15 +249,13 @@ fn compress_request_view_skips_verbatim_tools_but_compresses_the_rest() {
 
 #[tokio::test]
 async fn compression_disabled_sends_raw_output() {
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path": "big.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path": "big.txt"}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let body: String = (1..=100)
@@ -297,8 +288,8 @@ async fn compression_disabled_sends_raw_output() {
     let UserContent::ToolResult(raw) = &content[0] else {
         panic!("tool result block");
     };
-    let requests = model.requests();
-    let sent = crate::edge::rig_to_own(&requests[1].chat_history);
+    let requests = provider.requests();
+    let sent = crate::testing::replay_history(&requests[1].messages);
     let Message::User { content } = &sent[2] else {
         panic!("tool result message on the wire");
     };

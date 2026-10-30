@@ -1,11 +1,35 @@
 use std::fs;
 
-use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 use rig_core::tool::{PortableTool, ToolErrorKind};
 use serde_json::json;
 
 use super::{invoke, workspace};
 use crate::tools::*;
+
+/// A run model over the scripted attempts, and its recorder.
+fn run_model(
+    turns: Vec<crate::testing::Attempt>,
+) -> (
+    crate::provider::ModelHandle,
+    crate::testing::ScriptedProvider,
+) {
+    let provider = crate::testing::ScriptedProvider::new(Vec::new());
+    for turn in turns {
+        provider.push(turn);
+    }
+    (
+        crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+            &provider,
+            crate::testing::model_info("tools", 200_000, 8_192, false, false),
+        )),
+        provider,
+    )
+}
+
+/// One tool-call spec for `crate::testing::tool_turn`.
+fn tool_event(id: &str, name: &str, args: serde_json::Value) -> crate::testing::ToolCallSpec {
+    (id.to_owned(), name.to_owned(), args)
+}
 
 #[tokio::test]
 async fn all_tools_reject_outside_paths_and_git_metadata() {
@@ -118,55 +142,35 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
     let (_dir, workspace) = workspace();
     let path = workspace.root().join("file.txt");
     fs::write(&path, "old text\nsecond\n").unwrap();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![
-            MockStreamEvent::tool_call("1", "read", json!({"path":"file.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::tool_call("2", "grep", json!({"pattern":"old"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::tool_call(
-                "3",
-                "edit",
-                json!({"path":"file.txt","old_string":"old","new_string":"new"}),
-            ),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::tool_call(
-                "4",
-                "edit_lines",
-                json!({"path":"file.txt","start":2,"end":2,"new_string":"SECOND"}),
-            ),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::tool_call(
-                "5",
-                "insert_lines",
-                json!({"path":"file.txt","line":2,"new_string":"inserted"}),
-            ),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::tool_call(
-                "6",
-                "write",
-                json!({"path":"nested/dir/new.txt","content":"fresh\n"}),
-            ),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::tool_call("7", "delete", json!({"files":["file.txt"]})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, provider) = run_model(vec![
+        crate::testing::tool_turn(vec![tool_event("1", "read", json!({"path":"file.txt"}))]),
+        crate::testing::tool_turn(vec![tool_event("2", "grep", json!({"pattern":"old"}))]),
+        crate::testing::tool_turn(vec![tool_event(
+            "3",
+            "edit",
+            json!({"path":"file.txt","old_string":"old","new_string":"new"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "4",
+            "edit_lines",
+            json!({"path":"file.txt","start":2,"end":2,"new_string":"SECOND"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "5",
+            "insert_lines",
+            json!({"path":"file.txt","line":2,"new_string":"inserted"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "6",
+            "write",
+            json!({"path":"nested/dir/new.txt","content":"fresh\n"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "7",
+            "delete",
+            json!({"files":["file.txt"]}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let tools = workspace.register();
     let (_, cancel) = crate::run::cancel_channel();
@@ -182,13 +186,13 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
     )
     .await;
     assert!(matches!(outcome, crate::run::RunOutcome::Done { ref reply } if reply == "done"));
-    assert_eq!(model.request_count(), 8);
+    assert_eq!(provider.requests().len(), 8);
     assert!(!path.exists());
     assert_eq!(
         fs::read_to_string(workspace.root().join("nested/dir/new.txt")).unwrap(),
         "fresh\n"
     );
-    let requests = model.requests();
+    let requests = provider.requests();
     let mut names: Vec<_> = requests[0]
         .tools
         .iter()
@@ -247,7 +251,7 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
             "write"
         ]
     );
-    let transcript = serde_json::to_string(&requests[7].chat_history).unwrap();
+    let transcript = serde_json::to_string(&requests[7].messages).unwrap();
     assert!(transcript.contains("old text"));
     assert!(transcript.contains("edited file.txt"));
     assert!(transcript.contains("deleted"));
@@ -256,15 +260,13 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
 #[tokio::test]
 async fn dispatch_loop_preserves_permission_refusals() {
     let (_dir, workspace) = workspace();
-    let model = MockCompletionModel::from_stream_turns([
-        vec![
-            MockStreamEvent::tool_call("1", "delete", json!({"files":["../outside"]})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("permission denied"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, provider) = run_model(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "1",
+            "delete",
+            json!({"files":["../outside"]}),
+        )]),
+        crate::testing::text_turn("permission denied"),
     ]);
     let tools = workspace.register();
     let (_, cancel) = crate::run::cancel_channel();
@@ -283,7 +285,7 @@ async fn dispatch_loop_preserves_permission_refusals() {
     assert!(
         matches!(outcome, crate::run::RunOutcome::Done { ref reply } if reply == "permission denied")
     );
-    assert_eq!(model.request_count(), 2);
+    assert_eq!(provider.requests().len(), 2);
     // The refusal is recorded as an errored tool result; the next model turn
     // can explain it.
     let events = events.lock().unwrap();

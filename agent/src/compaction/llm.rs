@@ -8,11 +8,9 @@
 //! results by progressive ratio) before giving up and falling back to a
 //! static summary.
 
-use crate::providers::CompletionSource;
-use rig_core::ProviderError;
+use crate::provider::ModelHandle;
 use snafu::ResultExt;
 
-use crate::edge;
 use crate::history::{AssistantContent, Message, ToolResultContent, UserContent};
 use crate::prompt::{COMPACTION_SYSTEM, COMPACTION_TARGETED_USER, COMPACTION_USER};
 
@@ -43,8 +41,8 @@ pub type RelevanceScores<'a> = &'a [(usize, f32)];
 /// so input no turn has answered yet survives compaction verbatim (Craft's
 /// carry-protection). Returns whether the compacted history fits within
 /// `token_limit`.
-pub async fn llm_compact<M: CompletionSource + Clone>(
-    model: &M,
+pub async fn llm_compact(
+    model: &ModelHandle,
     history: &mut Vec<Message>,
     token_limit: u64,
     carry_len: usize,
@@ -171,26 +169,22 @@ pub(crate) fn is_context_overflow_body(message: &str) -> bool {
     is_scope && is_overflow
 }
 
-/// Maps a rig completion error onto the overflow classification. Rig
-/// flattens provider failures into string payloads, so the sniff runs on
-/// whatever text the variant carries.
-fn is_context_overflow(error: &ProviderError) -> bool {
-    match error {
-        ProviderError::Provider(message) | ProviderError::Response(message) => {
-            is_context_overflow_body(message)
-        }
-        ProviderError::Request(err) => is_context_overflow_body(&err.to_string()),
-        ProviderError::ProviderResponse(err) => is_context_overflow_body(&err.body),
-        _ => false,
-    }
+/// Maps a provider error onto the overflow classification: a typed HTTP
+/// body first, then whatever text the error carries.
+fn is_context_overflow(error: &crate::error::Error) -> bool {
+    let message = match error {
+        crate::error::Error::ProviderClient { source } => source.to_string(),
+        other => other.to_string(),
+    };
+    is_context_overflow_body(&message)
 }
 
 /// Summarize `head`, retrying overflow-failed requests on a progressively
 /// pruned copy of it: first the tool-result tail is collapsed and the oldest
 /// round dropped, then tool results are stripped by ratio, and only when the
 /// ladder is exhausted does the caller's static fallback apply.
-async fn summarize<M: CompletionSource + Clone>(
-    model: &M,
+async fn summarize(
+    model: &ModelHandle,
     head: &[Message],
     relevance_scores: Option<RelevanceScores<'_>>,
 ) -> Result<String> {
@@ -204,43 +198,33 @@ async fn summarize<M: CompletionSource + Clone>(
     let mut removal_step = 0;
 
     loop {
-        let request = edge::to_request(&request_messages, &[], Some(COMPACTION_SYSTEM), None, None);
-        let response = match model.completion(request).await {
-            Ok(response) => response,
-            Err(e) if is_context_overflow(&e) => {
-                // Truncation eats from the front, so it can never shrink an
-                // oversized result sitting in the tail. Collapse that first,
-                // and once there is nothing left to collapse, drop the
-                // oldest round rather than resend the same request.
-                if overflow_retries < MAX_OVERFLOW_RETRIES && request_messages.len() > 1 {
-                    overflow_retries += 1;
-                    if !collapse_tool_results(&mut request_messages, 0) {
-                        truncate_oldest_round(&mut request_messages);
+        let response =
+            match crate::provider::complete_text(model, &request_messages, COMPACTION_SYSTEM).await
+            {
+                Ok(response) => response,
+                Err(e) if is_context_overflow(&e) => {
+                    // Truncation eats from the front, so it can never shrink an
+                    // oversized result sitting in the tail. Collapse that first,
+                    // and once there is nothing left to collapse, drop the
+                    // oldest round rather than resend the same request.
+                    if overflow_retries < MAX_OVERFLOW_RETRIES && request_messages.len() > 1 {
+                        overflow_retries += 1;
+                        if !collapse_tool_results(&mut request_messages, 0) {
+                            truncate_oldest_round(&mut request_messages);
+                        }
+                        continue;
                     }
-                    continue;
+                    if removal_step < super::PROGRESSIVE_TOOL_REMOVAL_RATIOS.len() {
+                        let ratio = super::PROGRESSIVE_TOOL_REMOVAL_RATIOS[removal_step];
+                        removal_step += 1;
+                        strip_tool_results_by_ratio(&mut request_messages, ratio);
+                        continue;
+                    }
+                    return Err(e).context(SummarizeSnafu);
                 }
-                if removal_step < super::PROGRESSIVE_TOOL_REMOVAL_RATIOS.len() {
-                    let ratio = super::PROGRESSIVE_TOOL_REMOVAL_RATIOS[removal_step];
-                    removal_step += 1;
-                    strip_tool_results_by_ratio(&mut request_messages, ratio);
-                    continue;
-                }
-                return Err(e).context(SummarizeSnafu);
-            }
-            Err(e) => return Err(e).context(SummarizeSnafu),
-        };
-        let text: String = response
-            .choice
-            .iter()
-            .filter_map(|block| match block {
-                rig_core::completion::message::AssistantContent::Text(text) => {
-                    Some(text.text.clone())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Ok(text);
+                Err(e) => return Err(e).context(SummarizeSnafu),
+            };
+        return Ok(response);
     }
 }
 
@@ -279,11 +263,6 @@ pub(crate) fn build_static_summary(head: &[Message]) -> String {
 mod tests {
     use super::*;
     use crate::compaction::test_support::{assistant_tool, tool_result_of};
-    use rig_core::completion::message::{
-        Message as RigMessage, ToolResultContent as RigToolResultContent,
-        UserContent as RigUserContent,
-    };
-    use rig_core::test_utils::{MockCompletionModel, MockTurn};
 
     const OVERFLOW: &str = "prompt is too long";
 
@@ -316,19 +295,43 @@ mod tests {
         messages
     }
 
-    /// Model-visible text of one rig user message (text blocks plus tool
+    /// A model over the scripted replies, and its request recorder.
+    fn script(
+        turns: Vec<crate::testing::Attempt>,
+    ) -> (
+        crate::provider::ModelHandle,
+        crate::testing::ScriptedProvider,
+    ) {
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        for turn in turns {
+            provider.push(turn);
+        }
+        (
+            crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+                &provider,
+                crate::testing::model_info("summary", 1_000_000, 8_192, false, false),
+            )),
+            provider,
+        )
+    }
+
+    fn overflow_turn() -> crate::testing::Attempt {
+        crate::testing::http_error(400, OVERFLOW)
+    }
+
+    /// Model-visible text of one user message (text blocks plus tool
     /// result text), for asserting what the summarizer was sent.
-    fn rig_message_text(message: &RigMessage) -> String {
+    fn message_text(message: &Message) -> String {
         match message {
-            RigMessage::User { content } => content
+            Message::User { content } => content
                 .iter()
                 .map(|block| match block {
-                    RigUserContent::Text(text) => text.text.clone(),
-                    RigUserContent::ToolResult(result) => result
+                    crate::history::UserContent::Text(text) => text.text.clone(),
+                    crate::history::UserContent::ToolResult(result) => result
                         .content
                         .iter()
                         .map(|item| match item {
-                            RigToolResultContent::Text(text) => text.text.clone(),
+                            crate::history::ToolResultContent::Text(text) => text.text.clone(),
                             _ => String::new(),
                         })
                         .collect::<Vec<_>>()
@@ -337,19 +340,18 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
-            _ => String::new(),
+            other => other.text(),
         }
     }
 
-    fn request_texts(model: &MockCompletionModel) -> Vec<String> {
-        model
+    fn request_texts(provider: &crate::testing::ScriptedProvider) -> Vec<String> {
+        provider
             .requests()
             .iter()
             .map(|request| {
-                request
-                    .chat_history
+                crate::testing::replay_history(&request.messages)
                     .iter()
-                    .map(rig_message_text)
+                    .map(message_text)
                     .collect::<Vec<_>>()
                     .join("\n")
             })
@@ -358,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn summarizes_head_and_keeps_tail() {
-        let model = MockCompletionModel::from_turns([MockTurn::text("condensed summary")]);
+        let (model, provider) = script(vec![crate::testing::text_turn("condensed summary")]);
         let mut messages = history();
         let under = llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
@@ -369,21 +371,21 @@ mod tests {
                 if t.text.contains(LLM_SUMMARY_PREFIX)
                     && t.text.contains("condensed summary"))));
         assert!(messages.len() > 1, "tail must be preserved");
-        assert_eq!(model.requests().len(), 1);
-        let request = &model.requests()[0];
+        assert_eq!(provider.requests().len(), 1);
+        let request = &provider.requests()[0];
         // The preamble travels as the request's preamble field.
-        assert_eq!(request.system_instructions(), Some(COMPACTION_SYSTEM));
-        assert!(matches!(
-            request.chat_history.last(),
-            Some(rig_core::completion::message::Message::User { content })
-                if matches!(&content[0], rig_core::completion::message::UserContent::Text(t)
-                    if t.text == COMPACTION_USER)
-        ));
+        assert_eq!(request.system, COMPACTION_SYSTEM);
+        assert_eq!(
+            crate::testing::replay_history(&request.messages)
+                .last()
+                .map(|message| message.text()),
+            Some(COMPACTION_USER.to_owned())
+        );
     }
 
     #[tokio::test]
     async fn falls_back_to_static_summary_on_empty_response() {
-        let model = MockCompletionModel::from_turns([MockTurn::text("")]);
+        let (model, _provider) = script(vec![crate::testing::text_turn("")]);
         let mut messages = history();
         let under = llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
@@ -403,13 +405,13 @@ mod tests {
 
     #[tokio::test]
     async fn targeted_prompt_embeds_top_topics() {
-        let model = MockCompletionModel::from_turns([MockTurn::text("summary")]);
+        let (model, provider) = script(vec![crate::testing::text_turn("summary")]);
         let mut messages = history();
         let scores: Vec<(usize, f32)> = (0..15).map(|i| (i, 0.9)).collect();
         llm_compact(&model, &mut messages, u64::MAX, 0, Some(&scores))
             .await
             .unwrap();
-        let last = request_texts(&model)[0].clone();
+        let last = request_texts(&provider)[0].clone();
         assert!(last.contains("msg#0 (relevance: 0.90)"));
         assert!(last.contains("msg#9 (relevance: 0.90)"), "top ten kept");
         assert!(!last.contains("msg#10"), "beyond ten dropped");
@@ -418,30 +420,30 @@ mod tests {
 
     #[tokio::test]
     async fn low_scores_fall_back_to_plain_prompt() {
-        let model = MockCompletionModel::from_turns([MockTurn::text("summary")]);
+        let (model, provider) = script(vec![crate::testing::text_turn("summary")]);
         let mut messages = history();
         let scores = vec![(0usize, 0.4f32), (1, 0.5)];
         llm_compact(&model, &mut messages, u64::MAX, 0, Some(&scores))
             .await
             .unwrap();
-        let last = request_texts(&model)[0].clone();
+        let last = request_texts(&provider)[0].clone();
         assert!(last.contains(COMPACTION_USER));
         assert!(!last.contains("relevance"));
     }
 
     #[tokio::test]
     async fn overflow_retries_collapse_then_drop_round() {
-        let model = MockCompletionModel::from_turns([
-            MockTurn::error(OVERFLOW),
-            MockTurn::error(OVERFLOW),
-            MockTurn::text("made it"),
+        let (model, provider) = script(vec![
+            overflow_turn(),
+            overflow_turn(),
+            crate::testing::text_turn("made it"),
         ]);
         let mut messages = tool_history();
         llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
             .unwrap();
 
-        let requests = request_texts(&model);
+        let requests = request_texts(&provider);
         assert_eq!(requests.len(), 3, "collapse, truncate, then success");
         // First attempt carries the real tool results.
         assert!(requests[0].contains("xxxx"));
@@ -455,17 +457,17 @@ mod tests {
 
     #[tokio::test]
     async fn ladder_exhaustion_falls_back_to_static_summary() {
-        let turns = std::iter::repeat_with(|| MockTurn::error(OVERFLOW))
+        let turns = std::iter::repeat_with(overflow_turn)
             .take(3 + super::super::PROGRESSIVE_TOOL_REMOVAL_RATIOS.len() + 1)
             .collect::<Vec<_>>();
-        let model = MockCompletionModel::from_turns(turns);
+        let (model, provider) = script(turns);
         let mut messages = tool_history();
         llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
             .unwrap();
         // One collapse + one truncate (which drains the whole tool middle,
         // leaving a single message), then 4 ratio no-ops, then the failure.
-        assert_eq!(model.requests().len(), 7);
+        assert_eq!(provider.requests().len(), 7);
         assert!(
             matches!(&messages[0], Message::Assistant { content, .. }
             if matches!(&content[0], AssistantContent::Text(t)
@@ -476,12 +478,12 @@ mod tests {
 
     #[tokio::test]
     async fn non_overflow_error_falls_back_without_retry() {
-        let model = MockCompletionModel::from_turns([MockTurn::error("rate limited")]);
+        let (model, provider) = script(vec![crate::testing::http_error(429, "rate limited")]);
         let mut messages = tool_history();
         llm_compact(&model, &mut messages, u64::MAX, 0, None)
             .await
             .unwrap();
-        assert_eq!(model.requests().len(), 1, "only errors are not retried");
+        assert_eq!(provider.requests().len(), 1, "only errors are not retried");
         assert!(matches!(&messages[0], Message::Assistant { content, .. }
             if matches!(&content[0], AssistantContent::Text(t)
                 if t.text.contains("user"))));
@@ -574,12 +576,20 @@ mod tests {
     }
 
     #[test]
-    fn overflow_classifier_reads_rig_error_variants() {
-        assert!(is_context_overflow(&ProviderError::Provider(
-            OVERFLOW.into()
-        )));
-        assert!(!is_context_overflow(&ProviderError::Json(
-            serde_json::from_str::<()>("x").unwrap_err().into()
-        )));
+    fn overflow_classifier_reads_provider_error_bodies() {
+        let overflow = crate::error::client_error(animist::provider::ProviderError::Http {
+            status: 400,
+            body: OVERFLOW.to_owned(),
+            body_truncated: false,
+            backtrace: snafu::GenerateImplicitData::generate(),
+        });
+        assert!(is_context_overflow(&overflow));
+        let other = crate::error::client_error(animist::provider::ProviderError::Http {
+            status: 400,
+            body: "decode error".to_owned(),
+            body_truncated: false,
+            backtrace: snafu::GenerateImplicitData::generate(),
+        });
+        assert!(!is_context_overflow(&other));
     }
 }

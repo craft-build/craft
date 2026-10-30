@@ -3,10 +3,8 @@
 
 use std::sync::Arc;
 
-use crate::providers::CompletionSource;
-use rig_core::completion::{CompletionRequest, FinishReason};
-
 use crate::history::{self, Message};
+use crate::provider::ModelHandle;
 
 use super::dispatch_tool_calls;
 use super::doom;
@@ -35,23 +33,23 @@ pub(super) enum TurnEnd {
 /// Stream one model call for the current request, handling cancelled,
 /// overflow, and auth failures exactly as the inline loop did.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn stream_turn<M: CompletionSource + Clone>(
-    model: &M,
+pub(super) async fn stream_turn(
+    model: &ModelHandle,
     params: &RunParams,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
     history: &mut Vec<Message>,
     turn: &mut Vec<Message>,
     doom: &mut doom::DoomTracker,
-    refreshed_model: &mut Option<crate::providers::DynamicModel>,
+    refreshed_model: &mut Option<ModelHandle>,
     overflow_recoveries: &mut u32,
     reauth_attempts: &mut u32,
     measured_prompt_tokens: &mut u64,
     transient_budget: &retry::TransientBudget,
-    request: &CompletionRequest,
+    request: &stream::ProviderRequest,
     prompt_tokens: u64,
 ) -> Streamed {
-    match match refreshed_model.as_ref() {
+    let failure = match refreshed_model.as_ref() {
         Some(refreshed) => {
             retry::stream_with_retry(
                 refreshed,
@@ -78,7 +76,8 @@ pub(super) async fn stream_turn<M: CompletionSource + Clone>(
             )
             .await
         }
-    } {
+    };
+    match failure {
         Ok((output, served_fallback)) => {
             // Bill the model that actually answered: a retry-chain
             // fallback or a reauth-refreshed model, not the primary.
@@ -234,7 +233,7 @@ pub(super) async fn finish_turn(
         let reply = turn.last().expect("assistant pushed").text();
         // A truncated reply continues: the model's cut-off message is
         // already in `turn`, so the next request resumes from it.
-        let truncated = output.finish_reason == Some(FinishReason::Length);
+        let truncated = output.finish_reason == Some(animist::provider::StopReason::MaxTokens);
         if reply.trim().is_empty() && !truncated {
             tracing::warn!(
                 model = params.model_spec.as_deref().unwrap_or("unknown"),

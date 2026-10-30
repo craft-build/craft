@@ -19,7 +19,7 @@ use serde_json::Value;
 use crate::config::{AgentConfig, ProviderConfig};
 use crate::history::Message;
 use crate::model_registry::ModelTier;
-use crate::providers::DynamicModel;
+use crate::provider::ModelHandle;
 use crate::run::{self, CancelToken, Event, RunParams};
 use crate::tools::Workspace;
 use crate::tools::worktree::Worktree;
@@ -176,7 +176,7 @@ pub enum SubagentResult {
 #[derive(Clone)]
 pub struct SubagentLauncher {
     /// The parent's resolved model; the child's fallback.
-    pub parent_model: DynamicModel,
+    pub parent_model: ModelHandle,
     /// `provider/model` spec of the parent, for tier resolution and pricing.
     pub parent_spec: String,
     /// Provider name (key into `providers`).
@@ -224,7 +224,7 @@ impl SubagentLauncher {
     pub async fn resolve_model(
         &self,
         requested: Option<&str>,
-    ) -> Result<(DynamicModel, std::sync::Arc<str>), String> {
+    ) -> Result<(ModelHandle, std::sync::Arc<str>), String> {
         let parent = (self.parent_model.clone(), self.parent_spec.as_str().into());
         let Some(tier_str) = requested else {
             return Ok(parent);
@@ -245,10 +245,14 @@ impl SubagentLauncher {
         let Some(provider_config) = self.providers.get(&self.provider) else {
             return Ok(parent);
         };
+        let catalog = crate::provider::load_catalog().await;
         let provider =
-            crate::providers::Provider::from_config(provider_config).map_err(|e| e.to_string())?;
+            crate::provider::ProviderHandle::from_config(provider_config, Some(&catalog))
+                .await
+                .map_err(|e| e.to_string())?;
         let model = provider
-            .configured_model(provider_config, &spec)
+            .model(provider_config, Some(&catalog), &spec)
+            .await
             .map_err(|e| e.to_string())?;
         Ok((model, spec.as_str().into()))
     }
@@ -713,17 +717,26 @@ mod tests {
 
     use std::sync::Mutex as StdMutex;
 
-    fn mock(turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>) -> DynamicModel {
-        DynamicModel::wrap(
-            Some("mock"),
-            rig_core::test_utils::MockCompletionModel::from_stream_turns(turns),
-        )
+    fn mock(turns: Vec<crate::testing::Attempt>) -> crate::provider::ModelHandle {
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        for turn in turns {
+            provider.push(turn);
+        }
+        crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+            &provider,
+            crate::testing::model_info("mock", 200_000, 8_192, false, false),
+        ))
+    }
+
+    /// One tool-call spec for `crate::testing::tool_turn`.
+    fn tool_event(id: &str, name: &str, args: serde_json::Value) -> crate::testing::ToolCallSpec {
+        (id.to_owned(), name.to_owned(), args)
     }
 
     struct Captured(StdMutex<Vec<Event>>);
 
     fn launcher(
-        model: DynamicModel,
+        model: crate::provider::ModelHandle,
         captured: Arc<Captured>,
         cancel: &CancelToken,
     ) -> SubagentLauncher {
@@ -750,13 +763,6 @@ mod tests {
         }
     }
 
-    fn text_turn(text: &str) -> Vec<rig_core::test_utils::MockStreamEvent> {
-        vec![
-            rig_core::test_utils::MockStreamEvent::text(text),
-            rig_core::test_utils::MockStreamEvent::final_response_with_total_tokens(1),
-        ]
-    }
-
     fn events(captured: &Captured) -> Vec<Event> {
         captured.0.lock().unwrap().clone()
     }
@@ -781,15 +787,12 @@ mod tests {
         let seen = Arc::new(AtomicUsize::new(0));
         let mut l = launcher(
             mock(vec![
-                vec![
-                    rig_core::test_utils::MockStreamEvent::tool_call(
-                        "t1",
-                        "list",
-                        serde_json::json!({"path": "."}),
-                    ),
-                    rig_core::test_utils::MockStreamEvent::final_response_with_total_tokens(1),
-                ],
-                text_turn("done"),
+                crate::testing::tool_turn(vec![tool_event(
+                    "t1",
+                    "list",
+                    serde_json::json!({"path": "."}),
+                )]),
+                crate::testing::text_turn("done"),
             ]),
             captured,
             &cancel,
@@ -810,11 +813,11 @@ mod tests {
     /// the task-chats view can route them without guessing.
     #[tokio::test]
     async fn forwarded_events_carry_the_call_id() {
-        let (flag, cancel) = run::cancel_channel();
-        drop(flag);
+        // Keep the flag alive: dropping it cancels linked children.
+        let (_flag, cancel) = run::cancel_channel();
         let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
         let l = launcher(
-            mock(vec![text_turn("working on it")]),
+            mock(vec![crate::testing::text_turn("working on it")]),
             captured.clone(),
             &cancel,
         );
@@ -831,11 +834,11 @@ mod tests {
 
     #[tokio::test]
     async fn research_subagent_returns_final_text() {
-        let (flag, cancel) = run::cancel_channel();
-        drop(flag);
+        // Keep the flag alive: dropping it cancels linked children.
+        let (_flag, cancel) = run::cancel_channel();
         let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
         let l = launcher(
-            mock(vec![text_turn("found it at src/lib.rs:12")]),
+            mock(vec![crate::testing::text_turn("found it at src/lib.rs:12")]),
             captured.clone(),
             &cancel,
         );
@@ -858,12 +861,12 @@ mod tests {
 
     #[tokio::test]
     async fn output_schema_retries_until_valid_json() {
-        let (flag, cancel) = run::cancel_channel();
-        drop(flag);
+        // Keep the flag alive: dropping it cancels linked children.
+        let (_flag, cancel) = run::cancel_channel();
         let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
         let model = mock(vec![
-            text_turn("sure, here you go"),
-            text_turn(
+            crate::testing::text_turn("sure, here you go"),
+            crate::testing::text_turn(
                 r#"```json
             {"summary": "ok"}
             ```"#,
@@ -885,7 +888,11 @@ mod tests {
         let (flag, cancel) = run::cancel_channel();
         flag.set(true);
         let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
-        let l = launcher(mock(vec![text_turn("never runs")]), captured, &cancel);
+        let l = launcher(
+            mock(vec![crate::testing::text_turn("never runs")]),
+            captured,
+            &cancel,
+        );
         let err = l
             .spawn(&SubagentRequest::research("find", "search"))
             .await

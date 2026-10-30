@@ -1,22 +1,19 @@
-//! Streaming aggregation over a provider model's stream.
+//! Streaming one model call over animist's [`InferenceExchange`].
 //!
-//! rig-core's `CompletionStream` already assembles ragged tool-argument
-//! fragments and multi-part text; this module consumes its public events,
-//! forwards them as [`Event`]s (text/reasoning deltas, tool start), and
-//! produces the completed [`history::Message`] for the assistant turn plus
-//! its usage report.
+//! The exchange owns transport work and bounded partial output; this
+//! module drives it against craft's cancellation, forwards provider
+//! events as [`Event`]s (text/reasoning deltas, tool starts), and
+//! produces the completed [`history::Message`] for the assistant turn
+//! plus its usage report.
 
 use std::collections::HashMap;
 
-use crate::providers::CompletionSource;
-use futures::StreamExt;
-use rig_core::completion::message::AssistantContent;
-use rig_core::completion::{CompletionRequest, FinishReason};
-use rig_core::error::ProviderError;
-use rig_core::streaming::{Item, StreamEvent};
+use animist::provider::{ExchangeEvent, InferenceExchange, ProviderError, ProviderEvent};
+use animist::provider::{RequestOptions, StopReason, Tool};
 
-use crate::edge::{StreamedParts, assistant_from_stream, fold_streamed_event};
+use crate::edge;
 use crate::history;
+use crate::provider::ModelHandle;
 
 use super::{CancelToken, Event};
 
@@ -25,9 +22,11 @@ use super::{CancelToken, Event};
 pub struct TurnOutput {
     pub assistant: history::Message,
     pub usage: history::Usage,
-    /// Why the model stopped, when the provider reported it. `Length` means
-    /// the reply was truncated at `max_tokens`.
-    pub finish_reason: Option<FinishReason>,
+    /// Why the model stopped, when the provider reported it.
+    /// [`StopReason::MaxTokens`] means the reply was truncated at the
+    /// output limit; [`StopReason::ContextWindowExceeded`] is converted to
+    /// an overflow failure instead.
+    pub finish_reason: Option<StopReason>,
 }
 
 /// How a provider stream ended without producing a turn.
@@ -35,30 +34,35 @@ pub struct TurnOutput {
 pub enum StreamFailure {
     /// The user cancelled mid-stream; `streamed` is the reply text that
     /// already reached the view, kept so history can agree with it.
-    Cancelled {
-        streamed: String,
-    },
+    Cancelled { streamed: String },
     Error {
         kind: ErrorKind,
         message: String,
+        /// The provider already retried this failure internally (Bedrock
+        /// 429/503 backoff), so same-model backoff must not stack on it;
+        /// recovery goes straight to the fallback chain.
+        provider_retried: bool,
     },
 }
 
 impl StreamFailure {
-    /// Classify a bare provider message (no typed error available).
+    /// Classify a provider error into the recovery taxonomy.
     #[cfg(test)]
     pub(crate) fn error(message: impl Into<String>) -> Self {
         let message = message.into();
         let kind = classify_string(&message);
-        Self::Error { kind, message }
+        Self::Error {
+            kind,
+            message,
+            provider_retried: false,
+        }
     }
 }
 
 /// Recovery taxonomy for provider stream errors, ported from the
-/// reference's `AgentError::{is_retryable, should_rotate_key, should_abort}`
-/// (`craft-providers/src/error.rs`). Most failures classify from the
-/// preserved HTTP status, when one survived, and otherwise fall back to
-/// message matching.
+/// reference's `AgentError::{is_retryable, should_rotate_key, should_abort}`.
+/// Most failures classify from the preserved HTTP status, when one
+/// survived, and otherwise fall back to message matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ErrorKind {
     /// 429: retried with backoff; the first remedy is key rotation.
@@ -114,37 +118,80 @@ impl ErrorKind {
     }
 }
 
-/// Classify a typed rig provider error: use the preserved HTTP status when
-/// one exists (non-success statuses surface as `ProviderResponse`, in
-/// transport-refusals and failed replies alike), otherwise match on the
-/// display string.
+/// Classify a typed provider error: the preserved HTTP status first (Bedrock
+/// errors through their source), credential failures as auth, transport
+/// timeouts as timeouts, and everything else by message.
 pub(crate) fn classify_error(error: &ProviderError) -> ErrorKind {
-    if matches!(error, ProviderError::Truncated) {
-        // A stream cut before its terminal record is retryable transport
-        // damage, not a short honest answer.
-        return ErrorKind::Transport;
-    }
-    if let Some(status) = error.provider_response_status() {
-        match status.as_u16() {
-            401 => return ErrorKind::Auth,
-            429 => return ErrorKind::RateLimited,
-            500..=599 => return ErrorKind::Server,
-            // 4xx bodies carry the real reason (overflow, content policy);
-            // keep matching on the message instead of guessing Fatal.
-            _ => {}
+    match error {
+        ProviderError::Http { status: 429, .. } => return ErrorKind::RateLimited,
+        ProviderError::Http { status: 401, .. } => return ErrorKind::Auth,
+        ProviderError::Http {
+            status: 500..=599, ..
+        } => return ErrorKind::Server,
+        // 4xx bodies carry the real reason (overflow, content policy);
+        // keep matching on the message instead of guessing Fatal.
+        ProviderError::Http { body, .. } => {
+            if crate::compaction::llm::is_context_overflow_body(body) {
+                return ErrorKind::Overflow;
+            }
         }
-    }
-    if let ProviderError::Http(http) = error
-        && let Some(status) = http.non_success_status()
-    {
-        match status.as_u16() {
-            401 => return ErrorKind::Auth,
-            429 => return ErrorKind::RateLimited,
-            500..=599 => return ErrorKind::Server,
-            _ => {}
-        }
+        ProviderError::Transport { source } if source.is_timeout() => return ErrorKind::Timeout,
+        ProviderError::Transport { .. } => return ErrorKind::Transport,
+        ProviderError::Credentials { .. }
+        | ProviderError::CredentialEnvironment { .. }
+        | ProviderError::EmptyApiKey { .. } => return ErrorKind::Auth,
+        ProviderError::Bedrock { source } => return classify_bedrock(source),
+        _ => {}
     }
     classify_string(&error.to_string())
+}
+
+/// Bedrock failures: animist already retried 429/503 internally (bounded
+/// by `max_attempts`, `Retry-After`-aware), so those surface as
+/// provider-retried; the rest classify through the same taxonomy.
+fn classify_bedrock(source: &animist::provider::bedrock::BedrockError) -> ErrorKind {
+    use animist::provider::bedrock::BedrockError;
+    let (status, body): (u16, &[u8]) = match source {
+        BedrockError::Http { status, body, .. } => (*status, body.as_slice()),
+        BedrockError::ErrorBodyTooLarge {
+            status,
+            body_prefix,
+            ..
+        } => (*status, body_prefix),
+        BedrockError::Credentials { .. } | BedrockError::MissingCredentialsProvider { .. } => {
+            return ErrorKind::Auth;
+        }
+        BedrockError::Transport { source } if source.is_timeout() => return ErrorKind::Timeout,
+        BedrockError::Transport { .. } => return ErrorKind::Transport,
+        other => return classify_string(&other.to_string()),
+    };
+    match status {
+        429 => ErrorKind::RateLimited,
+        401 => ErrorKind::Auth,
+        500..=599 => ErrorKind::Server,
+        _ => {
+            let body = String::from_utf8_lossy(body);
+            if crate::compaction::llm::is_context_overflow_body(&body) {
+                ErrorKind::Overflow
+            } else {
+                classify_string(&body)
+            }
+        }
+    }
+}
+
+/// Whether animist's provider already spent its own retries on this error:
+/// Bedrock's 429/503 handling, and nothing else.
+fn provider_retried(error: &ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::Bedrock {
+            source: animist::provider::bedrock::BedrockError::Http {
+                status: 429 | 503,
+                ..
+            }
+        }
+    )
 }
 
 fn classify_string(message: &str) -> ErrorKind {
@@ -201,128 +248,196 @@ fn failure_from_error(error: &ProviderError) -> StreamFailure {
     StreamFailure::Error {
         kind: classify_error(error),
         message: error.to_string(),
+        provider_retried: provider_retried(error),
     }
 }
 
+/// One model call, already shaped for the provider: the mapped history,
+/// the system preamble, the tool declarations, and the request options.
+#[derive(Clone)]
+pub struct ProviderRequest {
+    pub messages: Vec<animist::history::Message>,
+    pub system: String,
+    pub tools: Vec<Tool>,
+    pub options: RequestOptions,
+}
+
+/// Build the per-request options from run params and the model handle:
+/// thinking preference, sampling, the output cap (with the Claude default
+/// and its warning), and the system-message policy the target protocol
+/// needs.
+pub(crate) fn request_options(
+    handle: &ModelHandle,
+    thinking: crate::thinking::ThinkingConfig,
+    fast: bool,
+    max_tokens: Option<u64>,
+    temperature: Option<f64>,
+) -> RequestOptions {
+    let mut options = RequestOptions::builder()
+        .thinking(thinking.to_animist())
+        .fast(fast)
+        .build();
+    // bon makes the optional members' setters take the inner type, so the
+    // `None` cases simply leave the fields unset.
+    if let Some(cap) = max_tokens {
+        options.max_output_tokens = Some(cap.min(u64::from(u32::MAX)) as u32);
+    }
+    options.temperature = temperature;
+    if handle.moves_system_to_preamble() {
+        options.system_message_policy = animist::provider::SystemMessagePolicy::MoveToPreamble;
+    }
+    options
+}
+
 /// Run one model stream to completion.
-pub(crate) async fn run_model_stream<M: CompletionSource + Clone>(
-    model: &M,
-    request: CompletionRequest,
+pub(crate) async fn run_model_stream(
+    handle: &ModelHandle,
+    request: ProviderRequest,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> std::result::Result<TurnOutput, StreamFailure> {
-    // Request-building failures (an unrepresentable wire body) surface
-    // before any bytes hit the network; the transport handshake itself now
-    // happens inside the polled loop below, where cancel outranks it.
     if cancel.cancelled() {
         return Err(StreamFailure::Cancelled {
             streamed: String::new(),
         });
     }
-    let mut stream = model.stream(request).map_err(|e| failure_from_error(&e))?;
+    let ProviderRequest {
+        messages,
+        system,
+        tools,
+        options,
+    } = request;
+    edge::assert_replay_valid(&messages, &tools);
+    let model = handle.model.clone();
+    let mut exchange = InferenceExchange::new(move |event_tx| {
+        let model = model.clone();
+        async move {
+            model
+                .provider
+                .stream_message(&model, &messages, &system, &tools, &event_tx, options)
+                .await
+        }
+    });
     // The reply text streamed so far; carried out on cancellation so the
     // committed history keeps what the user already saw.
     let mut streamed = String::new();
-    let mut parts = StreamedParts::default();
     // provider tool-call id -> run-stable internal id recorded at call time.
     let mut call_ids: HashMap<String, String> = HashMap::new();
     let mut cancel_rx = cancel.subscribe();
     // A dropped CancelFlag makes `changed()` ready (with Err) on every poll;
     // polling it forever would busy-loop, so disable the branch once that
-    // happens and let the stream drive the loop.
+    // happens and let the exchange drive the loop.
     let mut cancel_alive = true;
-    loop {
+    let response = loop {
         tokio::select! {
             biased;
             changed = cancel_rx.changed(), if cancel_alive => {
                 match changed {
-                    Ok(()) => return Err(StreamFailure::Cancelled { streamed }),
+                    Ok(()) => {
+                        let partial = exchange.cancel();
+                        return Err(StreamFailure::Cancelled {
+                            streamed: partial.display_text.clone(),
+                        });
+                    }
                     Err(_) => cancel_alive = false,
                 }
             }
-            item = stream.next() => match item {
-                None => break,
-                Some(Err(error)) => return Err(failure_from_error(&error)),
-                Some(Ok(Item::Unknown(_))) => {}
-                Some(Ok(Item::Event(event))) => {
-                    match &event {
-                        StreamEvent::Text { text, .. } => {
+            event = exchange.next() => {
+                let Some(event) = event else {
+                    return Err(StreamFailure::Cancelled { streamed });
+                };
+                match event {
+                    ExchangeEvent::Provider(event) => match &event {
+                        ProviderEvent::TextDelta { text } => {
                             streamed.push_str(text);
                             emit(Event::TextDelta(text.clone()));
                         }
-                        StreamEvent::Reasoning { text, .. } => {
+                        ProviderEvent::ThinkingDelta { text } => {
                             emit(Event::ThinkingDelta(text.clone()));
                         }
-                        StreamEvent::End {
-                            content: AssistantContent::ToolCall(tool_call),
-                            ..
-                        } => {
+                        ProviderEvent::ToolUseStart { id, name } => {
                             // Stream ids are provider property (fresh on
-                            // every attempt); mint a globally unique internal
-                            // id so replayed history survives retries and
-                            // cross-wire fallbacks. It must stay unique across
-                            // streams too: a per-stream counter restarted at
-                            // `call-0` on every model response, so history
-                            // carried duplicate tool ids and the TUI merged a
+                            // every attempt); mint a globally unique
+                            // internal id so replayed history survives
+                            // retries and cross-wire fallbacks. It must
+                            // stay unique across streams: a per-stream
+                            // counter restarted at `call-0` left duplicate
+                            // tool ids in history and the TUI merged a
                             // later call into an earlier call's card.
-                            let internal_call_id =
-                                format!("call-{}", crate::id::CraftId::generate());
-                            let internal_call_id = call_ids
-                                .entry(tool_call.id.to_string())
-                                .or_insert(internal_call_id)
+                            let internal_id = call_ids
+                                .entry(id.clone())
+                                .or_insert_with(|| format!("call-{}", crate::id::CraftId::generate()))
                                 .clone();
-                            emit(Event::ToolStart {
-                                id: internal_call_id,
-                                name: tool_call.function.name.to_string(),
-                                arguments: tool_call.function.arguments_value(),
+                            emit(Event::ToolPending {
+                                id: internal_id,
+                                name: name.clone(),
                             });
                         }
+                        ProviderEvent::ContentComplete {
+                            block: block @ animist::history::ContentBlock::ToolUse { id, input, .. },
+                        } => {
+                            // Emit at completion: the arguments are whole,
+                            // matching the timing surfaces expect.
+                            if let Some(internal_id) = call_ids.get(id) {
+                                let animist::history::ContentBlock::ToolUse { name, .. } = block
+                                else {
+                                    unreachable!("matched on ToolUse");
+                                };
+                                emit(Event::ToolStart {
+                                    id: internal_id.clone(),
+                                    name: name.clone(),
+                                    arguments: input.clone(),
+                                });
+                            }
+                        }
                         _ => {}
+                    },
+                    ExchangeEvent::Finished(Ok(response)) => break response,
+                    ExchangeEvent::Finished(Err(error)) => {
+                        return Err(failure_from_error(&error));
                     }
-                    fold_streamed_event(&mut parts, &event);
                 }
-            },
+            }
         }
-    }
-    // The folded turn: usage, finish reason, and the assembled choice come
-    // from the same response a blocking call would have returned.
-    let response = match stream.finish().await {
-        Ok(response) => response,
-        Err(error) => return Err(failure_from_error(&error)),
     };
-    let usage = usage_from_response(&response);
-    let assistant =
-        assistant_from_stream(&response.choice, Some(&response.origin), &call_ids, &parts);
+    if response.stop_reason == Some(StopReason::ContextWindowExceeded) {
+        return Err(StreamFailure::Error {
+            kind: ErrorKind::Overflow,
+            message: "the prompt exceeded the model's context window".to_owned(),
+            provider_retried: false,
+        });
+    }
+    let usage = history::Usage {
+        input_tokens: u64::from(response.usage.input + response.usage.cache_read),
+        output_tokens: u64::from(response.usage.output),
+        total_tokens: u64::from(
+            response.usage.input
+                + response.usage.output
+                + response.usage.cache_read
+                + response.usage.cache_creation,
+        ),
+    };
+    let assistant = edge::assistant_from_animist(&response.message, &call_ids);
     Ok(TurnOutput {
         assistant,
         usage,
-        finish_reason: response.finish_reason(),
+        finish_reason: response.stop_reason,
     })
-}
-
-/// Zero-valued counters are the documented sentinel for a missing report;
-/// `total_tokens` is derived when the provider omitted it.
-fn usage_from_response(response: &rig_core::completion::CompletionResponse) -> history::Usage {
-    let rig_usage = &response.usage;
-    let input = rig_usage.input_tokens.unwrap_or(0);
-    let output = rig_usage.output_tokens.unwrap_or(0);
-    let total = rig_usage
-        .total_tokens
-        .unwrap_or(input.saturating_add(output));
-    history::Usage {
-        input_tokens: input,
-        output_tokens: output,
-        total_tokens: total,
-    }
 }
 
 impl StreamFailure {
     pub(crate) fn is_overflow(&self) -> bool {
-        matches!(self, Self::Error { kind, .. } if kind.is_overflow())
+        matches!(
+            self,
+            Self::Error { kind, .. } if kind.is_overflow()
+        )
     }
 
     pub(crate) fn is_auth(&self) -> bool {
-        matches!(self, Self::Error { kind, .. } if *kind == ErrorKind::Auth)
+        matches!(
+            self,
+            Self::Error { kind, .. } if *kind == ErrorKind::Auth
+        )
     }
 
     pub(crate) fn message(&self) -> Option<&str> {
@@ -336,17 +451,6 @@ impl StreamFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
-
-    fn request() -> CompletionRequest {
-        crate::edge::to_request(
-            &[crate::history::Message::user("hi")],
-            &[],
-            None,
-            None,
-            None,
-        )
-    }
 
     #[test]
     fn classifies_provider_overflow_messages() {
@@ -466,8 +570,9 @@ mod tests {
         }
     }
 
-    /// A preserved provider status classifies without string matching, both
-    /// from transport refusals and provider-shaped failures.
+    /// A typed HTTP status classifies without string matching, including
+    /// Bedrock statuses surfacing through their source, and Bedrock
+    /// 429/503 mark themselves provider-retried.
     #[test]
     fn classifies_typed_http_status() {
         for (status, expected) in [
@@ -477,154 +582,108 @@ mod tests {
             (400, ErrorKind::Fatal),
             (401, ErrorKind::Auth),
         ] {
-            let error = ProviderError::from_http_response(
-                http::StatusCode::from_u16(status).unwrap(),
-                "boom",
-            );
+            let error = ProviderError::Http {
+                status,
+                body: "boom".to_owned(),
+                body_truncated: false,
+                backtrace: snafu::GenerateImplicitData::generate(),
+            };
             assert_eq!(classify_error(&error), expected, "status {status}");
-            assert_eq!(
-                classify_error(&ProviderError::from_transport_error(
-                    rig_core::http_client::Error::non_success_with_details(
-                        http::StatusCode::from_u16(status).unwrap(),
-                        http::HeaderMap::new(),
-                        "boom".into(),
-                    ),
-                )),
-                expected,
-                "transport status {status}"
-            );
         }
-        // A truncated stream is retryable transport damage.
-        assert_eq!(
-            classify_error(&ProviderError::Truncated),
-            ErrorKind::Transport
-        );
-    }
-
-    /// A dropped `CancelFlag` must disable the cancel branch instead of
-    /// busy-looping: the stream still completes and aggregates normally.
-    #[tokio::test]
-    async fn dropped_cancel_flag_lets_the_stream_complete() {
-        let model = MockCompletionModel::from_stream_turns(vec![vec![
-            MockStreamEvent::text("hello"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final_with_total_tokens(3)),
-        ]]);
-        let (flag, cancel) = crate::run::cancel_channel();
-        drop(flag);
-        let output = run_model_stream(&model, request(), &cancel, &|_| {})
-            .await
-            .unwrap();
-        assert_eq!(output.assistant.text(), "hello");
-        assert_eq!(output.usage.total_tokens, 3);
-        assert_eq!(output.finish_reason, None);
-    }
-
-    /// A `FinalResponse` finish's reason rides the turn output.
-    #[tokio::test]
-    async fn finish_reason_rides_the_turn_output() {
-        let finish = {
-            let mut finish =
-                rig_core::test_utils::mock_final(rig_core::completion::Usage::default());
-            finish.reason = Some(rig_core::completion::FinishReason::Length);
-            finish
+        let overflow = ProviderError::Http {
+            status: 400,
+            body: "This model's maximum context length is 200000 tokens.".to_owned(),
+            body_truncated: false,
+            backtrace: snafu::GenerateImplicitData::generate(),
         };
-        let model = MockCompletionModel::from_stream_turns(vec![vec![
-            MockStreamEvent::text("trunc"),
-            MockStreamEvent::FinalResponse(finish),
-        ]]);
-        let (_flag, cancel) = crate::run::cancel_channel();
-        let output = run_model_stream(&model, request(), &cancel, &|_| {})
-            .await
-            .unwrap();
-        assert_eq!(
-            output.finish_reason,
-            Some(rig_core::completion::FinishReason::Length)
-        );
+        assert!(failure_from_error(&overflow).is_overflow());
+
+        let bedrock_retried = ProviderError::Bedrock {
+            source: animist::provider::bedrock::BedrockError::Http {
+                status: 429,
+                request_id: None,
+                error_type: None,
+                body: Vec::new(),
+                backtrace: snafu::GenerateImplicitData::generate(),
+            },
+        };
+        let StreamFailure::Error {
+            kind,
+            provider_retried,
+            ..
+        } = failure_from_error(&bedrock_retried)
+        else {
+            panic!("error failure");
+        };
+        assert_eq!(kind, ErrorKind::RateLimited);
+        assert!(provider_retried, "animist already spent its retries");
+
+        let plain = ProviderError::Http {
+            status: 429,
+            body: String::new(),
+            body_truncated: false,
+            backtrace: snafu::GenerateImplicitData::generate(),
+        };
+        let StreamFailure::Error {
+            provider_retried, ..
+        } = failure_from_error(&plain)
+        else {
+            panic!("error failure");
+        };
+        assert!(!provider_retried, "only Bedrock retries internally");
     }
 
     /// A stream that ends without reporting usage yields the zero-valued
     /// sentinel when the provider sent none.
     #[tokio::test]
-    async fn missing_usage_report_falls_back_to_zero() {
-        let model = MockCompletionModel::from_stream_turns(vec![vec![
-            MockStreamEvent::text("hi"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-                rig_core::completion::Usage::default(),
-            )),
-        ]]);
-        let (_flag, cancel) = crate::run::cancel_channel();
-        let output = run_model_stream(&model, request(), &cancel, &|_| {})
+    async fn scripted_text_turn_streams_and_aggregates() {
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        provider.push(crate::testing::text_turn("hello"));
+        let handle = ModelHandle::scripted(crate::testing::scripted_model(
+            &provider,
+            crate::testing::model_info("m", 1000, 100, false, false),
+        ));
+        let request = ProviderRequest {
+            messages: crate::edge::to_animist(&[crate::history::Message::user("hi")], false),
+            system: String::new(),
+            tools: Vec::new(),
+            options: RequestOptions::default(),
+        };
+        let (flag, cancel) = crate::run::cancel_channel();
+        drop(flag);
+        let output = run_model_stream(&handle, request, &cancel, &|_| {})
             .await
             .unwrap();
-        assert_eq!(output.assistant.text(), "hi");
-        assert_eq!(output.usage.total_tokens, 0);
+        assert_eq!(output.assistant.text(), "hello");
+        assert_eq!(output.usage.total_tokens, 12);
+        assert_eq!(output.finish_reason, Some(StopReason::EndTurn));
     }
 
-    /// A stream that ends without the provider's terminal record is
-    /// truncation-damaged transport, not a short honest answer: it
-    /// classifies retryable and carries a message.
+    /// Cancellation mid-stream keeps the partial text the view already
+    /// showed, from the exchange's retained partial.
     #[tokio::test]
-    async fn unterminated_stream_is_transport_failure() {
-        let model = MockCompletionModel::from_stream_turns(vec![vec![MockStreamEvent::text("hi")]]);
-        let (_flag, cancel) = crate::run::cancel_channel();
-        match run_model_stream(&model, request(), &cancel, &|_| {}).await {
-            Err(StreamFailure::Error { kind, .. }) => {
-                assert!(kind.is_retryable(), "{kind:?}");
-            }
-            other => panic!("expected transport failure, got {other:?}"),
-        }
-    }
-
-    /// A model whose stream never resolves: the first poll is the window an
-    /// Esc lands in during a slow provider handshake.
-    #[derive(Clone)]
-    struct HangingModel;
-
-    impl CompletionSource for HangingModel {
-        fn completion(
-            &self,
-            _request: CompletionRequest,
-        ) -> impl Future<Output = Result<rig_core::completion::CompletionResponse, ProviderError>> + Send
-        {
-            std::future::pending()
-        }
-
-        fn stream(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<rig_core::streaming::CompletionStream, ProviderError> {
-            Ok(rig_core::streaming::CompletionStream::relay(
-                "hanging",
-                Box::pin(futures::stream::pending()),
-            ))
-        }
-    }
-
-    /// An Esc that lands while the handshake is still being polled must
-    /// settle the turn as a normal cancellation (partial history commit)
-    /// instead of hanging until the interrupt grace abort drops the turn.
-    #[tokio::test]
-    async fn cancel_during_stream_establishment_settles_immediately() {
+    async fn cancelled_stream_carries_the_partial_text() {
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        provider.push(crate::testing::text_turn("partial").blocked());
+        let handle = ModelHandle::scripted(crate::testing::scripted_model(
+            &provider,
+            crate::testing::model_info("m", 1000, 100, false, false),
+        ));
+        let request = ProviderRequest {
+            messages: crate::edge::to_animist(&[crate::history::Message::user("hi")], false),
+            system: String::new(),
+            tools: Vec::new(),
+            options: RequestOptions::default(),
+        };
         let (flag, cancel) = crate::run::cancel_channel();
-        let task = tokio::spawn(async move {
-            run_model_stream(&HangingModel, request(), &cancel, &|_| {}).await
-        });
-        // Let the task park inside the handshake poll, then interrupt.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let task =
+            tokio::spawn(async move { run_model_stream(&handle, request, &cancel, &|_| {}).await });
+        while provider.requests().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
         flag.set(true);
         match task.await.unwrap() {
-            Err(StreamFailure::Cancelled { .. }) => {}
-            other => panic!("expected cancellation, got {other:?}"),
-        }
-    }
-
-    /// A token already cancelled before the call must not enter the stream.
-    #[tokio::test]
-    async fn pre_cancelled_token_cancels_before_establishment() {
-        let (flag, cancel) = crate::run::cancel_channel();
-        flag.set(true);
-        match run_model_stream(&HangingModel, request(), &cancel, &|_| {}).await {
-            Err(StreamFailure::Cancelled { .. }) => {}
+            Err(StreamFailure::Cancelled { streamed }) => assert_eq!(streamed, "partial"),
             other => panic!("expected cancellation, got {other:?}"),
         }
     }

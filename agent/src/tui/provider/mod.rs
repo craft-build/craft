@@ -248,6 +248,10 @@ pub struct ModelChoice {
     pub provider_label: String,
     /// Supported thinking policies resolved by the backend from model metadata.
     pub thinking_choices: Vec<crate::thinking::ThinkingConfig>,
+    /// Whether the model takes image input; unknown models allow the
+    /// attach (a wrongly attached image is recoverable, a dropped one is
+    /// not), matching the old metadata-miss behavior.
+    pub vision: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -280,7 +284,7 @@ pub struct UsageRow {
 pub enum UsageFetchState {
     Idle,
     Loading,
-    Ready(crate::providers::ProviderUsage),
+    Ready(crate::usage_fetch::ProviderUsage),
     /// The provider exposes no programmatic usage endpoint.
     Unsupported,
     Error(String),

@@ -49,14 +49,12 @@ fn first_tool_text(history: &[Message]) -> String {
 #[tokio::test]
 async fn disallowed_tool_is_denied_at_the_gate() {
     let (model, _) = stream_turns(vec![
-        vec![
-            tool_event("t1", "delete", serde_json::json!({"files": ["victim.txt"]})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("recovered"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "delete",
+            serde_json::json!({"files": ["victim.txt"]}),
+        )]),
+        crate::testing::text_turn("recovered"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("victim.txt"), "body").unwrap();
@@ -89,14 +87,12 @@ async fn disallowed_tool_is_denied_at_the_gate() {
 #[tokio::test]
 async fn allowed_tool_runs_without_a_prompt() {
     let (model, _) = stream_turns(vec![
-        vec![
-            tool_event("t1", "delete", serde_json::json!({"files": ["victim.txt"]})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "delete",
+            serde_json::json!({"files": ["victim.txt"]}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("victim.txt"), "body").unwrap();
@@ -126,21 +122,12 @@ async fn allowed_tool_runs_without_a_prompt() {
 #[tokio::test]
 async fn batch_children_inherit_the_cli_policy() {
     let (model, _) = stream_turns(vec![
-        vec![
-            tool_event(
-                "t1",
-                "batch",
-                serde_json::json!({"tool_calls": [
-                    {"tool": "delete", "parameters": {"files": ["victim.txt"]}},
-                    {"tool": "read", "parameters": {"path": "kept.txt"}},
-                ]}),
-            ),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "batch",
+            serde_json::json!({"tool_calls": [ {"tool": "delete", "parameters": {"files": ["victim.txt"]}}, {"tool": "read", "parameters": {"path": "kept.txt"}}, ]}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("victim.txt"), "body").unwrap();
@@ -179,14 +166,12 @@ async fn batch_children_inherit_the_cli_policy() {
 #[tokio::test]
 async fn mcp_server_rule_denies_wire_tool_calls() {
     let (model, _) = stream_turns(vec![
-        vec![
-            tool_event("t1", "srv__echo", serde_json::json!({"message": "hi"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("recovered"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "srv__echo",
+            serde_json::json!({"message": "hi"}),
+        )]),
+        crate::testing::text_turn("recovered"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let permissions = std::sync::Arc::new(crate::permissions::PermissionManager::new(

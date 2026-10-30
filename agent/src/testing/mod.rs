@@ -223,23 +223,22 @@ pub fn model_info(
     thinking: bool,
     vision: bool,
 ) -> ModelInfo {
+    let features = Features::builder()
+        .tool_examples(false)
+        .thinking(
+            Thinking::builder()
+                .supported(thinking)
+                .required(false)
+                .efforts(Vec::new())
+                .build(),
+        )
+        .vision(vision)
+        .deferred_tools(false)
+        .build();
     ModelInfo::builder()
         .ids(vec![id.to_owned()])
         .tier(Tier::Medium)
-        .features(
-            Features::builder()
-                .tool_examples(false)
-                .thinking(
-                    Thinking::builder()
-                        .supported(thinking)
-                        .required(false)
-                        .efforts(Vec::new())
-                        .build(),
-                )
-                .vision(vision)
-                .deferred_tools(false)
-                .build(),
-        )
+        .features(features)
         .pricing(Pricing::default())
         .config(
             Config::builder()
@@ -248,6 +247,123 @@ pub fn model_info(
                 .build(),
         )
         .build()
+}
+
+/// An `ModelInfo` row with optional limits, for catalog rows exercising an
+/// unknown window or output cap.
+pub fn model_info_with(
+    id: &str,
+    context_window: Option<u32>,
+    max_output: Option<u32>,
+) -> ModelInfo {
+    let mut config = Config::builder().build();
+    config.context_window = context_window;
+    config.max_output_tokens = max_output;
+    ModelInfo::builder()
+        .ids(vec![id.to_owned()])
+        .tier(Tier::Medium)
+        .features(
+            Features::builder()
+                .tool_examples(false)
+                .thinking(
+                    Thinking::builder()
+                        .supported(false)
+                        .required(false)
+                        .efforts(Vec::new())
+                        .build(),
+                )
+                .vision(false)
+                .deferred_tools(false)
+                .build(),
+        )
+        .pricing(Pricing::default())
+        .config(config)
+        .build()
+}
+
+/// Map recorded wire messages back onto craft history, the test-side
+/// inverse of [`crate::edge::to_animist`]: assertions compare what a
+/// request carried against the committed history. Assistant messages reuse
+/// the production mapping (tool-call ids stay as the wire recorded them).
+pub fn replay_history(messages: &[Message]) -> Vec<crate::history::Message> {
+    use crate::history::{ToolResult, ToolResultContent, UserContent};
+    use animist::history::{ContentBlock, ImageSource, Role, ToolContent};
+
+    let image_block = |source: &ImageSource| match source {
+        ImageSource::Base64 { media_type, data } => crate::history::ImageBlock {
+            media_type: match media_type.as_str() {
+                "image/jpeg" => crate::history::ImageMedia::Jpeg,
+                "image/gif" => crate::history::ImageMedia::Gif,
+                "image/webp" => crate::history::ImageMedia::Webp,
+                _ => crate::history::ImageMedia::Png,
+            },
+            data: data.clone(),
+            caption: "[image]".to_owned(),
+        },
+        ImageSource::Url { url } => crate::history::ImageBlock {
+            media_type: crate::history::ImageMedia::Png,
+            data: url.clone(),
+            caption: "[image]".to_owned(),
+        },
+    };
+
+    messages
+        .iter()
+        .map(|message| match message.role {
+            Role::System => crate::history::Message::System {
+                content: message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            },
+            Role::User => crate::history::Message::User {
+                content: message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(UserContent::text(text.clone())),
+                        ContentBlock::Image { source } => {
+                            Some(UserContent::Image(image_block(source)))
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            name,
+                            content,
+                            is_error,
+                            ..
+                        } => Some(UserContent::ToolResult(ToolResult {
+                            call: tool_use_id.clone(),
+                            name: name.clone().unwrap_or_default(),
+                            content: content
+                                .0
+                                .iter()
+                                .map(|item| match item {
+                                    ToolContent::Text { text } => {
+                                        ToolResultContent::Text(crate::history::Text {
+                                            text: text.clone(),
+                                        })
+                                    }
+                                    ToolContent::Image { source } => {
+                                        ToolResultContent::Image(image_block(source))
+                                    }
+                                })
+                                .collect(),
+                            is_error: *is_error,
+                        })),
+                        _ => None,
+                    })
+                    .collect(),
+            },
+            Role::Assistant => {
+                crate::edge::assistant_from_animist(message, &std::collections::HashMap::new())
+            }
+        })
+        .collect()
 }
 
 fn assistant(content: Vec<ContentBlock>) -> Message {

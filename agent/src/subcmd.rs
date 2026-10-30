@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::error::{InvalidSnafu, Result};
 use crate::paths;
 use crate::prompt::{self, PromptId, ResolvedSlots, Vars};
-use crate::providers::{Provider, ProviderKind};
+use crate::provider::ProviderHandle;
 use crate::storage::StateDir;
 use crate::storage::model as model_store;
 use crate::storage::stats::{CostLedger, CostSummary, format_usd};
@@ -31,14 +31,14 @@ fn storage() -> Result<StateDir> {
 /// `craft models`: one `provider/model-id` line per catalog entry. A failing
 /// provider warns on stderr without aborting the other providers.
 pub async fn models(config: Config) -> Result<()> {
+    let catalog_data = crate::provider::load_catalog().await;
     for (name, provider_config) in &config.providers {
-        if provider_config.kind == ProviderKind::Voyageai {
-            continue;
-        }
-        match Provider::from_config(provider_config) {
-            Ok(provider) => match provider.models(provider_config).await {
+        match ProviderHandle::from_config(provider_config, Some(&catalog_data)).await {
+            Ok(provider) => match provider.models(provider_config, Some(&catalog_data)).await {
                 Ok(catalog) => {
-                    for line in format_model_lines(name, &catalog) {
+                    let rows =
+                        crate::model_selection::CatalogModel::rows(&catalog, Some(provider_config));
+                    for line in format_model_lines(name, &rows) {
                         println!("{line}");
                     }
                 }
@@ -55,7 +55,10 @@ pub async fn models(config: Config) -> Result<()> {
     Ok(())
 }
 
-fn format_model_lines(provider: &str, catalog: &[crate::providers::CatalogModel]) -> Vec<String> {
+fn format_model_lines(
+    provider: &str,
+    catalog: &[crate::model_selection::CatalogModel],
+) -> Vec<String> {
     catalog
         .iter()
         .map(|model| format!("{provider}/{}", model.id))
@@ -148,8 +151,8 @@ pub async fn doctor(config: Config, export: bool) -> Result<()> {
     let current_ok = match &current {
         Some((name, model)) => {
             let provider_config = &config.providers[name];
-            let (status, detail) = match Provider::from_config(provider_config) {
-                Ok(provider) => match ping(provider.models(provider_config)).await {
+            let (status, detail) = match ProviderHandle::from_config(provider_config, None).await {
+                Ok(provider) => match ping(provider.models(provider_config, None)).await {
                     Ok(_) => ("ok", String::new()),
                     Err(detail) => ("fail", detail),
                 },
@@ -180,12 +183,10 @@ pub async fn doctor(config: Config, export: bool) -> Result<()> {
 
     if !current_ok {
         for (name, provider_config) in &config.providers {
-            if provider_config.kind == ProviderKind::Voyageai
-                || current.as_ref().is_some_and(|(n, _)| n == name)
-            {
+            if current.as_ref().is_some_and(|(n, _)| n == name) {
                 continue;
             }
-            let provider = match Provider::from_config(provider_config) {
+            let provider = match ProviderHandle::from_config(provider_config, None).await {
                 Ok(p) => p,
                 Err(e) => {
                     provider_status.push(json!({
@@ -196,7 +197,7 @@ pub async fn doctor(config: Config, export: bool) -> Result<()> {
                     continue;
                 }
             };
-            let catalog = match ping(provider.models(provider_config)).await {
+            let catalog = match ping(provider.models(provider_config, None)).await {
                 Ok(catalog) => catalog,
                 Err(detail) => {
                     provider_status.push(json!({
@@ -207,8 +208,8 @@ pub async fn doctor(config: Config, export: bool) -> Result<()> {
                     continue;
                 }
             };
-            if let Some(model) = catalog.first() {
-                let spec = format!("{name}/{}", model.id);
+            if let Some(model) = catalog.first().and_then(|info| info.ids.first()) {
+                let spec = format!("{name}/{model}");
                 model_store::persist_model(&dir, &spec).map_err(|e| {
                     InvalidSnafu {
                         reason: format!("persist healed model: {e}"),
@@ -256,14 +257,14 @@ pub async fn doctor(config: Config, export: bool) -> Result<()> {
 
 async fn first_configured_model(config: &Config) -> Option<(String, String)> {
     for (name, provider_config) in &config.providers {
-        if provider_config.kind == ProviderKind::Voyageai {
-            continue;
-        }
-        let provider = Provider::from_config(provider_config).ok()?;
-        if let Ok(catalog) = provider.models(provider_config).await
+        let provider = ProviderHandle::from_config(provider_config, None)
+            .await
+            .ok()?;
+        if let Ok(catalog) = provider.models(provider_config, None).await
             && let Some(model) = catalog.first()
+            && let Some(id) = model.ids.first()
         {
-            return Some((name.clone(), model.id.clone()));
+            return Some((name.clone(), id.clone()));
         }
     }
     None
@@ -418,7 +419,7 @@ pub async fn prompt(variant: PromptVariant, plan: bool, tools: bool, names: bool
                     json!({
                         "name": d.name,
                         "description": d.description,
-                        "parameters": d.parameters,
+                        "parameters": d.input_schema,
                     })
                 })
                 .collect();
@@ -624,14 +625,14 @@ mod tests {
     #[test]
     fn format_model_lines_prefix_the_provider() {
         let catalog = vec![
-            crate::providers::CatalogModel {
+            crate::model_selection::CatalogModel {
                 id: "m1".into(),
                 name: None,
                 description: None,
                 context_length: None,
                 max_output_tokens: None,
             },
-            crate::providers::CatalogModel {
+            crate::model_selection::CatalogModel {
                 id: "m2".into(),
                 name: Some("M2".into()),
                 description: None,

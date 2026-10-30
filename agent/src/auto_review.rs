@@ -8,20 +8,17 @@
 //!
 //! Ported from the reference `craft-agent/src/agent/auto_review.rs`,
 //! re-expressed for this repo's Rig edge: the reviewer call goes through
-//! [`crate::edge::to_request`] + `CompletionSource::completion`, like the
+//! [`crate::provider::complete_text`], like the
 //! compaction summarizer. Deviation: no reviewer-side cancel token (the
 //! reference races one); the deadline alone bounds the call.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::providers::CompletionSource;
-use rig_core::completion::message::AssistantContent;
 use serde::Deserialize;
 use snafu::Snafu;
 use tokio::time::timeout;
 
-use crate::edge;
 use crate::history::{Message, UserContent};
 
 const REVIEWER_DEADLINE: Duration = Duration::from_secs(30);
@@ -228,7 +225,7 @@ pub(crate) type Reviewer = Arc<
 >;
 
 /// Production reviewer: one locked-down model call per NeedsPrompt decision.
-pub(crate) fn model_reviewer(model: crate::providers::DynamicModel) -> Reviewer {
+pub(crate) fn model_reviewer(model: crate::provider::ModelHandle) -> Reviewer {
     Arc::new(move |tool, scopes| {
         let model = model.clone();
         Box::pin(async move { review(&model, &tool, &scopes).await })
@@ -249,7 +246,7 @@ pub(crate) fn endpoint_reviewer(provider: Arc<dyn argosy::decision::DecisionProv
 
 /// The auto-review reviewer for a session: the decision endpoint when it is
 /// enabled, otherwise the locked-down LLM reviewer.
-pub(crate) fn reviewer_for(model: crate::providers::DynamicModel) -> Reviewer {
+pub(crate) fn reviewer_for(model: crate::provider::ModelHandle) -> Reviewer {
     let decision = crate::knowledge::ArgosyService::global().decision();
     if decision.is_enabled() {
         endpoint_reviewer(decision)
@@ -277,8 +274,8 @@ fn review_message(tool: &str, scopes: &[String]) -> Message {
 /// being requested. The call carries no tools, so the reviewer cannot itself
 /// mutate state. Fails closed on timeout, provider error, or unparseable
 /// output.
-pub async fn review<M: CompletionSource>(
-    model: &M,
+pub async fn review(
+    model: &crate::provider::ModelHandle,
     tool: &str,
     scopes: &[String],
 ) -> Result<Decision, ReviewError> {
@@ -287,16 +284,20 @@ pub async fn review<M: CompletionSource>(
 
 /// Deadline-parameterized core so tests can exercise the timeout path
 /// without waiting the full 30 seconds.
-pub(crate) async fn review_with_deadline<M: CompletionSource>(
-    model: &M,
+pub(crate) async fn review_with_deadline(
+    model: &crate::provider::ModelHandle,
     tool: &str,
     scopes: &[String],
     deadline: Duration,
 ) -> Result<Decision, ReviewError> {
     let messages = vec![review_message(tool, scopes)];
-    let request = edge::to_request(&messages, &[], Some(REVIEWER_SYSTEM_PROMPT), None, None);
-    let response = match timeout(deadline, model.completion(request)).await {
-        Ok(Ok(response)) => response,
+    let text = match timeout(
+        deadline,
+        crate::provider::complete_text(model, &messages, REVIEWER_SYSTEM_PROMPT),
+    )
+    .await
+    {
+        Ok(Ok(text)) => text,
         Ok(Err(e)) => {
             return Err(ReviewError::Provider {
                 message: e.to_string(),
@@ -304,15 +305,6 @@ pub(crate) async fn review_with_deadline<M: CompletionSource>(
         }
         Err(_) => return Err(ReviewError::Timeout { deadline }),
     };
-    let text = response
-        .choice
-        .iter()
-        .filter_map(|block| match block {
-            AssistantContent::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     if text.trim().is_empty() {
         return Err(ReviewError::Empty);
     }
@@ -322,7 +314,8 @@ pub(crate) async fn review_with_deadline<M: CompletionSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::test_utils::{MockCompletionModel, MockTurn};
+    use crate::provider::ModelHandle;
+    use crate::testing::ScriptedProvider;
 
     struct FixedDecision(f32);
 
@@ -462,27 +455,40 @@ mod tests {
         format!(r#"{{"verdict":"{verdict}","risk":"{risk}","rationale":"{rationale}"}}"#)
     }
 
+    /// A reviewer model over one scripted reply, and its recorder.
+    fn reviewer_model(reply: crate::testing::Attempt) -> (ModelHandle, ScriptedProvider) {
+        let provider = ScriptedProvider::new(Vec::new());
+        provider.push(reply);
+        (
+            ModelHandle::scripted(crate::testing::scripted_model(
+                &provider,
+                crate::testing::model_info("reviewer", 200_000, 8_192, false, false),
+            )),
+            provider,
+        )
+    }
+
     #[tokio::test]
     async fn well_formed_allow_is_parsed_from_the_model() {
-        let model = MockCompletionModel::from_turns([MockTurn::text(decision_json(
+        let (model, provider) = reviewer_model(crate::testing::text_turn(&decision_json(
             "allow",
             "low",
             "read-only",
-        ))]);
+        )));
         let d = review(&model, "write", &["/tmp/x".into()]).await.unwrap();
         assert_eq!(d.verdict, Verdict::Allow);
         assert_eq!(d.risk, Risk::Low);
         assert_eq!(d.rationale, "read-only");
         // Exactly one locked-down call: no tools, reviewer preamble.
-        assert_eq!(model.requests().len(), 1);
-        let request = &model.requests()[0];
+        assert_eq!(provider.requests().len(), 1);
+        let request = &provider.requests()[0];
         assert!(request.tools.is_empty());
-        assert_eq!(request.system_instructions(), Some(REVIEWER_SYSTEM_PROMPT));
+        assert_eq!(request.system, REVIEWER_SYSTEM_PROMPT);
     }
 
     #[tokio::test]
     async fn provider_error_fails_closed() {
-        let model = MockCompletionModel::from_turns([MockTurn::error("rate limited")]);
+        let (model, _provider) = reviewer_model(crate::testing::http_error(429, "rate limited"));
         assert!(matches!(
             review(&model, "bash", &["rm -rf /".into()]).await,
             Err(ReviewError::Provider { .. })
@@ -491,32 +497,10 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_fails_closed() {
-        #[derive(Clone)]
-        struct HangingModel;
-        impl CompletionSource for HangingModel {
-            fn completion(
-                &self,
-                _request: rig_core::completion::CompletionRequest,
-            ) -> impl Future<
-                Output = Result<
-                    rig_core::completion::CompletionResponse,
-                    rig_core::error::ProviderError,
-                >,
-            > + Send {
-                futures::future::pending()
-            }
-            fn stream(
-                &self,
-                _request: rig_core::completion::CompletionRequest,
-            ) -> Result<rig_core::streaming::CompletionStream, rig_core::error::ProviderError>
-            {
-                Ok(rig_core::streaming::CompletionStream::relay(
-                    "hanging",
-                    Box::pin(futures::stream::pending()),
-                ))
-            }
-        }
-        let err = review_with_deadline(&HangingModel, "bash", &[], Duration::from_millis(10))
+        // An attempt that streams its events and then holds: the deadline
+        // is the only way out.
+        let (model, _provider) = reviewer_model(crate::testing::text_turn("never").blocked());
+        let err = review_with_deadline(&model, "bash", &[], Duration::from_millis(10))
             .await
             .unwrap_err();
         assert!(matches!(err, ReviewError::Timeout { .. }));

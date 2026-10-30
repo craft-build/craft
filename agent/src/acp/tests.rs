@@ -43,13 +43,7 @@ fn config_options_expose_provider_model_and_thinking() {
         instructions: Default::default(),
         history: Vec::new(),
         provider_name: "openai".into(),
-        models: vec![CatalogModel {
-            id: "gpt-x".into(),
-            name: Some("GPT X".into()),
-            description: None,
-            context_length: None,
-            max_output_tokens: None,
-        }],
+        models: vec![crate::testing::model_info_with("gpt-x", None, None)],
         model: "gpt-x".into(),
         context_length: Some(128_000),
         thinking: Default::default(),
@@ -68,6 +62,14 @@ fn config_options_expose_provider_model_and_thinking() {
     assert_eq!(options[0].id.0.as_ref(), "provider");
     assert_eq!(options[1].id.0.as_ref(), "model");
     assert_eq!(options[2].id.0.as_ref(), "thinking");
+}
+
+fn mock_model() -> crate::provider::ModelHandle {
+    let provider = crate::testing::ScriptedProvider::new(Vec::new());
+    crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+        &provider,
+        crate::testing::model_info("mock-model", 200_000, 8_192, false, false),
+    ))
 }
 
 fn test_session() -> Session {
@@ -94,12 +96,8 @@ fn test_session() -> Session {
 
 #[test]
 fn thinking_options_include_current_budget() {
-    let config = thinking_test_config();
-    let option = thinking_option(
-        crate::thinking::ThinkingConfig::Budget(4096),
-        config.providers.get("openai"),
-        "gpt-x",
-    );
+    let info = efforts_info(&["low", "high"]);
+    let option = thinking_option(crate::thinking::ThinkingConfig::Budget(4096), Some(&info));
     let json = serde_json::to_value(option).unwrap();
     let current = crate::thinking::ThinkingConfig::Budget(4096).to_string();
     assert_eq!(json["currentValue"], current);
@@ -112,37 +110,33 @@ fn thinking_options_include_current_budget() {
     assert_eq!(values, ["off", "adaptive", "low", "high", &current]);
 }
 
-fn thinking_test_config() -> Config {
-    let mut config = Config::parse(
-        r#"
-        provider "openai" {
-            kind = "openai"
-            model "gpt-x" { supports_thinking = true }
-        }
-        "#,
-    )
-    .unwrap();
-    config
-        .providers
-        .get_mut("openai")
-        .unwrap()
-        .models
-        .get_mut("gpt-x")
-        .unwrap()
-        .reasoning_options = Some(vec![crate::thinking::ReasoningOption {
-        kind: "effort".into(),
-        values: vec!["low".into(), "high".into()],
-        ..Default::default()
-    }]);
-    config
+/// A `ModelInfo` reporting discrete efforts, as a provider listing or the
+/// models.dev catalog would.
+fn efforts_info(efforts: &[&str]) -> animist::provider::ModelInfo {
+    let parsed: Vec<animist::provider::Effort> = efforts
+        .iter()
+        .map(|effort| match *effort {
+            "low" => animist::provider::Effort::Low,
+            "high" => animist::provider::Effort::High,
+            other => panic!("unsupported test effort {other}"),
+        })
+        .collect();
+    let mut info = crate::testing::model_info_with("gpt-x", None, None);
+    info.features.thinking = animist::provider::Thinking::builder()
+        .supported(true)
+        .required(false)
+        .efforts(parsed)
+        .build();
+    info
 }
 
 #[test]
 fn thinking_options_filter_levels_without_restoring_unsupported_current_effort() {
-    let config = thinking_test_config();
+    let info = efforts_info(&["low", "high"]);
     let mut session = test_session();
+    session.models = vec![info];
     session.thinking = crate::thinking::ThinkingConfig::Effort(crate::thinking::Effort::Max);
-    let options = session.config_options(&config, &["openai".into()]);
+    let options = session.config_options(&Config::default(), &["openai".into()]);
     let json = serde_json::to_value(&options[2]).unwrap();
     assert_eq!(json["currentValue"], "high");
     assert_eq!(
@@ -234,8 +228,6 @@ fn tool_kinds_follow_the_registered_tools() {
 
 #[tokio::test]
 async fn run_turn_tools_route_task_calls_to_the_installed_launcher() {
-    use rig_core::test_utils::MockCompletionModel;
-
     struct AllowAll;
     impl run::BeforeExecute for AllowAll {
         fn decide(&self, _call: history::ToolCall) -> run::BoxFuture<run::Decision> {
@@ -250,12 +242,7 @@ async fn run_turn_tools_route_task_calls_to_the_installed_launcher() {
     // a bad subagent type reaches its spawn and fails informatively
     // instead of degrading to the no-host availability error.
     let launcher = Arc::new(crate::subagent::SubagentLauncher {
-        parent_model: crate::providers::DynamicModel::wrap(
-            Some("mock"),
-            MockCompletionModel::from_stream_turns(
-                Vec::<Vec<rig_core::test_utils::MockStreamEvent>>::new(),
-            ),
-        ),
+        parent_model: mock_model(),
         parent_spec: "mock/mock-model".into(),
         provider: "mock".into(),
         providers: Default::default(),
@@ -315,7 +302,6 @@ async fn run_turn_tools_route_task_calls_to_the_installed_launcher() {
 
 #[tokio::test]
 async fn streamed_filesystem_results_match_model_and_acp_text() {
-    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
     use serde_json::json;
 
     let dir = tempfile::tempdir().unwrap();
@@ -324,7 +310,7 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
         "skipped\r\n\r\n    let name = \"βeta\";\r\nlast",
     )
     .unwrap();
-    let mut turns = Vec::new();
+    let mut turns: Vec<crate::testing::Attempt> = Vec::new();
     for (id, name, args) in [
         (
             "1",
@@ -339,16 +325,21 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
         ),
         ("4", "delete", json!({"files":["file.rs"]})),
     ] {
-        turns.push(vec![
-            MockStreamEvent::tool_call(id, name, args),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ]);
+        turns.push(crate::testing::tool_turn(vec![(
+            id.to_owned(),
+            name.to_owned(),
+            args,
+        )]));
     }
-    turns.push(vec![
-        MockStreamEvent::text("done"),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]);
-    let model = MockCompletionModel::from_stream_turns(turns);
+    turns.push(crate::testing::text_turn("done"));
+    let provider = crate::testing::ScriptedProvider::new(Vec::new());
+    for turn in turns {
+        provider.push(turn);
+    }
+    let model = crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+        &provider,
+        crate::testing::model_info("scripted", 200_000, 8_192, false, false),
+    ));
     let tools = Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = run::cancel_channel();
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -390,9 +381,9 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
     ]);
     // Verify what the next model request actually receives, not only the
     // display events: all four results must remain literal text.
-    let requests = model.requests();
+    let requests = provider.requests();
     assert_eq!(requests.len(), 5);
-    let model_results = crate::edge::rig_to_own(&requests[4].chat_history)
+    let model_results = crate::testing::replay_history(&requests[4].messages)
         .iter()
         .flat_map(|message| match message {
             history::Message::User { content } => content

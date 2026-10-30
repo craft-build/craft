@@ -70,7 +70,8 @@ pub(super) async fn run_turn(
         fail!("no model is selected; set the model session configuration option");
     }
     let model_label = model.clone();
-    let model = match provider.configured_model(&state.config.providers[&provider_name], &model) {
+    let provider_config = &state.config.providers[&provider_name];
+    let model = match provider.model(provider_config, None, &model).await {
         Ok(model) => model,
         Err(error) => fail!(report(error)),
     };

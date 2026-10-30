@@ -1,5 +1,11 @@
 # 03 — Inference seam cutover
 
+> **Absorbed into [02](02-provider-registry.md).** The cutover was approved as
+> one change: providers are rewritten in place on animist and the inference
+> seam moves with them, so this prompt has no separate work. Everything below
+> is kept for the record; 02's fused prompt and completion note cover it.
+
+
 ## Required workflow
 
 - **Load the `rust-best-practices` skill before writing any code** and apply it

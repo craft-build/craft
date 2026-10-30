@@ -44,8 +44,8 @@ migration branch to `main` only after 11.**
 | # | Prompt | Outcome |
 | --- | --- | --- |
 | 01 | [Baseline, dependency, test doubles](01-baseline-and-test-doubles.md) | animist in the workspace; scripted fake provider; recorded baseline |
-| 02 | [Provider registry on animist](02-provider-registry.md) | Async construction of every supported kind into animist providers and models, built in parallel with rig; Bedrock entirely on animist (credentials, client, retries, listing) |
-| 03 | [Inference seam cutover](03-inference-seam.md) | Every model call goes through animist; rig provider code, mocks and blocking bridges deleted |
+| 02 | [Provider cutover on animist](02-provider-registry.md) (fused with 03) | Providers rewritten in place on animist, every model call through animist, rig provider code/mocks/bridges deleted; Bedrock entirely on animist |
+| 03 | [Inference seam cutover](03-inference-seam.md) | *Absorbed into 02* |
 | 04 | [History types](04-history-types.md) | `crate::history` *is* animist history; legacy sessions load; `edge.rs` gone |
 | 05 | [Agent runtime core](05-agent-runtime-core.md) | `animist::agent::Agent` runs every turn behind a `run::run` facade; a temporary rig-tool bridge; request and dedup layers; event bridge |
 | 06 | [Native async tools](06-tools.md) | Tools are `ToolImpl` with scheduling claims; async I/O; global workspace lock and rig removed |

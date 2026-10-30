@@ -272,6 +272,7 @@ fn scene_model_menu() -> App {
             label: (*m).into(),
             provider_label: "provider".into(),
             thinking_choices: crate::thinking::ThinkingConfig::choices(),
+            vision: true,
         })
         .collect();
     app.handle_event(AgentEvent::CatalogSet { models, current: 1 });

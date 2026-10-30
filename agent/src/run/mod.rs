@@ -55,11 +55,10 @@ use view::compress_request_view;
 
 use std::sync::Arc;
 
-use crate::providers::CompletionSource;
+use crate::provider::ModelHandle;
 
 use crate::compression::CompressionConfig;
 use crate::config::{CompactionBuffer, CompactionConfig};
-use crate::edge;
 use crate::history::{ImageBlock, Message};
 // Module names for the test tree: `run/tests/*` qualifies `history::` and
 // `compression::` through this scope.
@@ -175,10 +174,7 @@ pub struct RunParams {
 /// (`Ok(None)` when the active model needs no swap), or report failure
 /// (`Err`).
 pub type ReauthFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<Option<crate::providers::DynamicModel>, String>>
-            + Send,
-    >,
+    Box<dyn std::future::Future<Output = Result<Option<ModelHandle>, String>> + Send>,
 >;
 pub type ReauthHook = std::sync::Arc<dyn Fn(u32) -> ReauthFuture + Send + Sync>;
 
@@ -282,8 +278,8 @@ pub enum RunOutcome {
 /// Drive one multi-turn run. `history` is the caller-owned conversation; the
 /// prompt is appended as the turn's first user message. `emit` receives every
 /// event as it happens (it must not block).
-pub async fn run<M: CompletionSource + Clone>(
-    model: &M,
+pub async fn run(
+    model: &ModelHandle,
     params: &RunParams,
     tools: &ToolDispatch,
     history: &mut Vec<Message>,
@@ -299,8 +295,8 @@ pub async fn run<M: CompletionSource + Clone>(
 // Clippy: the loop seam is deliberately flat (model, params, tools,
 // history, prompt, attachments, cancel, emit) rather than a builder.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_with_images<M: CompletionSource + Clone>(
-    model: &M,
+pub async fn run_with_images(
+    model: &ModelHandle,
     params: &RunParams,
     tools: &ToolDispatch,
     history: &mut Vec<Message>,
@@ -348,8 +344,8 @@ pub async fn run_with_images<M: CompletionSource + Clone>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_inner<M: CompletionSource + Clone>(
-    model: &M,
+async fn run_inner(
+    model: &ModelHandle,
     params: &RunParams,
     tools: &ToolDispatch,
     history: &mut Vec<Message>,
@@ -406,8 +402,8 @@ pub(crate) fn prompt_message(prompt: &str, images: &[ImageBlock]) -> Message {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_loop<M: CompletionSource + Clone>(
-    model: &M,
+async fn run_loop(
+    model: &ModelHandle,
     params: &RunParams,
     tools: &ToolDispatch,
     history: &mut Vec<Message>,
@@ -445,7 +441,7 @@ async fn run_loop<M: CompletionSource + Clone>(
     // (reference resets `reauth_attempts` on every successful stream).
     let mut reauth_attempts: u32 = 0;
     // Model rebuilt by a successful reauth, used for the rest of the run.
-    let mut refreshed_model: Option<crate::providers::DynamicModel> = None;
+    let mut refreshed_model: Option<ModelHandle> = None;
     // Run-wide transient-retry tally shared by every model call.
     let transient_budget = retry::TransientBudget::default();
     // Measured input tokens from the last completed stream; feeds the
@@ -507,14 +503,19 @@ async fn run_loop<M: CompletionSource + Clone>(
             .saturating_add(overhead.tokens())
             .max(measured_prompt_tokens);
         let window = params.compaction.as_ref().and_then(|c| c.context_length);
-        let mut request = edge::to_request(
-            &full,
-            &definitions,
-            params.preamble.as_deref(),
-            params.temperature,
-            clamped_max_tokens(window, prompt_tokens, params.max_tokens),
-        );
-        crate::thinking::attach(&mut request, params.thinking);
+        let target = refreshed_model.as_ref().unwrap_or(model);
+        let request = stream::ProviderRequest {
+            messages: crate::edge::to_animist(&full, target.relocates_tool_images()),
+            system: params.preamble.clone().unwrap_or_default(),
+            tools: definitions.clone(),
+            options: stream::request_options(
+                target,
+                params.thinking,
+                params.fast,
+                clamped_max_tokens(window, prompt_tokens, params.max_tokens),
+                params.temperature,
+            ),
+        };
         match turns::stream_turn(
             model,
             params,

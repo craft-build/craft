@@ -62,8 +62,8 @@ fn format_reset(reset_at: u64) -> String {
 pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<Line<'static>> {
     let t = theme::current();
 
-    use crate::providers::{ModelUsageRow, ProviderUsage, UsageLimit};
     use crate::tui::provider::UsageFetchState;
+    use crate::usage_fetch::{ModelUsageRow, ProviderUsage, UsageLimit};
 
     fn limit_line(limit: &UsageLimit) -> Line<'static> {
         let pct = match limit.percentage {

@@ -22,17 +22,22 @@ pub(crate) struct RunStats {
 /// primary spec's provider prefixes it.
 pub(crate) fn served_spec(
     primary: Option<&str>,
-    served_fallback: Option<&str>,
-    refreshed: Option<&crate::providers::DynamicModel>,
+    served_fallback: Option<String>,
+    refreshed: Option<&crate::provider::ModelHandle>,
 ) -> Option<Arc<str>> {
     let primary = primary?;
     let label = served_fallback
-        .or_else(|| refreshed.and_then(|m| m.label()))
-        .unwrap_or_else(|| primary.rsplit_once('/').map_or(primary, |(_, m)| m));
+        .or_else(|| refreshed.map(|m| m.model.id.clone()))
+        .unwrap_or_else(|| {
+            primary
+                .rsplit_once('/')
+                .map_or(primary, |(_, m)| m)
+                .to_owned()
+        });
     // A label with a slash is already a full spec (possibly cross-provider);
     // only a bare id borrows the primary's provider.
     let spec = if label.contains('/') {
-        label.to_owned()
+        label
     } else {
         let provider = primary.split_once('/').map_or(primary, |(p, _)| p);
         format!("{provider}/{label}")

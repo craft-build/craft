@@ -11,7 +11,6 @@ use crate::error::{
     InvalidBaseUrlSnafu, InvalidBmlSnafu, InvalidProviderSnafu, InvalidSnafu, LoadConfigSnafu,
     ReadConfigSnafu, Result,
 };
-use crate::providers::ProviderKind;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -313,29 +312,473 @@ impl AgentConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderConfig {
-    pub kind: ProviderKind,
-    /// Environment variable containing the credential; never store keys in config.
-    pub api_key_env: Option<String>,
-    /// Full API base, including any protocol prefix such as `/v1`.
-    pub base_url: Option<String>,
-    /// Azure OpenAI API version; other providers reject this field.
-    pub api_version: Option<String>,
+/// One provider's config: animist's own serializable settings for the
+/// kind, plus craft's model table and discovery switch. Every field the
+/// provider accepts is animist's documented field — new upstream fields
+/// reach users with no craft change — and `api_key` is rejected at parse
+/// time (keys live in the environment, named by `api_key_env`).
+#[derive(Clone, Deserialize)]
+pub struct ProviderEntry<C> {
+    /// The kind's animist settings (`#[serde(flatten)]`).
+    #[serde(flatten)]
+    pub config: C,
     /// Disable discovery for compatible servers without a models endpoint.
     #[serde(default = "default_discover_models")]
     pub discover_models: bool,
+    /// Manual model table: metadata overrides keyed by exact model ID. An
+    /// entry with no fields still registers an otherwise unlisted model.
     #[serde(default)]
     pub models: BTreeMap<String, ModelConfig>,
+}
+
+impl<C> std::fmt::Debug for ProviderEntry<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Credential-bearing configs have no Debug by design; the kind
+        // name and the craft-owned fields carry everything a log needs.
+        f.debug_struct("ProviderEntry")
+            .field("config", &"<per-kind settings>")
+            .field("discover_models", &self.discover_models)
+            .field("models", &self.models)
+            .finish()
+    }
+}
+
+impl<C: Default> Default for ProviderEntry<C> {
+    fn default() -> Self {
+        Self {
+            config: C::default(),
+            discover_models: default_discover_models(),
+            models: BTreeMap::new(),
+        }
+    }
+}
+
+/// One configured provider, tagged by kind. The variants carry animist's
+/// config types directly; the serde tag is the config `kind` string. The
+/// manual [`Deserialize`] impl parses kind-first so dropped kinds get
+/// migration guidance.
+#[derive(Clone)]
+pub enum ProviderConfig {
+    Anthropic(ProviderEntry<animist::provider::anthropic::AnthropicConfig>),
+    Openai(ProviderEntry<animist::provider::openai::OpenAiConfig>),
+    /// Third-party OpenAI-compatible endpoints: the OpenAI config with the
+    /// Chat Completions protocol by default. A keyless local endpoint
+    /// rides animist's keyless llama.cpp client.
+    OpenaiCompatible(ProviderEntry<animist::provider::openai::OpenAiConfig>),
+    Synthetic(ProviderEntry<animist::provider::synthetic::SyntheticConfig>),
+    ZaiCodingPlan(ProviderEntry<animist::provider::zai_coding_plan::ZaiCodingPlanConfig>),
+    Ollama(ProviderEntry<animist::provider::ollama::OllamaConfig>),
+    LlamaCpp(ProviderEntry<animist::provider::llama_cpp::LlamaCppConfig>),
+    Omlx(ProviderEntry<animist::provider::omlx::OmlxConfig>),
+    AmazonBedrock(ProviderEntry<animist::provider::bedrock::BedrockConfig>),
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Kind name plus the entry wrapper's Debug; the per-kind configs
+        // have no Debug by design (credential policy).
+        match self {
+            Self::Anthropic(entry) => f.debug_tuple("Anthropic").field(entry).finish(),
+            Self::Openai(entry) => f.debug_tuple("Openai").field(entry).finish(),
+            Self::OpenaiCompatible(entry) => {
+                f.debug_tuple("OpenaiCompatible").field(entry).finish()
+            }
+            Self::Synthetic(entry) => f.debug_tuple("Synthetic").field(entry).finish(),
+            Self::ZaiCodingPlan(entry) => f.debug_tuple("ZaiCodingPlan").field(entry).finish(),
+            Self::Ollama(entry) => f.debug_tuple("Ollama").field(entry).finish(),
+            Self::LlamaCpp(entry) => f.debug_tuple("LlamaCpp").field(entry).finish(),
+            Self::Omlx(entry) => f.debug_tuple("Omlx").field(entry).finish(),
+            Self::AmazonBedrock(entry) => f.debug_tuple("AmazonBedrock").field(entry).finish(),
+        }
+    }
+}
+
+impl ProviderConfig {
+    /// The kind string (the serde tag): registry keys and error text.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic(_) => "anthropic",
+            Self::Openai(_) => "openai",
+            Self::OpenaiCompatible(_) => "openai-compatible",
+            Self::Synthetic(_) => "synthetic",
+            Self::ZaiCodingPlan(_) => "zai-coding-plan",
+            Self::Ollama(_) => "ollama",
+            Self::LlamaCpp(_) => "llama-cpp",
+            Self::Omlx(_) => "omlx",
+            Self::AmazonBedrock(_) => "amazon-bedrock",
+        }
+    }
+
+    /// The manual model table.
+    pub fn models(&self) -> &BTreeMap<String, ModelConfig> {
+        macro_rules! models {
+            ($($variant:ident),+ $(,)?) => {
+                match self {
+                    $(Self::$variant(entry) => &entry.models,)+
+                }
+            };
+        }
+        models!(
+            Anthropic,
+            Openai,
+            OpenaiCompatible,
+            Synthetic,
+            ZaiCodingPlan,
+            Ollama,
+            LlamaCpp,
+            Omlx,
+            AmazonBedrock,
+        )
+    }
+
+    /// Whether discovery runs for this provider.
+    pub fn discover_models(&self) -> bool {
+        macro_rules! discover {
+            ($($variant:ident),+ $(,)?) => {
+                match self {
+                    $(Self::$variant(entry) => entry.discover_models,)+
+                }
+            };
+        }
+        discover!(
+            Anthropic,
+            Openai,
+            OpenaiCompatible,
+            Synthetic,
+            ZaiCodingPlan,
+            Ollama,
+            LlamaCpp,
+            Omlx,
+            AmazonBedrock,
+        )
+    }
+
+    /// Override whether discovery runs for this provider.
+    pub fn set_discover_models(&mut self, discover: bool) {
+        macro_rules! set_discover {
+            ($($variant:ident),+ $(,)?) => {
+                match self {
+                    $(Self::$variant(entry) => entry.discover_models = discover,)+
+                }
+            };
+        }
+        set_discover!(
+            Anthropic,
+            Openai,
+            OpenaiCompatible,
+            Synthetic,
+            ZaiCodingPlan,
+            Ollama,
+            LlamaCpp,
+            Omlx,
+            AmazonBedrock,
+        );
+    }
+
+    /// The configured base URL, when the kind has one and the user set it
+    /// away from the default.
+    pub fn base_url(&self) -> Option<&str> {
+        fn non_default<'a>(url: &'a str, default: &str) -> Option<&'a str> {
+            (url != default).then_some(url)
+        }
+        match self {
+            Self::Anthropic(entry) => {
+                non_default(&entry.config.base_url, "https://api.anthropic.com/v1")
+            }
+            Self::Openai(entry) | Self::OpenaiCompatible(entry) => {
+                non_default(&entry.config.base_url, "https://api.openai.com/v1")
+            }
+            Self::Synthetic(entry) => non_default(
+                &entry.config.base_url,
+                animist::provider::synthetic::BASE_URL,
+            ),
+            Self::ZaiCodingPlan(entry) => non_default(
+                &entry.config.base_url,
+                animist::provider::zai_coding_plan::BASE_URL,
+            ),
+            Self::Ollama(entry) => non_default(&entry.config.base_url, "http://localhost:11434/v1"),
+            Self::LlamaCpp(entry) => {
+                non_default(&entry.config.base_url, "http://localhost:9931/v1")
+            }
+            Self::Omlx(entry) => non_default(&entry.config.base_url, "http://localhost:8000/v1"),
+            // Bedrock endpoints are `endpoint_url`/`control_plane_endpoint_url`.
+            Self::AmazonBedrock(entry) => entry
+                .config
+                .endpoint_url
+                .as_deref()
+                .or(entry.config.control_plane_endpoint_url.as_deref()),
+        }
+    }
+
+    /// The environment variable holding the credential, when this kind
+    /// uses one: the configured `api_key_env`, else the kind's default.
+    /// Bedrock (AWS chain) and Ollama have none.
+    pub fn credential_env(&self) -> Option<&str> {
+        match self {
+            Self::Anthropic(entry) => Some(&entry.config.api_key_env),
+            Self::Openai(entry) | Self::OpenaiCompatible(entry) => Some(&entry.config.api_key_env),
+            Self::Synthetic(entry) => Some(&entry.config.api_key_env),
+            Self::ZaiCodingPlan(entry) => Some(&entry.config.api_key_env),
+            Self::LlamaCpp(entry) => entry.config.api_key_env.as_deref(),
+            Self::Omlx(entry) => entry.config.api_key_env.as_deref(),
+            Self::Ollama(_) | Self::AmazonBedrock(_) => None,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(name) = self.credential_env() {
+            if name.trim().is_empty() || name.contains(['=', '\0']) {
+                return InvalidSnafu {
+                    reason: "api_key_env must be a nonempty environment variable name",
+                }
+                .fail();
+            }
+        }
+        for (id, model) in self.models() {
+            if id.trim().is_empty() {
+                return InvalidSnafu {
+                    reason: "model IDs must not be empty",
+                }
+                .fail();
+            }
+            if model.context_length == Some(0) || model.max_output_tokens == Some(0) {
+                return InvalidSnafu {
+                    reason: format!("model {id:?}: token limits must be positive"),
+                }
+                .fail();
+            }
+            if model.protocol.is_some() && !matches!(self, Self::AmazonBedrock(_)) {
+                return InvalidSnafu {
+                    reason: format!("model {id:?}: protocol is only supported by amazon-bedrock"),
+                }
+                .fail();
+            }
+        }
+        if let Some(base) = self.base_url() {
+            if !base.is_empty() {
+                let url = url::Url::parse(base).context(InvalidBaseUrlSnafu)?;
+                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                    return InvalidSnafu {
+                        reason: "base_url must be HTTP(S) with a host",
+                    }
+                    .fail();
+                }
+                if !url.username().is_empty() || url.password().is_some() {
+                    return InvalidSnafu {
+                        reason: "base_url must not embed credentials; use api_key_env",
+                    }
+                    .fail();
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        // Config blocks always arrive as projected JSON (bml.rs builds a
+        // serde_json::Value), so re-borrowing the value here buys
+        // kind-first parsing: dropped kinds get migration guidance instead
+        // of an unknown-variant error, and inline keys are rejected before
+        // any provider sees them.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Self::from_json(value).map_err(D::Error::custom)
+    }
+}
+
+/// The supported kind strings, for parse errors.
+const SUPPORTED_KINDS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "openai-compatible",
+    "synthetic",
+    "zai-coding-plan",
+    "ollama",
+    "llama-cpp",
+    "omlx",
+    "amazon-bedrock",
+];
+
+/// Keys owned by the craft wrapper; every other key belongs to the
+/// flattened animist config.
+const ENTRY_KEYS: &[&str] = &["kind", "discover_models", "models"];
+
+impl ProviderConfig {
+    fn from_json(value: serde_json::Value) -> std::result::Result<Self, String> {
+        let map = value
+            .as_object()
+            .ok_or_else(|| "a provider block must be a table".to_owned())?;
+        let kind = map
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "provider block needs kind = \"...\" (one of {})",
+                    SUPPORTED_KINDS.join(", ")
+                )
+            })?;
+        reject_inline_key(map)?;
+
+        macro_rules! parse {
+            ($variant:ident, $config:ty) => {{
+                let entry: ProviderEntry<$config> = serde_json::from_value(value.clone())
+                    .map_err(|error| format!("{kind} provider: {error}"))?;
+                reject_unknown_keys(map, &entry.config, ENTRY_KEYS)?;
+                Self::$variant(entry)
+            }};
+        }
+        let config = match kind {
+            "anthropic" => parse!(Anthropic, animist::provider::anthropic::AnthropicConfig),
+            "openai" => parse!(Openai, animist::provider::openai::OpenAiConfig),
+            "openai-compatible" => {
+                let mut entry: ProviderEntry<animist::provider::openai::OpenAiConfig> =
+                    serde_json::from_value(value.clone())
+                        .map_err(|error| format!("{kind} provider: {error}"))?;
+                reject_unknown_keys(map, &entry.config, ENTRY_KEYS)?;
+                // Chat Completions is the compat default; an explicit
+                // `protocol` in the block wins.
+                if !map.contains_key("protocol") {
+                    entry.config.protocol = animist::provider::openai::Protocol::ChatCompletions;
+                }
+                Self::OpenaiCompatible(entry)
+            }
+            "synthetic" => parse!(Synthetic, animist::provider::synthetic::SyntheticConfig),
+            "zai-coding-plan" => parse!(
+                ZaiCodingPlan,
+                animist::provider::zai_coding_plan::ZaiCodingPlanConfig
+            ),
+            "ollama" => parse!(Ollama, animist::provider::ollama::OllamaConfig),
+            "llama-cpp" => parse!(LlamaCpp, animist::provider::llama_cpp::LlamaCppConfig),
+            "omlx" => parse!(Omlx, animist::provider::omlx::OmlxConfig),
+            "amazon-bedrock" => parse!(AmazonBedrock, animist::provider::bedrock::BedrockConfig),
+            other => return Err(dropped_kind_error(other)),
+        };
+        Ok(config)
+    }
+}
+
+/// Keys never stored, only rejected with instructions.
+fn reject_inline_key(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(), String> {
+    if map.contains_key("api_key") {
+        return Err(
+            "api_key must not be stored in config files; put the key in an \
+             environment variable and name it with api_key_env"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Report keys the provider config does not know, replacing the typo
+/// protection `deny_unknown_fields` cannot provide through `flatten`:
+/// a key is known when the serialized default of the kind's config has it.
+fn reject_unknown_keys<C: serde::Serialize>(
+    map: &serde_json::Map<String, serde_json::Value>,
+    config: &C,
+    entry_keys: &[&str],
+) -> std::result::Result<(), String> {
+    let Ok(serde_json::Value::Object(known)) = serde_json::to_value(config) else {
+        return Ok(());
+    };
+    let unknown: Vec<&String> = map
+        .keys()
+        .filter(|key| !known.contains_key(*key) && !entry_keys.contains(&key.as_str()))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let mut sorted: Vec<&str> = known
+        .keys()
+        .map(String::as_str)
+        .chain(entry_keys.iter().copied())
+        .collect();
+    sorted.sort_unstable();
+    Err(format!(
+        "unknown provider field(s) {}; known fields are {}",
+        unknown
+            .iter()
+            .map(|key| key.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        sorted.join(", ")
+    ))
+}
+
+/// The actionable error for a config naming a dropped kind: OpenAI-dialect
+/// vendors learn the `openai-compatible` migration with their base URL.
+fn dropped_kind_error(kind: &str) -> String {
+    let openai_dialect = [
+        ("deepseek", "https://api.deepseek.com"),
+        ("doubleword", ""),
+        ("groq", "https://api.groq.com/openai/v1"),
+        ("huggingface", "https://router.huggingface.co/v1"),
+        ("hyperbolic", "https://api.hyperbolic.xyz/v1"),
+        ("minimax", "https://api.minimax.chat/v1"),
+        ("mira", ""),
+        ("mistral", "https://api.mistral.ai/v1"),
+        ("moonshot", "https://api.moonshot.ai/v1"),
+        ("openrouter", "https://openrouter.ai/api/v1"),
+        ("perplexity", "https://api.perplexity.ai"),
+        ("together", "https://api.together.xyz/v1"),
+        ("venice", "https://api.venice.ai/api/v1"),
+        ("xai", "https://api.x.ai/v1"),
+        ("xiaomimimo", ""),
+        ("zai", "https://api.z.ai/api/paas/v4"),
+    ];
+    if let Some((_, base)) = openai_dialect.iter().find(|(name, _)| *name == kind) {
+        return if base.is_empty() {
+            format!(
+                "provider kind {kind:?} is no longer built in; point \
+                 kind = \"openai-compatible\" at the vendor's OpenAI-compatible base_url"
+            )
+        } else {
+            format!(
+                "provider kind {kind:?} is no longer built in; use \
+                 kind = \"openai-compatible\" with base_url = \"{base}\""
+            )
+        };
+    }
+    match kind {
+        "llamafile" => "provider kind \"llamafile\" is no longer built in; use \
+                        kind = \"llama-cpp\" with base_url pointing at the server"
+            .to_owned(),
+        "azure" => "provider kind \"azure\" is no longer built in; use \
+                    kind = \"openai-compatible\" with the deployment's base_url"
+            .to_owned(),
+        "gemini" => "provider kind \"gemini\" is no longer built in; use \
+                     kind = \"openai-compatible\" with \
+                     base_url = \"https://generativelanguage.googleapis.com/v1beta/openai\""
+            .to_owned(),
+        "cohere" => "provider kind \"cohere\" is no longer built in; use kind = \
+             \"openai-compatible\" with base_url = \"https://api.cohere.com/compatibility/v1\""
+            .to_owned(),
+        "chatgpt" | "copilot" => format!(
+            "provider kind {kind:?} is no longer built in: the OAuth device flows were \
+             removed. Use API-key access through the vendor's API kind"
+        ),
+        "voyageai" => "provider kind \"voyageai\" is no longer built in (embeddings \
+                       only; no completion models)"
+            .to_owned(),
+        other => format!(
+            "unknown provider kind {other:?}; supported kinds are {}",
+            SUPPORTED_KINDS.join(", ")
+        ),
+    }
 }
 
 fn default_discover_models() -> bool {
     true
 }
 
-/// Partial metadata overrides, keyed by the exact provider model/deployment ID.
-/// An empty table is sufficient to register an otherwise unlisted model.
+/// Partial metadata overrides, keyed by the exact provider model/deployment
+/// ID. An empty table is sufficient to register an otherwise unlisted model.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
@@ -345,8 +788,9 @@ pub struct ModelConfig {
     pub max_output_tokens: Option<u32>,
     pub supports_thinking: Option<bool>,
     pub requires_thinking: Option<bool>,
-    pub reasoning_options: Option<Vec<crate::thinking::ReasoningOption>>,
-    pub thinking_fields: Option<crate::thinking::ThinkingFields>,
+    /// Bedrock only: the wire protocol for this model, overriding the
+    /// per-family routing animist never infers.
+    pub protocol: Option<animist::provider::bedrock::Protocol>,
 }
 
 impl Config {
@@ -545,94 +989,6 @@ impl Config {
     }
 }
 
-impl ProviderConfig {
-    pub fn validate(&self) -> Result<()> {
-        if let Some(name) = &self.api_key_env {
-            if name.trim().is_empty() || name.contains(['=', '\0']) {
-                return InvalidSnafu {
-                    reason: "api_key_env must be a nonempty environment variable name",
-                }
-                .fail();
-            }
-            if self.kind == ProviderKind::Llamafile {
-                return InvalidSnafu {
-                    reason: "llamafile does not accept credentials",
-                }
-                .fail();
-            }
-        }
-        if let Some(base) = &self.base_url {
-            let url = url::Url::parse(base).context(InvalidBaseUrlSnafu)?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-            {
-                return InvalidSnafu {
-                    reason: "base_url must be HTTP(S), without credentials, query, or fragment",
-                }
-                .fail();
-            }
-        }
-        if self.api_version.is_some() && self.kind != ProviderKind::Azure {
-            return InvalidSnafu {
-                reason: "api_version is only supported by azure",
-            }
-            .fail();
-        }
-        if self
-            .api_version
-            .as_ref()
-            .is_some_and(|v| v.trim().is_empty())
-        {
-            return InvalidSnafu {
-                reason: "api_version must not be empty",
-            }
-            .fail();
-        }
-        for (id, model) in &self.models {
-            if id.trim().is_empty() {
-                return InvalidSnafu {
-                    reason: "model IDs must not be empty",
-                }
-                .fail();
-            }
-            if model.context_length == Some(0) || model.max_output_tokens == Some(0) {
-                return InvalidSnafu {
-                    reason: format!("model {id:?}: token limits must be positive"),
-                }
-                .fail();
-            }
-            if let Some(fields) = &model.thinking_fields
-                && fields
-                    .off
-                    .iter()
-                    .chain(fields.adaptive.iter())
-                    .chain(fields.levels.values())
-                    .any(|value| !value.is_object())
-            {
-                return InvalidSnafu {
-                    reason: format!("model {id:?}: thinking_fields modes must be request objects"),
-                }
-                .fail();
-            }
-            if let Some(options) = &model.reasoning_options
-                && options
-                    .iter()
-                    .any(|o| o.min.zip(o.max).is_some_and(|(min, max)| min > max))
-            {
-                return InvalidSnafu {
-                    reason: format!("model {id:?}: reasoning budget min exceeds max"),
-                }
-                .fail();
-            }
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,11 +1005,6 @@ mod tests {
               model "custom" {
                 supports_thinking = true
                 requires_thinking = true
-                reasoning_options = [{ type = "effort", values = ["low", "high"] }]
-                thinking_fields {
-                  off { enable_thinking = false }
-                  high { enable_thinking = true }
-                }
               }
             }
         "#,
@@ -664,21 +1015,9 @@ mod tests {
             Some(ThinkingConfig::Effort(Effort::Low))
         );
         assert_eq!(config.agent.thinking, Some(ThinkingConfig::Budget(4096)));
-        let model = &config.providers["local"].models["custom"];
-        assert_eq!(
-            model.reasoning_options.as_ref().unwrap()[0].values,
-            ["low", "high"]
-        );
-        assert_eq!(
-            model
-                .thinking_fields
-                .as_ref()
-                .unwrap()
-                .off
-                .as_ref()
-                .unwrap()["enable_thinking"],
-            false
-        );
+        let model = &config.providers["local"].models()["custom"];
+        assert_eq!(model.supports_thinking, Some(true));
+        assert_eq!(model.requires_thinking, Some(true));
         for value in ["0", "\"nonsense\""] {
             assert!(Config::parse(&format!("always_thinking = {value}")).is_err());
         }
@@ -862,10 +1201,7 @@ mod tests {
         assert_eq!(config.compaction.len(), 2);
         // Labeled block override merges per-field.
         let provider = &config.providers["x"];
-        assert_eq!(
-            provider.base_url.as_deref(),
-            Some("https://llm.example.com")
-        );
+        assert_eq!(provider.base_url(), Some("https://llm.example.com"));
     }
 
     #[test]

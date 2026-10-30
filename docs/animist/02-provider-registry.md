@@ -1,4 +1,4 @@
-# 02 — Provider registry on animist (built in parallel, not wired)
+# 02 — Provider cutover on animist (fused with the inference seam)
 
 ## Required workflow
 
@@ -10,172 +10,92 @@
 
 ## Goal
 
-Build, **asynchronously**, every supported config `kind` into an `animist::provider::Provider`, and
-every selected model into an `animist::provider::Model` that carries craft's
-model metadata. This lands next to the rig registry without replacing it, so
-the build stays green. 03 cuts the inference path over and deletes the rig
-registry.
+Rewrite craft's provider layer directly on animist 0.7.0 and move the inference
+seam in the same change: every model call (the run loop, compaction summaries,
+auto-review, the advisor, memory extraction) goes through animist, and the rig
+provider stack — `providers/`, `DynamicModel`, `CompletionSource`, the rig test
+mocks, `models_dev.rs` — is deleted outright. No parallel registry, no
+middle-man wrappers: animist *is* the provider layer; craft adds only what
+animist cannot carry (config parsing, the disk cache, UI projections).
+
+Craft's own loop and `crate::history` stay; `edge.rs` becomes the craft↔animist
+mapping, which 04 then removes.
 
 ## Read first
 
 - [README → Provider mapping](README.md#provider-mapping): the supported and
   dropped kinds.
-- Craft:
-  - `agent/src/providers/{mod.rs, registry.rs, dynamic.rs, bedrock.rs,
-    catalog.rs, openai_compat.rs, reauth.rs, usage_fetch.rs}`
-  - `agent/src/config.rs` (`ProviderConfig`, `ModelConfig`)
-  - `agent/src/models_dev.rs`, `agent/src/model_registry.rs`,
-    `agent/src/model_selection.rs`, `agent/src/thinking.rs` (model-info
-    resolution), `agent/src/setup.rs`
-  - `agent/agent.example.bml`
-- animist 0.7.0:
-  - `src/provider/{anthropic, openai, synthetic, zai_coding_plan, ollama,
-    llama_cpp, omlx}.rs`
-  - `src/provider/bedrock/{mod.rs, provider.rs, listing.rs}`,
-    `src/provider/model.rs`, `src/catalog/`
-  - `docs/bedrock.md`, `docs/openai.md`, `docs/ollama.md`, `docs/llama-cpp.md`,
-    `docs/omlx.md`, `docs/synthetic.md`, `docs/zai-coding-plan.md`
+- Craft: `agent/src/providers/*`, `agent/src/models_dev.rs`,
+  `agent/src/config.rs`, `agent/src/edge.rs`, `agent/src/run/*`,
+  `agent/src/thinking.rs`, `agent/src/setup.rs`, `agent/agent.example.bml`.
+- animist 0.7.0: `src/provider/{anthropic,openai,synthetic,zai_coding_plan,
+  ollama,llama_cpp,omlx}.rs`, `src/provider/bedrock/*`, `src/provider/{model,
+  types,exchange,error}.rs`, `src/catalog/`, `docs/providers-and-protocols.md`,
+  `docs/bedrock.md` and the per-provider docs.
 
 ## Work
 
-1. **Kinds.** Add `providers::animist` (the module name is up to you), with a
-   new `AnimistKind` enum for the supported kinds:
-   `anthropic`, `openai`, `openai-compatible`, `synthetic`, `zai-coding-plan`,
-   `ollama`, `llama-cpp`, `omlx`, `amazon-bedrock`.
-   - Parse from the same `ProviderConfig`. A dropped kind gives an actionable
-     snafu error that names the kind; for OpenAI-dialect vendors, the error
-     suggests `kind = "openai-compatible"` with that vendor's `base_url`.
-   - Don't change how `ProviderConfig` deserializes yet; 03 switches the real
-     registry over.
-2. **Construction.** One builder per kind, mapping `ProviderConfig` fields
-   (`api_key_env`, `base_url`, a protocol selection where supported, the
-   `max_output_tokens` default) onto the animist config structs.
-   - Give each non-Bedrock provider `.with_client(..)` with craft's
-     `Timeouts` (connect timeout + stream timeout) on a plain
-     `reqwest::Client`, replacing `timeout_client`'s rig wrapper. Bedrock
-     keeps animist's own client (below).
-   - `openai-compatible` → `OpenAi` with `Protocol::ChatCompletions` by
-     default, overridable to Responses.
-   - **Keyless local endpoints.** `OpenAiConfig` reads `api_key_env` at
-     construction. Check what craft does today for keyless
-     `openai-compatible`/`ollama`/`llamafile` hosts, and keep that behaviour:
-     - Prefer routing local hosts the user configured as `openai-compatible`
-       through a keyless path. `LlamaCpp`/`Omlx` take an optional key; a
-       placeholder key is only acceptable if the endpoint ignores it.
-     - Document the rule you chose.
-   - **Bedrock.** Use animist's Bedrock provider as it ships (README
-     decision 13). It is more reliable than the rig-bedrock integration, so
-     craft does not tune it:
-     - Construct with `Bedrock::new(BedrockConfig)`, mapping the config's
-       `profile`, `region` and `endpoint_url` onto `BedrockConfig`. animist
-       loads the AWS credential chain itself and resolves credentials per
-       attempt.
-     - Don't call `with_client`, and don't change `max_attempts`. animist's
-       default client (redirects off, 10 s connect timeout) and its 429/503
-       retries (3 attempts, `Retry-After`-aware backoff) stay as they are.
-       The `RecoveryLayer` (08) must not stack its own same-model backoff on
-       a Bedrock 429/503 that animist already retried; it goes straight to
-       fallback.
-     - Set `listing_mode(ListingMode::ControlPlane)`, and pass craft's
-       models.dev catalog as `BedrockConfig::catalog`. animist lists
-       foundation models and paginated inference profiles with signed
-       requests and merges catalog metadata by exact ID. Craft enriches what
-       is still missing (profile → underlying model, longest-prefix lookup
-       for dated ids, the `limits_for` context table) on the returned
-       `ModelInfo`s, not by listing again.
-     - Delete craft's Bedrock SDK chain in `providers/bedrock.rs`:
-       `sdk_config`, `sdk_config_blocking`, `load_sdk_config`, the region
-       chain, the fast-IMDS setup, the `aws-sdk-bedrock` listing client and
-       `aws_error_chain`. Keep only the enrichment helpers and the actionable
-       error text (map animist's `BedrockError`, for example a missing region,
-       onto craft's existing messages).
-     - Pick the protocol per model: Claude → `AnthropicMessages`, OpenAI
-       models (for example `openai.gpt-oss-*`) → `Responses`, other models
-       with a Bedrock OpenAI surface → `ChatCompletions`, and every other
-       model → `Converse`. Allow a per-model config override, because animist
-       never infers the protocol. An unsupported protocol is not retried on
-       another one.
-     - `BedrockConfig::protocol` is per provider instance, so the registry
-       holds one `Bedrock` per protocol actually selected, built lazily and
-       cached, all from the same config.
-     - Converse rejects generic thinking settings other than `Off`. For
-       Converse models, map craft's thinking preference to `Off` and surface
-       model-specific settings only through an explicit config field passed
-       to `converse_additional_model_request_fields`.
-3. **Catalog.** Keep `models_dev.rs`'s 24h disk cache and its
-   tolerant-of-bad-entries policy (see the module docs: one unknown field must
-   never cost the whole table). Parse into `animist::catalog::Catalog`, or keep
-   craft's tolerant parser and convert to `ModelInfo`. Prefer animist's parser
-   only if it is at least as tolerant; check that with craft's existing
-   fixtures.
-   - Feed `ProviderCatalog` into provider configs, so animist's `list_models`
-     merges metadata.
-   - Keep longest-prefix lookup for dated ids.
-4. **Model handle.** Define `providers::ModelHandle` (the name is up to you). It
-   is a cheap-clone wrapper around `animist::provider::Model`, plus craft-only
-   metadata:
-   - the `provider/model` spec label;
-   - the `ModelConfig` settings;
-   - the effective context length;
-   - the catalog key used for pricing.
-
-   Map the craft model overrides (context length, max output, thinking support,
-   vision, fast) onto `ModelInfo::config` and `Overrides`. Call
-   `Provider::adjust_model` once at construction.
-5. **Async construction.** Provider construction, discovery and selection are
-   `async fn`s end to end (README → Async native):
-   - `Bedrock::new` is awaited directly.
-   - Delete `sdk_config_blocking` (its `block_in_place`, private-runtime and
-     scoped-thread fallbacks) with the rest of craft's Bedrock SDK chain, and
-     `block_on_auth`, which leaves with the OAuth kinds.
-   - Update the 02 builder's callers in this prompt to await. 03 converts the
-     live callers (`runtime.rs`, `model_selection.rs`, TUI/ACP model pickers)
-     as it switches over.
-6. **Discovery and selection.** Port `list_models` aggregation, and the
-   `model_registry` tier table keyed by kind string, to the new kinds.
-   `model_selection` keeps its behaviour for every supported kind. Delete
-   static tier entries for dropped kinds.
-7. **Reauth and usage.** Turn `reauth.rs`'s "rebuild provider" into
-   `Provider::reload_auth()` where that is enough. For Bedrock it always is:
-   `reload_auth` rebuilds and validates animist's default credential chain. Keep a rebuild fallback for
-   config changes. `usage_fetch.rs`: delete DeepSeek and keep the
-   `Ok(None)`-for-unsupported contract.
-
-## Tests
-
-- Per kind: construct a provider from a representative `ProviderConfig` with an
-  injected credential lookup (no process-env mutation; reuse the
-  `from_config_with` pattern).
-- Each dropped kind gives its actionable error.
-- `list_models` against a local mock `/models` endpoint for `openai-compatible`,
-  `ollama` and `llama-cpp`.
-- Bedrock: tests build through `Bedrock::from_sdk_config` with a static-
-  credentials `SdkConfig` (a test-only seam in the craft builder; production
-  always uses `Bedrock::new`), plus local `endpoint_url` and
-  `control_plane_endpoint_url`. Pin:
-  - protocol selection per model id (Claude → Messages, `openai.*` →
-    Responses, an unknown model → Converse, a configured override wins);
-  - one cached provider instance per protocol;
-  - control-plane listing against a mock `/foundation-models` and paginated
-    `/inference-profiles`, with craft's enrichment applied.
-- Construction under `#[tokio::test(flavor = "current_thread")]`, the case
-  that deadlocked without the old blocking bridge.
-- Catalog: existing models.dev fixtures parse with the same skip counts.
-- The `ModelHandle` override mapping is pinned for context length, thinking
-  and vision.
-
-## Out of scope
-
-Wiring the new handle into `run/`. The rig registry stays the live path until
-03.
+1. **Config.** `ProviderConfig` becomes a serde-tagged enum over
+   `ProviderEntry<animist config type>` — animist's own config structs, fields
+   and defaults, flattened. A kind-first `Deserialize` gives dropped kinds an
+   actionable error naming the replacement, rejects inline `api_key` (keys live
+   in the environment), detects unknown-key typos against the serialized
+   defaults, and defaults `openai-compatible` to Chat Completions unless the
+   protocol is explicit.
+2. **Construction (`provider.rs`).** `ProviderHandle::from_config` builds each
+   kind's animist provider asynchronously; `ModelHandle` wraps an
+   `animist::provider::Model` plus the projection craft needs (context window,
+   catalog key, protocol flags). Bedrock keeps one lazily-built provider per
+   protocol (the protocol table: `anthropic.*`/claude → Anthropic Messages,
+   `openai.*` → Responses, deepseek/moonshot → Chat Completions, else Converse;
+   the per-model `protocol` override wins), with eager default-protocol
+   construction so region and credential problems surface at startup.
+   Keyless loopback/RFC1918 `openai-compatible` endpoints ride animist's
+   keyless llama.cpp client.
+3. **Catalog.** No craft mirror of models.dev: `provider::load_catalog()` is
+   application policy over animist's `Catalog` — 24 h disk cache, stale
+   fallback on a failed refresh, never cache an empty parse — returning one
+   `Arc<Catalog>` per session. Surfaces pass `Option<&Catalog>` explicitly.
+4. **Reauth.** `provider::reauth_hook` polls the credential env var for a
+   change, then rebuilds the provider and returns the refreshed model —
+   animist binds credentials at construction, so a refreshed key reaches the
+   wire only through a new provider.
+5. **Edge mapping (`edge.rs`).** craft `history::Message` ↔ animist messages:
+   adjacent user messages coalesce; tool-result images relocate only for
+   Chat Completions targets; empty-after-filter assistant turns drop;
+   reasoning maps to `Thinking`/`RedactedThinking`; `SystemMessagePolicy::
+   MoveToPreamble` is set for the protocols that need it;
+   `validate_replay` runs over the mapped view in debug builds and tests.
+6. **Streaming (`run/stream.rs`).** Drive `InferenceExchange` against
+   craft's cancellation: forward deltas and tool starts with the timing the
+   surfaces expect, mint run-stable internal tool-call ids, map `StopReason`
+   (`MaxTokens` → continuation, `ContextWindowExceeded` → overflow), and carry
+   the partial text out on cancel. Classify `ProviderError` into the recovery
+   taxonomy (HTTP status first, credential kinds as auth, bedrock sources
+   through), marking Bedrock's internally-retried 429/503 so craft's backoff
+   does not stack on it.
+7. **Request options.** One function builds `RequestOptions` (thinking, fast,
+   output cap with the Claude default, temperature, system-message policy)
+   from run params plus the `ModelHandle`. `thinking.rs` shrinks to the
+   preference types plus `choices_for`/`reconcile_for` over
+   `Option<&ModelInfo>`; animist's adapters own the wire fields.
+8. **Side completions.** `provider::complete_text` serves the no-tools calls
+   (compaction, auto-review, advisor, memory extraction); callers keep their
+   deadlines and fail-closed behavior.
+9. **Usage pricing.** The static price table prices turns by the served
+   model's catalog key; provider usage endpoints are gone (`usage_fetch`
+   keeps the `Ok(None)` contract the panels already handle).
+10. **Tests.** Port every rig-mock test to the scripted provider from 01;
+    deleted suites get named replacements where the behaviour survives.
+    Missing upstream behaviour becomes an animist followup, never a silent
+    drop.
 
 ## Acceptance
 
-- Every supported kind builds, and every dropped kind fails with guidance.
-- The user-facing configs in `agent.example.bml` and the shapes in the README
-  provider table all build: `openai-compatible` for Synthetic, Z.AI and a
-  localhost server, plus Anthropic, OpenAI, Ollama and Bedrock.
-- The build and all tests pass, and no rig code was removed yet.
+- Every supported kind builds; dropped kinds fail with guidance; the example
+  config parses.
+- `cargo test -p craft` green (modulo the pre-existing failures recorded in
+  01), fmt and clippy at baseline, review verdict clean.
 
 ## Finish
 
@@ -183,9 +103,95 @@ Wiring the new handle into `run/`. The rig registry stays the live path until
 2. **Run the review agent** (`.craft/agents/reviewer.md`) over this prompt's
    full diff. Address its findings, re-run validation, and repeat until the
    verdict is clean.
-3. Append a completion note: the keyless rule chosen, the Bedrock protocol
-   table, which `providers/bedrock.rs` helpers survived, and follow-ups.
+3. Append a completion note: the keyless rule, the Bedrock protocol table,
+  behaviour changes, the removed-test→replacement list, and follow-ups.
 
 ## Completion note
 
-_(fill in when done)_
+**2026-10-30, branch `animist-migration`**, commit `08ed7546` (base
+`a5547bc3`, the rig-bedrock/OAuth excision).
+
+One cutover, no parallel registry: `src/providers/`, `src/models_dev.rs` and
+every rig mock are deleted; `src/provider.rs` is the seam (construction,
+`ModelHandle`, `load_catalog`, `complete_text`, `reauth_hook`), `config.rs`
+carries the tagged-enum `ProviderConfig` over animist's own config structs,
+`edge.rs` maps craft↔animist history, `run/stream.rs` drives
+`InferenceExchange`, and `thinking.rs` is the preference module over
+`Option<&ModelInfo>`.
+
+- **Keyless rule**: `openai-compatible` with no credential configured, no
+  `OPENAI_API_KEY` in the environment, and a loopback/RFC1918/`.local`/
+  `.internal` host rides animist's keyless `LlamaCpp` client; any injected
+  key or public host disqualifies (pinned by
+  `provider::tests::keyless_local_requires_a_private_host_and_no_key_anywhere`).
+- **Bedrock protocol table**: `anthropic.*` or `*claude*` → Anthropic
+  Messages, `openai.*` → Responses, `deepseek.*`/`moonshotai.*` → Chat
+  Completions, else Converse; a per-model `protocol` in the config wins;
+  providers are cached per protocol and the default protocol is built eagerly
+  so region/credential problems surface at startup (pinned by
+  `provider::tests::bedrock_protocol_follows_the_family_table_and_per_model_override`).
+- **Catalog cache**: 24 h TTL, stale fallback on failed refresh, empty parses
+  never cached; the cache holds the *normalized* serialization and loads via
+  the derived `Deserialize` because `Catalog::from_slice` parses the
+  models.dev source shape (pinned by four `provider::tests`).
+- **Review**: one P1 found and fixed during review — the reauth hook built a
+  fresh provider, reloaded *it*, and dropped it, so the run retried with the
+  stale key (animist binds credentials at construction). The hook now returns
+  the rebuilt model, and two paused-clock tests pin the wait/refresh/unrefresh
+  behavior. One P3 accepted: `edge::assert_replay_valid` also executes
+  `validate_replay` in release builds (a no-op branch); it is cheap and keeps
+  debug/release paths identical.
+- **Validation**: `cargo fmt -p craft --check` clean; clippy **93/119**
+  warnings (lib/all-targets) against the 01 baseline's 135/168;
+  `cargo test -p craft --lib` **1977 passed, 3 failed** — the three
+  pre-existing recipe-render failures recorded in 01.
+
+**Behaviour changes** (all intentional):
+
+1. No connect/stream timeouts on provider clients until F12 lands; Bedrock
+   keeps animist's bounded client.
+2. Picker display names come from the config's manual table or fall back to
+   the model id (models.dev names ride the catalog slice only).
+3. Thinking-picker levels come from `ModelInfo.features.thinking.efforts`;
+   the per-provider dialect tables are gone, and a required-reasoning model
+   offers no `off` choice even when it lists no efforts.
+4. Tool-result images stay inline for every protocol except Chat Completions
+   targets (previously relocated for all).
+5. No longest-prefix dated-id lookup against models.dev; the catalog merges
+   by exact ID (animist's rule).
+6. Re-authentication rebuilds the provider instead of reloading in place
+   (animist binds keys at construction); surfaces already resolve fresh
+   handles per turn.
+7. Unsigned-reasoning `origin` provenance no longer rides the mapping;
+   animist's replay validation owns gating.
+8. Provider usage endpoints are gone (`usage_fetch` answers `Ok(None)`);
+   usage panels show the session ledger only.
+
+**Removed tests → replacements** (75 removed, all accounted):
+
+- `edge::tests` (17) → the six new `edge::tests::test_*` bidirectional
+  mapping/replay tests; preamble/tools/sampling assertions moved into
+  `run::stream` and `provider::tests`.
+- `models_dev::tests` (14) → animist's catalog suites own parsing; craft's
+  cache policy is pinned by `provider::tests::{a_fresh_cache_is_served…,
+  an_empty_parse_is_never_cached, a_failed_refresh_serves…, cache_freshness…}`;
+  parsing tolerance and the normalized round trip are followups F13/F14.
+- `providers::*` (23) → construction is animist's; craft's shares
+  (keyless routing, protocol table, manual-model merge) are pinned in
+  `provider::tests`; the networked custom-anthropic/openai inference tests
+  are subsumed by the TUI preamble SSE test over a real `openai-compatible`
+  provider; the timeout-policy tests died with the policy (F12); the
+  DeepSeek usage-endpoint tests died with the endpoints.
+- `thinking::tests` (12) → five new tests over `Option<&ModelInfo>`;
+  dialect-specific cases died with the dialects (change 3).
+- `run::stream::tests` (6) → the scripted-driver tests plus the turns/
+  overflow suites that already covered finish reasons, usage, and cancel.
+- `runtime::tests::catalog_metadata…` → deleted with the helper; windows now
+  ride `ModelHandle::context_length` (covered by bootstrap/spec tests).
+- `compaction::llm::…rig_error_variants` → renamed/re-expressed as
+  `…provider_error_bodies`.
+
+**Follow-ups** (animist `docs/followups/`): F11 Bedrock `MissingRegion`
+guidance, F12 provider client timeouts, F13 tolerant models.dev parsing,
+F14 catalog normalized-form round trip.
+

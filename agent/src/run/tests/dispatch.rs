@@ -4,7 +4,6 @@
 use super::*;
 use crate::history::UserContent;
 use crate::run::*;
-use rig_core::test_utils::MockStreamEvent;
 
 /// Collect every tool result's first text block, in call order.
 fn collect_tool_text(history: &[Message]) -> Vec<String> {
@@ -25,15 +24,13 @@ fn collect_tool_text(history: &[Message]) -> Vec<String> {
 
 #[tokio::test]
 async fn unknown_tool_surfaces_error_and_run_continues() {
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "no_such_tool", serde_json::json!({})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("recovered"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "no_such_tool",
+            serde_json::json!({}),
+        )]),
+        crate::testing::text_turn("recovered"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
@@ -50,7 +47,11 @@ async fn unknown_tool_surfaces_error_and_run_continues() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::Done { .. }));
-    assert_eq!(model.requests().len(), 2, "the model gets a second chance");
+    assert_eq!(
+        provider.requests().len(),
+        2,
+        "the model gets a second chance"
+    );
     let errors = collect_tool_text(&history);
     assert_eq!(errors.len(), 1);
     assert!(
@@ -59,8 +60,8 @@ async fn unknown_tool_surfaces_error_and_run_continues() {
     );
     // The retried request carries the error result, so the model sees what
     // went wrong and can correct the name.
-    let requests = model.requests();
-    let replayed = crate::edge::rig_to_own(&requests[1].chat_history);
+    let requests = provider.requests();
+    let replayed = crate::testing::replay_history(&requests[1].messages);
     let replayed_errors = collect_tool_text(&replayed);
     assert!(
         replayed_errors[0].contains("unknown tool: no_such_tool"),
@@ -76,15 +77,13 @@ async fn skip_decision_reports_reason_to_model() {
             Box::pin(async { Decision::Skip("not allowed".into()) })
         }
     }
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path":"f"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("okay"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path":"f"}),
+        )]),
+        crate::testing::text_turn("okay"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path())
@@ -133,15 +132,13 @@ async fn after_execute_transform_rewrites_results() {
             })
         }
     }
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path":"f"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("ok"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path":"f"}),
+        )]),
+        crate::testing::text_turn("ok"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "body\n").unwrap();
@@ -174,13 +171,10 @@ async fn after_execute_transform_rewrites_results() {
 async fn dedup_replays_identical_read_calls() {
     // Two identical read calls in one run: the second answers from cache.
     let read = || tool_event("t", "read", serde_json::json!({"path": "f"}));
-    let (model, _turns) = stream_turns(vec![
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "body\n").unwrap();
@@ -234,17 +228,11 @@ async fn dedup_invalidated_by_write_to_same_path() {
             serde_json::json!({"path": "f", "content": "new\n"}),
         )
     };
-    let (model, _turns) = stream_turns(vec![
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            write(),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::tool_turn(vec![write()]),
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "old\n").unwrap();
@@ -301,17 +289,11 @@ async fn dedup_invalidated_by_multiedit_top_level_path() {
             }),
         )
     };
-    let (model, _turns) = stream_turns(vec![
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            multiedit(),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::tool_turn(vec![multiedit()]),
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "old\n").unwrap();
@@ -354,17 +336,11 @@ async fn dedup_invalidated_by_batch_child_write() {
             }}]}),
         )
     };
-    let (model, _turns) = stream_turns(vec![
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            batch(),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::tool_turn(vec![batch()]),
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "old\n").unwrap();
@@ -408,14 +384,11 @@ async fn dedup_cleared_by_bash() {
             serde_json::json!({"command": "printf 'new\\n' > f"}),
         )
     };
-    let (model, _turns) = stream_turns(vec![
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![bash(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::tool_turn(vec![bash()]),
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "old\n").unwrap();
@@ -467,13 +440,10 @@ async fn dedup_replays_through_after_hook() {
         }
     }
     let read = || tool_event("t", "read", serde_json::json!({"path": "f"}));
-    let (model, _turns) = stream_turns(vec![
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::tool_turn(vec![read()]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "body\n").unwrap();
@@ -535,7 +505,7 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> crate::history::ToolCa
 fn tool(name: &str, run: impl Fn() + Send + Sync + Clone + 'static) -> DynamicTool {
     let run2 = run.clone();
     DynamicTool::new(
-        crate::edge::tool_name(name),
+        crate::tools::tool_name(name),
         name,
         serde_json::json!({}),
         move |_| {
@@ -597,7 +567,7 @@ async fn independent_calls_run_concurrently() {
     let mk_probe = |name: &'static str, barrier: &std::sync::Arc<tokio::sync::Barrier>| {
         let barrier = std::sync::Arc::clone(barrier);
         DynamicTool::new(
-            crate::edge::tool_name(name),
+            crate::tools::tool_name(name),
             name,
             serde_json::json!({}),
             move |_: serde_json::Value| {
@@ -637,7 +607,7 @@ async fn identical_calls_blocked_as_doom_loop() {
     let runs = std::sync::Arc::new(AtomicUsize::new(0));
     let runs2 = std::sync::Arc::clone(&runs);
     let tools = ToolDispatch::new([DynamicTool::new(
-        crate::edge::tool_name("probe"),
+        crate::tools::tool_name("probe"),
         "probe",
         serde_json::json!({}),
         move |_: serde_json::Value| {

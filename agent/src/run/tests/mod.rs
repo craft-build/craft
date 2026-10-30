@@ -1,7 +1,5 @@
-//! Run-loop integration tests, split by subsystem. The shared mock harness
-//! lives here; the topic modules hold the tests.
-
-use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+//! Run-loop integration tests, split by subsystem. The shared scripted
+//! harness lives here; the topic modules hold the tests.
 
 mod advisor;
 mod cli_policy;
@@ -11,21 +9,28 @@ mod overflow;
 mod spec;
 mod turns;
 
-fn stream_turns(
-    turns: Vec<Vec<MockStreamEvent>>,
-) -> (MockCompletionModel, Vec<Vec<MockStreamEvent>>) {
-    let model = MockCompletionModel::from_stream_turns(turns.clone());
-    (model, turns)
+use crate::provider::ModelHandle;
+use crate::testing::{Attempt, ScriptedProvider};
+
+/// A run-loop model over the scripted attempts, and the provider recording
+/// every request it serves.
+fn stream_turns(turns: Vec<Attempt>) -> (ModelHandle, ScriptedProvider) {
+    let provider = ScriptedProvider::new(Vec::new());
+    for turn in turns {
+        provider.push(turn);
+    }
+    (model(&provider), provider)
 }
 
-fn tool_event(id: &str, name: &str, args: serde_json::Value) -> MockStreamEvent {
-    MockStreamEvent::tool_call(id, name, args)
+/// A run-loop model handle over a scripted provider.
+fn model(provider: &ScriptedProvider) -> ModelHandle {
+    ModelHandle::scripted(crate::testing::scripted_model(
+        provider,
+        crate::testing::model_info("scripted", 200_000, 8_192, false, false),
+    ))
 }
 
-fn length_final(total_tokens: u64) -> MockStreamEvent {
-    let mut finish = rig_core::test_utils::mock_final(
-        rig_core::completion::Usage::new().total_tokens(total_tokens),
-    );
-    finish.reason = Some(rig_core::completion::FinishReason::Length);
-    MockStreamEvent::FinalResponse(finish)
+/// One tool-call spec for [`crate::testing::tool_turn`].
+fn tool_event(id: &str, name: &str, args: serde_json::Value) -> crate::testing::ToolCallSpec {
+    (id.to_owned(), name.to_owned(), args)
 }

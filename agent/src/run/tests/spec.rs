@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::run::*;
-use rig_core::test_utils::MockStreamEvent;
 use std::collections::HashMap;
 
 /// The clamp mirrors the reference `clamped_output_tokens` table.
@@ -44,15 +43,7 @@ fn clamps_output_tokens_to_the_remaining_window() {
 #[tokio::test]
 async fn done_by_model_carries_priced_and_unpriced_models() {
     async fn collect_by_model(spec: &str) -> HashMap<String, crate::usage::StoredTokenUsage> {
-        let (model, _turns) = stream_turns(vec![vec![
-            MockStreamEvent::text("hi"),
-            MockStreamEvent::final_response(
-                rig_core::completion::Usage::new()
-                    .input_tokens(10)
-                    .output_tokens(5)
-                    .total_tokens(15),
-            ),
-        ]]);
+        let (model, _provider) = stream_turns(vec![crate::testing::text_turn("hi")]);
         let tools = crate::tools::Workspace::new(std::env::temp_dir())
             .unwrap()
             .register();
@@ -104,14 +95,17 @@ mod served_spec_tests {
     fn bare_ids_borrow_the_primary_provider_full_specs_do_not() {
         let primary = "anthropic/claude-sonnet-5";
         assert_eq!(
-            served_spec(Some(primary), Some("claude-opus-5"), None),
+            served_spec(Some(primary), Some("claude-opus-5".to_owned()), None),
             Some("anthropic/claude-opus-5".into())
         );
         assert_eq!(
-            served_spec(Some(primary), Some("openai/gpt-5.6-sol"), None),
+            served_spec(Some(primary), Some("openai/gpt-5.6-sol".to_owned()), None),
             Some("openai/gpt-5.6-sol".into())
         );
-        assert_eq!(served_spec(None, Some("claude-opus-5"), None), None);
+        assert_eq!(
+            served_spec(None, Some("claude-opus-5".to_owned()), None),
+            None
+        );
         assert_eq!(
             served_spec(Some(primary), None, None),
             Some("anthropic/claude-sonnet-5".into())
@@ -124,10 +118,7 @@ mod served_spec_tests {
 /// just the messages.
 #[tokio::test]
 async fn output_cap_clamp_counts_request_overhead() {
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::text("ok"),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, provider) = stream_turns(vec![crate::testing::text_turn("ok")]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let overhead =
@@ -170,10 +161,10 @@ async fn output_cap_clamp_counts_request_overhead() {
         &|event| sink.lock().unwrap().push(event),
     )
     .await;
-    assert_eq!(model.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 1);
     assert_eq!(
-        model.requests()[0].max_tokens,
-        Some(margin),
+        provider.requests()[0].options.max_output_tokens,
+        Some(margin as u32),
         "the clamp reserves the window for history + request overhead"
     );
 }
@@ -182,10 +173,7 @@ async fn output_cap_clamp_counts_request_overhead() {
 /// never triggers (pre-change behavior preserved).
 #[tokio::test]
 async fn unknown_window_leaves_the_cap_and_skips_compaction() {
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::text("ok"),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, provider) = stream_turns(vec![crate::testing::text_turn("ok")]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let shared: SharedCompactionState = std::sync::Arc::new(std::sync::Mutex::new(
@@ -220,7 +208,7 @@ async fn unknown_window_leaves_the_cap_and_skips_compaction() {
     )
     .await;
     assert_eq!(
-        model.requests()[0].max_tokens,
+        provider.requests()[0].options.max_output_tokens,
         Some(100_000),
         "no window: the configured cap is untouched"
     );

@@ -4,19 +4,16 @@
 use super::*;
 use crate::history::UserContent;
 use crate::run::*;
-use rig_core::test_utils::MockStreamEvent;
 
 #[tokio::test]
 async fn multi_turn_tool_round_trip_commits_history() {
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path":"file.txt"})),
-            MockStreamEvent::final_response_with_total_tokens(3),
-        ],
-        vec![
-            MockStreamEvent::text("all done"),
-            MockStreamEvent::final_response_with_total_tokens(5),
-        ],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path":"file.txt"}),
+        )]),
+        crate::testing::text_turn("all done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("file.txt"), "content\n").unwrap();
@@ -51,9 +48,9 @@ async fn multi_turn_tool_round_trip_commits_history() {
         Message::User { content } if matches!(&content[0], UserContent::ToolResult(r)
             if r.call == call.id && r.name == "read")));
     // The result the model sees on the next call is literal text.
-    let requests = model.requests();
+    let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    let replayed = crate::edge::rig_to_own(&requests[1].chat_history);
+    let replayed = crate::testing::replay_history(&requests[1].messages);
     assert_eq!(replayed[2], history[2]);
     // Events: tool start, tool done, usage per call, results submitted
     // per wave, one terminal Done.
@@ -90,19 +87,13 @@ async fn multi_turn_tool_round_trip_commits_history() {
 
 #[tokio::test]
 async fn snapshots_commit_on_done_and_undo_restores_files() {
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event(
-                "t1",
-                "write",
-                serde_json::json!({"path":"f.txt","content":"changed\n"}),
-            ),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "write",
+            serde_json::json!({"path":"f.txt","content":"changed\n"}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f.txt"), "original\n").unwrap();
@@ -139,13 +130,10 @@ async fn snapshots_commit_on_done_and_undo_restores_files() {
 async fn truncated_reply_continues_then_finishes() {
     // Truncated, truncated, then a clean stop: the run continues the
     // truncated replies and ends Done with the final text.
-    let (model, _turns) = stream_turns(vec![
-        vec![MockStreamEvent::text("part one "), length_final(1)],
-        vec![MockStreamEvent::text("part two "), length_final(1)],
-        vec![
-            MockStreamEvent::text("part three"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::max_tokens_turn("part one "),
+        crate::testing::max_tokens_turn("part two "),
+        crate::testing::text_turn("part three"),
     ]);
     let (_, cancel) = cancel_channel();
     let mut history = Vec::new();
@@ -163,7 +151,7 @@ async fn truncated_reply_continues_then_finishes() {
         matches!(outcome, RunOutcome::Done { ref reply } if reply == "part three"),
         "{outcome:?}"
     );
-    assert_eq!(model.request_count(), 3);
+    assert_eq!(provider.requests().len(), 3);
     // prompt + three assistant messages, all committed
     assert_eq!(history.len(), 4);
     assert_eq!(history[1].text(), "part one ");
@@ -173,11 +161,11 @@ async fn truncated_reply_continues_then_finishes() {
 async fn truncation_gives_up_after_the_continuation_budget() {
     // Every reply truncates: after `max_continuation_turns` continuations
     // the run ends MaxTokens with the truncated tail committed.
-    let (model, _turns) = stream_turns(vec![
-        vec![MockStreamEvent::text("a"), length_final(1)],
-        vec![MockStreamEvent::text("b"), length_final(1)],
-        vec![MockStreamEvent::text("c"), length_final(1)],
-        vec![MockStreamEvent::text("d"), length_final(1)],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::max_tokens_turn("a"),
+        crate::testing::max_tokens_turn("b"),
+        crate::testing::max_tokens_turn("c"),
+        crate::testing::max_tokens_turn("d"),
     ]);
     let (_, cancel) = cancel_channel();
     let mut history = Vec::new();
@@ -196,16 +184,13 @@ async fn truncation_gives_up_after_the_continuation_budget() {
         "{outcome:?}"
     );
     // 1 initial + 3 continuations (the default budget).
-    assert_eq!(model.request_count(), 4);
+    assert_eq!(provider.requests().len(), 4);
     assert_eq!(history.len(), 5, "truncated tail is committed");
 }
 
 #[tokio::test]
 async fn continuation_budget_is_configurable_to_zero() {
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::text("cut off"),
-        length_final(1),
-    ]]);
+    let (model, provider) = stream_turns(vec![crate::testing::max_tokens_turn("cut off")]);
     let (_, cancel) = cancel_channel();
     let params = RunParams {
         max_continuation_turns: 0,
@@ -223,16 +208,16 @@ async fn continuation_budget_is_configurable_to_zero() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::MaxTokens { .. }));
-    assert_eq!(model.request_count(), 1);
+    assert_eq!(provider.requests().len(), 1);
 }
 
 #[tokio::test]
 async fn continuations_respect_the_turn_budget() {
     // One clean turn budget, a truncated first reply: the continuation
     // counts against `max_turns` and the run ends MaxTurns sanitized.
-    let (model, _turns) = stream_turns(vec![
-        vec![MockStreamEvent::text("a"), length_final(1)],
-        vec![MockStreamEvent::text("b"), length_final(1)],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::max_tokens_turn("a"),
+        crate::testing::max_tokens_turn("b"),
     ]);
     let (_, cancel) = cancel_channel();
     let params = RunParams {
@@ -251,7 +236,7 @@ async fn continuations_respect_the_turn_budget() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::MaxTurns));
-    assert_eq!(model.request_count(), 1);
+    assert_eq!(provider.requests().len(), 1);
     assert_eq!(history.last().unwrap().text(), END_MARKER);
 }
 
@@ -260,7 +245,7 @@ async fn empty_truncated_reply_is_committed_as_max_tokens() {
     // A truncation with zero visible text is not an empty-and-stalled
     // turn: the cut-off (empty) assistant message is committed and the
     // run ends MaxTokens instead of firing the nudge path.
-    let (model, _turns) = stream_turns(vec![vec![length_final(1)]]);
+    let (model, provider) = stream_turns(vec![crate::testing::max_tokens_turn("")]);
     let (_, cancel) = cancel_channel();
     let params = RunParams {
         max_continuation_turns: 0,
@@ -278,7 +263,7 @@ async fn empty_truncated_reply_is_committed_as_max_tokens() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::MaxTokens { .. }));
-    assert_eq!(model.request_count(), 1, "no nudge was sent");
+    assert_eq!(provider.requests().len(), 1, "no nudge was sent");
     assert_eq!(history.len(), 2);
     // prompt + the truncated assistant message (empty, not replaced by
     // the empty-response marker)
@@ -298,39 +283,15 @@ async fn guardrails_warn_then_block_repeated_failures() {
             serde_json::json!({ "path": format!("missing{n}") }),
         )
     };
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            read(1),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            read(2),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            read(3),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            read(4),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            read(5),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            read(6),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            read(7),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read(1)]),
+        crate::testing::tool_turn(vec![read(2)]),
+        crate::testing::tool_turn(vec![read(3)]),
+        crate::testing::tool_turn(vec![read(4)]),
+        crate::testing::tool_turn(vec![read(5)]),
+        crate::testing::tool_turn(vec![read(6)]),
+        crate::testing::tool_turn(vec![read(7)]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path())
@@ -405,9 +366,7 @@ async fn failed_run_preserves_prior_history_and_commits_the_turn() {
     // any in-place compaction must not leak) but still commits the
     // failed turn itself — sanitized, with a failure note — because tool
     // calls that already ran have real workspace effects.
-    let (model, _turns) = stream_turns(vec![vec![MockStreamEvent::Error(
-        rig_core::test_utils::MockError::provider("boom"),
-    )]]);
+    let (model, _provider) = stream_turns(vec![crate::testing::http_error(400, "boom")]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = cancel_channel();
@@ -448,18 +407,18 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
     // One batch of identical failing reads: two errors (+1 each) and one
     // blocked doom-loop call (+15) put the score at 17 — past the grace
     // threshold — so the next request carries the one-shot grace prompt.
-    let read = || tool_event("t", "read", serde_json::json!({"path": "missing"}));
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            read(),
-            read(),
-            read(),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("summarized"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    // Distinct ids per call: a provider streams each tool use with its own
+    // id, and replay validation rejects duplicates.
+    let read = |n: usize| {
+        tool_event(
+            &format!("t{n}"),
+            "read",
+            serde_json::json!({"path": "missing"}),
+        )
+    };
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read(1), read(2), read(3)]),
+        crate::testing::text_turn("summarized"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
@@ -499,9 +458,9 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
                 && r.content[0].to_text().contains("stuck in a loop")))
     }));
     // The second request saw the grace prompt as its trailing message.
-    let requests = model.requests();
+    let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    let replayed = crate::edge::rig_to_own(&requests[1].chat_history);
+    let replayed = crate::testing::replay_history(&requests[1].messages);
     assert_eq!(
         replayed.last().map(Message::text),
         Some(doom::GRACE_CALL_PROMPT.to_owned())
@@ -512,25 +471,20 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
 async fn doom_score_hard_stops_the_run() {
     // Two doom-loop batches push the score past the hard-stop threshold
     // (25); the run ends DoomStop with sanitized partial history.
-    let read = || tool_event("t", "read", serde_json::json!({"path": "missing"}));
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            read(),
-            read(),
-            read(),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            read(),
-            read(),
-            read(),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    // Distinct ids per call: a provider streams each tool use with its own
+    // id, and replay validation rejects duplicates.
+    let read = |n: usize| {
+        tool_event(
+            &format!("t{n}"),
+            "read",
+            serde_json::json!({"path": "missing"}),
+        )
+    };
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![read(4), read(5), read(6)]),
+        crate::testing::tool_turn(vec![read(1), read(2), read(3)]),
         // Never requested: the hard stop preempts the third turn.
-        vec![
-            MockStreamEvent::text("never"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+        crate::testing::text_turn("never"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
@@ -547,7 +501,11 @@ async fn doom_score_hard_stops_the_run() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::DoomStop));
-    assert_eq!(model.requests().len(), 2, "no request after the hard stop");
+    assert_eq!(
+        provider.requests().len(),
+        2,
+        "no request after the hard stop"
+    );
     assert_eq!(
         history.last().map(Message::text),
         Some(END_MARKER.to_owned())
@@ -556,9 +514,7 @@ async fn doom_score_hard_stops_the_run() {
 
 #[tokio::test]
 async fn failed_run_emits_error_then_done_with_error_reason() {
-    let (model, _turns) = stream_turns(vec![vec![MockStreamEvent::Error(
-        rig_core::test_utils::MockError::provider("boom"),
-    )]]);
+    let (model, _provider) = stream_turns(vec![crate::testing::http_error(400, "boom")]);
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = cancel_channel();
@@ -592,10 +548,7 @@ async fn failed_run_emits_error_then_done_with_error_reason() {
 
 #[tokio::test]
 async fn turn_complete_reports_a_nonzero_context_size() {
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::text("ok"),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, _provider) = stream_turns(vec![crate::testing::text_turn("ok")]);
     let (_, cancel) = cancel_channel();
     let mut history = vec![Message::user(
         "a sufficiently long prompt to register a nonzero token estimate \
@@ -627,15 +580,16 @@ async fn turn_complete_reports_a_nonzero_context_size() {
 
 #[tokio::test]
 async fn max_turns_bound_commits_sanitized_partial_history() {
-    let turns: Vec<Vec<MockStreamEvent>> = (0..3)
+    let turns: Vec<crate::testing::Attempt> = (0..3)
         .map(|i| {
-            vec![
-                tool_event(&format!("t{i}"), "read", serde_json::json!({"path":"f"})),
-                MockStreamEvent::final_response_with_total_tokens(1),
-            ]
+            crate::testing::tool_turn(vec![tool_event(
+                &format!("t{i}"),
+                "read",
+                serde_json::json!({"path":"f"}),
+            )])
         })
         .collect();
-    let (model, _t) = stream_turns(turns);
+    let (model, provider) = stream_turns(turns);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "x\n").unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
@@ -657,7 +611,7 @@ async fn max_turns_bound_commits_sanitized_partial_history() {
     .await;
     assert!(matches!(outcome, RunOutcome::MaxTurns));
     // Prompt + 2x(assistant+result) + end marker; the third call never ran.
-    assert_eq!(model.request_count(), 2);
+    assert_eq!(provider.requests().len(), 2);
     assert_eq!(history.len(), 6);
     assert_eq!(history.last().unwrap().text(), END_MARKER);
     // No dangling tool calls: every call has its result.
@@ -696,14 +650,13 @@ async fn failed_run_commits_sanitized_partial_history() {
     // result survives, dangling calls are closed, and a failure note
     // records why the run stopped — so the model (or a resumed session)
     // starts from what actually happened.
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path": "f"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![MockStreamEvent::Error(
-            rig_core::test_utils::MockError::provider("boom"),
-        )],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path": "f"}),
+        )]),
+        crate::testing::http_error(400, "boom"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "x\n").unwrap();
@@ -741,10 +694,11 @@ async fn cancel_mid_tool_skips_execution_and_commits_sanitized_partial() {
             Box::pin(async { Decision::Stop("cancelled".into()) })
         }
     }
-    let (model, _turns) = stream_turns(vec![vec![
-        tool_event("t1", "read", serde_json::json!({"path":"f"})),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, _provider) = stream_turns(vec![crate::testing::tool_turn(vec![tool_event(
+        "t1",
+        "read",
+        serde_json::json!({"path": "f"}),
+    )])]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "secret\n").unwrap();
     let tools = crate::tools::Workspace::new(dir.path())
@@ -776,7 +730,7 @@ async fn cancel_mid_tool_skips_execution_and_commits_sanitized_partial() {
 
 #[tokio::test]
 async fn cancel_before_the_first_model_call_commits_prompt_and_marker_only() {
-    let (model, _turns) = stream_turns(vec![]);
+    let (model, _provider) = stream_turns(vec![]);
     let (flag, cancel) = cancel_channel();
     flag.set(true);
     let mut history = Vec::new();
@@ -801,19 +755,18 @@ async fn tool_call_ids_stay_unique_across_model_streams() {
     // Every model response restarts the provider's own call numbering; the
     // internal ids the driver mints must not, or history carries duplicate
     // tool ids and the TUI merges the second call into the first card.
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path":"f"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path":"f"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "call-1",
+            "read",
+            serde_json::json!({"path":"f"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "call-1",
+            "read",
+            serde_json::json!({"path":"f"}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "a\n").unwrap();
@@ -850,15 +803,13 @@ async fn argument_fragments_accumulate_into_one_call() {
     // rig-core's assembler owns fragment folding; the driver must surface
     // exactly one ToolStart and one assistant tool-call block per call,
     // with the arguments parsed as JSON.
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path":"f","limit":1})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![
-            MockStreamEvent::text("done"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, _provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "call-1",
+            "read",
+            serde_json::json!({"path":"f","limit":1}),
+        )]),
+        crate::testing::text_turn("done"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "a\nb\n").unwrap();
@@ -905,16 +856,14 @@ async fn argument_fragments_accumulate_into_one_call() {
 #[tokio::test]
 async fn empty_reply_after_tool_call_is_nudged_to_continue() {
     // Tool call, then a completely empty reply, then recovery.
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path":"f"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![MockStreamEvent::final_response_with_total_tokens(1)],
-        vec![
-            MockStreamEvent::text("all better now"),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path":"f"}),
+        )]),
+        crate::testing::text_turn(""),
+        crate::testing::text_turn("all better now"),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "body\n").unwrap();
@@ -953,18 +902,16 @@ async fn empty_reply_after_tool_call_is_nudged_to_continue() {
         "a nudge event must be emitted"
     );
     // The nudged retry carried the marker and the prompt.
-    let requests = model.requests();
+    let requests = provider.requests();
     assert_eq!(requests.len(), 3);
-    let sent = crate::edge::rig_to_own(&requests[2].chat_history);
+    let sent = crate::testing::replay_history(&requests[2].messages);
     assert_eq!(sent[3].text(), nudge::EMPTY_RESPONSE_MARKER);
     assert!(sent[4].text().contains("returned an empty response"));
 }
 
 #[tokio::test]
 async fn empty_reply_without_recent_tool_results_ends_the_run() {
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, provider) = stream_turns(vec![crate::testing::text_turn("")]);
     let (_, cancel) = cancel_channel();
     let mut history = Vec::new();
     let outcome = run(
@@ -981,17 +928,18 @@ async fn empty_reply_without_recent_tool_results_ends_the_run() {
     // prompt + empty marker; no nudge prompt follows
     assert_eq!(history.len(), 2);
     assert_eq!(history[1].text(), nudge::EMPTY_RESPONSE_MARKER);
-    assert_eq!(model.request_count(), 1);
+    assert_eq!(provider.requests().len(), 1);
 }
 
 #[tokio::test]
 async fn empty_reply_counts_against_the_turn_budget() {
-    let (model, _turns) = stream_turns(vec![
-        vec![
-            tool_event("t1", "read", serde_json::json!({"path":"f"})),
-            MockStreamEvent::final_response_with_total_tokens(1),
-        ],
-        vec![MockStreamEvent::final_response_with_total_tokens(1)],
+    let (model, provider) = stream_turns(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path":"f"}),
+        )]),
+        crate::testing::text_turn(""),
     ]);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "body\n").unwrap();
@@ -1013,17 +961,14 @@ async fn empty_reply_counts_against_the_turn_budget() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::MaxTurns));
-    assert_eq!(model.request_count(), 2, "nudged retry still ran");
+    assert_eq!(provider.requests().len(), 2, "nudged retry still ran");
     // The sanitized tail closes with the end marker.
     assert_eq!(history.last().unwrap().text(), END_MARKER);
 }
 
 #[tokio::test]
 async fn empty_history_and_prompt_round_trip() {
-    let (model, _turns) = stream_turns(vec![vec![
-        MockStreamEvent::text("hello"),
-        MockStreamEvent::final_response_with_total_tokens(1),
-    ]]);
+    let (model, _provider) = stream_turns(vec![crate::testing::text_turn("hello")]);
     let (_, cancel) = cancel_channel();
     let mut history = Vec::new();
     let outcome = run(

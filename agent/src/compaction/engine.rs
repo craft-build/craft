@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::providers::CompletionSource;
+use crate::provider::ModelHandle;
 
 use crate::config::{
     CompactionBuffer, CompactionConfig, CompactionKind,
@@ -149,10 +149,10 @@ impl CompactionEngine {
     /// the estimated context has already overflowed the buffer-subtracted
     /// window — overflow forces every armed stage in order (VCC first, then
     /// LLM), regardless of its ratio threshold.
-    pub async fn maybe_compact<M: CompletionSource + Clone>(
+    pub async fn maybe_compact(
         &self,
         state: &mut CompactionState,
-        model: &M,
+        model: &ModelHandle,
         history: &mut Vec<Message>,
         context_length: Option<u32>,
     ) -> bool {
@@ -164,10 +164,10 @@ impl CompactionEngine {
     /// fill, following the same rule the overflow-forced path uses. Stages
     /// whose mechanics decline to run (too-short history) still leave the
     /// history untouched, so an already-compact history returns `false`.
-    pub async fn force_compact<M: CompletionSource + Clone>(
+    pub async fn force_compact(
         &self,
         state: &mut CompactionState,
-        model: &M,
+        model: &ModelHandle,
         history: &mut Vec<Message>,
         context_length: Option<u32>,
     ) -> bool {
@@ -175,10 +175,10 @@ impl CompactionEngine {
             .await
     }
 
-    async fn compact_impl<M: CompletionSource + Clone>(
+    async fn compact_impl(
         &self,
         state: &mut CompactionState,
-        model: &M,
+        model: &ModelHandle,
         history: &mut Vec<Message>,
         context_length: Option<u32>,
         force: bool,
@@ -281,7 +281,6 @@ mod tests {
     use crate::compaction::llm::LLM_SUMMARY_PREFIX;
     use crate::compaction::test_support::{assistant_text, tool_result_of, user};
     use crate::history::AssistantContent;
-    use rig_core::test_utils::{MockCompletionModel, MockTurn};
 
     fn stage(kind: CompactionKind, context: f64) -> CompactionConfig {
         CompactionConfig { kind, context }
@@ -297,6 +296,31 @@ mod tests {
             ),
             tool_result_of(&id, output),
         ]
+    }
+
+    /// A compaction model scripting `reply` for every call it serves.
+    fn summary_model(reply: &str) -> crate::provider::ModelHandle {
+        summary_script(reply).0
+    }
+
+    /// [`summary_model`] with the provider recording its calls.
+    fn summary_script(
+        reply: &str,
+    ) -> (
+        crate::provider::ModelHandle,
+        crate::testing::ScriptedProvider,
+    ) {
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        for _ in 0..8 {
+            provider.push(crate::testing::text_turn(reply));
+        }
+        (
+            crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+                &provider,
+                crate::testing::model_info("summary", 1_000_000, 8_192, false, false),
+            )),
+            provider,
+        )
     }
 
     /// Long history: alternating prompts and large tool rounds.
@@ -327,7 +351,7 @@ mod tests {
         let ran = engine
             .force_compact(
                 &mut state,
-                &MockCompletionModel::text("x"),
+                &summary_model("x"),
                 &mut history,
                 Some(context_length),
             )
@@ -349,7 +373,7 @@ mod tests {
         let ran = engine
             .force_compact(
                 &mut state,
-                &MockCompletionModel::text("x"),
+                &summary_model("x"),
                 &mut history,
                 Some(1_000_000),
             )
@@ -363,12 +387,7 @@ mod tests {
         let mut state = CompactionState::default();
         let mut history = long_history();
         let ran = engine
-            .force_compact(
-                &mut state,
-                &MockCompletionModel::text("x"),
-                &mut history,
-                None,
-            )
+            .force_compact(&mut state, &summary_model("x"), &mut history, None)
             .await;
         assert!(!ran);
     }
@@ -384,7 +403,7 @@ mod tests {
         let ran = engine
             .maybe_compact(
                 &mut state,
-                &MockCompletionModel::text("x"),
+                &summary_model("x"),
                 &mut history,
                 Some(context_length),
             )
@@ -405,7 +424,7 @@ mod tests {
         let tokens = estimate_tokens(&history);
         // Window sized so 80% of it is below the current estimate.
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
-        let model = MockCompletionModel::from_turns([MockTurn::text("llm summary text")]);
+        let model = summary_model("llm summary text");
         let ran = engine
             .maybe_compact(&mut state, &model, &mut history, Some(context_length))
             .await;
@@ -427,7 +446,7 @@ mod tests {
         // stage then runs and compacts effectively, re-arming everything.
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.99) as u32).max(1);
-        let model = MockCompletionModel::from_turns([MockTurn::text("summarized")]);
+        let (model, _calls) = summary_script("summarized");
         assert!(
             engine
                 .maybe_compact(&mut state, &model, &mut history, Some(context_length))
@@ -457,7 +476,7 @@ mod tests {
         ];
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.99) as u32).max(1);
-        let model = MockCompletionModel::text("x");
+        let model = summary_model("x");
         let ran = engine
             .maybe_compact(&mut state, &model, &mut history, Some(context_length))
             .await;
@@ -482,7 +501,7 @@ mod tests {
         let mut history = vec![user(&"x".repeat(4000))];
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
-        let model = MockCompletionModel::text("x");
+        let model = summary_model("x");
         let ran = engine
             .maybe_compact(&mut state, &model, &mut history, Some(context_length))
             .await;
@@ -510,7 +529,7 @@ mod tests {
             !engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length),
                 )
@@ -526,7 +545,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length),
                 )
@@ -560,7 +579,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length)
                 )
@@ -578,12 +597,7 @@ mod tests {
         let mut state = CompactionState::default();
         let mut history = long_history();
         let ran = engine
-            .maybe_compact(
-                &mut state,
-                &MockCompletionModel::text("x"),
-                &mut history,
-                None,
-            )
+            .maybe_compact(&mut state, &summary_model("x"), &mut history, None)
             .await;
         assert!(!ran);
         assert_eq!(history.len(), long_history().len());
@@ -603,7 +617,7 @@ mod tests {
         state.protect_from(history.len() - 2);
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
-        let model = MockCompletionModel::from_turns([MockTurn::text("summary")]);
+        let (model, calls) = summary_script("summary");
         assert!(
             engine
                 .maybe_compact(&mut state, &model, &mut history, Some(context_length))
@@ -618,16 +632,15 @@ mod tests {
         // The protection re-anchored to where the carried input now starts.
         assert_eq!(state.carry_from(), Some(history.len() - 2));
         // The summarizer never saw the carried input.
-        let request = &model.requests()[0];
-        let carried = request
-            .chat_history
+        let request = &calls.requests()[0];
+        let carried = crate::testing::replay_history(&request.messages)
             .iter()
-            .filter_map(|m| match m {
-                rig_core::completion::message::Message::User { content } => content.first(),
-                _ => None,
+            .flat_map(|m| match m {
+                Message::User { content } => content.iter().collect::<Vec<_>>(),
+                _ => Vec::new(),
             })
             .filter_map(|b| match b {
-                rig_core::completion::message::UserContent::Text(t) => Some(t.text.as_str()),
+                crate::history::UserContent::Text(t) => Some(t.text.as_str()),
                 _ => None,
             })
             .any(|t| t.contains("unanswered prompt") || t.contains("queued followup"));
@@ -654,14 +667,20 @@ mod tests {
         state.protect_from(0);
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.5) as u32).max(1);
-        let model = MockCompletionModel::from_turns([MockTurn::text("summary")]);
+        // No model calls: the protected tail leaves nothing compactable.
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        let model = crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+            &provider,
+            crate::testing::model_info("summary", 1_000_000, 8_192, false, false),
+        ));
+        let calls = provider;
         assert!(
             !engine
                 .maybe_compact(&mut state, &model, &mut history, Some(context_length))
                 .await
         );
         assert_eq!(history.len(), long_history().len());
-        assert!(model.requests().is_empty());
+        assert!(calls.requests().is_empty());
     }
 
     #[tokio::test]
@@ -680,7 +699,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length)
                 )
@@ -703,7 +722,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length)
                 )
@@ -733,12 +752,7 @@ mod tests {
         let tight = ((tokens as f64 / 0.99) as u32).max(1);
         assert!(
             engine
-                .maybe_compact(
-                    &mut state,
-                    &MockCompletionModel::text("x"),
-                    &mut history,
-                    Some(tight)
-                )
+                .maybe_compact(&mut state, &summary_model("x"), &mut history, Some(tight))
                 .await
         );
         // A second run with a wide window but a huge buffer: fill is over the
@@ -748,7 +762,7 @@ mod tests {
             !engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(overflowing)
                 )
@@ -773,7 +787,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length)
                 )
@@ -806,7 +820,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length)
                 )
@@ -841,14 +855,14 @@ mod tests {
         // Fill ratio 0.7: over VCC's 0.6 threshold, under LLM's 0.8 and the
         // usable window, so the LLM stage only runs via the cascade.
         let context_length = ((tokens as f64 / 0.7) as u32).max(1);
-        let model = MockCompletionModel::from_turns([MockTurn::text("summarized")]);
+        let (model, calls) = summary_script("summarized");
         assert!(
             engine
                 .maybe_compact(&mut state, &model, &mut history, Some(context_length))
                 .await
         );
         assert!(
-            !model.requests().is_empty(),
+            !calls.requests().is_empty(),
             "the LLM stage must run after an over-limit VCC pass"
         );
         assert!(matches!(&history[0], Message::Assistant { content, .. }
@@ -891,7 +905,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length),
                 )
@@ -919,7 +933,7 @@ mod tests {
             !engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length),
                 )
@@ -934,7 +948,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length),
                 )
@@ -958,7 +972,7 @@ mod tests {
             !engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length),
                 )
@@ -969,7 +983,7 @@ mod tests {
             engine
                 .maybe_compact(
                     &mut state,
-                    &MockCompletionModel::text("x"),
+                    &summary_model("x"),
                     &mut history,
                     Some(context_length),
                 )
@@ -993,12 +1007,7 @@ mod tests {
         state.set_request_overhead(usable - tokens);
         assert!(
             engine
-                .maybe_compact(
-                    &mut state,
-                    &MockCompletionModel::text("x"),
-                    &mut history,
-                    Some(window),
-                )
+                .maybe_compact(&mut state, &summary_model("x"), &mut history, Some(window),)
                 .await,
             "an estimate equal to the usable window is an overflow"
         );
@@ -1019,12 +1028,7 @@ mod tests {
         state.set_request_overhead(usable - tokens - 1);
         assert!(
             !engine
-                .maybe_compact(
-                    &mut state,
-                    &MockCompletionModel::text("x"),
-                    &mut history,
-                    Some(window),
-                )
+                .maybe_compact(&mut state, &summary_model("x"), &mut history, Some(window),)
                 .await,
             "one token under the usable window must not force compaction"
         );
@@ -1047,12 +1051,7 @@ mod tests {
         let mut state = CompactionState::default();
         assert!(
             engine
-                .maybe_compact(
-                    &mut state,
-                    &MockCompletionModel::text("x"),
-                    &mut history,
-                    Some(window),
-                )
+                .maybe_compact(&mut state, &summary_model("x"), &mut history, Some(window),)
                 .await,
             "the MIN_OUTPUT_TOKENS floor must be reserved below the threshold"
         );

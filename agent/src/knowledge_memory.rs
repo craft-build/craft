@@ -10,8 +10,6 @@
 //!
 //! Controlled by `agent.memory_extraction` (default on).
 
-use crate::providers::CompletionSource;
-use rig_core::completion::message::AssistantContent;
 use serde::Deserialize;
 
 use crate::history::Message;
@@ -174,8 +172,8 @@ pub fn write_fact(fact: &Fact, cwd: &std::path::Path) -> Result<(), String> {
 
 /// One weak-tier side completion that extracts facts from the turn
 /// (the auto-review/compaction edge pattern).
-async fn extract_facts<M: CompletionSource>(
-    model: &M,
+async fn extract_facts(
+    model: &crate::provider::ModelHandle,
     history: &[Message],
 ) -> Result<Vec<Fact>, String> {
     let mut transcript = String::new();
@@ -193,20 +191,9 @@ async fn extract_facts<M: CompletionSource>(
     let messages = vec![Message::User {
         content: vec![crate::history::UserContent::text(transcript)],
     }];
-    let request = crate::edge::to_request(&messages, &[], Some(&extraction_prompt()), None, None);
-    let response = model
-        .completion(request)
+    let text = crate::provider::complete_text(model, &messages, &extraction_prompt())
         .await
         .map_err(|e| format!("extraction call failed: {e}"))?;
-    let text = response
-        .choice
-        .iter()
-        .filter_map(|block| match block {
-            AssistantContent::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     if text.trim().is_empty() {
         return Err("extraction produced no text".into());
     }
@@ -239,7 +226,7 @@ pub async fn wait_for_pending(timeout: std::time::Duration) {
 /// failures swallowed. Called by every surface after a successful run; the
 /// handle is also tracked so [`wait_for_pending`] can drain it at teardown.
 pub fn spawn_extraction(
-    model: crate::providers::DynamicModel,
+    model: crate::provider::ModelHandle,
     history: Vec<Message>,
     cwd: std::path::PathBuf,
     enabled: bool,

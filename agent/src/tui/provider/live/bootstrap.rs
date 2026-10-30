@@ -10,7 +10,8 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::error::{InvalidSnafu, Result};
-use crate::providers::{CatalogModel, Provider as ClientProvider, ProviderKind};
+use crate::provider::ProviderHandle;
+use animist::provider::ModelInfo;
 
 use super::cards;
 use super::{AgentEvent, CraftProvider, ModelChoice, Selection, Tone, report};
@@ -19,7 +20,7 @@ use super::{AgentEvent, CraftProvider, ModelChoice, Selection, Tone, report};
 /// default, or a prior session's header) against the discovered catalogs.
 /// `None` when the provider is gone or the model is no longer listed.
 pub(super) fn selection_for_spec(
-    catalogs: &BTreeMap<String, Vec<CatalogModel>>,
+    catalogs: &BTreeMap<String, Vec<ModelInfo>>,
     spec: &str,
 ) -> Option<Selection> {
     let (provider, resolved) = crate::model_selection::resolve_spec(catalogs, spec)?;
@@ -33,22 +34,46 @@ pub(super) fn selection_for_spec(
 /// Flat model menu rows across all usable providers, with the current
 /// selection's index.
 pub(super) fn catalog_choices(
-    catalogs: &BTreeMap<String, Vec<CatalogModel>>,
+    config: &crate::config::Config,
+    catalog: &animist::catalog::Catalog,
+    catalogs: &BTreeMap<String, Vec<ModelInfo>>,
     selection: &Selection,
 ) -> (Vec<ModelChoice>, usize) {
     let mut choices = Vec::new();
     let mut current = 0;
     for (provider, models) in catalogs {
-        for model in models {
-            if provider == &selection.provider && model.id == selection.model {
+        let key = config
+            .providers
+            .get(provider)
+            .map(crate::provider::catalog_key)
+            .unwrap_or("openai-compatible");
+        for info in models {
+            let Some(id) = info.ids.first() else { continue };
+            if provider == &selection.provider && id == &selection.model {
                 current = choices.len();
             }
+            let label = config
+                .providers
+                .get(provider)
+                .and_then(|p| p.models().get(id))
+                .and_then(|m| m.name.clone())
+                .unwrap_or_else(|| id.clone());
+            // Vision claims come from the catalog row: a model the catalog
+            // does not know keeps the old metadata-miss behavior (attach
+            // allowed) rather than the provider row's default-false.
+            let vision = catalog
+                .model(key, id)
+                .is_none_or(|entry| entry.info.features.vision);
             choices.push(ModelChoice {
                 provider: provider.clone(),
-                model: model.id.clone(),
-                label: model.label().to_owned(),
+                model: id.clone(),
+                label,
                 provider_label: provider.clone(),
-                thinking_choices: crate::thinking::ThinkingConfig::choices(),
+                thinking_choices: crate::thinking::choices_for(
+                    crate::thinking::ThinkingConfig::Off,
+                    Some(info),
+                ),
+                vision,
             });
         }
     }
@@ -66,7 +91,7 @@ impl CraftProvider {
             .fail();
         }
         let cwd = cwd.as_ref();
-        let mut catalogs: BTreeMap<String, Vec<CatalogModel>> = BTreeMap::new();
+        let mut catalogs: BTreeMap<String, Vec<ModelInfo>> = BTreeMap::new();
         let mut notes = Vec::new();
         // B.11: start the MCP client up front but never await `ready` here —
         // the first frame must not block on a slow server initialize. The
@@ -102,23 +127,16 @@ impl CraftProvider {
             notes.push(format!("mcp: {}", env.mcp_errors));
         }
         let mcp = workspace.mcp();
-        // H.2 models.dev catalog: warm the 24h disk cache (best-effort, with
-        // a fetch budget) BEFORE discovery, matching headless and ACP: the
-        // Bedrock listing resolves inference-profile limits (exact id, then
-        // the profile's base model) while listing, and openai-compatible
-        // endpoints record reasoning hints — a post-warm pass can only fill
-        // fields keyed by the model id, so a cold catalog would leave those
-        // permanently empty. The per-model enrichment itself now lives in
-        // `models_with`; failures degrade to whatever discovery provides.
-        let _ =
-            tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
+        // models.dev: the session catalog loads once (24h disk cache,
+        // bounded refresh) BEFORE discovery, matching headless and ACP —
+        // providers merge their catalog slice into the listing by exact ID,
+        // so a cold catalog would leave context windows and thinking
+        // support permanently empty this session. Failures degrade to
+        // whatever discovery provides.
+        let catalog = crate::provider::load_catalog().await;
         for (name, provider_config) in &config.providers {
-            if provider_config.kind == ProviderKind::Voyageai {
-                notes.push(format!("{name}: no completion models (non-chat provider)"));
-                continue;
-            }
-            match ClientProvider::from_config(provider_config) {
-                Ok(provider) => match provider.models(provider_config).await {
+            match ProviderHandle::from_config(provider_config, Some(&catalog)).await {
+                Ok(provider) => match provider.models(provider_config, Some(&catalog)).await {
                     Ok(models) => {
                         if models.is_empty() {
                             notes.push(format!("{name}: no models discovered"));
@@ -152,12 +170,14 @@ impl CraftProvider {
             if let Some(models) = catalogs.get(name) {
                 crate::model_registry::set_known_models(
                     name,
-                    provider_config.kind.as_str(),
+                    crate::provider::config_kind_str(provider_config),
                     models
                         .iter()
                         .map(|m| crate::model_registry::ModelInfo {
-                            context_window: m.context_length,
-                            ..crate::model_registry::ModelInfo::new(m.id.clone())
+                            context_window: m.config.context_window,
+                            ..crate::model_registry::ModelInfo::new(
+                                m.ids.first().cloned().unwrap_or_default(),
+                            )
                         })
                         .collect(),
                 );
@@ -166,6 +186,11 @@ impl CraftProvider {
 
         let (provider, models) = catalogs.iter().next().expect("catalogs is non-empty");
         let first = models.first().expect("each catalog is non-empty");
+        let first_id = first
+            .ids
+            .first()
+            .cloned()
+            .expect("listing rows carry an id");
         // Reuse the model from the most recent session in this cwd, so the
         // user does not reselect it every launch. Falls back to the
         // Medium-tier default, then the first catalog entry; an explicit
@@ -183,8 +208,8 @@ impl CraftProvider {
                 .and_then(|spec| selection_for_spec(&catalogs, &spec));
         let selection = last_used.or(tier_default).unwrap_or(Selection {
             provider: provider.clone(),
-            model: first.id.clone(),
-            context_length: first.context_length,
+            model: first_id,
+            context_length: first.config.context_window,
         });
         Ok(Self {
             config: Arc::new(config),
@@ -192,6 +217,7 @@ impl CraftProvider {
             instructions,
             permissions,
             catalogs,
+            catalog,
             notes,
             selection,
             cwd_label: cards::display_path(cwd),
@@ -228,7 +254,7 @@ impl CraftProvider {
         );
         let entry = self.catalogs[provider]
             .iter()
-            .find(|m| m.id == model)
+            .find(|info| info.ids.first().is_some_and(|id| id == model))
             .ok_or_else(|| {
                 crate::error::InvalidSnafu {
                     reason: format!("provider {provider:?} has no model {model:?}"),
@@ -237,8 +263,8 @@ impl CraftProvider {
             })?;
         self.selection = Selection {
             provider: provider.to_string(),
-            model: entry.id.clone(),
-            context_length: entry.context_length,
+            model: entry.ids.first().expect("row carries an id").clone(),
+            context_length: entry.config.context_window,
         };
         Ok(self)
     }

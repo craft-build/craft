@@ -27,9 +27,9 @@ use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::config::Config;
 use crate::permissions::PermissionManager;
-use crate::providers::CatalogModel;
 use crate::run;
 use crate::tools::Workspace;
+use animist::provider::ModelInfo;
 
 use bootstrap::catalog_choices;
 use usage_recorder::UsageLedger;
@@ -136,7 +136,8 @@ struct LoopCtx {
     config: Arc<Config>,
     workspace: Workspace,
     instructions_text: String,
-    catalogs: BTreeMap<String, Vec<CatalogModel>>,
+    catalogs: BTreeMap<String, Vec<ModelInfo>>,
+    catalog: Arc<animist::catalog::Catalog>,
     snapshots: crate::snapshot::SnapshotManager,
     state_dir: Option<crate::storage::StateDir>,
     cwd: String,
@@ -156,17 +157,7 @@ impl LoopCtx {
     /// Flat model menu rows across all usable providers, with the
     /// current selection's index.
     fn catalog_choices(&self, selection: &Selection) -> (Vec<ModelChoice>, usize) {
-        let (mut choices, current) = catalog_choices(&self.catalogs, selection);
-        for choice in &mut choices {
-            if let Some(provider) = self.config.providers.get(&choice.provider) {
-                choice.thinking_choices = crate::thinking::choices_for(
-                    crate::thinking::ThinkingConfig::Off,
-                    provider,
-                    &choice.model,
-                );
-            }
-        }
-        (choices, current)
+        catalog_choices(&self.config, &self.catalog, &self.catalogs, selection)
     }
 }
 
@@ -189,7 +180,10 @@ pub struct CraftProvider {
     /// grants, and per-tool defaults; consulted by the approval gate.
     permissions: Arc<PermissionManager>,
     /// Per-provider discovered models, config key order.
-    catalogs: BTreeMap<String, Vec<CatalogModel>>,
+    catalogs: BTreeMap<String, Vec<ModelInfo>>,
+    /// The session's models.dev catalog: display names, vision claims,
+    /// and any later model selection all read it.
+    catalog: Arc<animist::catalog::Catalog>,
     /// Discovery problems surfaced to the user as notes at startup.
     notes: Vec<String>,
     selection: Selection,

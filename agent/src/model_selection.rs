@@ -4,7 +4,58 @@
 
 use std::collections::BTreeMap;
 
-use crate::providers::CatalogModel;
+use animist::provider::ModelInfo;
+
+/// One row of a provider's model listing as the pickers and session
+/// options see it: an animist [`ModelInfo`] projected with the display
+/// fields the config's manual table and the models.dev catalog carry
+/// (`ModelInfo` itself holds neither name nor description).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub context_length: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl CatalogModel {
+    /// Project a listing row, attaching the manual table's display fields.
+    pub fn from_info(info: &ModelInfo, name: Option<String>, description: Option<String>) -> Self {
+        Self {
+            id: info.ids.first().cloned().unwrap_or_default(),
+            name,
+            description,
+            context_length: info.config.context_window,
+            max_output_tokens: info.config.max_output_tokens,
+        }
+    }
+
+    /// Project a full listing, attaching the config's manual display
+    /// fields by exact id. A session whose provider left the config
+    /// projects bare rows.
+    pub fn rows(infos: &[ModelInfo], config: Option<&crate::config::ProviderConfig>) -> Vec<Self> {
+        infos
+            .iter()
+            .map(|info| {
+                let manual = info
+                    .ids
+                    .first()
+                    .and_then(|id| config.and_then(|c| c.models().get(id)));
+                Self::from_info(
+                    info,
+                    manual.and_then(|m| m.name.clone()),
+                    manual.and_then(|m| m.description.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// Human label for pickers.
+    pub fn label(&self) -> String {
+        self.name.clone().unwrap_or_else(|| self.id.clone())
+    }
+}
 
 /// A resolved model: its catalog id and the context window the catalog
 /// reports for it.
@@ -20,16 +71,19 @@ pub struct ResolvedModel {
 /// listed — callers use the miss to re-prompt instead of silently serving
 /// a different model.
 pub fn resolve_spec(
-    catalogs: &BTreeMap<String, Vec<CatalogModel>>,
+    catalogs: &BTreeMap<String, Vec<ModelInfo>>,
     spec: &str,
 ) -> Option<(String, ResolvedModel)> {
     let (provider, model) = spec.split_once('/')?;
-    let entry = catalogs.get(provider)?.iter().find(|m| m.id == model)?;
+    let entry = catalogs
+        .get(provider)?
+        .iter()
+        .find(|info| info.ids.first().is_some_and(|id| id == model))?;
     Some((
         provider.to_string(),
         ResolvedModel {
-            model: entry.id.clone(),
-            context_length: entry.context_length,
+            model: entry.ids.first()?.clone(),
+            context_length: entry.config.context_window,
         },
     ))
 }
@@ -38,16 +92,17 @@ pub fn resolve_spec(
 /// still lists it, otherwise the catalog's first entry. The ACP protocol
 /// needs a concrete model at all times, so an absent model falls back
 /// rather than fails.
-pub fn resolve_or_default(
-    models: &[CatalogModel],
-    requested: Option<&str>,
-) -> Option<ResolvedModel> {
+pub fn resolve_or_default(models: &[ModelInfo], requested: Option<&str>) -> Option<ResolvedModel> {
     let entry = requested
-        .and_then(|id| models.iter().find(|m| m.id == id))
+        .and_then(|id| {
+            models
+                .iter()
+                .find(|info| info.ids.first().is_some_and(|listed| listed == id))
+        })
         .or_else(|| models.first())?;
     Some(ResolvedModel {
-        model: entry.id.clone(),
-        context_length: entry.context_length,
+        model: entry.ids.first()?.clone(),
+        context_length: entry.config.context_window,
     })
 }
 
@@ -55,17 +110,14 @@ pub fn resolve_or_default(
 mod tests {
     use super::*;
 
-    fn model(id: &str, ctx: Option<u32>) -> CatalogModel {
-        CatalogModel {
-            id: id.to_string(),
-            name: None,
-            description: None,
-            context_length: ctx,
-            max_output_tokens: None,
-        }
+    fn model(id: &str, ctx: Option<u32>) -> ModelInfo {
+        let mut info = ModelInfo::default();
+        info.ids = vec![id.to_string()];
+        info.config.context_window = ctx;
+        info
     }
 
-    fn catalogs() -> BTreeMap<String, Vec<CatalogModel>> {
+    fn catalogs() -> BTreeMap<String, Vec<ModelInfo>> {
         BTreeMap::from([(
             "acme".to_string(),
             vec![model("one", Some(8)), model("two", None)],

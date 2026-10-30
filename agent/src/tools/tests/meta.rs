@@ -61,7 +61,12 @@ async fn list_tools_lists_and_details_registered_tools() {
         .definitions()
         .into_iter()
         .filter(|definition| definition.name != "list_tools")
-        .collect();
+        .map(|definition| rig_core::completion::ToolDefinition {
+            name: crate::tools::tool_name(&definition.name),
+            description: definition.description,
+            parameters: definition.input_schema,
+        })
+        .collect::<Vec<_>>();
     let tool = ListTools(std::sync::Arc::new(definitions));
     let output = invoke(&tool, json!({})).await.unwrap();
     assert!(
