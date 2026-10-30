@@ -144,6 +144,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "animist"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65917a6ce50e126f26a090b2b294bd2281e5e7099179d299d375d38a1fc416d6"
+dependencies = [
+ "arc-handle",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-types",
+ "base64 0.23.1",
+ "bon",
+ "bytes",
+ "crc32fast",
+ "flume 0.12.0",
+ "futures-util",
+ "http",
+ "jiff",
+ "macro_rules_attribute",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -250,6 +280,17 @@ dependencies = [
  "percent-encoding",
  "windows-sys 0.61.2",
  "x11rb",
+]
+
+[[package]]
+name = "arc-handle"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "691bca3363b851c93af8bf5dfcb066e70bd13a86bdb94caaa8ad6bc49dd2b32e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2397,6 +2438,7 @@ version = "1.0.0-beta.8"
 dependencies = [
  "agent-client-protocol",
  "aho-corasick",
+ "animist",
  "arboard",
  "arc-swap",
  "argosy",
@@ -3261,6 +3303,9 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+dependencies = [
+ "getrandom 0.4.3",
+]
 
 [[package]]
 name = "fax"
@@ -3348,6 +3393,18 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "nanorand",
+ "spin",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
+ "fastrand 2.5.0",
+ "futures-core",
+ "futures-sink",
  "spin",
 ]
 
@@ -3858,7 +3915,7 @@ dependencies = [
  "embed-resource",
  "etagere",
  "filedescriptor",
- "flume",
+ "flume 0.11.1",
  "foreign-types",
  "futures",
  "gpui-macros",

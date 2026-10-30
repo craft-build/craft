@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 agent-client-protocol.workspace = true
 aho-corasick.workspace = true
+animist.workspace = true
 arboard.workspace = true
 arc-swap.workspace = true
 argosy.workspace = true
@@ -70,6 +71,7 @@ aws-credential-types.workspace = true
 aws-smithy-types.workspace = true
 
 [dev-dependencies]
+animist = { workspace = true, features = ["testing"] }
 fastrand = "2"
 rig-core = { workspace = true, features = ["reqwest", "test-utils"] }
 test-case = "3"

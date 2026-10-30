@@ -99,4 +99,78 @@ compare against, and build the fake provider that replaces rig's
 
 ## Completion note
 
-_(fill in when done)_
+**2026-10-29, branch `animist-migration`** (uncommitted at time of writing;
+base commit `90c82ae7`).
+
+Baseline recorded on clean `main` before any change:
+
+- `cargo test -p craft`: **2040 passed, 4 failed, 1 ignored**. Failing:
+  `recipe::tests::render_includes_subrecipe`,
+  `recipe::tests::render_substitutes_parameters`,
+  `recipe::tests::render_supports_conditionals`,
+  `sandbox::mac::tests::sandboxed_process_cannot_write_outside_workspace`
+  (all pre-existing; the sandbox one is environment-dependent).
+- `cargo clippy -p craft --all-targets`: **135 warnings (lib), 168 including
+  test targets** (33 test-only). No growth allowed beyond this.
+- `cargo fmt -p craft --check`: **not clean** — 2 pre-existing diffs
+  (`agent/src/tui/mod.rs:745`, `agent/src/tui/probe.rs:157`). Left as-is on
+  purpose: fixing them is outside this prompt's allowed file surface.
+
+Delivered:
+
+- `animist = { version = "0.7.0", features = ["bedrock"] }` in
+  `[workspace.dependencies]`; `animist.workspace = true` in `agent/[dependencies]`
+  and `animist = { workspace = true, features = ["testing"] }` in
+  `[dev-dependencies]` (dev-only, forward wiring for 06's `ToolHarness`).
+  `cargo tree -p craft -d`: no new duplicate majors — `reqwest`/`tokio`/`jiff`/
+  `flume`/`serde` unify; the only `serde v1.0.229` double entry is a same-version
+  feature-split that predates this change. `flume` stays a re-export
+  (`animist::flume`); no workspace entry.
+- `agent/src/testing/` behind `#[cfg(test)] pub mod testing;` (craft has no
+  `agent/tests/`; every test lives under `src/`): `ScriptedProvider`
+  (`ProviderImpl` with a shared script queue, per-attempt blocking gates with a
+  one-shot `release()`, full `RecordedRequest` capture, and
+  `refresh_auth`/`reload_auth` counters), `Attempt` helpers (`text_turn`,
+  `tool_turn`, `thinking_turn`, `max_tokens_turn`, `http_error`,
+  `transport_timeout`, `context_overflow` + `context_overflow_http`),
+  `scripted_model`, `model_info`.
+- 7 self-tests through a real `animist::agent::Agent`: text turn completes;
+  scripted tool call reaches a registered no-op tool (result visible in the next
+  request); blocked attempt released completes; blocked attempt cancelled via
+  `Cancellation` yields `RunStatus::Cancelled` with the scripted partial
+  (`display_text` + the usage checkpoint) in `interrupted_attempts`; helper-shape
+  and provider-behavior tests (list_models, auth counters, error shapes,
+  overflow-body classification via `compaction::llm`).
+
+Decisions:
+
+- `#[cfg(test)]` over a `test-support` cfg: nothing outside the crate consumes
+  the double. If 06's `ToolHarness` work needs `agent/tests/` integration tests,
+  revisit then (reviewer forward note).
+- Attempt state uses `std::sync::Mutex` (never held across an `await`); the
+  queues are tiny and this keeps `push`/`requests` sync-callable from tests.
+- `ProviderError` is constructed literally (`Http { .. }` with
+  `snafu::Backtrace::generate()`; `Transport` from a real loopback timeout via a
+  `.no_proxy()` client) because animist's snafu selectors are `pub(crate)`.
+- `transport_timeout()` uses a never-accepted loopback listener + 50 ms client
+  timeout; `.no_proxy()` guarantees proxy env vars cannot route it off-machine.
+- Turn helpers end with a `ProviderEvent::Usage` checkpoint (cumulative, equal
+  to the final usage) per the provider contract, so interrupted attempts keep
+  usage in their partial.
+- Reviewer P3 skips (accepted per prompt mandate): workspace-level `bedrock`
+  feature and dev-only `testing` feature are specified verbatim by this prompt.
+
+Validation after the change: `cargo build -p craft` clean; `cargo test -p craft`
+**2047 passed / 4 failed / 1 ignored** (baseline + 7, same baseline failures);
+clippy exactly at baseline (135/168, one `result_large_err` silenced with a
+reasoned `#[expect]` — `ProviderError` is animist's public type); fmt at
+baseline (the same 2 tui diffs only). Review verdict after one fix round:
+**approve, 0 findings** (P2 proxy hazard and a fidelity P3 fixed; two P3s
+justified above).
+
+Follow-ups:
+
+- Pre-existing main failures (3× recipe render, 1× macOS sandbox) and the 2 tui
+  fmt diffs predate this work; later prompts must not be blamed for them.
+- 06: if `agent::testing` needs to reach `agent/tests/` integration tests,
+  switch the module to a `test-support` cfg alias.

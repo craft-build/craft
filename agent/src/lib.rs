@@ -40,6 +40,8 @@ pub mod subagent;
 pub mod subcmd;
 pub mod template;
 pub mod term;
+#[cfg(test)]
+pub mod testing;
 pub mod thinking;
 pub mod tools;
 pub mod tui;
