@@ -45,6 +45,15 @@ pub fn current_call_id() -> Option<String> {
     CURRENT_CALL_ID.try_with(|id| id.clone()).ok()
 }
 
+/// Run `future` with the dispatch call-id task-local set to `id`; the rig
+/// bridge scopes every bridged executor call this way.
+pub(crate) async fn scope_call_id<T, F>(id: &str, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CURRENT_CALL_ID.scope(id.to_owned(), future).await
+}
+
 /// What to do with a tool call before it executes.
 #[derive(Debug, Clone)]
 pub enum Decision {
@@ -134,6 +143,12 @@ impl ToolDispatch {
     /// Registered tool names, in dispatch-table (alphabetical) order.
     pub fn names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
+    }
+
+    /// The registered rig tools; the bridge wraps each as an animist
+    /// executor until 06 makes them native.
+    pub(crate) fn dynamic_tools(&self) -> impl Iterator<Item = &DynamicTool> {
+        self.tools.values()
     }
 
     pub fn with_before(self, hook: Arc<dyn BeforeExecute>) -> Self {
@@ -481,7 +496,7 @@ fn guardrail_note(
 
 /// Model-visible content for a failed call: the error's canonical output when
 /// it has one, else its message.
-fn output_content_of_error(error: &rig_core::tool::ToolExecutionError) -> ToolContents {
+pub(crate) fn output_content_of_error(error: &rig_core::tool::ToolExecutionError) -> ToolContents {
     let content = rig_content_to_contents(error.model_output().as_content());
     if content.0.is_empty() {
         ToolContents::from(error.to_string())
@@ -490,7 +505,7 @@ fn output_content_of_error(error: &rig_core::tool::ToolExecutionError) -> ToolCo
     }
 }
 
-fn rig_content_to_contents(
+pub(crate) fn rig_content_to_contents(
     items: &[rig_core::completion::message::ToolResultContent],
 ) -> ToolContents {
     items

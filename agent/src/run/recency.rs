@@ -93,6 +93,27 @@ pub(crate) fn recency_view(
     attach_recency_tail(messages, &facts)
 }
 
+/// Attach the rendered tail to the last user message of a wire view, in
+/// place; a no-op when there is nothing to inject or no user message to
+/// carry it.
+pub(crate) fn attach_recency_tail_wire(
+    messages: &mut [crate::history::Message],
+    source: &Arc<dyn RecencySource>,
+    turn: u32,
+) {
+    let facts = source.collect(&RecencyCtx { turn });
+    if facts.is_empty() {
+        return;
+    }
+    let tail = facts.render();
+    let Some(last_user) = messages.iter().rposition(ext::is_user) else {
+        return;
+    };
+    messages[last_user]
+        .content
+        .push(ContentBlock::Text { text: tail });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

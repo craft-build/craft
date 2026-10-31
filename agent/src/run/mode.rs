@@ -23,6 +23,33 @@ impl AgentMode {
             Self::Plan(p) => Some(p),
         }
     }
+
+    /// The plan-mode block reason for a call, or `None` when the call may
+    /// run. In Plan mode only the allocated plan file may be written; write
+    /// calls that name no path fail closed. `write_root` anchors path
+    /// normalization the same way the dedup cache does.
+    pub fn plan_block_reason(
+        &self,
+        write_root: Option<&Path>,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Option<String> {
+        let plan = self.plan_path()?;
+        if !super::dedup::ToolDedupCache::is_write(name) {
+            return None;
+        }
+        let root = write_root.map(|p| p.to_string_lossy().into_owned());
+        let plan_key = super::dedup::normalize_write_path_with_root(
+            root.as_deref(),
+            &plan.display().to_string(),
+        );
+        let paths = super::dedup::extract_write_paths(name, arguments);
+        let blocked = paths.is_empty()
+            || paths.iter().any(|p| {
+                super::dedup::normalize_write_path_with_root(root.as_deref(), p) != plan_key
+            });
+        blocked.then(|| PLAN_WRITE_RESTRICTED.to_owned())
+    }
 }
 
 #[cfg(test)]

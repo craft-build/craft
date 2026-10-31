@@ -254,7 +254,7 @@ impl Default for AdvisorConfig {
 }
 
 /// Defaults for each agent run, independent of provider/model selection.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
     /// System instructions. An empty string keeps the built-in defaults; any
@@ -270,6 +270,11 @@ pub struct AgentConfig {
     /// (unbounded in the TUI, [`crate::run::RunParams`] defaults headless);
     /// set by `--max-turns` (G.1).
     pub max_turns: Option<u32>,
+    /// Bound on tools executing concurrently within one wave. Rig tools are
+    /// bridged as exclusive until 06, so this only bites once tools carry
+    /// scheduling claims.
+    #[serde(default = "default_max_concurrent_tools")]
+    pub max_concurrent_tools: usize,
     /// Post-turn advisor (C.12).
     pub advisor: AdvisorConfig,
     /// Post-turn argosy memory extraction (Phase 4 of the argosy
@@ -281,6 +286,25 @@ pub struct AgentConfig {
 
 fn default_memory_extraction() -> bool {
     true
+}
+
+fn default_max_concurrent_tools() -> usize {
+    8
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            preamble: String::new(),
+            temperature: None,
+            max_tokens: None,
+            thinking: None,
+            max_turns: None,
+            max_concurrent_tools: default_max_concurrent_tools(),
+            advisor: AdvisorConfig::default(),
+            memory_extraction: default_memory_extraction(),
+        }
+    }
 }
 
 impl AgentConfig {

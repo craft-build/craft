@@ -262,33 +262,6 @@ pub struct ProviderRequest {
     pub options: RequestOptions,
 }
 
-/// Build the per-request options from run params and the model handle:
-/// thinking preference, sampling, the output cap (with the Claude default
-/// and its warning), and the system-message policy the target protocol
-/// needs.
-pub(crate) fn request_options(
-    handle: &ModelHandle,
-    thinking: crate::thinking::ThinkingConfig,
-    fast: bool,
-    max_tokens: Option<u64>,
-    temperature: Option<f64>,
-) -> RequestOptions {
-    let mut options = RequestOptions::builder()
-        .thinking(thinking.to_animist())
-        .fast(fast)
-        .build();
-    // bon makes the optional members' setters take the inner type, so the
-    // `None` cases simply leave the fields unset.
-    if let Some(cap) = max_tokens {
-        options.max_output_tokens = Some(cap.min(u64::from(u32::MAX)) as u32);
-    }
-    options.temperature = temperature;
-    if handle.moves_system_to_preamble() {
-        options.system_message_policy = animist::provider::SystemMessagePolicy::MoveToPreamble;
-    }
-    options
-}
-
 /// Run one model stream to completion.
 pub(crate) async fn run_model_stream(
     handle: &ModelHandle,

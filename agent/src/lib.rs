@@ -9,6 +9,7 @@ pub mod compression;
 pub mod config;
 pub mod diff;
 pub mod error;
+pub mod harness;
 pub mod headless;
 pub mod history;
 pub mod id;

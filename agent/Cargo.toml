@@ -23,6 +23,7 @@ clap.workspace = true
 clap_complete.workspace = true
 dirs.workspace = true
 etcetera.workspace = true
+flume = "0.12"
 futures.workspace = true
 htmd.workspace = true
 http.workspace = true

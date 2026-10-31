@@ -25,7 +25,7 @@ pub mod guardrails;
 pub mod mode;
 pub(crate) mod nudge;
 mod overflow;
-mod read_lifecycle;
+pub(crate) mod read_lifecycle;
 pub mod recency;
 mod retry;
 mod stats;
@@ -523,7 +523,7 @@ async fn run_loop(
             messages: request,
             system: params.preamble.clone().unwrap_or_default(),
             tools: definitions.clone(),
-            options: stream::request_options(
+            options: crate::harness::request::request_options(
                 target,
                 params.thinking,
                 params.fast,
