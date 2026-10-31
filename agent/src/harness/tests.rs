@@ -894,4 +894,35 @@ async fn a_checkpoint_failure_surfaces_an_event_and_never_fails_the_run() {
         matches!(&outcome, TurnOutcome::Done { reply } if reply == "done"),
         "the run completes despite the failing disk: {outcome:?}"
     );
+
+    // Recovery: with the disk writable again, the next checkpoint must
+    // land exactly the live history — a retry after a failed one must
+    // never duplicate the batch it already mirrored.
+    let conversation_history = conversation.history();
+    conversation_history
+        .add_stored(crate::history::ext::stored_user_text("after recovery"))
+        .await;
+    let persister = conversation.persister().expect("persisted");
+    persister
+        .lock()
+        .await
+        .checkpoint()
+        .await
+        .expect("the retry checkpoint succeeds");
+    let reloaded =
+        crate::storage::sessions::StoredSession::load(session_ref().id(), &state_dir(&dir))
+            .unwrap();
+    let live = conversation_history.snapshot().await;
+    let texts = |entries: &[animist::history::HistoryEntry]| {
+        entries
+            .iter()
+            .filter_map(animist::history::HistoryEntry::current)
+            .map(crate::history::ext::message_text)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        texts(reloaded.messages()),
+        texts(live.entries()),
+        "the recovered file equals the live history, nothing duplicated"
+    );
 }

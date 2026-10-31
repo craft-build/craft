@@ -1,9 +1,9 @@
-//! Craft's ACP agent boundary: the shared run loop exposed over
+//! Craft's ACP agent boundary: the shared conversation exposed over
 //! agent-client-protocol v1.
 //!
-//! Every capability of the run loop (`run::run` with read/grep/edit/delete
-//! tools, streaming output, per-turn usage, caller-owned history) is surfaced
-//! here: provider and model selection travel as session config options, model
+//! Every capability of the conversation (`harness::run_turn` with
+//! read/grep/edit/delete tools, streaming output, per-turn usage) is
+//! surfaced here: provider and model selection travel as session config options, model
 //! output streams as `session/update` notifications, and `session/cancel`
 //! stops the in-flight turn. The loop itself is unchanged; this module only
 //! translates. Gated tool calls ask the client over

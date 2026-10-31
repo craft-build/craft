@@ -1,11 +1,10 @@
 //! Reusable subagent launcher (A.5 `task` tool).
 //!
 //! Spawns a child agent with a restricted tool set and its own context
-//! window, runs it to completion through the ordinary [`crate::run::run`]
-//! seam (Rig owns the loop — a subagent is a nested run with a child tool
-//! table and a child cancel token, not a separate agent object), and
-//! returns the final assistant text or, when an `output_schema` is
-//! supplied, the validated JSON object.
+//! window, runs it to completion on its own [`crate::harness::Conversation`]
+//! (never the parent's — per-run layer state would collide), and returns
+//! the final assistant text or, when an `output_schema` is supplied, the
+//! validated JSON object.
 //!
 //! Ported from the reference `craft-agent/src/tools/subagent.rs` +
 //! `task.rs`; the host seams (TUI, headless) install a

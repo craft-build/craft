@@ -205,26 +205,47 @@ mod tests {
     /// `run_policy` produced for the same inputs.
     #[test]
     fn system_prompt_bytes_match_the_old_policy_output() {
-        let settings = TurnSettings {
-            mode: crate::run::mode::AgentMode::Build,
+        // Literal byte invariants, not a call to the same builder the
+        // layer uses: the env section is threaded verbatim (cwd, platform,
+        // date), the base follows it, and the plan prompt only rides plan
+        // mode. The template itself is prompt.rs's own tested surface.
+        let settings = |mode| TurnSettings {
+            mode,
             thinking: ThinkingConfig::default(),
             fast: false,
             temperature: None,
             max_tokens: None,
         };
         let base = "preamble text";
-        let expected = crate::prompt::build_system_prompt(
-            &crate::prompt::Vars::new()
-                .set("{cwd}", "/project")
-                .set("{platform}", std::env::consts::OS)
-                .set("{date}", crate::prompt::today_utc()),
-            base,
-            &crate::prompt::ResolvedSlots::default(),
-            None,
+        let env_section = format!(
+            "\n\nEnvironment:\n- Working directory: /project\n- Platform: {}\n- Date: {}",
+            std::env::consts::OS,
+            crate::prompt::today_utc(),
         );
-        assert_eq!(
-            RequestLayer::system_prompt(&settings, base, "/project"),
-            expected
+        let build = RequestLayer::system_prompt(
+            &settings(crate::run::mode::AgentMode::Build),
+            base,
+            "/project",
+        );
+        assert_eq!(build.matches(&env_section).count(), 1);
+        let after_env = build
+            .split_once(&env_section)
+            .expect("the env section leads the instructions");
+        assert!(
+            after_env.1.starts_with(base),
+            "the preamble+instructions base follows the env section verbatim"
+        );
+        assert!(!build.contains("{cwd}"), "no template var leaks: {build:?}");
+        let plan = RequestLayer::system_prompt(
+            &settings(crate::run::mode::AgentMode::Plan(std::path::PathBuf::from(
+                "/project/plan.md",
+            ))),
+            base,
+            "/project",
+        );
+        assert!(
+            plan.len() > build.len() && plan.contains("/project/plan.md"),
+            "plan mode appends the plan prompt with the resolved path"
         );
     }
 }

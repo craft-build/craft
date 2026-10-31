@@ -110,3 +110,74 @@ pub async fn workspace_env(
         sandbox_note,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn workspace_env_discovers_instructions_and_builds_every_piece() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "runtime-contract-marker instructions",
+        )
+        .unwrap();
+        for startup in ["connected", "background"] {
+            let mode = if startup == "connected" {
+                McpStartup::Connected
+            } else {
+                McpStartup::Background(crate::mcp::McpEvents::default())
+            };
+            let env = workspace_env(
+                dir.path(),
+                mode,
+                false,
+                crate::sandbox::SandboxPolicy::off(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                env.instructions
+                    .text
+                    .contains("runtime-contract-marker instructions"),
+                "{startup}: instructions must be discovered"
+            );
+            // The workspace canonicalizes its root (macOS /var symlink).
+            assert_eq!(
+                env.workspace.root(),
+                dir.path().canonicalize().unwrap().as_path()
+            );
+            assert!(env.mcp_errors.is_empty());
+            // The permission engine exists even where nothing consults it.
+            assert!(!env.permissions.is_yolo());
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_env_installs_the_reviewer_definition_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        workspace_env(
+            dir.path(),
+            McpStartup::Connected,
+            true,
+            crate::sandbox::SandboxPolicy::off(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            dir.path().join(".craft/agents").exists(),
+            "reviewer install is requested by the flag"
+        );
+        let bare = tempfile::tempdir().unwrap();
+        workspace_env(
+            bare.path(),
+            McpStartup::Connected,
+            false,
+            crate::sandbox::SandboxPolicy::off(),
+        )
+        .await
+        .unwrap();
+        assert!(!bare.path().join(".craft/agents").exists());
+    }
+}

@@ -631,6 +631,12 @@ pub(super) async fn close_aborted_turn(state: &Arc<Mutex<SessionState>>) {
             ))
             .await;
     }
+    // The aborted run never reached `turn_end`: flush the change feed the
+    // persist layer would have checkpointed, and close the snapshot
+    // capture session onto the `/undo` stack the same way a settled
+    // cancelled turn does.
+    conversation.flush().await;
+    conversation.snapshots().commit();
 }
 
 /// `Command::Clear`: interrupt, drop queued shell results, and start a

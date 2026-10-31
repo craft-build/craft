@@ -19,7 +19,7 @@ use animist::history::History;
 use snafu::ResultExt;
 
 use crate::config::Config;
-use crate::error::{BuildConversationSnafu, Result};
+use crate::error::{BuildConversationSnafu, Result, ShutdownConversationSnafu};
 use crate::provider::ModelHandle;
 use crate::run::SharedCompactionState;
 use crate::run::ToolDispatch;
@@ -515,6 +515,6 @@ impl Conversation {
         self.agent()
             .shutdown()
             .await
-            .context(BuildConversationSnafu)
+            .context(ShutdownConversationSnafu)
     }
 }

@@ -530,6 +530,12 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<history::Co
         }};
     }
 
+    // The turn's cancellation goes into the cell the gates, the MCP tools,
+    // and the subagent launcher read; a new turn replaces it wholesale.
+    // Stored before model resolution so an Esc during the (network-bound)
+    // resolve cancels this turn, not the previous one's stale cell.
+    let turn_cancel = animist::agent::Cancellation::default();
+    kit.cancel_cell.store(Arc::new(turn_cancel.clone()));
     let selection = Arc::unwrap_or_clone(kit.selection.load_full());
     let model = match resolve_model(&kit.config, &selection).await {
         Ok(model) => model,
@@ -566,11 +572,6 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<history::Co
     if let Some(plan) = mode.plan_path() {
         kit.workspace.set_plan_path(Some(plan.to_path_buf()));
     }
-    // The turn's cancellation goes into the cell the gates, the MCP tools,
-    // and the subagent launcher read; a new turn replaces it wholesale.
-    let turn_cancel = animist::agent::Cancellation::default();
-    kit.cancel_cell.store(Arc::new(turn_cancel.clone()));
-
     // B.11: the first prompt must not ship without MCP tools, but a hung
     // server cannot block forever — the gate times out and the turn
     // proceeds with whatever has landed. Esc skips the wait (and the
@@ -770,6 +771,36 @@ mod tests {
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Neutral);
         assert!(text.contains("guardrail blocked read"), "{text}");
+    }
+
+    /// A dedup `Respond` never fires `ToolStarted`: the card renders from
+    /// `ToolFinished` alone, so a served-from-cache call still completes
+    /// its card instead of hanging "running".
+    #[test]
+    fn tool_finished_without_tool_started_still_renders_the_done_card() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(Event::Agent(RuntimeEvent::ToolFinished {
+            call: animist::agent::tool::ToolCall {
+                id: "cache-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "a.rs"}),
+            },
+            output: animist::agent::tool::ToolOutput::builder()
+                .content(history::ToolContents(vec![history::ToolContent::Text {
+                    text: "file body".into(),
+                }]))
+                .build(),
+        }));
+        let event = rx.try_recv().expect("the done card renders");
+        let AgentEvent::ToolCall(card) = event else {
+            panic!("expected a tool card, got {event:?}");
+        };
+        assert_eq!(card.id, "cache-1");
+        assert!(!card.awaiting_approval);
+        assert!(
+            !card.lines.is_empty(),
+            "the card body carries the result text"
+        );
     }
 
     #[tokio::test]

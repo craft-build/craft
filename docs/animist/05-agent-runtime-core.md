@@ -453,13 +453,64 @@ Still open: `ToolDispatch`/`BeforeExecute` seam (06–07), `ReauthHook`
 - **The post-marker `conversation.flush()`** rides the driver because
   terminal markers are driver-written and the flush must order after them.
 
+### Review-pass additions and dispositions
+
+- **Persister mirror rollback** (review P1): `checkpoint` applied a batch
+  to the in-memory mirror before the append; an append I/O failure left
+  the mirror ahead of the rolled-back file, and the retry would
+  double-apply entries into the mirror (baked into the next whole-file
+  save). The mirror now rolls back unless the append landed. Pinned by
+  the recovery-equality half of the harness checkpoint-failure test; the
+  raw I/O-error path itself needs mock I/O to drive portably.
+- **Runtime tests restored** (review P1): `workspace_env`'s two tests
+  (instruction discovery + reviewer install opt-in) were collateral of
+  trimming `runtime.rs` to `workspace_env`; both are back.
+- **Force-abort closing** (review P2): the interrupt fallback aborts the
+  run future, so `turn_end` never runs; `close_aborted_turn` now flushes
+  the change feed and commits the snapshot capture session the same way a
+  settled cancelled turn does. The 2 s abort watcher stays detached and
+  idempotent (`is_finished` guard makes a second Esc harmless).
+- **Esc during turn startup** (review P3): the fresh cancellation is
+  stored into the cell before model resolution, so an Esc in the
+  network-bound resolve window cancels this turn rather than vanishing.
+- **`Conversation::shutdown`** reports through its own
+  `ShutdownConversation` error variant (was `BuildConversation`).
+- **TUI empty-reply continuation vs 09's `ContinuationLayer`** (review
+  P2): the surface-level continuation (`MAX_EMPTY_CONTINUATIONS`) is
+  old-loop parity, kept so the TUI does not dead-stop on empty terminal
+  replies; it nudges only terminal emptiness, not the run-level
+  after-tool-call stall (those tests are `restored in 09`). When 09 lands
+  `ContinuationLayer`, the surface loop must be removed or the TUI will
+  nudge twice.
+- **Unbounded conversation sink** (review P2, accepted): the sink is
+  single-reader per conversation and every surface drains it — the TUI
+  forwarder for the session's life, ACP during the turn, print to
+  completion. Bounding it would have to drop events, and the only event
+  that must never drop is the terminal `Done` (usage, cost, settle). A
+  wedged reader is a bug in the reader, not backpressure the writer can
+  resolve; revisit if a surface ever parks a stream mid-session.
+- **`AfterExecute`** (review P2, disposition): prompt §A5 expected
+  `GuardrailLayer::post_tool_exec` to run "today's `AfterExecute`
+  transform", but no parent-level after-transform ever existed — the only
+  production installer is `batch`'s internal child table (`TagList`).
+  The hook stays for that second implementation; the guardrail hook
+  records dedup state only, as before.
+- **Stale doc comments** referencing `run::run` (acp/mod.rs,
+  subagent.rs) rewritten to the conversation seam; the §C acceptance grep
+  is now empty for code and comments.
+
 ### Test-inventory diff
 
 `2005 → 1918` listed tests. Removed: unit tests of deleted modules
-(`run::{advisor,nudge,overflow,stream,events,task_set,stats}`,
-`runtime::run_policy`, `run::retry`'s stream driver — its state-machine
-test is kept), `headless`'s deleted spawn/interactive API (8), the
-reauth-hook tests (09), 3 documented run_tests deletions, and renames
+(`run::{advisor,nudge,overflow,stream,events,task_set,stats}` — the
+run-level behaviours they tested live on as the ported-and-ignored
+run_tests shapes; `runtime::run_policy`, with `workspace_env`'s two
+surviving tests restored; `run::retry`'s stream driver — its
+state-machine test is kept), `headless`'s deleted spawn/interactive API
+(8 — multi-turn/cancel/model-swap semantics are covered at the harness
+level; `spawn_interactive` had no consumers), the reauth-hook tests (the
+hook itself is deleted; 09 restores hook and tests together), 3
+documented run_tests deletions, and renames
 whose replacements are in the added list (acp turn-tools/slot tests, TUI
 interrupt/approval-cell/turn-mapping tests, provider cache tests
 restored). Added: 16 harness tests, the ported run_tests suite, policy /

@@ -41,6 +41,12 @@ pub enum Error {
         source: Box<animist::agent::AgentError>,
     },
 
+    #[snafu(display("shutting down the conversation harness"))]
+    ShutdownConversation {
+        #[snafu(source(from(animist::agent::AgentError, Box::new)))]
+        source: Box<animist::agent::AgentError>,
+    },
+
     #[snafu(display("opening the session persister"))]
     PersisterOpen {
         #[snafu(source(from(crate::storage::sessions::SessionError, Box::new)))]
