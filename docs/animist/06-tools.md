@@ -178,11 +178,12 @@ Delete 05's rig bridge and the `rig-core` dependency.
 
 ## Completion note
 
-**2026-10-31 · commits `4911907b` + `b3f1996f` + `4c1a2e0d` (review fixes) ·
-`cargo test -p craft`: 1890 passed, 3 failed (the three pre-existing recipe
-render fixed points), 29 ignored · reviewer verdict: clean after two
-iterations (P1×2 P3×3 then P1×1 P2×2, all addressed) · clippy at the 01
-baseline (zero new warnings), `cargo fmt --check` clean.**
+**2026-10-31 · commits `4911907b..HEAD` (the cutover plus the review-fix
+and note amendments) · `cargo test -p craft`: 1891 passed, 3 failed (the
+three pre-existing recipe render fixed points), 29 ignored · reviewer
+verdict: approve_with_nits → clean after three iterations (all findings
+addressed) · clippy at the 01 baseline (zero new warnings),
+`cargo fmt --check` clean.**
 
 ### Claim table per tool
 
@@ -240,10 +241,14 @@ dispatcher's; `Error::Io` keeps the io error as its snafu source with
 argument-decode failures now read animist's `Invalid tool arguments: …`
 (was `invalid arguments: …`), unknown tools read animist's
 `Unknown tool: {name}` (was craft's longer hint — the hint survives on
-`list_tools`' unknown-detail path), and batch dispatch failures read
+`list_tools`' unknown-detail path), batch dispatch failures read
 `batch dispatch failed: …` (pinned by
-`dispatch_failure_is_reported_with_our_wording`). Machinery-fault
-wording is animist-composed and left unpinned except the batch string.
+`dispatch_failure_is_reported_with_our_wording`), and the fail-closed
+delete re-check reads
+`{path} became a directory before the delete; retry` (pinned by
+`target_becoming_a_directory_before_the_delete_fails_closed`).
+Machinery-fault wording is animist-composed and left unpinned except the
+batch string.
 
 ### Remaining `spawn_blocking` sites (each with a reason comment)
 

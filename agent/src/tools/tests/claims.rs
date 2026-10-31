@@ -358,6 +358,51 @@ async fn tree_delete_excludes_a_concurrent_directory_walk() {
     );
 }
 
+/// A target that becomes a directory between the delete's classification
+/// and its guard fails closed, with the retry wording as its result.
+#[tokio::test]
+async fn target_becoming_a_directory_before_the_delete_fails_closed() {
+    let (_dir, workspace) = workspace();
+    let path = workspace.root().join("f");
+    std::fs::write(&path, "x\n").unwrap();
+    // Park the delete on the file's write guard, swap the file for a
+    // directory while it waits, then release.
+    let keys = crate::tools::claims::write_keys(workspace.root_key().as_deref(), &["f".to_owned()]);
+    let holder_cancel = animist::agent::Cancellation::default();
+    let _guard = workspace
+        .locks()
+        .write(&keys, &holder_cancel)
+        .await
+        .unwrap();
+    let delete = {
+        let workspace = workspace.clone();
+        tokio::spawn(async move {
+            let mut harness = animist::agent::testing::ToolHarness::builder()
+                .build()
+                .unwrap();
+            harness
+                .call(
+                    Delete(workspace),
+                    json!({"files": ["f"], "recursive": true}),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    drop(_guard);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), delete)
+        .await
+        .expect("the delete returns")
+        .unwrap()
+        .expect("delete outcome");
+    assert!(output.is_error);
+    let text = crate::history::ext::tool_content_text(&output.content);
+    assert_eq!(text, "f became a directory before the delete; retry");
+    assert!(path.is_dir(), "the tree must survive the fail-closed path");
+}
+
 /// Cancellation during a long foreground bash kills the process group and
 /// reports the partial output with the cancel note.
 #[tokio::test]

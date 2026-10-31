@@ -183,8 +183,7 @@ async fn tool_round_trip_completes_and_commits_history() {
     assert!(saw_finished, "the executed call must finish");
 }
 
-/// A native test tool: `boom` panics, `stall` waits for release. The old
-/// rig DynamicTool fakes for panic and cancellation coverage.
+/// A native test tool: `boom` panics, `stall` waits for release.
 #[derive(Clone)]
 struct HarnessProbe {
     name: &'static str,
