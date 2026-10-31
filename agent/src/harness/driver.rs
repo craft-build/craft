@@ -92,6 +92,9 @@ pub async fn run_turn(
             None,
         ),
     };
+    // One more flush after the terminal markers; `turn_end` has already run
+    // inside the agent.
+    conversation.flush().await;
     emit_done(&sink, conversation, &outcome, done.as_ref());
     outcome
 }

@@ -29,6 +29,9 @@ pub enum CraftEvent {
     /// The run failed; paired with a terminal [`CraftEvent::Done`] carrying
     /// the reason.
     Error(String),
+    /// A session checkpoint failed; the run continues, and the next
+    /// checkpoint retries with a full rewrite.
+    PersistenceFailed(String),
     /// The run ended.
     Done {
         usage: TokenUsage,

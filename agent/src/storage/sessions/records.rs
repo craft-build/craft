@@ -120,11 +120,35 @@ where
     Ok(Option::<StoredTokenUsage>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// The record spelling one history change: the inverse of the mapping the
+/// loader replays, so writing a change and loading it back round-trips.
+pub(crate) fn record_of(change: &animist::history::HistoryChange) -> Record {
+    use animist::history::HistoryChange;
+    match change {
+        HistoryChange::Appended { entry, .. } => Record::Entry {
+            entry: entry.clone(),
+        },
+        HistoryChange::Inserted { index, entry } => Record::Insert {
+            index: *index,
+            entry: entry.clone(),
+        },
+        HistoryChange::Revised { index, message } => Record::Revise {
+            index: *index,
+            message: message.clone(),
+        },
+        HistoryChange::Deactivated { index } => Record::Deactivate { index: *index },
+        HistoryChange::EntryReplaced { index, entry } => Record::Replace {
+            index: *index,
+            entry: entry.clone(),
+        },
+    }
+}
+
 /// Apply one change record to the entry list. Indices address the list at
 /// the time of the record, as animist defines them, so replaying records in
 /// order reproduces the snapshot. An out-of-range index is a corrupt
 /// record; the caller's skip-with-warning policy applies.
-pub(super) fn apply_record(entries: &mut Vec<HistoryEntry>, record: &Record) -> Result<(), ()> {
+pub(crate) fn apply_record(entries: &mut Vec<HistoryEntry>, record: &Record) -> Result<(), ()> {
     match record {
         Record::Entry { entry } => {
             entries.push(entry.clone());

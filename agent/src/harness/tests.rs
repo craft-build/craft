@@ -650,3 +650,248 @@ async fn max_turns_budget_ends_with_the_end_marker() {
         crate::history::marker::END
     ));
 }
+
+// --- Phase B: the change-feed persister ---
+
+fn state_dir(tmp: &tempfile::TempDir) -> crate::storage::StateDir {
+    crate::storage::StateDir::from_path(tmp.path().to_path_buf())
+}
+
+fn session_ref() -> crate::id::SessionRef {
+    crate::id::SessionRef::from_id("01965087-4c71-7f00-8000-000000000001".parse().unwrap())
+}
+
+/// A persisted conversation over the workspace's real tools.
+async fn persisted_conversation(
+    tmp: &tempfile::TempDir,
+    scripted: &ScriptedProvider,
+) -> Conversation {
+    let persister = crate::harness::Persister::open_in(
+        state_dir(tmp),
+        session_ref(),
+        "/project",
+        "scripted/main",
+    )
+    .await
+    .expect("persister opens");
+    let workspace = Workspace::new(tmp.path()).expect("workspace");
+    let (sink, _stream) = EventSink::new();
+    let handle = ModelHandle::scripted(testing::scripted_model(
+        scripted,
+        testing::model_info("main", 128_000, 4_096, false, false),
+    ));
+    let history = persister.history();
+    ConversationBuilder::new(
+        &Config::parse("").unwrap(),
+        &tmp.path().display().to_string(),
+        "",
+        handle,
+        workspace.register(),
+        sink,
+    )
+    .history(history)
+    .persist(Arc::new(tokio::sync::Mutex::new(persister)))
+    .build()
+    .expect("conversation builds")
+}
+
+fn load_session(tmp: &tempfile::TempDir) -> crate::storage::sessions::StoredSession {
+    crate::storage::sessions::StoredSession::load(session_ref().id(), &state_dir(tmp))
+        .expect("session loads back")
+}
+
+fn jsonl_line_count(tmp: &tempfile::TempDir) -> usize {
+    let path = state_dir(tmp)
+        .ensure_subdir(crate::storage::sessions::SESSIONS_DIR)
+        .expect("sessions dir");
+    let name = format!("{}.jsonl", session_ref().id());
+    let data = std::fs::read(path.join(name)).expect("session file");
+    data.split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .count()
+}
+
+#[tokio::test]
+async fn persisted_turns_replay_into_an_equal_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "contents").unwrap();
+    let scripted = ScriptedProvider::new(Vec::new());
+    scripted
+        .push(testing::tool_turn(vec![(
+            "t1".into(),
+            "read".into(),
+            serde_json::json!({ "path": "f.txt" }),
+        )]))
+        .push(testing::text_turn("done"));
+    let conversation = persisted_conversation(&dir, &scripted).await;
+
+    let outcome =
+        crate::harness::run_turn(&conversation, "read it", &[], Cancellation::default()).await;
+    assert!(matches!(&outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+
+    // Mid-run checkpoints (step_end) recorded the placeholder revisions and
+    // the squash; replaying the written records must equal the live
+    // snapshot, revisions and all.
+    let loaded = load_session(&dir);
+    let live = entries(&conversation.history()).await;
+    assert_eq!(
+        loaded.messages().to_vec(),
+        live,
+        "replaying the written records reproduces the snapshot"
+    );
+}
+
+#[tokio::test]
+async fn one_message_turn_on_a_long_session_appends_a_small_delta() {
+    let dir = tempfile::tempdir().unwrap();
+    // Seed a long session and persist it, then reopen: the reopen's full
+    // write is the baseline the delta is measured against.
+    {
+        let persister = crate::harness::Persister::open_in(
+            state_dir(&dir),
+            session_ref(),
+            "/project",
+            "scripted/main",
+        )
+        .await
+        .unwrap();
+        let history = persister.history();
+        for i in 0..200 {
+            history
+                .add_stored(crate::history::ext::stored_user_text(format!("seed {i}")))
+                .await;
+        }
+        let mut persister = persister;
+        persister.checkpoint().await.unwrap();
+    }
+    let scripted = ScriptedProvider::new(Vec::new());
+    scripted.push(testing::text_turn("ok"));
+    let conversation = persisted_conversation(&dir, &scripted).await;
+    let before = jsonl_line_count(&dir);
+
+    let outcome = crate::harness::run_turn(&conversation, "go", &[], Cancellation::default()).await;
+    assert!(matches!(&outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+
+    let after = jsonl_line_count(&dir);
+    assert!(
+        after - before <= 6,
+        "one message appended {before} -> {after} lines; a full rewrite would add ~203"
+    );
+    let loaded = load_session(&dir);
+    assert_eq!(loaded.messages().len(), 202, "prompt and reply persisted");
+}
+
+#[tokio::test]
+async fn a_stale_cursor_falls_back_to_a_full_rewrite_and_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let persister = crate::harness::Persister::open_in(
+        state_dir(&dir),
+        session_ref(),
+        "/project",
+        "scripted/main",
+    )
+    .await
+    .unwrap();
+    // Outgrow the feed's retention (1024 events) without checkpointing.
+    let history = persister.history();
+    for i in 0..1030 {
+        history
+            .add_stored(crate::history::ext::stored_user_text(format!("flood {i}")))
+            .await;
+    }
+    let mut persister = persister;
+    persister.checkpoint().await.expect("rewrite recovers");
+    let loaded = load_session(&dir);
+    assert_eq!(
+        loaded.messages().len(),
+        1030,
+        "the full rewrite carries every entry"
+    );
+    let after_rewrite = jsonl_line_count(&dir);
+
+    // The feed resumes from the rewrite's cursor: the next change is a
+    // small delta, not another rewrite.
+    history
+        .add_stored(crate::history::ext::stored_user_text("tail"))
+        .await;
+    persister.checkpoint().await.expect("delta appends");
+    assert_eq!(
+        jsonl_line_count(&dir),
+        after_rewrite + 2,
+        "one entry record plus the meta record"
+    );
+    assert_eq!(load_session(&dir).messages().len(), 1031);
+}
+
+#[tokio::test]
+async fn a_checkpoint_failure_surfaces_an_event_and_never_fails_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "contents").unwrap();
+    let scripted = ScriptedProvider::new(Vec::new());
+    scripted.push(testing::text_turn("done"));
+    let persister = crate::harness::Persister::open_in(
+        state_dir(&dir),
+        session_ref(),
+        "/project",
+        "scripted/main",
+    )
+    .await
+    .unwrap();
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let (sink, stream) = EventSink::new();
+    let handle = ModelHandle::scripted(testing::scripted_model(
+        &scripted,
+        testing::model_info("main", 128_000, 4_096, false, false),
+    ));
+    let history = persister.history();
+    let conversation = ConversationBuilder::new(
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        "",
+        handle,
+        workspace.register(),
+        sink,
+    )
+    .history(history)
+    .persist(Arc::new(tokio::sync::Mutex::new(persister)))
+    .build()
+    .unwrap();
+    let mut stream = stream;
+
+    // Outgrow the feed so the next checkpoint must full-rewrite, then make
+    // the sessions directory unwritable so that rewrite fails. (The append
+    // path holds an open file handle and would survive the chmod.)
+    let conversation_history = conversation.history();
+    for i in 0..1030 {
+        conversation_history
+            .add_stored(crate::history::ext::stored_user_text(format!("flood {i}")))
+            .await;
+    }
+    let sessions_dir = state_dir(&dir)
+        .ensure_subdir(crate::storage::sessions::SESSIONS_DIR)
+        .unwrap();
+    let permissions = std::fs::metadata(&sessions_dir).unwrap().permissions();
+    std::fs::set_permissions(
+        &sessions_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o500),
+    )
+    .unwrap();
+
+    let outcome = crate::harness::run_turn(&conversation, "go", &[], Cancellation::default()).await;
+    let mut surfaced = false;
+    loop {
+        match next_event(&mut stream).await {
+            Event::Craft(crate::harness::CraftEvent::PersistenceFailed(_)) => {
+                surfaced = true;
+            }
+            Event::Craft(crate::harness::CraftEvent::Done { .. }) => break,
+            _ => {}
+        }
+    }
+    std::fs::set_permissions(&sessions_dir, permissions).unwrap();
+    assert!(surfaced, "the checkpoint failure surfaces as a craft event");
+    assert!(
+        matches!(&outcome, TurnOutcome::Done { reply } if reply == "done"),
+        "the run completes despite the failing disk: {outcome:?}"
+    );
+}

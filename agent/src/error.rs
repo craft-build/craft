@@ -41,6 +41,12 @@ pub enum Error {
         source: Box<animist::agent::AgentError>,
     },
 
+    #[snafu(display("opening the session persister"))]
+    PersisterOpen {
+        #[snafu(source(from(crate::storage::sessions::SessionError, Box::new)))]
+        source: Box<crate::storage::sessions::SessionError>,
+    },
+
     #[snafu(display("provider {name:?}"))]
     InvalidProvider {
         name: String,

@@ -29,11 +29,15 @@ mod legacy_messages;
 mod log;
 mod records;
 mod scan;
+mod store;
 
 #[cfg(test)]
 mod tests;
 
 pub use log::SessionLog;
+#[cfg(test)]
+pub(crate) use store::SOFT_SAVE_DELAY;
+pub use store::SessionStore;
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -588,15 +592,31 @@ where
 /// Persistence: reading and writing the session log is concrete — the log
 /// format knows entry lists, priced usage and animist tool-result blocks.
 impl StoredSession {
-    pub fn save(&mut self, dir: &StateDir) -> Result<(), SessionError> {
-        let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
-        self.save_to(&sessions_dir)
+    /// Adopt a batch of history changes into the persisted mirror, the same
+    /// replay the loader performs. The changes come from the live history's
+    /// feed, so their indices are trusted; a failed apply still skips the
+    /// record rather than panicking.
+    pub fn apply_changes(&mut self, changes: &[animist::history::HistoryChange]) {
+        let messages = Arc::make_mut(&mut self.messages);
+        for change in changes {
+            let record = records::record_of(change);
+            let _ = records::apply_record(messages, &record);
+        }
+        self.touch();
     }
 
-    pub fn save_to(&mut self, dir: &Path) -> Result<(), SessionError> {
-        self.updated_at = now_epoch();
-        SessionLog::rewrite(dir, self)?;
+    pub fn save(&mut self, dir: &StateDir) -> Result<(), SessionError> {
+        let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
+        self.save_to(&sessions_dir)?;
         Ok(())
+    }
+
+    /// Full canonical write; the returned log owns the append cursors for
+    /// the file just written, so a change-feed persister can continue from
+    /// it without a second write.
+    pub fn save_to(&mut self, dir: &Path) -> Result<SessionLog, SessionError> {
+        self.updated_at = now_epoch();
+        SessionLog::rewrite(dir, self)
     }
 
     pub fn load(id: CraftId, dir: &StateDir) -> Result<Self, SessionError> {

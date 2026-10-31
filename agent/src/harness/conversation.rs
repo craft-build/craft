@@ -31,8 +31,10 @@ use crate::run::recency::RecencySource;
 use crate::snapshot::SnapshotManager;
 use crate::thinking::ThinkingConfig;
 
-use super::events::EventSink;
+use super::events::{CraftEvent, EventSink};
 use super::guardrail::GuardrailLayer;
+use super::persist::Persister;
+use super::persist_layer::PersistLayer;
 use super::policy::PolicyLayer;
 use super::request::{RequestLayer, RequestLayerInputs};
 use super::rig_bridge;
@@ -68,13 +70,24 @@ struct LayerSet {
     guardrail: Layer,
     request: Layer,
     snapshot: Layer,
+    persist: Option<Layer>,
 }
 
 impl LayerSet {
-    /// The chain head: policy → guardrail → request → snapshot, so a denial
-    /// short-circuits everything after it and the snapshot layer only sees
-    /// calls that will really run.
+    /// The chain head: policy → guardrail → request → snapshot (→ persist),
+    /// so a denial short-circuits everything after it, the snapshot layer
+    /// only sees calls that will really run, and persistence observes the
+    /// committed results of both.
     fn chain(&self) -> AgentLayer {
+        let tail = match &self.persist {
+            Some(persist) => AgentLayer::builder()
+                .layer(self.snapshot.clone())
+                .next(Box::new(
+                    AgentLayer::builder().layer(persist.clone()).build(),
+                ))
+                .build(),
+            None => AgentLayer::builder().layer(self.snapshot.clone()).build(),
+        };
         AgentLayer::builder()
             .layer(self.policy.clone())
             .next(Box::new(
@@ -83,9 +96,7 @@ impl LayerSet {
                     .next(Box::new(
                         AgentLayer::builder()
                             .layer(self.request.clone())
-                            .next(Box::new(
-                                AgentLayer::builder().layer(self.snapshot.clone()).build(),
-                            ))
+                            .next(Box::new(tail))
                             .build(),
                     ))
                     .build(),
@@ -109,6 +120,7 @@ struct Inner {
     /// Serializes rebuilds; runs never overlap a rebuild because both happen
     /// between runs on the surface's turn loop.
     rebuild: Mutex<()>,
+    persist: Option<Arc<tokio::sync::Mutex<Persister>>>,
 }
 
 /// One conversation shared by a surface and its driver; cheap to clone.
@@ -141,6 +153,7 @@ pub struct ConversationBuilder<'a> {
     approval: Option<Arc<dyn BeforeExecute>>,
     recency: Option<Arc<dyn RecencySource>>,
     snapshots: Option<SnapshotManager>,
+    persist: Option<Arc<tokio::sync::Mutex<Persister>>>,
 }
 
 impl<'a> ConversationBuilder<'a> {
@@ -170,6 +183,7 @@ impl<'a> ConversationBuilder<'a> {
             approval: None,
             recency: None,
             snapshots: None,
+            persist: None,
         }
     }
 
@@ -225,6 +239,13 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
+    /// The session persister; wires the persistence layer at the chain's
+    /// tail and gives the driver its post-marker flush.
+    pub fn persist(mut self, persister: Arc<tokio::sync::Mutex<Persister>>) -> Self {
+        self.persist = Some(persister);
+        self
+    }
+
     /// Assemble the layers, the settings cell, and the first `Agent`.
     #[expect(
         clippy::result_large_err,
@@ -246,6 +267,7 @@ impl<'a> ConversationBuilder<'a> {
             approval,
             recency,
             snapshots,
+            persist,
         } = self;
         let write_root = tools.write_root().map(PathBuf::from);
         let snapshots = snapshots.unwrap_or_else(|| SnapshotManager::new(PathBuf::from(cwd)));
@@ -306,6 +328,9 @@ impl<'a> ConversationBuilder<'a> {
                 cwd: cwd.to_owned(),
             })),
             snapshot: Layer::new(SnapshotLayer::new(snapshots.clone())),
+            persist: persist
+                .clone()
+                .map(|persister| Layer::new(PersistLayer::new(persister, sink.clone()))),
         };
         let history = history.unwrap_or_default();
         let agent = build_agent(&agent_config, &history, &model_cell.load(), &layers, &tools)
@@ -323,6 +348,7 @@ impl<'a> ConversationBuilder<'a> {
             compaction,
             snapshots,
             rebuild: Mutex::new(()),
+            persist,
         };
         Ok(Conversation {
             inner: Arc::new(inner),
@@ -405,6 +431,26 @@ impl Conversation {
     /// The snapshot manager driving `/undo`.
     pub fn snapshots(&self) -> SnapshotManager {
         self.inner.snapshots.clone()
+    }
+
+    /// The session persister, when the conversation persists; the surface's
+    /// meta duties (drafts, model, thinking, mode, cost) go through it.
+    pub fn persister(&self) -> Option<Arc<tokio::sync::Mutex<Persister>>> {
+        self.inner.persist.clone()
+    }
+
+    /// Flush the history change feed after terminal markers; persistence
+    /// errors are logged and surfaced, never fatal.
+    pub async fn flush(&self) {
+        let Some(persister) = &self.inner.persist else {
+            return;
+        };
+        let mut persister = persister.lock().await;
+        if let Err(error) = persister.checkpoint().await {
+            tracing::warn!("session checkpoint failed: {error}");
+            self.sink()
+                .craft(CraftEvent::PersistenceFailed(error.to_string()));
+        }
     }
 
     /// The active agent; one load per turn keeps the run on a stable agent.

@@ -98,6 +98,41 @@ impl SessionLog {
         self.session_id
     }
 
+    /// Append one change-feed batch: the five record kinds of the change
+    /// vocabulary plus the trailing meta record. The session's message list
+    /// must already mirror the changes (see `StoredSession::apply_changes`);
+    /// this log's message-count cursor is not advanced, so a feed log is
+    /// owned exclusively by its persister and never mixed with [`Self::append`].
+    pub fn append_changes(
+        &mut self,
+        session: &StoredSession,
+        changes: &[animist::history::HistoryChange],
+    ) -> Result<(), SessionError> {
+        self.require_same_id(session)?;
+        self.ensure_appendable(session)?;
+        let mut buf = Vec::new();
+        for change in changes {
+            append_record(&mut buf, &super::records::record_of(change))?;
+        }
+        let meta = meta_record(session)?;
+        if buf.is_empty() && meta == self.saved_meta {
+            return Ok(());
+        }
+        buf.extend_from_slice(&meta);
+        if let Err(e) = self
+            .file
+            .write_all(&buf)
+            .and_then(|()| self.file.sync_data())
+        {
+            let _ = self.file.set_len(self.saved_len);
+            return Err(StorageError::from(e).into());
+        }
+        self.saved_len += buf.len() as u64;
+        self.appends += 1;
+        self.saved_meta = meta;
+        Ok(())
+    }
+
     pub fn append(&mut self, session: &StoredSession) -> Result<(), SessionError> {
         self.require_same_id(session)?;
         self.ensure_appendable(session)?;

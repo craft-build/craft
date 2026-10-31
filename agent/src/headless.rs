@@ -10,10 +10,8 @@
 //! run seam actually takes; MCP handles, Flow attachments, and plugin rule
 //! stores from the reference have no counterpart here (yet).
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -27,204 +25,14 @@ use crate::provider::ModelHandle;
 use crate::run::dispatch::BeforeExecute;
 use crate::run::events::{SessionEvents, event_stream};
 use crate::run::{Event, RunParams, cancel_channel};
-use crate::storage::sessions::SessionError;
-use crate::storage::stats::{self, CostLedger, CostUsage};
-use crate::storage::{StateDir, StorageError};
+use crate::storage::StateDir;
 use crate::tools::Workspace;
 
+/// The session store every surface shares; moved to the storage layer in 05.
+pub use crate::storage::sessions::SessionStore;
 /// The persisted shape of a live session: our own message/usage/tool-result
 /// domain types.
 pub use crate::storage::sessions::StoredSession;
-
-/// The shortest gap between two writes that carry only soft session state
-/// (the composer draft). Ported from the reference `SOFT_SAVE_DELAY`.
-const SOFT_SAVE_DELAY: Duration = Duration::from_millis(1000);
-
-/// Owns a session's persisted state for the lifetime of one headless run.
-/// Save failures are warnings, never fatal: a headless run must finish even
-/// when the disk is unhappy.
-pub struct SessionStore {
-    dir: StateDir,
-    /// Cost ledger handle, opened once so per-turn appends don't re-resolve
-    /// the path. `None` when the state dir cannot host it.
-    ledger: Option<CostLedger>,
-    session: StoredSession,
-    /// When the last disk write happened, so draft-only changes land at
-    /// most once per [`SOFT_SAVE_DELAY`] (each costs a meta record plus an
-    /// fsync).
-    last_save: Instant,
-    /// A soft change is waiting for its write window; flushed by
-    /// [`SessionStore::checkpoint_now`].
-    pending_soft_save: bool,
-}
-
-impl SessionStore {
-    /// Open (or create) in the resolved state dir; `None` when the state dir
-    /// is unavailable, meaning the session simply will not be persisted.
-    pub fn open(session_ref: SessionRef, cwd: &str, model_spec: &str) -> Option<Self> {
-        let dir = StateDir::resolve().ok()?;
-        Self::open_in(dir, session_ref, cwd, model_spec).ok()
-    }
-
-    /// Open (or create) against an explicit dir; a fresh session is saved
-    /// immediately so it is loadable before the first turn completes.
-    /// Returns `Err` when an existing session cannot be read for any reason
-    /// other than absence — the caller must disable persistence for the run
-    /// so the unreadable file is never overwritten by a later save.
-    pub fn open_in(
-        dir: StateDir,
-        session_ref: SessionRef,
-        cwd: &str,
-        model_spec: &str,
-    ) -> Result<Self, SessionError> {
-        // Opened once and reused for every turn's cost append; a failure here
-        // only means no cost records, the session itself still persists.
-        let ledger = CostLedger::from_state_dir(&dir).ok();
-        match StoredSession::load(session_ref.id(), &dir) {
-            Ok(session) => Ok(Self {
-                dir,
-                ledger,
-                session,
-                last_save: Instant::now(),
-                pending_soft_save: false,
-            }),
-            Err(SessionError::Storage {
-                source: StorageError::NotFound { .. },
-            }) => {
-                let mut session = StoredSession::new(model_spec, cwd);
-                session.id = session_ref;
-                let mut store = Self {
-                    dir,
-                    ledger,
-                    session,
-                    last_save: Instant::now(),
-                    pending_soft_save: false,
-                };
-                store.save();
-                Ok(store)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    fn save(&mut self) {
-        self.last_save = Instant::now();
-        self.pending_soft_save = false;
-        if let Err(e) = self.session.save(&self.dir) {
-            eprintln!("failed to persist session: {e}");
-        }
-    }
-
-    /// A draft-only change: written at most once per [`SOFT_SAVE_DELAY`],
-    /// bounding what a crash takes with it without charging a keystroke an
-    /// fsync. Anything a turn produced still writes immediately
-    /// ([`Self::record_turn`]). An empty draft clears the field.
-    pub fn checkpoint_draft(&mut self, draft: &str) {
-        let draft = (!draft.is_empty()).then(|| draft.to_owned());
-        if self.session.meta.input_draft.as_deref() == draft.as_deref() {
-            return;
-        }
-        self.session.set_input_draft(draft);
-        if self.last_save.elapsed() >= SOFT_SAVE_DELAY {
-            self.save();
-        } else {
-            self.pending_soft_save = true;
-        }
-    }
-
-    /// Flush a pending soft write: shutdown, or a session swap, where no
-    /// later frame will carry the change to disk.
-    pub fn checkpoint_now(&mut self) {
-        if self.pending_soft_save {
-            self.save();
-        }
-    }
-
-    /// How long until a pending soft write may land, so a caller can arm a
-    /// timer instead of waiting for the next keystroke to carry it.
-    pub fn soft_save_wait(&self) -> Option<Duration> {
-        self.pending_soft_save
-            .then(|| SOFT_SAVE_DELAY.saturating_sub(self.last_save.elapsed()))
-    }
-
-    /// The loaded session's persisted messages, so a resumed run seeds its
-    /// history from the store instead of starting empty — the first save
-    /// would otherwise wipe every prior turn.
-    pub fn messages(&self) -> &[animist::history::HistoryEntry] {
-        self.session.messages()
-    }
-
-    /// Persist the post-turn history and the model that served it, deriving
-    /// the title from the first user message when it is still the default.
-    pub fn record_turn(&mut self, messages: &[StoredMessage], model_spec: String) {
-        self.session
-            .replace_messages(crate::history::ext::entries(messages.to_vec()));
-        self.session.set_model(model_spec);
-        self.session.update_title_if_default();
-        self.save();
-    }
-
-    /// Record the currently selected model without a turn, so the choice is
-    /// restored on the next launch even when no message followed it.
-    pub fn set_model(&mut self, model_spec: String) {
-        self.session.set_model(model_spec);
-        self.save();
-    }
-
-    pub fn thinking(&self) -> Option<crate::thinking::ThinkingConfig> {
-        self.session.meta.thinking
-    }
-
-    pub fn set_thinking(&mut self, thinking: crate::thinking::ThinkingConfig) {
-        self.session.set_thinking(thinking);
-        self.save();
-    }
-
-    /// Persist the session mode so a resume restores it (`build`/`plan`).
-    /// Mode changes are user-initiated and rare, so they write immediately.
-    pub fn set_mode(&mut self, plan: bool) {
-        let mode = if plan { "plan" } else { "build" };
-        if self.session.meta.mode.as_deref() == Some(mode) {
-            return;
-        }
-        self.session.set_mode(Some(mode.to_string()));
-        self.save();
-    }
-
-    /// Fold a finished run's per-model usage into the session and append one
-    /// cost-ledger record per model to `cost.jsonl`. Ledger failures are
-    /// warnings, never fatal. A model whose cost could not be resolved records
-    /// `cost_usd: null` — the token counts carry the information and callers
-    /// must not show "$0.00" as a bill.
-    pub fn record_cost(
-        &mut self,
-        by_model: &HashMap<String, crate::usage::StoredTokenUsage>,
-        fast: bool,
-    ) {
-        if by_model.is_empty() {
-            return;
-        }
-        for (spec, usage) in by_model {
-            let stored = *usage;
-            self.session.add_model_usage(spec, stored);
-            if let Some(ledger) = &self.ledger {
-                let (provider, model) = spec.split_once('/').unwrap_or(("", spec.as_str()));
-                let record = stats::make_record(
-                    self.session.id.id().to_string(),
-                    model,
-                    provider,
-                    CostUsage::from_stored(usage),
-                    usage.cost,
-                    fast,
-                );
-                if let Err(e) = ledger.append(&record) {
-                    eprintln!("warning: failed to append cost record: {e}");
-                }
-            }
-        }
-        self.save();
-    }
-}
 
 /// The headless permission gate (`--print`, `craft term run`,
 /// `craft recipe run`): the permission engine decides every tool call, and
@@ -825,7 +633,7 @@ mod tests {
         let wait = store
             .soft_save_wait()
             .expect("a deferred draft owes a write window");
-        assert!(wait <= SOFT_SAVE_DELAY);
+        assert!(wait <= crate::storage::sessions::SOFT_SAVE_DELAY);
 
         // Shutdown flush: the pending draft reaches disk.
         store.checkpoint_now();
@@ -851,9 +659,9 @@ mod tests {
         assert!(load(&tmp).meta.input_draft.is_none());
 
         // An unchanged draft is a no-op (no revision bump, no write).
-        let before = store.session.revision();
+        let before = store.session().revision();
         store.checkpoint_draft("");
-        assert_eq!(store.session.revision(), before);
+        assert_eq!(store.session().revision(), before);
         assert!(
             store.soft_save_wait().is_none(),
             "nothing pending, nothing owed"
@@ -889,7 +697,7 @@ mod tests {
         drop(store);
 
         let mut store = store_in(&tmp);
-        assert_eq!(store.session.messages().len(), 1);
+        assert_eq!(store.session().messages().len(), 1);
 
         store.record_turn(
             &[
