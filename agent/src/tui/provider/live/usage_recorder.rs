@@ -50,7 +50,9 @@ impl UsageLedger {
                 let tokens = crate::usage::TokenUsage::from(*usage);
                 UsageRow {
                     model: spec.clone(),
-                    tokens: u64::from(tokens.total_input().saturating_add(tokens.output)),
+                    tokens: u64::from(
+                        crate::usage::total_input(&tokens).saturating_add(tokens.output),
+                    ),
                     cost: usage.cost,
                 }
             })

@@ -1,11 +1,9 @@
 //! Session persistence with append-only JSONL log format.
 //!
-//! Ported from the reference `craft-storage/src/sessions.rs` (thiserror →
-//! snafu, no `tracing` here so warnings go to stderr, meta trimmed to the
-//! concepts this repo ports, and `StoredRule` replaced by
-//! `crate::permissions::PermissionRule`).
-//!
-//! Each session is stored as `{uuid}.jsonl`, one JSON record per line. The
+//! Each session is stored as `{uuid}.jsonl`, one JSON record per line.
+//! Messages persist as animist entry records (`entry`, `insert`, `revise`,
+//! `deactivate`, `replace` — see [`records`]); craft writes only `entry`
+//! records today, and the change-feed persister (05) writes the rest. The
 //! format is crash-safe: on load, each record that fails to parse is
 //! skipped with a stderr warning, wherever it sits in the file (a partial
 //! flush may corrupt multiple records, not just trailing ones). A header
@@ -13,18 +11,23 @@
 //! [`SessionLog`](log::SessionLog) tracks cursor state to enable O(delta)
 //! incremental saves.
 //!
-//! Legacy `.json` files are loaded transparently and converted to `.jsonl` on
-//! next save.
+//! Older shapes load through the same reader: pre-entry JSONL records
+//! (`msg`/`sub_msg`/`out`, log version ≤ 3) and legacy `.json` files are
+//! converted on load, and saving rewrites them in the current shape.
 //!
 //! Module layout: the [`Session`] model and its API live here, while the
-//! append-only log (`log`), archive rotation (`archive`), the cwd index
-//! (`index`), header scanning for the picker (`scan`), and legacy-file
-//! migration/removal (`legacy`) live in sibling modules.
+//! record vocabulary and loader (`records`), the append-only log (`log`),
+//! the pre-animist message enums and their converter (`legacy_messages`),
+//! archive rotation (`archive`), the cwd index (`index`), header scanning
+//! for the picker (`scan`), and legacy-file migration/removal (`legacy`)
+//! live in sibling modules.
 
 mod archive;
 mod index;
 mod legacy;
+mod legacy_messages;
 mod log;
+mod records;
 mod scan;
 
 #[cfg(test)]
@@ -41,6 +44,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use animist::history::{ContentBlock, HistoryEntry};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
@@ -52,11 +56,11 @@ use crate::storage::{StateDir, StorageError};
 use archive::ARCHIVE_DIR;
 use index::{load_cwd_index, remove_from_cwd_index};
 use legacy::{locate_session_file, remove_legacy_files, try_remove};
-use log::load_session_at;
+use records::load_session_at;
 use scan::{read_header_model, read_last_thinking, scan_headers};
 
 #[cfg(test)]
-use archive::{ARCHIVE_KEEP, ARCHIVE_MAX_BYTES, MSG_PREFIX};
+use archive::{ARCHIVE_KEEP, ARCHIVE_MAX_BYTES, MSG_PREFIXES};
 #[cfg(test)]
 use index::{CWD_INDEX_FILE, update_cwd_index};
 #[cfg(test)]
@@ -65,10 +69,15 @@ use legacy::json_path;
 use log::{LOG_BLOATED, MAX_APPENDS, write_full_session};
 
 const SESSION_VERSION: u32 = 1;
-const LOG_FORMAT_VERSION: u32 = 3;
+const LOG_FORMAT_VERSION: u32 = 4;
 pub const SESSIONS_DIR: &str = "sessions";
 const DEFAULT_TITLE: &str = "New session";
 const MAX_TITLE_LEN: usize = 60;
+
+/// The session file's concrete message, usage and tool-output types: entry
+/// lists, the priced usage ledger, and read-only raw tool-output copies
+/// in their animist block shape.
+pub type StoredSession = Session<HistoryEntry, StoredTokenUsage, ContentBlock>;
 
 /// Hands out the token that tags one append-only run of a message list.
 /// Process wide, so two runs never pick the same number.
@@ -110,67 +119,10 @@ pub enum SessionError {
     },
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct StoredTokenUsage {
-    #[serde(default)]
-    pub input: u32,
-    #[serde(default)]
-    pub output: u32,
-    #[serde(default)]
-    pub cache_creation: u32,
-    #[serde(default)]
-    pub cache_read: u32,
-    /// What the turns billed, in USD. Prices move (some providers by the
-    /// hour), so re-pricing these counters later would be fiction. `None` on
-    /// unpriced models, and on entries written before we recorded it until the
-    /// next load settles an estimate into them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<f64>,
-}
-
-/// From the in-memory accounting type of `usage.rs` (what `Event::Done`
-/// carries) into this persisted shape.
-impl From<crate::usage::StoredTokenUsage> for StoredTokenUsage {
-    fn from(u: crate::usage::StoredTokenUsage) -> Self {
-        Self {
-            input: u.input,
-            output: u.output,
-            cache_creation: u.cache_creation,
-            cache_read: u.cache_read,
-            cost: u.cost,
-        }
-    }
-}
-
-impl StoredTokenUsage {
-    pub fn total_input(&self) -> u32 {
-        self.input
-            .saturating_add(self.cache_read)
-            .saturating_add(self.cache_creation)
-    }
-
-    pub fn total(&self) -> u32 {
-        self.total_input().saturating_add(self.output)
-    }
-}
-
-impl std::ops::AddAssign for StoredTokenUsage {
-    fn add_assign(&mut self, rhs: Self) {
-        self.input = self.input.saturating_add(rhs.input);
-        self.output = self.output.saturating_add(rhs.output);
-        self.cache_creation = self.cache_creation.saturating_add(rhs.cache_creation);
-        self.cache_read = self.cache_read.saturating_add(rhs.cache_read);
-        add_cost(&mut self.cost, rhs.cost);
-    }
-}
-
-/// The one way costs are summed, so every running total agrees: `None` until
-/// the first priced turn shows up, and from there it only grows.
-pub fn add_cost(total: &mut Option<f64>, addend: Option<f64>) {
-    if let Some(addend) = addend {
-        *total = Some(total.unwrap_or_default() + addend);
-    }
-}
+/// The persisted usage ledger entry: the billing type of `usage.rs` (input,
+/// output, cache counters plus what the turns were billed), serialized under
+/// the same field names the session format always used.
+pub use crate::usage::StoredTokenUsage;
 
 /// The part of a session the owner mirrors from its own live state and hands
 /// over whole on every checkpoint. `subagents` and `usage_by_model` live on
@@ -296,15 +248,16 @@ pub trait TitleSource {
     fn first_user_text(&self) -> Option<&str>;
 }
 
-impl TitleSource for crate::history::Message {
+impl TitleSource for HistoryEntry {
     fn first_user_text(&self) -> Option<&str> {
-        match self {
-            Self::User { content } => content.iter().find_map(|block| match block {
-                crate::history::UserContent::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            }),
-            _ => None,
+        let message = self.verbatim().message();
+        if !crate::history::ext::is_user(message) {
+            return None;
         }
+        message.content.iter().find_map(|block| match block {
+            crate::history::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
     }
 }
 
@@ -625,6 +578,16 @@ where
         self.rewrite();
     }
 
+    pub fn update_title_if_default(&mut self) {
+        if self.title == DEFAULT_TITLE {
+            self.set_title(generate_title(&self.messages));
+        }
+    }
+}
+
+/// Persistence: reading and writing the session log is concrete — the log
+/// format knows entry lists, priced usage and animist tool-result blocks.
+impl StoredSession {
     pub fn save(&mut self, dir: &StateDir) -> Result<(), SessionError> {
         let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
         self.save_to(&sessions_dir)
@@ -648,7 +611,7 @@ where
             }
             .into());
         };
-        let session = load_session_at::<M, U, T>(&path)?;
+        let session = load_session_at(&path)?;
         if path != jsonl_path(dir, id)
             && let Err(e) = SessionLog::write_canonical(dir, &session)
         {
@@ -692,12 +655,6 @@ where
             .max_by_key(|s| s.updated_at)
             .map(|s| Self::load_from(s.id.id(), dir).map(Some))
             .unwrap_or(Ok(None))
-    }
-
-    pub fn update_title_if_default(&mut self) {
-        if self.title == DEFAULT_TITLE {
-            self.set_title(generate_title(&self.messages));
-        }
     }
 
     pub fn delete(id: CraftId, dir: &StateDir) -> Result<(), SessionError> {

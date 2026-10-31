@@ -1,15 +1,17 @@
 //! Overflow recovery and terminal/partial-commit handling for the run loop.
 
+use crate::history::{self, ContentBlock, StoredMessage};
+use crate::history::{ext, marker};
 use crate::provider::ModelHandle;
 
 use crate::compaction::CompactionEngine;
-use crate::history::{self, Message};
 
 use super::doom;
 use super::nudge;
 use super::{Event, RunOutcome, RunParams};
 
-/// Marker appended when a run is cut short, so the model knows the turn ended.
+/// Marker text appended when a run is cut short, so the model knows the
+/// turn ended. Identity lives in the [`marker::END`] tag.
 pub(crate) const END_MARKER: &str = "[The turn ended here; the run was cut short.]";
 
 /// Recalibrate and force a compaction after the request overflowed the
@@ -22,7 +24,7 @@ pub(crate) const END_MARKER: &str = "[The turn ended here; the run was cut short
 pub(super) async fn recover_from_overflow(
     params: &RunParams,
     model: &ModelHandle,
-    history: &mut Vec<Message>,
+    history: &mut Vec<StoredMessage>,
     doom: &mut doom::DoomTracker,
     error_text: Option<&str>,
     emit: &(dyn Fn(Event) + Send + Sync),
@@ -177,8 +179,8 @@ fn numbers_in(text: &str) -> Vec<(u64, usize, usize)> {
 /// Commit a partial turn and end the run at its budget or the doom hard
 /// stop: sanitized so dangling tool calls replay cleanly on the next request.
 pub(super) fn commit_partial(
-    history: &mut Vec<Message>,
-    turn: &mut Vec<Message>,
+    history: &mut Vec<StoredMessage>,
+    turn: &mut Vec<StoredMessage>,
     outcome: RunOutcome,
 ) -> RunOutcome {
     sanitize_partial(turn);
@@ -186,29 +188,37 @@ pub(super) fn commit_partial(
     outcome
 }
 
-/// Drop a trailing grace prompt left in committed history by a previous
-/// run, so it does not replay as if the user asked for it (reference
-/// `strip_trailing_grace_prompt`).
-pub(super) fn strip_trailing_grace_prompt(history: &mut Vec<Message>) {
-    if let Some(Message::User { content }) = history.last()
-        && content.len() == 1
-        && let history::UserContent::Text(text) = &content[0]
-        && text.text == doom::GRACE_CALL_PROMPT
-    {
-        history.pop();
-    }
+/// Drop trailing grace (and nudge) observations left in committed history by
+/// a previous run, so they do not replay as if the user asked for them.
+/// Repeated trailing markers all go (hardening/27); identity is checked by
+/// tag, so a user message whose text happens to equal a marker prompt is
+/// never touched, and nothing an assistant said is dropped.
+pub(super) fn strip_trailing_markers(history: &mut Vec<StoredMessage>) {
+    history.truncate(
+        history
+            .iter()
+            .rposition(|stored| {
+                !marker::is(stored, marker::GRACE) && !marker::is(stored, marker::NUDGE)
+            })
+            .map(|last_kept| last_kept + 1)
+            .unwrap_or(0),
+    );
 }
 
-/// Marker appended when a run is cancelled by the user, so the model knows
-/// where the turn stopped (reference `history.rs` `CANCEL_MARKER`).
+/// Marker text appended when a run is cancelled by the user, so the model
+/// knows where the turn stopped (reference `history.rs` `CANCEL_MARKER`).
+/// Identity lives in the [`marker::CANCEL`] tag.
 pub(crate) const CANCEL_MARKER: &str = "[Cancelled by user]";
 
 /// Commit the partial turn of a cancelled run: the prompt and whatever the
 /// model produced are kept, dangling tool calls are closed with an error
 /// result, and the cancel marker records the cut-off.
-pub(super) fn commit_cancelled(history: &mut Vec<Message>, turn: &mut Vec<Message>) -> RunOutcome {
+pub(super) fn commit_cancelled(
+    history: &mut Vec<StoredMessage>,
+    turn: &mut Vec<StoredMessage>,
+) -> RunOutcome {
     close_dangling_calls(turn, "skipped: cancelled by the user");
-    turn.push(Message::user(CANCEL_MARKER));
+    turn.push(marker::observation(marker::CANCEL, CANCEL_MARKER));
     history.append(turn);
     RunOutcome::Cancelled
 }
@@ -218,9 +228,9 @@ pub(super) fn commit_cancelled(history: &mut Vec<Message>, turn: &mut Vec<Messag
 /// returns the run outcome. `None` means "keep looping".
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_terminal_reply(
-    history: &mut Vec<Message>,
-    turn: &mut Vec<Message>,
-    full: &[Message],
+    history: &mut Vec<StoredMessage>,
+    turn: &mut Vec<StoredMessage>,
+    full: &[StoredMessage],
     reply: &str,
     truncated: bool,
     nudges: &mut u32,
@@ -277,52 +287,42 @@ pub(super) fn handle_terminal_reply(
 
 /// Close dangling tool calls and append the end marker, so the committed
 /// partial history replays cleanly on the next request.
-pub(super) fn sanitize_partial(turn: &mut Vec<Message>) {
+pub(super) fn sanitize_partial(turn: &mut Vec<StoredMessage>) {
     close_dangling_calls(turn, "skipped: the turn ended before this call ran");
-    turn.push(Message::user(END_MARKER));
+    turn.push(marker::observation(marker::END, END_MARKER));
 }
 
 /// Append error results for every tool call in the turn that never got an
 /// answer, so the trailing assistant message is API-valid on replay.
-fn close_dangling_calls(turn: &mut Vec<Message>, note: &str) {
-    let mut dangling: Vec<history::ToolCall> = Vec::new();
+fn close_dangling_calls(turn: &mut Vec<StoredMessage>, note: &str) {
+    let mut dangling: Vec<ContentBlock> = Vec::new();
     let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for message in turn.iter() {
-        match message {
-            Message::Assistant { content } => {
-                for block in content {
-                    if let history::AssistantContent::ToolCall(call) = block {
-                        dangling.push(call.clone());
-                    }
+    for message in turn.iter().map(StoredMessage::message) {
+        for block in &message.content {
+            match block {
+                ContentBlock::ToolUse { .. } => dangling.push(block.clone()),
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    answered.insert(tool_use_id.clone());
                 }
+                _ => {}
             }
-            Message::User { content } => {
-                for block in content {
-                    if let history::UserContent::ToolResult(result) = block {
-                        answered.insert(result.call.clone());
-                    }
-                }
-            }
-            Message::System { .. } => {}
         }
     }
-    let open: Vec<history::ToolCall> = dangling
+    let open: Vec<ContentBlock> = dangling
         .into_iter()
-        .filter(|call| !answered.contains(&call.id))
+        .filter(|call| !matches!(call, ContentBlock::ToolUse { id, .. } if answered.contains(id)))
         .collect();
     if !open.is_empty() {
         let content = open
             .iter()
             .map(|call| {
-                history::UserContent::ToolResult(history::ToolResult {
-                    call: call.id.clone(),
-                    name: call.function.name.clone(),
-                    content: vec![history::ToolResultContent::text(note)],
-                    is_error: true,
-                })
+                let ContentBlock::ToolUse { id, name, .. } = call else {
+                    unreachable!("filtered to tool uses");
+                };
+                ext::tool_result(id, Some(name), note.to_owned(), true)
             })
             .collect();
-        turn.push(Message::User { content });
+        turn.push(ext::stored(history::ext::observation(content)));
     }
 }
 
@@ -409,5 +409,83 @@ mod tests {
             parse_overflow_prompt_size("\u{212a} request resulted in 7000 tokens"),
             Some(7000)
         );
+    }
+
+    #[test]
+    fn trailing_markers_strip_by_tag_repeatedly() {
+        let mut history = vec![
+            ext::stored_user_text("work"),
+            marker::observation(marker::GRACE, doom::GRACE_CALL_PROMPT),
+            marker::observation(marker::NUDGE, nudge::NUDGE_PROMPT),
+            marker::observation(marker::GRACE, doom::GRACE_CALL_PROMPT),
+        ];
+        strip_trailing_markers(&mut history);
+        assert_eq!(history.len(), 1, "all trailing markers go");
+
+        // A user typing the grace prompt verbatim is not a marker.
+        let mut honest = vec![
+            ext::stored_user_text("work"),
+            ext::stored_user_text(doom::GRACE_CALL_PROMPT),
+        ];
+        strip_trailing_markers(&mut honest);
+        assert_eq!(honest.len(), 2, "untagged text is never stripped");
+
+        // A grace observation followed by an answer stays: the answer is
+        // real content, and only the trailing suffix is synthetic.
+        let mut answered = vec![
+            ext::stored_user_text("work"),
+            marker::observation(marker::GRACE, doom::GRACE_CALL_PROMPT),
+            ext::stored(ext::assistant_text("here is the summary")),
+        ];
+        strip_trailing_markers(&mut answered);
+        assert_eq!(answered.len(), 3);
+    }
+
+    #[test]
+    fn dangling_calls_get_error_results_with_names() {
+        let mut turn = vec![
+            ext::stored_user_text("go"),
+            ext::stored(history::Message {
+                role: history::Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({}),
+                        thought_signature: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({}),
+                        thought_signature: None,
+                    },
+                ],
+                display_text: None,
+                kind: history::MessageKind::Turn,
+            }),
+            ext::stored(history::ext::observation(vec![ext::tool_result(
+                "t2",
+                Some("read"),
+                "already answered",
+                false,
+            )])),
+        ];
+        sanitize_partial(&mut turn);
+        let last = turn.last().expect("end marker");
+        assert!(marker::is(last, marker::END));
+        let closing = turn[turn.len() - 2].message();
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            name,
+            is_error,
+            ..
+        } = &closing.content[0]
+        else {
+            panic!("closing result");
+        };
+        assert_eq!(tool_use_id, "t1");
+        assert_eq!(name.as_deref(), Some("bash"));
+        assert!(*is_error);
     }
 }

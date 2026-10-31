@@ -4,12 +4,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::history;
+use crate::usage::TokenUsage;
 
 /// Run-wide accumulators for the terminal [`Event::Done`](super::Event::Done).
 #[derive(Default)]
 pub(crate) struct RunStats {
-    pub(crate) usage: history::Usage,
+    pub(crate) usage: TokenUsage,
     pub(crate) context_size: u64,
     pub(crate) turns: u32,
     /// Per-model ledger (H.6): turns are priced when they run and their cost
@@ -48,11 +48,10 @@ pub(crate) fn served_spec(
 impl RunStats {
     /// Fold one model call's usage into the ledger, pricing the turn against
     /// today's table. An unresolvable spec still counts its tokens, unpriced.
-    pub(crate) fn add_usage(&mut self, usage: &history::Usage, spec: Option<&str>, fast: bool) {
-        self.usage.add(*usage);
+    pub(crate) fn add_usage(&mut self, usage: &TokenUsage, spec: Option<&str>, fast: bool) {
+        crate::usage::accumulate(&mut self.usage, usage);
         let Some(spec) = spec else { return };
-        let tokens = crate::usage::TokenUsage::from(usage);
-        let cost = crate::usage::resolve_spec(spec).and_then(|m| m.billed_cost(&tokens, fast));
-        *self.by_model.entry(spec.to_owned()).or_default() += tokens.billed(cost);
+        let cost = crate::usage::resolve_spec(spec).and_then(|m| m.billed_cost(usage, fast));
+        *self.by_model.entry(spec.to_owned()).or_default() += crate::usage::billed(usage, cost);
     }
 }

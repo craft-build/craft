@@ -11,7 +11,8 @@ use super::commands::{
 };
 use super::resume::{handle_set_mode, load_session, persist_on_exit, resume_latest, transcript};
 use super::*;
-use crate::history::Message;
+use crate::history::ext;
+use crate::history::marker;
 use crate::permissions::PermissionsConfig;
 use crate::tui::provider::{LoadedMessage, Tone};
 
@@ -64,12 +65,12 @@ async fn shell_results_drain_into_history_once() {
     pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push_result(Message::user("I ran: $ ls\n\nOutput:\nsrc"));
+        .push_result(ext::stored_user_text("I ran: $ ls\n\nOutput:\nsrc"));
 
     drain_shell_results(&pending, &state).await;
     assert_eq!(state.lock().await.history.len(), 1);
     assert_eq!(
-        state.lock().await.history[0].text(),
+        ext::message_text(&state.lock().await.history[0]),
         "I ran: $ ls\n\nOutput:\nsrc"
     );
     assert!(
@@ -100,7 +101,7 @@ async fn bang_results_persist_on_loop_exit() {
     ctx.shell
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push_result(Message::user("I ran: $ ls\n\nOutput:\nsrc"));
+        .push_result(ext::stored_user_text("I ran: $ ls\n\nOutput:\nsrc"));
 
     persist_on_exit(
         &ctx,
@@ -116,12 +117,12 @@ async fn bang_results_persist_on_loop_exit() {
     // The store mints its own session id; discover it via the cwd list.
     let summaries = crate::headless::StoredSession::list(Some("/cwd"), &state_dir).unwrap();
     let found = summaries.first().expect("the session lists for this cwd");
-    let reloaded = crate::headless::StoredSession::load(found.id.id().clone(), &state_dir).unwrap();
+    let reloaded = crate::headless::StoredSession::load(found.id.id(), &state_dir).unwrap();
     assert!(
         reloaded
             .messages()
             .iter()
-            .any(|m| m.text().starts_with("I ran: $ ls")),
+            .any(|m| ext::message_text(m.latest()).starts_with("I ran: $ ls")),
         "the bang-mode result reached the session file"
     );
 }
@@ -361,8 +362,8 @@ async fn loading_a_persisted_session_repopulates_history() {
     )
     .unwrap();
     let history = vec![
-        Message::user("hello there"),
-        Message::assistant("hi — how can I help?"),
+        ext::stored_user_text("hello there"),
+        ext::stored(ext::assistant_text("hi — how can I help?")),
     ];
     store.set_thinking(crate::thinking::ThinkingConfig::Budget(4096));
     store.checkpoint_draft("unsent draft");
@@ -444,7 +445,7 @@ async fn resume_latest_picks_the_newest_session_for_cwd() {
             "mock/model",
         )
         .unwrap();
-        store.record_turn(&[Message::user(text)], "mock/model".into());
+        store.record_turn(&[ext::stored_user_text(text)], "mock/model".into());
     };
     persist("older session");
     std::thread::sleep(std::time::Duration::from_millis(1100)); // distinct updated_at seconds
@@ -456,7 +457,10 @@ async fn resume_latest_picks_the_newest_session_for_cwd() {
     resume_latest(&state, &files, Some(&state_dir), "/cwd", "mock/model", &tx).await;
 
     assert_eq!(state.lock().await.history.len(), 1);
-    assert_eq!(state.lock().await.history[0].text(), "newer session");
+    assert_eq!(
+        ext::message_text(&state.lock().await.history[0]),
+        "newer session"
+    );
     let mut saw_load = false;
     while let Ok(event) = rx.try_recv() {
         if matches!(event, AgentEvent::SessionLoaded { .. }) {
@@ -468,7 +472,7 @@ async fn resume_latest_picks_the_newest_session_for_cwd() {
     // No prior session in this cwd: a notice, not a crash, and the
     // current session history stays put.
     let state = Arc::new(Mutex::new(SessionState::default()));
-    state.lock().await.history = vec![Message::user("keep me")];
+    state.lock().await.history = vec![ext::stored_user_text("keep me")];
     let (tx, mut rx) = mpsc::unbounded_channel();
     resume_latest(
         &state,
@@ -497,18 +501,14 @@ async fn resume_latest_picks_the_newest_session_for_cwd() {
 #[test]
 fn transcript_skips_tool_blocks() {
     let messages = vec![
-        Message::user("do it"),
-        Message::User {
-            content: vec![crate::history::UserContent::ToolResult(
-                crate::history::ToolResult {
-                    call: "t1".into(),
-                    name: "read".into(),
-                    content: vec![crate::history::ToolResultContent::text("file body")],
-                    is_error: false,
-                },
-            )],
-        },
-        Message::system("compacted summary"),
+        ext::stored_user_text("do it"),
+        ext::stored(ext::observation(vec![ext::tool_result(
+            "t1",
+            Some("read"),
+            "file body",
+            false,
+        )])),
+        ext::stored(ext::system_text("compacted summary")),
     ];
     let rendered = transcript(&messages);
     assert_eq!(rendered.len(), 2);
@@ -522,7 +522,7 @@ async fn load_with_unknown_id_keeps_the_session_and_warns() {
     let dir = tempfile::tempdir().unwrap();
     let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
     let state = Arc::new(Mutex::new(SessionState::default()));
-    state.lock().await.history = vec![Message::user("keep me")];
+    state.lock().await.history = vec![ext::stored_user_text("keep me")];
     let files = Files::default();
     let (tx, mut rx) = mpsc::unbounded_channel();
     load_session(
@@ -693,8 +693,9 @@ async fn interrupt_grace_abort_keeps_the_staged_prompt() {
     assert!(stuck.is_finished());
     let history = state.lock().await.history.clone();
     assert_eq!(history.len(), 2, "prompt + cancel marker, nothing dropped");
-    assert_eq!(history[0].text(), "keep me");
-    assert_eq!(history[1].text(), crate::run::CANCEL_MARKER);
+    assert_eq!(ext::message_text(&history[0]), "keep me");
+    assert!(marker::is(&history[1], marker::CANCEL));
+    assert_eq!(ext::message_text(&history[1]), crate::run::CANCEL_MARKER);
 
     // Interrupting again on the already-closed turn adds no second marker.
     handle_interrupt(&ctx, &current_turn);
@@ -716,7 +717,8 @@ async fn close_aborted_turn_appends_one_marker() {
     close_aborted_turn(&state).await;
     let history = state.lock().await.history.clone();
     assert_eq!(history.len(), 2);
-    assert_eq!(history[1].text(), crate::run::CANCEL_MARKER);
+    assert!(marker::is(&history[1], marker::CANCEL));
+    assert_eq!(ext::message_text(&history[1]), crate::run::CANCEL_MARKER);
 }
 
 /// A one-shot local SSE server echoing OpenAI chat.completion chunks (the

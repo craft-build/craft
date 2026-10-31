@@ -45,7 +45,7 @@ pub(super) async fn run_turn(
     connection: ConnectionTo<AcpClient>,
     session_id: SessionId,
     text: String,
-    mut history: Vec<history::Message>,
+    mut history: Vec<history::StoredMessage>,
     workspace: Workspace,
     provider_name: String,
     model: String,
@@ -206,7 +206,7 @@ pub(super) async fn run_turn(
                         return;
                     };
                     SessionUpdate::UsageUpdate(UsageUpdate::new(
-                        usage.input_tokens,
+                        u64::from(usage.input) + u64::from(usage.cache_read),
                         u64::from(size),
                     ))
                 }
@@ -308,7 +308,11 @@ pub(super) async fn run_turn(
             // project's local argosy. Never blocks or fails the turn.
             crate::knowledge_memory::spawn_extraction(
                 model.clone(),
-                history,
+                history
+                    .iter()
+                    .map(crate::history::StoredMessage::message)
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 std::path::PathBuf::from(cwd),
                 state.config.agent.memory_extraction,
             );
@@ -374,18 +378,24 @@ pub(super) fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
-pub(super) fn tool_result_content(result: &history::ToolResult) -> ToolCallContent {
-    ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
-        tool_result_text(&result.content),
-    ))))
+pub(super) fn tool_result_content(result: &history::ContentBlock) -> ToolCallContent {
+    let text = match result {
+        history::ContentBlock::ToolResult { content, .. } => {
+            history::ext::tool_content_text(content)
+        }
+        _ => String::new(),
+    };
+    ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
 }
 
 /// Built-in tools produce model-facing text, which ACP displays verbatim.
 /// Keep JSON readable for additional tools without interpreting their schemas.
-pub(super) fn tool_result_text(items: &[history::ToolResultContent]) -> String {
-    items
-        .iter()
-        .map(history::ToolResultContent::to_text)
-        .collect::<Vec<_>>()
-        .join("\n")
+#[cfg(test)]
+pub(super) fn tool_result_text(result: &history::ContentBlock) -> String {
+    match result {
+        history::ContentBlock::ToolResult { content, .. } => {
+            history::ext::tool_content_text(content)
+        }
+        _ => String::new(),
+    }
 }

@@ -11,7 +11,7 @@ use crate::config::{
     CompactionBuffer, CompactionConfig, CompactionKind,
     DEFAULT_COMPACTION_BUFFER as DEFAULT_ENGINE_BUFFER,
 };
-use crate::history::Message;
+use crate::history::StoredMessage;
 use crate::run::SharedDedupCache;
 
 use super::estimate::{TokenEstimator, estimate_tokens};
@@ -97,7 +97,7 @@ impl CompactionState {
     }
 
     /// The overhead-inclusive estimate the engine's thresholds run against.
-    fn scaled_estimate(&self, history: &[Message]) -> u64 {
+    fn scaled_estimate(&self, history: &[StoredMessage]) -> u64 {
         self.estimator
             .scale(estimate_tokens(history).saturating_add(self.request_overhead))
     }
@@ -153,7 +153,7 @@ impl CompactionEngine {
         &self,
         state: &mut CompactionState,
         model: &ModelHandle,
-        history: &mut Vec<Message>,
+        history: &mut Vec<StoredMessage>,
         context_length: Option<u32>,
     ) -> bool {
         self.compact_impl(state, model, history, context_length, false)
@@ -168,7 +168,7 @@ impl CompactionEngine {
         &self,
         state: &mut CompactionState,
         model: &ModelHandle,
-        history: &mut Vec<Message>,
+        history: &mut Vec<StoredMessage>,
         context_length: Option<u32>,
     ) -> bool {
         self.compact_impl(state, model, history, context_length, true)
@@ -179,7 +179,7 @@ impl CompactionEngine {
         &self,
         state: &mut CompactionState,
         model: &ModelHandle,
-        history: &mut Vec<Message>,
+        history: &mut Vec<StoredMessage>,
         context_length: Option<u32>,
         force: bool,
     ) -> bool {
@@ -279,22 +279,24 @@ impl CompactionEngine {
 mod tests {
     use super::*;
     use crate::compaction::llm::LLM_SUMMARY_PREFIX;
-    use crate::compaction::test_support::{assistant_text, tool_result_of, user};
-    use crate::history::AssistantContent;
+    use crate::compaction::test_support::{
+        stored_assistant_text, stored_assistant_tool_args, stored_tool_result_of, stored_user,
+    };
+    use crate::history::ext;
 
     fn stage(kind: CompactionKind, context: f64) -> CompactionConfig {
         CompactionConfig { kind, context }
     }
 
-    fn tool_round(i: usize, output: &str) -> Vec<Message> {
+    fn tool_round(i: usize, output: &str) -> Vec<StoredMessage> {
         let id = format!("t{i}");
         vec![
-            crate::compaction::test_support::assistant_tool_args(
+            stored_assistant_tool_args(
                 &id,
                 "bash",
                 serde_json::json!({"command": format!("echo {i}")}),
             ),
-            tool_result_of(&id, output),
+            stored_tool_result_of(&id, output),
         ]
     }
 
@@ -324,15 +326,17 @@ mod tests {
     }
 
     /// Long history: alternating prompts and large tool rounds.
-    fn long_history() -> Vec<Message> {
+    fn long_history() -> Vec<StoredMessage> {
         let mut messages = Vec::new();
         for i in 0..8 {
-            messages.push(user(&format!("do task {i} with a fairly long instruction")));
+            messages.push(stored_user(&format!(
+                "do task {i} with a fairly long instruction"
+            )));
             messages.extend(tool_round(i, &"x".repeat(200)));
         }
-        messages.push(user("second task begins here"));
+        messages.push(stored_user("second task begins here"));
         for i in 8..14 {
-            messages.push(user(&format!(
+            messages.push(stored_user(&format!(
                 "do subtask {i} with a fairly long instruction"
             )));
             messages.extend(tool_round(i, &"y".repeat(200)));
@@ -367,7 +371,7 @@ mod tests {
     async fn force_compact_on_short_history_is_a_no_op() {
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
         let mut state = CompactionState::default();
-        let mut history = vec![user("hi"), user("there")];
+        let mut history = vec![stored_user("hi"), stored_user("there")];
         // The VCC stage declines a too-short history even when forced, so
         // callers get `false` and can report "already compact".
         let ran = engine
@@ -411,9 +415,7 @@ mod tests {
         assert!(ran);
         assert!(!history.is_empty());
         // VCC summary marker present (deterministic, no LLM call).
-        assert!(matches!(&history[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains("This summary captures"))));
+        assert!(ext::message_text(&history[0]).contains("This summary captures"));
     }
 
     #[tokio::test]
@@ -429,9 +431,7 @@ mod tests {
             .maybe_compact(&mut state, &model, &mut history, Some(context_length))
             .await;
         assert!(ran);
-        assert!(matches!(&history[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains(LLM_SUMMARY_PREFIX))));
+        assert!(ext::message_text(&history[0]).contains(LLM_SUMMARY_PREFIX));
     }
 
     #[tokio::test]
@@ -465,14 +465,14 @@ mod tests {
         // savings are below 10%: craft a history where vcc's summary barely
         // shrinks (short messages). Use short messages.
         let mut history = vec![
-            user(&"a".repeat(100)),
-            assistant_text(&"b".repeat(100)),
-            user(&"c".repeat(100)),
-            assistant_text(&"d".repeat(100)),
-            user(&"e".repeat(100)),
-            assistant_text(&"f".repeat(100)),
-            user(&"g".repeat(100)),
-            assistant_text(&"h".repeat(100)),
+            stored_user(&"a".repeat(100)),
+            stored_assistant_text(&"b".repeat(100)),
+            stored_user(&"c".repeat(100)),
+            stored_assistant_text(&"d".repeat(100)),
+            stored_user(&"e".repeat(100)),
+            stored_assistant_text(&"f".repeat(100)),
+            stored_user(&"g".repeat(100)),
+            stored_assistant_text(&"h".repeat(100)),
         ];
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.99) as u32).max(1);
@@ -498,7 +498,7 @@ mod tests {
             stage(CompactionKind::Llm, 0.8),
         ]);
         let mut state = CompactionState::default();
-        let mut history = vec![user(&"x".repeat(4000))];
+        let mut history = vec![stored_user(&"x".repeat(4000))];
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
         let model = summary_model("x");
@@ -518,7 +518,7 @@ mod tests {
         // still carry the scaled estimate past the usable window.
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
         let mut state = CompactionState::default();
-        let mut history: Vec<Message> = std::iter::repeat_with(long_history)
+        let mut history: Vec<StoredMessage> = std::iter::repeat_with(long_history)
             .take(8)
             .flatten()
             .collect();
@@ -537,7 +537,7 @@ mod tests {
             "raw estimate sits under the threshold"
         );
         state.recalibrate(context_length as u64 * 2, tokens);
-        let mut history: Vec<Message> = std::iter::repeat_with(long_history)
+        let mut history: Vec<StoredMessage> = std::iter::repeat_with(long_history)
             .take(8)
             .flatten()
             .collect();
@@ -564,7 +564,7 @@ mod tests {
             let mut guard = cache.lock().unwrap();
             guard.insert(
                 key,
-                &crate::history::ToolResult::text("c1", "read", "x"),
+                &crate::history::ext::tool_result("c1", Some("read"), "x", false),
                 None,
                 "read",
                 &input,
@@ -611,7 +611,10 @@ mod tests {
             .with_buffer(crate::config::CompactionBuffer::Tokens(0));
         let mut state = CompactionState::default();
         let mut history = long_history();
-        let (prompt, followup) = (user("unanswered prompt"), user("queued followup"));
+        let (prompt, followup) = (
+            stored_user("unanswered prompt"),
+            stored_user("queued followup"),
+        );
         history.push(prompt.clone());
         history.push(followup.clone());
         state.protect_from(history.len() - 2);
@@ -624,26 +627,21 @@ mod tests {
                 .await
         );
         // Summary replaced the head, protected tail is intact and last.
-        assert!(matches!(&history[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains(LLM_SUMMARY_PREFIX))));
+        assert!(ext::message_text(&history[0]).contains(LLM_SUMMARY_PREFIX));
         assert_eq!(history[history.len() - 2], prompt);
         assert_eq!(*history.last().unwrap(), followup);
         // The protection re-anchored to where the carried input now starts.
         assert_eq!(state.carry_from(), Some(history.len() - 2));
         // The summarizer never saw the carried input.
         let request = &calls.requests()[0];
-        let carried = crate::testing::replay_history(&request.messages)
+        let carried = &request
+            .messages
             .iter()
-            .flat_map(|m| match m {
-                Message::User { content } => content.iter().collect::<Vec<_>>(),
-                _ => Vec::new(),
-            })
-            .filter_map(|b| match b {
-                crate::history::UserContent::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .any(|t| t.contains("unanswered prompt") || t.contains("queued followup"));
+            .filter(|m| crate::history::ext::is_user(m))
+            .any(|m| {
+                crate::history::ext::text(m).contains("unanswered prompt")
+                    || crate::history::ext::text(m).contains("queued followup")
+            });
         assert!(!carried, "carried input must not be sent to the summarizer");
     }
 
@@ -738,14 +736,14 @@ mod tests {
             .with_buffer(crate::config::CompactionBuffer::Percent(50));
         let mut state = CompactionState::default();
         let mut history = vec![
-            user(&"a".repeat(100)),
-            assistant_text(&"b".repeat(100)),
-            user(&"c".repeat(100)),
-            assistant_text(&"d".repeat(100)),
-            user(&"e".repeat(100)),
-            assistant_text(&"f".repeat(100)),
-            user(&"g".repeat(100)),
-            assistant_text(&"h".repeat(100)),
+            stored_user(&"a".repeat(100)),
+            stored_assistant_text(&"b".repeat(100)),
+            stored_user(&"c".repeat(100)),
+            stored_assistant_text(&"d".repeat(100)),
+            stored_user(&"e".repeat(100)),
+            stored_assistant_text(&"f".repeat(100)),
+            stored_user(&"g".repeat(100)),
+            stored_assistant_text(&"h".repeat(100)),
         ];
         let tokens = estimate_tokens(&history);
         // Window so tight vcc's savings fall below 10%: the stage disarms.
@@ -778,7 +776,7 @@ mod tests {
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
         let mut state = CompactionState::default();
         let mut history = long_history();
-        let prompt = user("unanswered queued prompt");
+        let prompt = stored_user("unanswered queued prompt");
         history.push(prompt.clone());
         state.protect_from(history.len() - 1);
         let tokens = estimate_tokens(&history);
@@ -795,10 +793,9 @@ mod tests {
         );
         // The prompt survived verbatim at the tail and was never summarized.
         assert_eq!(*history.last().unwrap(), prompt);
-        assert!(matches!(&history[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains("This summary captures")
-                    && !t.text.contains("unanswered queued prompt"))));
+        let summary = ext::message_text(&history[0]);
+        assert!(summary.contains("This summary captures"));
+        assert!(!summary.contains("unanswered queued prompt"));
         // The protection re-anchored to where the carried input now starts.
         assert_eq!(state.carry_from(), Some(history.len() - 1));
     }
@@ -810,7 +807,10 @@ mod tests {
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
         let mut state = CompactionState::default();
         let mut history = long_history();
-        let (a, b) = (user("first unanswered"), user("second unanswered"));
+        let (a, b) = (
+            stored_user("first unanswered"),
+            stored_user("second unanswered"),
+        );
         history.push(a.clone());
         history.push(b);
         state.protect_from(history.len() - 2);
@@ -842,14 +842,14 @@ mod tests {
         .with_buffer(crate::config::CompactionBuffer::Tokens(0));
         let mut state = CompactionState::default();
         let mut history = vec![
-            user(&"a".repeat(100)),
-            assistant_text(&"b".repeat(100)),
-            user(&"c".repeat(100)),
-            assistant_text(&"d".repeat(100)),
-            user(&"e".repeat(100)),
-            assistant_text(&"f".repeat(100)),
-            user(&"g".repeat(100)),
-            assistant_text(&"h".repeat(100)),
+            stored_user(&"a".repeat(100)),
+            stored_assistant_text(&"b".repeat(100)),
+            stored_user(&"c".repeat(100)),
+            stored_assistant_text(&"d".repeat(100)),
+            stored_user(&"e".repeat(100)),
+            stored_assistant_text(&"f".repeat(100)),
+            stored_user(&"g".repeat(100)),
+            stored_assistant_text(&"h".repeat(100)),
         ];
         let tokens = estimate_tokens(&history);
         // Fill ratio 0.7: over VCC's 0.6 threshold, under LLM's 0.8 and the
@@ -865,9 +865,7 @@ mod tests {
             !calls.requests().is_empty(),
             "the LLM stage must run after an over-limit VCC pass"
         );
-        assert!(matches!(&history[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains(LLM_SUMMARY_PREFIX))));
+        assert!(ext::message_text(&history[0]).contains(LLM_SUMMARY_PREFIX));
         assert!(
             estimate_tokens(&history) < u64::from(context_length),
             "context must end under the usable window"
@@ -885,7 +883,7 @@ mod tests {
             let mut guard = cache.lock().unwrap();
             guard.insert(
                 key,
-                &crate::history::ToolResult::text("c1", "read", "x"),
+                &crate::history::ext::tool_result("c1", Some("read"), "x", false),
                 None,
                 "read",
                 &input,
@@ -898,7 +896,7 @@ mod tests {
             stage(CompactionKind::Llm, 0.1),
         ]);
         let mut state = CompactionState::default().with_dedup(cache.clone());
-        let mut history = vec![user(&"x".repeat(4000))];
+        let mut history = vec![stored_user(&"x".repeat(4000))];
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
         for _ in 0..2 {

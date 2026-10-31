@@ -28,7 +28,7 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use crate::config::{AdvisorAutoAct, AdvisorConfig};
-use crate::history::Message;
+use crate::history::{StoredMessage, ext};
 
 const ADVISOR_SYSTEM: &str = "\
 You are a lightweight code reviewer paired with an autonomous coding agent. \
@@ -174,7 +174,7 @@ impl AdvisorState {
 pub async fn review(
     model: &crate::provider::ModelHandle,
     state: &mut AdvisorState,
-    history: &[Message],
+    history: &[StoredMessage],
 ) -> Option<AdvisorNote> {
     let delta = build_delta(history, state.last_reviewed);
     state.last_reviewed = history.len();
@@ -183,7 +183,7 @@ pub async fn review(
     }
 
     let user_msg = format!("# Agent delta\n{delta}\n\nReview this delta. One line, or OK.");
-    let messages = vec![Message::user(user_msg)];
+    let messages = vec![ext::user_text(user_msg)];
     let text = match timeout(
         REVIEW_DEADLINE,
         crate::provider::complete_text(model, &messages, ADVISOR_SYSTEM),
@@ -234,8 +234,8 @@ pub(crate) fn advisor_continuation_info(note: &AdvisorNote, continuation: u32, m
     )
 }
 
-pub(crate) fn advisor_followup_message(note: &AdvisorNote) -> Message {
-    Message::user(
+pub(crate) fn advisor_followup_message(note: &AdvisorNote) -> StoredMessage {
+    ext::stored_user_text(
         ADVISOR_FOLLOWUP_PROMPT
             .replace("{severity}", note.severity.as_str())
             .replace("{note}", &note.message),
@@ -254,27 +254,29 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
     }
 }
 
-fn build_delta(history: &[Message], last_reviewed: usize) -> String {
+fn build_delta(history: &[StoredMessage], last_reviewed: usize) -> String {
     if history.len() <= last_reviewed {
         return String::new();
     }
-    let tail: Vec<&Message> = history
+    let tail: Vec<&StoredMessage> = history
         .iter()
         .skip(last_reviewed)
         .rev()
         .take(MAX_DELTA_MESSAGES)
         .collect();
     let mut out = String::new();
-    for msg in tail.into_iter().rev() {
+    for stored in tail.into_iter().rev() {
+        let msg = stored.message();
         if !out.is_empty() {
             out.push_str("\n---\n");
         }
-        let role = match msg {
-            Message::User { .. } => "user",
-            _ => "assistant",
+        let role = if ext::is_user(msg) {
+            "user"
+        } else {
+            "assistant"
         };
         out.push_str(&format!("[{role}] "));
-        out.push_str(&msg.text());
+        out.push_str(&ext::text(msg));
         if out.len() > MAX_DELTA_CHARS {
             let cut = floor_char_boundary(&out, MAX_DELTA_CHARS);
             out.truncate(cut);
@@ -398,14 +400,16 @@ mod tests {
 
     #[test]
     fn build_delta_empty_when_no_new_messages() {
-        let history = vec![Message::user("a")];
+        let history = vec![ext::stored_user_text("a")];
         assert_eq!(build_delta(&history, 1), "");
         assert_eq!(build_delta(&history, 5), "");
     }
 
     #[test]
     fn build_delta_includes_only_new_tail() {
-        let history: Vec<Message> = (0..10).map(|i| Message::user(format!("m{i}"))).collect();
+        let history: Vec<StoredMessage> = (0..10)
+            .map(|i| ext::stored_user_text(format!("m{i}")))
+            .collect();
         let delta = build_delta(&history, 7);
         assert!(delta.contains("m7"));
         assert!(delta.contains("m9"));
@@ -415,7 +419,7 @@ mod tests {
     #[test]
     fn build_delta_truncates_at_char_boundary() {
         let big: String = "é".repeat(MAX_DELTA_CHARS + 100);
-        let history = vec![Message::user(big)];
+        let history = vec![ext::stored_user_text(big)];
         let delta = build_delta(&history, 0);
         assert!(delta.len() <= MAX_DELTA_CHARS + 64);
         assert!(delta.ends_with("...(truncated)"));
@@ -499,7 +503,10 @@ mod tests {
         let (model, provider) =
             advisor_model(vec![crate::testing::text_turn("concern: unchecked unwrap")]);
         let mut state = AdvisorState::with_dedup(8);
-        let history = vec![Message::user("do the thing"), Message::assistant("done")];
+        let history = vec![
+            ext::stored_user_text("do the thing"),
+            ext::stored(ext::assistant_text("done")),
+        ];
         let note = review(&model, &mut state, &history).await.unwrap();
         assert_eq!(note.severity, AdvisorSeverity::Concern);
         assert_eq!(note.message, "unchecked unwrap");
@@ -518,7 +525,7 @@ mod tests {
             crate::testing::text_turn("blocker: real bug"),
         ]);
         let mut state = AdvisorState::with_dedup(8);
-        let history = vec![Message::user("go")];
+        let history = vec![ext::stored_user_text("go")];
         assert!(review(&model, &mut state, &history).await.is_some());
         // Same note again: deduped to silence.
         assert!(review(&model, &mut state, &history).await.is_none());

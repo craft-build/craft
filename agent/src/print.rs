@@ -20,9 +20,11 @@ use serde_json::{Value, json};
 use crate::cli::OutputFormat;
 use crate::error::{InvalidSnafu, Result};
 use crate::headless::HeadlessHandle;
-use crate::history::{ImageBlock, ImageMedia, Message, Usage};
+use crate::history::ext::{self, ImageMedia};
+use crate::history::{ContentBlock, Message};
 use crate::id::SessionRef;
 use crate::run::{DoneReason, Event};
+use crate::usage::TokenUsage;
 
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -36,11 +38,11 @@ fn invalid(reason: impl Into<String>) -> crate::error::Error {
 /// Attach `--image` paths to the prompt as vision content. Files are fully
 /// decoded before base64 so a corrupt image fails here instead of poisoning
 /// the message history (same rationale as the `view_image` tool).
-pub fn load_images(paths: &[std::path::PathBuf]) -> Result<Vec<ImageBlock>> {
+pub fn load_images(paths: &[std::path::PathBuf]) -> Result<Vec<ContentBlock>> {
     paths.iter().map(|path| load_image(path)).collect()
 }
 
-fn load_image(path: &Path) -> Result<ImageBlock> {
+fn load_image(path: &Path) -> Result<ContentBlock> {
     let bytes = std::fs::read(path).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
     let format = image::guess_format(&bytes)
         .map_err(|e| invalid(format!("{} is not an image: {e}", path.display())))?;
@@ -53,10 +55,11 @@ fn load_image(path: &Path) -> Result<ImageBlock> {
     image::ImageReader::with_format(Cursor::new(&bytes), format)
         .decode()
         .map_err(|e| invalid(format!("cannot decode {}: {e}", path.display())))?;
-    Ok(ImageBlock {
-        media_type: media,
-        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-        caption: path.display().to_string(),
+    Ok(ContentBlock::Image {
+        source: ext::image_source(
+            media,
+            base64::engine::general_purpose::STANDARD.encode(&bytes),
+        ),
     })
 }
 
@@ -89,12 +92,16 @@ struct UsageValue {
     total_tokens: u64,
 }
 
-impl From<Usage> for UsageValue {
-    fn from(usage: Usage) -> Self {
+impl From<&TokenUsage> for UsageValue {
+    fn from(usage: &TokenUsage) -> Self {
         Self {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            total_tokens: usage.total_tokens,
+            input_tokens: u64::from(usage.input) + u64::from(usage.cache_read),
+            output_tokens: u64::from(usage.output),
+            // The same folded identity the wire format always reported:
+            // total = input + output, cache-creation excluded.
+            total_tokens: u64::from(usage.input)
+                + u64::from(usage.cache_read)
+                + u64::from(usage.output),
         }
     }
 }
@@ -212,7 +219,7 @@ struct PrintState {
     turn_text: String,
     turn_tools: Vec<Value>,
     num_turns: u32,
-    usage: Usage,
+    usage: TokenUsage,
     cost: Option<f64>,
     stop_reason: Option<&'static str>,
     error: Option<String>,
@@ -233,7 +240,7 @@ impl PrintState {
             turn_text: String::new(),
             turn_tools: Vec::new(),
             num_turns: 0,
-            usage: Usage::default(),
+            usage: TokenUsage::default(),
             cost: None,
             stop_reason: None,
             error: None,
@@ -301,7 +308,7 @@ impl PrintState {
                         model: &self.model,
                         role: "assistant",
                         content,
-                        usage: usage.into(),
+                        usage: (&usage).into(),
                     },
                     session_id: &self.session_id,
                 })?;
@@ -366,7 +373,7 @@ impl PrintState {
             session_id: self.session_id.clone(),
             // Zero on an unpriced model, which is what its turns reported too.
             total_cost_usd: self.cost.unwrap_or_default(),
-            usage: self.usage.into(),
+            usage: (&self.usage).into(),
         };
         match format {
             // Reference semantics: text output is always the raw reply;
@@ -386,13 +393,14 @@ impl PrintState {
     }
 }
 
-/// Serialize the tool-results wave in our own history shape (tagged blocks,
-/// not Claude Code's): the transcript is for debugging and tooling, and the
-/// raw history encoding is the lossless form.
+/// Serialize the tool-results wave in animist's block shape (not Claude
+/// Code's): the transcript is for debugging and tooling, and the history
+/// encoding is the lossless form.
 fn message_content(message: &Message) -> Value {
-    let content = match message {
-        Message::User { content } => serde_json::to_value(content),
-        other => serde_json::to_value(other.text()),
+    let content = if crate::history::ext::is_user(message) {
+        serde_json::to_value(&message.content)
+    } else {
+        serde_json::to_value(crate::history::ext::text(message))
     };
     content.unwrap_or_else(|_| json!([]))
 }
@@ -430,7 +438,7 @@ pub async fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::{ToolResult, UserContent};
+    use crate::history::ImageSource;
     use serde_json::Value;
 
     const PRINT_RESULT_FIELDS: &[&str] = &[
@@ -471,7 +479,7 @@ mod tests {
             stop_reason: Some("end_turn"),
             session_id: sid(),
             total_cost_usd: 0.003,
-            usage: Usage::default().into(),
+            usage: (&TokenUsage::default()).into(),
         };
         let json: Value = serde_json::to_value(&result).unwrap();
         for field in PRINT_RESULT_FIELDS {
@@ -532,21 +540,24 @@ mod tests {
             .unwrap();
         state
             .observe(Event::TurnComplete {
-                usage: Usage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
+                usage: TokenUsage {
+                    input: 10,
+                    output: 5,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    cost: None,
                 },
                 context_size: 20,
             })
             .unwrap();
         state
             .observe(Event::ToolResultsSubmitted {
-                message: Message::User {
-                    content: vec![UserContent::ToolResult(ToolResult::text(
-                        "t1", "read", "ok",
-                    ))],
-                },
+                message: crate::history::ext::observation(vec![crate::history::ext::tool_result(
+                    "t1",
+                    Some("read"),
+                    "ok",
+                    false,
+                )]),
             })
             .unwrap();
         state
@@ -559,10 +570,12 @@ mod tests {
         assert!(!state.observe(Event::TextDelta("done".into())).unwrap());
         let terminal = state
             .observe(Event::Done {
-                usage: Usage {
-                    input_tokens: 25,
-                    output_tokens: 9,
-                    total_tokens: 34,
+                usage: TokenUsage {
+                    input: 25,
+                    output: 9,
+                    cache_creation: 0,
+                    cache_read: 0,
+                    cost: None,
                 },
                 context_size: 30,
                 context_window: 0,
@@ -636,26 +649,25 @@ mod tests {
             .unwrap();
         state
             .observe(Event::TurnComplete {
-                usage: Usage::default(),
+                usage: TokenUsage::default(),
                 context_size: 10,
             })
             .unwrap();
         state
             .observe(Event::ToolResultsSubmitted {
-                message: Message::User {
-                    content: vec![UserContent::ToolResult(ToolResult::text(
-                        "t1",
-                        "bash",
-                        "Permission denied for `bash` (`rm -rf /`). User guidance: \
+                message: crate::history::ext::observation(vec![crate::history::ext::tool_result(
+                    "t1",
+                    Some("bash"),
+                    "Permission denied for `bash` (`rm -rf /`). User guidance: \
                          this headless run has no interactive approver.",
-                    ))],
-                },
+                    false,
+                )]),
             })
             .unwrap();
         assert!(
             state
                 .observe(Event::Done {
-                    usage: Usage::default(),
+                    usage: TokenUsage::default(),
                     context_size: 10,
                     context_window: 0,
                     num_turns: 1,
@@ -701,9 +713,14 @@ mod tests {
 
         let images = load_images(std::slice::from_ref(&png)).unwrap();
         assert_eq!(images.len(), 1);
-        assert_eq!(images[0].media_type, ImageMedia::Png);
-        assert_eq!(images[0].caption, png.display().to_string());
-        assert!(!images[0].data.is_empty());
+        let ContentBlock::Image { source } = &images[0] else {
+            panic!("image block");
+        };
+        let ImageSource::Base64 { media_type, data } = source else {
+            panic!("base64 image source");
+        };
+        assert_eq!(media_type, "image/png");
+        assert!(!data.is_empty());
 
         let err = load_images(&[txt]).unwrap_err();
         assert!(err.to_string().contains("not an image"));

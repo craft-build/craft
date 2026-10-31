@@ -166,4 +166,104 @@ writes into it.
 
 ## Completion note
 
-_(fill in when done)_
+**2026-10-30, branch `animist-migration`**, commits `7b137693` (golden
+fixtures, written with pre-cutover code) and this one (base `a73e3db3`).
+
+`crate::history` is now animist history: the module re-exports
+`Message/ContentBlock/ToolContent(s)/ImageSource/Role/MessageKind/
+StoredMessage/HistoryEntry`, craft-side helpers live in `history::ext`
+(free functions: text extraction, constructors, `tool_calls`/`tool_results`
+iterators, `tool_name` with the call-fallback for legacy results, image
+helpers, `stored`/`entries`/`stored_of_entries`), and marker identity lives
+in `history::marker` (`craft.marker` tags on `StoredMessage`). `edge.rs` is
+deleted; its request-shaping rules are pure functions in `run/view.rs`
+(`shape_messages`, `relocate_tool_result_images`, `coalesce_user_messages`,
+`assert_replay_valid`) applied after the request rewrites, exactly where the
+old edge sat. The loop and every surface speak `Vec<StoredMessage>` and map
+to `Vec<Message>` at the provider call.
+
+- **Captions**: dropped. `view_image` already ships its human-visible
+  summary as a leading Text block (the caption the TUI showed), composer
+  attachment captions were never rendered and never model-visible, and
+  `dispatch`'s hardcoded `"[image]"` placeholder survives as
+  `ext::tool_content_text`'s image rendering. The Chat-Completions
+  relocation placeholder no longer embeds the caption (it names the image
+  generically) — the only model-visible string that changed.
+- **Usage**: `history::Usage` is deleted and `crate::usage::TokenUsage`
+  re-exports `animist::provider::TokenUsage` (every field maps; helpers
+  became free functions in `usage.rs`). The two identical
+  `StoredTokenUsage` types collapsed into `usage::StoredTokenUsage`. Cache
+  counters now flow into pricing for the first time (the old seam zeroed
+  them); folded display semantics (`input_tokens` = input + cache_read,
+  stream-json `total` = input + cache_read + output) are preserved.
+- **Format**: one bump, `LOG_FORMAT_VERSION` 3 → 4 (the `.json` path keeps
+  `SESSION_VERSION` 1). Messages persist as animist entry records —
+  `entry/insert/revise/deactivate/replace`, one to one with animist's
+  `HistoryChange` (only `entry` and `sub_entry` are written today; the
+  replay function covers all five kinds and is unit-tested) — and
+  `subagent_messages` are entry lists. One loader (`records.rs`) accepts v4
+  records, v3 `msg`/`sub_msg`/`out` records (converted by
+  `legacy_messages.rs`, markers recognized by text and tagged,
+  timestamps approximated to the session's `created_at`) and `.json` files
+  (current shape first, then the legacy shape converted); a loaded legacy
+  session rewrites in the new shape on save, and `tool_outputs` stays
+  readable but is never written. **Downgrade caveat**: older `crafty` builds
+  cannot read new saves (documented in `agent/README.md`).
+- **Coalescing**: kept. animist's Anthropic/Bedrock adapters map messages
+  one to one with no merging, and both protocols require a step's tool
+  results in the following single user message, so
+  `coalesce_user_messages` remains a request-view rule (with a bug the
+  review caught: only user-role messages may merge — the first cut folded
+  assistant messages in and broke replay).
+- **hardening/27**: `strip_trailing_markers` drops any trailing run of
+  grace/nudge observations by tag (repeated suffixes included), never
+  touches untagged text or assistant replies.
+
+**Validation**: `cargo fmt -p craft --check` clean; clippy 93 lib / 118
+all-targets against the 02 note's 93/119 baseline; `cargo test -p craft`
+**2001 passed, 3 failed** — the three pre-existing recipe-render failures
+recorded in 01 — and 1 pre-existing ignore (`tools/tests/read.rs`). No new
+`#[ignore]`.
+
+**Behaviour changes** (each pinned):
+
+1. Session format v4 (above); older builds cannot read new saves.
+2. stream-json `user` events serialize content in animist's block shape
+   (was the craft enum shape); both were already non-Claude-Code shapes.
+3. Cache-token counters reach pricing and usage ledgers (previously
+   zeroed at the seam); folded display identities unchanged.
+4. Marker identity is tag-based; a user typing a marker's text verbatim is
+   no longer treated as one (TUI cancel-close, grace stripping).
+5. TUI usage label and ACP `UsageUpdate` keep their exact folded values.
+
+**Removed tests → replacements** (9): `edge::tests` (6) →
+`run::view::tests::{adjacent_user_messages_coalesce,
+empty_assistant_turns_drop, tool_result_images_relocate_only_when_asked,
+image_bearing_user_messages_stay_separate, request_view_passes_replay_validation}`
+plus `stream`/`turns` request assertions; `history::tests` (2) →
+`history::ext::tests` + marker/serialization coverage in the session
+round-trips; `usage::rig_usage_converts_with_zero_cache_counters` died with
+`history::Usage` (cache counters now pass through natively). **Added**: 33
+(ext/marker units, marker-by-tag, five-record replay, eight golden-fixture
+loads + round trip + replay validation, legacy `.json` load, legacy-format
+archive pin, out-record readability, rig-Json pretty-print).
+
+**Review**: three parallel reviewer passes (core/sessions/surfaces) found
+3 P1 + 3 P2 + a P3 batch — all fixed: out-of-range `insert` records could
+panic the loader; the archive prefix cutover silently disabled archiving
+for legacy-format logs; legacy `.json` sessions failed to deserialize (the
+loader now converts them); `LegacyRecord::Meta` had a nested-key shape real
+files never had; stream-json `total_tokens` drifted from the folded
+identity; the rig-Json pretty-print coverage was tautological (dispatch
+test added); plus fail-closed gates, request-order restoration
+(lifecycle/compress before protocol shaping, context-size estimate on the
+rewritten view), estimate clone removal, and comment cleanups. A second
+verification pass confirmed **13/13 fixes correct**, and its one residual
+P2 (context_size estimated from the raw view) and two doc nits are fixed.
+Two findings are recorded in the argosy review session (`c51376c4…`);
+new-file findings (records.rs, legacy_messages.rs, history/, view.rs are
+untracked in the snapshot) live here instead.
+
+**Indirection rows closed**: none — the inventory's rows all land in 05+.
+`edge.rs` was not an inventory row; it is simply gone.
+

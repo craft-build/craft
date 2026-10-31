@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::{Result, Workspace, failure, impl_tool, invalid};
-use crate::history::ImageMedia;
+use crate::history::ext::ImageMedia;
 
 const MAX_INPUT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_RAW_BYTES: usize = 3 * 1024 * 1024;

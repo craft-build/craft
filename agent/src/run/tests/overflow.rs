@@ -2,6 +2,7 @@
 //! reauth waits, and the cancel marker.
 
 use super::*;
+use crate::history::{StoredMessage, ext};
 use crate::run::*;
 
 // --- Context-overflow recovery (C.5) ---
@@ -19,7 +20,7 @@ fn done_turn(text: &str) -> crate::testing::Attempt {
     crate::testing::text_turn(text)
 }
 
-fn overflow_history() -> Vec<Message> {
+fn overflow_history() -> Vec<StoredMessage> {
     use crate::compaction::test_support as ts;
     // Repeated 50x so the history dwarfs the fixed tool-schema overhead
     // (~14k tokens): these tests exercise a *history*-driven overflow that
@@ -27,18 +28,21 @@ fn overflow_history() -> Vec<Message> {
     let mut messages = Vec::new();
     for round in 0..8 * 50 {
         let i = round % 8;
-        messages.push(ts::user(&format!(
+        messages.push(ts::stored_user(&format!(
             "do task {i} with a fairly long instruction"
         )));
         // Wire tool-call ids must be unique across the whole history
         // (replay validation rejects duplicates), so each round mints its
         // own while the args keep the per-task variety.
-        messages.push(ts::assistant_tool_args(
+        messages.push(ts::stored_assistant_tool_args(
             &format!("t{round}"),
             "bash",
             serde_json::json!({"command": format!("echo {i}")}),
         ));
-        messages.push(ts::tool_result_of(&format!("t{round}"), &"x".repeat(200)));
+        messages.push(ts::stored_tool_result_of(
+            &format!("t{round}"),
+            &"x".repeat(200),
+        ));
     }
     messages
 }
@@ -312,9 +316,9 @@ async fn cancel_mid_stream_commits_the_partial_reply_with_marker() {
     // The committed history keeps the streamed partial the user saw,
     // then the cancel marker.
     assert_eq!(history.len(), 3, "prompt + partial reply + marker");
-    assert_eq!(history[0].text(), "go");
-    assert_eq!(history[1].text(), "partial answer");
-    assert_eq!(history[2].text(), CANCEL_MARKER);
+    assert_eq!(ext::message_text(&history[0]), "go");
+    assert_eq!(ext::message_text(&history[1]), "partial answer");
+    assert_eq!(ext::message_text(&history[2]), CANCEL_MARKER);
 }
 
 // --- Auth-error reauth wait (E.10) ---

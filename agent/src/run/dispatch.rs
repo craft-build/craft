@@ -6,16 +6,22 @@
 //! execution, and an [`AfterExecute`] hook (output transform) applied to each
 //! result. Both default to pass-through; the TUI's approval gate is a
 //! `BeforeExecute` implementation.
+//!
+//! Calls and results are animist content blocks: a call is a
+//! `ContentBlock::ToolUse`, a result a `ContentBlock::ToolResult` carrying
+//! the tool's name, so results are self-describing everywhere they travel.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
+use animist::history::{ContentBlock, ToolContents};
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::DynamicTool;
 
-use crate::history;
+use crate::history::Message;
+use crate::history::{self, ext};
 
 use super::dedup::{self, SharedDedupCache, ToolDedupCache};
 use super::guardrails::{GuardrailDecision, SharedGuardrails};
@@ -50,19 +56,16 @@ pub enum Decision {
     Stop(String),
 }
 
-/// Interception point before a tool executes (approval gate).
+/// Interception point before a tool executes (approval gate). `call` is the
+/// model's `ToolUse` block.
 pub trait BeforeExecute: Send + Sync {
-    fn decide(&self, call: history::ToolCall) -> BoxFuture<Decision>;
+    fn decide(&self, call: ContentBlock) -> BoxFuture<Decision>;
 }
 
 /// Output-transform slot after a tool executes. Initially identity; the future
 /// home of output-trimming and presentation features.
 pub trait AfterExecute: Send + Sync {
-    fn transform(
-        &self,
-        call: history::ToolCall,
-        result: history::ToolResult,
-    ) -> BoxFuture<history::ToolResult>;
+    fn transform(&self, call: ContentBlock, result: ContentBlock) -> BoxFuture<ContentBlock>;
 }
 
 /// The turn's tool set: name-keyed portable tools plus interception hooks.
@@ -91,11 +94,23 @@ pub struct ToolDispatch {
 #[derive(Debug, Clone)]
 pub enum DispatchOutcome {
     /// The tool ran (successfully or not; see the result's `is_error`).
-    Ran(history::ToolResult),
+    Ran(ContentBlock),
     /// A `BeforeExecute` hook skipped the call; the reason is the result.
-    Skipped(history::ToolResult),
+    Skipped(ContentBlock),
     /// A `BeforeExecute` hook stopped the run.
     Stopped(String),
+}
+
+/// The `ToolUse` block's id, name and input; every dispatch path receives
+/// ToolUse-shaped calls.
+pub(crate) fn call_parts(call: &ContentBlock) -> (&str, &str, &serde_json::Value) {
+    let ContentBlock::ToolUse {
+        id, name, input, ..
+    } = call
+    else {
+        unreachable!("dispatch receives ToolUse blocks only");
+    };
+    (id, name, input)
 }
 
 impl ToolDispatch {
@@ -208,18 +223,22 @@ impl ToolDispatch {
     /// and can correct itself.
     pub async fn execute(
         &self,
-        call: history::ToolCall,
+        call: ContentBlock,
     ) -> std::result::Result<DispatchOutcome, String> {
-        let Some(tool) = self.tools.get(&call.function.name) else {
-            return Ok(DispatchOutcome::Skipped(history::ToolResult {
-                call: call.id,
-                name: call.function.name.clone(),
-                content: vec![history::ToolResultContent::text(format!(
+        let (call_id, name, arguments) = call_parts(&call);
+        let call_id = call_id.to_owned();
+        let name = name.to_owned();
+        let arguments = arguments.clone();
+        let Some(tool) = self.tools.get(&name) else {
+            return Ok(DispatchOutcome::Skipped(ext::tool_result(
+                call_id,
+                Some(&name),
+                format!(
                     "unknown tool: {}. Call list_tools() to see available tools.",
-                    call.function.name
-                ))],
-                is_error: true,
-            }));
+                    name
+                ),
+                true,
+            )));
         };
         let before = self
             .before
@@ -230,12 +249,12 @@ impl ToolDispatch {
             match before.decide(call.clone()).await {
                 Decision::Run => {}
                 Decision::Skip(reason) => {
-                    return Ok(DispatchOutcome::Skipped(history::ToolResult {
-                        call: call.id,
-                        name: call.function.name,
-                        content: vec![history::ToolResultContent::text(reason)],
-                        is_error: false,
-                    }));
+                    return Ok(DispatchOutcome::Skipped(ext::tool_result(
+                        call_id,
+                        Some(&name),
+                        reason,
+                        false,
+                    )));
                 }
                 Decision::Stop(reason) => return Ok(DispatchOutcome::Stopped(reason)),
             }
@@ -243,15 +262,14 @@ impl ToolDispatch {
         // Plan mode (C.17): a write may only touch the allocated plan file.
         // Batch children reach this same gate because they flow through the
         // shared dispatch table.
-        if let Some(reason) = self.plan_block_reason(&call) {
-            return Ok(DispatchOutcome::Skipped(history::ToolResult {
-                call: call.id,
-                name: call.function.name,
-                content: vec![history::ToolResultContent::text(reason)],
-                is_error: true,
-            }));
+        if let Some(reason) = self.plan_block_reason(&name, &arguments) {
+            return Ok(DispatchOutcome::Skipped(ext::tool_result(
+                call_id,
+                Some(&name),
+                reason,
+                true,
+            )));
         }
-        let name = call.function.name.clone();
         let read_only = ToolDedupCache::is_read_only(&name);
         // Guardrails are consulted after approval so a human-approved call
         // still cannot loop unproductively.
@@ -264,33 +282,33 @@ impl ToolDispatch {
         if let Some(guardrails) = guardrails
             && let Ok(mut guard) = guardrails.lock()
         {
-            match guard.check_before_call(&name, &call.function.arguments, read_only) {
+            match guard.check_before_call(&name, &arguments, read_only) {
                 GuardrailDecision::Allow => {}
                 GuardrailDecision::Warn => pre_warned = true,
                 GuardrailDecision::Block => {
-                    return Ok(DispatchOutcome::Skipped(history::ToolResult {
-                        call: call.id,
-                        name: call.function.name,
-                        content: vec![history::ToolResultContent::text(GUARDRAIL_BLOCK_MESSAGE)],
-                        is_error: true,
-                    }));
+                    return Ok(DispatchOutcome::Skipped(ext::tool_result(
+                        call_id,
+                        Some(&name),
+                        GUARDRAIL_BLOCK_MESSAGE,
+                        true,
+                    )));
                 }
             }
         }
-        let dedup_key = read_only.then(|| ToolDedupCache::key(&name, &call.function.arguments));
+        let dedup_key = read_only.then(|| ToolDedupCache::key(&name, &arguments));
         let cache = self.dedup.read().unwrap_or_else(|e| e.into_inner()).clone();
         let cached = if let (Some(cache), Some(key)) = (cache.as_ref(), dedup_key) {
             cache
                 .lock()
                 .ok()
-                .and_then(|guard| guard.get(key, &name, &call.function.arguments).cloned())
+                .and_then(|guard| guard.get(key, &name, &arguments).cloned())
         } else {
             None
         };
         if let Some(cached) = cached {
             // Replays re-run the after hook on the cached raw result: the
             // transform is per-call and must not be baked into the cache.
-            let mut replayed = dedup::cached_result(&cached, &call.id);
+            let mut replayed = dedup::cached_result(&cached, &call_id);
             let after = self.after.read().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some(after) = after {
                 replayed = after.transform(call.clone(), replayed).await;
@@ -298,7 +316,7 @@ impl ToolDispatch {
             guardrail_note(
                 self,
                 &name,
-                &call.function.arguments,
+                &arguments,
                 &mut replayed,
                 read_only,
                 pre_warned,
@@ -306,61 +324,53 @@ impl ToolDispatch {
             return Ok(DispatchOutcome::Ran(replayed));
         }
         let output = CURRENT_CALL_ID
-            .scope(
-                call.id.clone(),
-                tool.execute(call.function.arguments.clone()),
-            )
+            .scope(call_id.clone(), tool.execute(arguments.clone()))
             .await;
         let mut result = match output {
-            Ok(output) => history::ToolResult {
-                call: call.id.clone(),
-                name: call.function.name.clone(),
-                content: rig_content_to_own(output.as_content()),
-                is_error: false,
-            },
-            Err(error) => history::ToolResult {
-                call: call.id.clone(),
-                name: call.function.name.clone(),
-                content: output_content_of_error(&error),
-                is_error: true,
-            },
+            Ok(output) => ext::tool_result(
+                call_id.clone(),
+                Some(&name),
+                rig_content_to_contents(output.as_content()),
+                false,
+            ),
+            Err(error) => ext::tool_result(
+                call_id.clone(),
+                Some(&name),
+                output_content_of_error(&error),
+                true,
+            ),
         };
         // Cache bookkeeping runs on the raw, pre-transform result so a
         // call-specific AfterExecute hook cannot poison the cache.
         if let Some(cache) = cache
             && let Ok(mut guard) = cache.lock()
         {
-            if !result.is_error
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = &result
+            else {
+                unreachable!("result is tool-result shaped");
+            };
+            if !*is_error
                 && let Some(key) = dedup_key
-                && !result
-                    .content
+                && !content
+                    .0
                     .iter()
-                    .any(|item| matches!(item, history::ToolResultContent::Image(_)))
+                    .any(|item| matches!(item, animist::history::ToolContent::Image { .. }))
             {
-                let path = dedup::extract_file_path(&call.function.arguments);
-                guard.insert(
-                    key,
-                    &result,
-                    path.as_deref(),
-                    &name,
-                    &call.function.arguments,
-                );
+                let path = dedup::extract_file_path(&arguments);
+                guard.insert(key, &result, path.as_deref(), &name, &arguments);
             }
             // Invalidation runs even on a failed result: apply_patch and
             // delete apply hunks iteratively, so a call that errors midway may
             // still have written. Clearing a cache entry that did not change
             // only costs one re-read.
             if ToolDedupCache::is_write(&name) {
-                let mut paths = dedup::extract_write_paths(&name, &call.function.arguments);
+                let mut paths = dedup::extract_write_paths(&name, &arguments);
                 if name == "move_file" {
                     // `move_file` also rewrites imports elsewhere; those files
                     // appear only in the result text.
-                    let text = result
-                        .content
-                        .iter()
-                        .map(|c| c.to_text())
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                    let text = ext::tool_content_text(content);
                     paths.extend(crate::tools::move_file::rewritten_files(&text));
                 }
                 if paths.is_empty() {
@@ -379,23 +389,16 @@ impl ToolDispatch {
             result = after.transform(call.clone(), result).await;
         }
         let mut result = result;
-        guardrail_note(
-            self,
-            &name,
-            &call.function.arguments,
-            &mut result,
-            read_only,
-            pre_warned,
-        );
+        guardrail_note(self, &name, &arguments, &mut result, read_only, pre_warned);
         Ok(DispatchOutcome::Ran(result))
     }
 
     /// Returns the plan-mode block reason for a call, or `None` when the
     /// call may run. In Plan mode only the allocated plan file may be
     /// written; write calls that name no path fail closed.
-    fn plan_block_reason(&self, call: &history::ToolCall) -> Option<String> {
+    fn plan_block_reason(&self, name: &str, arguments: &serde_json::Value) -> Option<String> {
         let plan = self.mode.plan_path()?;
-        if !is_gated_write(&call.function.name) {
+        if !is_gated_write(name) {
             return None;
         }
         let root = self
@@ -404,7 +407,7 @@ impl ToolDispatch {
             .map(|p| p.to_string_lossy().into_owned());
         let plan_key =
             dedup::normalize_write_path_with_root(root.as_deref(), &plan.display().to_string());
-        let paths = gated_write_paths(&call.function.name, &call.function.arguments);
+        let paths = gated_write_paths(name, arguments);
         let blocked = paths.is_empty()
             || paths
                 .iter()
@@ -437,7 +440,7 @@ fn guardrail_note(
     dispatch: &ToolDispatch,
     name: &str,
     arguments: &serde_json::Value,
-    result: &mut history::ToolResult,
+    result: &mut ContentBlock,
     read_only: bool,
     pre_warned: bool,
 ) {
@@ -452,14 +455,15 @@ fn guardrail_note(
     let Ok(mut guard) = guardrails.lock() else {
         return;
     };
-    let text = result
-        .content
-        .iter()
-        .map(history::ToolResultContent::to_text)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = result
+    else {
+        return;
+    };
+    let text = ext::tool_content_text(content);
     let warning = guard
-        .record_result(name, arguments, &text, result.is_error, read_only)
+        .record_result(name, arguments, &text, *is_error, read_only)
         .map(|warning| warning.reason);
     let reason = match (warning, pre_warned) {
         (Some(reason), _) => reason,
@@ -468,70 +472,63 @@ fn guardrail_note(
         }
         (None, false) => return,
     };
-    result.content.insert(
-        0,
-        history::ToolResultContent::text(format!("{GUARDRAIL_WARN_PREFIX}{reason}")),
-    );
+    let mut blocks = vec![animist::history::ToolContent::Text {
+        text: format!("{GUARDRAIL_WARN_PREFIX}{reason}"),
+    }];
+    blocks.append(&mut content.0);
+    *content = ToolContents::from(blocks);
 }
 
 /// Model-visible content for a failed call: the error's canonical output when
 /// it has one, else its message.
-fn output_content_of_error(
-    error: &rig_core::tool::ToolExecutionError,
-) -> Vec<history::ToolResultContent> {
-    let content = rig_content_to_own(error.model_output().as_content());
-    if content.is_empty() {
-        vec![history::ToolResultContent::text(error.to_string())]
+fn output_content_of_error(error: &rig_core::tool::ToolExecutionError) -> ToolContents {
+    let content = rig_content_to_contents(error.model_output().as_content());
+    if content.0.is_empty() {
+        ToolContents::from(error.to_string())
     } else {
         content
     }
 }
 
-fn rig_content_to_own(
+fn rig_content_to_contents(
     items: &[rig_core::completion::message::ToolResultContent],
-) -> Vec<history::ToolResultContent> {
+) -> ToolContents {
     items
         .iter()
         .map(|item| match item {
             rig_core::completion::message::ToolResultContent::Text(text) => {
-                history::ToolResultContent::text(text.text.clone())
+                animist::history::ToolContent::Text {
+                    text: text.text.clone(),
+                }
             }
             rig_core::completion::message::ToolResultContent::Json { value, .. } => {
-                history::ToolResultContent::Json {
-                    value: value.clone(),
+                animist::history::ToolContent::Text {
+                    text: serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
                 }
             }
             rig_core::completion::message::ToolResultContent::Image(image) => {
                 let media_type = match image.media_type {
-                    Some(rig_core::completion::message::ImageMediaType::PNG) => {
-                        history::ImageMedia::Png
-                    }
-                    Some(rig_core::completion::message::ImageMediaType::JPEG) => {
-                        history::ImageMedia::Jpeg
-                    }
-                    Some(rig_core::completion::message::ImageMediaType::GIF) => {
-                        history::ImageMedia::Gif
-                    }
-                    Some(rig_core::completion::message::ImageMediaType::WEBP) => {
-                        history::ImageMedia::Webp
-                    }
-                    _ => history::ImageMedia::Png,
+                    Some(rig_core::completion::message::ImageMediaType::PNG) => "image/png",
+                    Some(rig_core::completion::message::ImageMediaType::JPEG) => "image/jpeg",
+                    Some(rig_core::completion::message::ImageMediaType::GIF) => "image/gif",
+                    Some(rig_core::completion::message::ImageMediaType::WEBP) => "image/webp",
+                    _ => "image/png",
                 };
                 let data = match &image.data {
                     rig_core::completion::message::DocumentSourceKind::Base64(data) => data.clone(),
                     _ => String::new(),
                 };
-                history::ToolResultContent::Image(history::ImageBlock {
-                    media_type,
-                    data,
-                    caption: "[image]".into(),
-                })
+                animist::history::ToolContent::Image {
+                    source: history::ImageSource::Base64 {
+                        media_type: media_type.to_owned(),
+                        data,
+                    },
+                }
             }
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .into()
 }
-
-use crate::history::Message;
 
 use super::doom;
 use super::task_set;
@@ -551,6 +548,22 @@ pub(crate) fn is_never_parallel(name: &str) -> bool {
     matches!(name, "batch" | "question")
 }
 
+/// The model-visible text of a result block, or the empty string for a
+/// non-result block.
+fn result_first_text(result: &ContentBlock) -> String {
+    match result {
+        ContentBlock::ToolResult { content, .. } => content
+            .0
+            .first()
+            .map(|item| match item {
+                animist::history::ToolContent::Text { text } => text.clone(),
+                animist::history::ToolContent::Image { .. } => "[image]".to_owned(),
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 /// Execute the turn's tool calls, appending their results to `turn`.
 /// Returns `Some(outcome)` when the run must stop (cancel or dispatch
 /// failure); `None` means the loop continues.
@@ -562,8 +575,8 @@ pub(crate) fn is_never_parallel(name: &str) -> bool {
 /// unwinding the run.
 pub(crate) async fn dispatch_tool_calls(
     tools: &ToolDispatch,
-    turn: &mut Vec<Message>,
-    calls: Vec<history::ToolCall>,
+    turn: &mut Vec<history::StoredMessage>,
+    calls: Vec<ContentBlock>,
     recent: &mut doom::RecentCalls,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
@@ -571,7 +584,7 @@ pub(crate) async fn dispatch_tool_calls(
     // Spawned tasks need owned state; the dispatch table is cheap to clone.
     let tools = Arc::new(tools.clone());
     let mut set = task_set::TaskSet::new();
-    let mut wave: Vec<history::ToolCall> = Vec::new();
+    let mut wave: Vec<ContentBlock> = Vec::new();
     let mut all_write_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut batch = doom::ToolBatchOutcome::default();
 
@@ -581,24 +594,19 @@ pub(crate) async fn dispatch_tool_calls(
                 commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
             return (outcome.or(Some(RunOutcome::Cancelled)), batch);
         }
-        let name = call.function.name.clone();
-        let arguments = call.function.arguments.clone();
+        let (id, name, arguments) = call_parts(&call);
+        let id = id.to_owned();
+        let name = name.to_owned();
+        let arguments = arguments.clone();
         if recent.is_doom_loop(&name, &arguments) {
             // The call is blocked, not executed: emit the reference's error
             // result directly and clear the window so the warning does not
             // re-fire identically on the next retry.
             batch.doom_loops += 1;
-            let result = history::ToolResult {
-                call: call.id.clone(),
-                name: name.clone(),
-                content: vec![history::ToolResultContent::text(doom::DOOM_LOOP_MESSAGE)],
-                is_error: true,
-            };
-            turn.push(Message::User {
-                content: vec![history::UserContent::ToolResult(result.clone())],
-            });
+            let result = ext::tool_result(id.clone(), Some(&name), doom::DOOM_LOOP_MESSAGE, true);
+            turn.push(ext::stored(ext::observation(vec![result.clone()])));
             emit(Event::ToolDone {
-                id: call.id.clone(),
+                id: id.clone(),
                 name: name.clone(),
                 arguments: arguments.clone(),
                 result,
@@ -608,18 +616,17 @@ pub(crate) async fn dispatch_tool_calls(
             // A never-parallel tool or a repeat write path must not share a
             // wave with earlier calls, so the pending wave is flushed
             // *before* this call is spawned into a fresh one.
-            let write_paths: Vec<String> =
-                dedup::extract_write_paths(&name, &call.function.arguments)
-                    .iter()
-                    .map(|p| {
-                        let root = tools
-                            .write_root
-                            .as_deref()
-                            .map(|r| r.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        dedup::normalize_write_path_with_root(Some(&root), p)
-                    })
-                    .collect();
+            let write_paths: Vec<String> = dedup::extract_write_paths(&name, &arguments)
+                .iter()
+                .map(|p| {
+                    let root = tools
+                        .write_root
+                        .as_deref()
+                        .map(|r| r.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    dedup::normalize_write_path_with_root(Some(&root), p)
+                })
+                .collect();
             let conflicts = is_never_parallel(&name)
                 || write_paths
                     .iter()
@@ -647,16 +654,16 @@ pub(crate) async fn dispatch_tool_calls(
 /// One finished wave entry: the call paired with its dispatch outcome, or
 /// the panic/cancellation string when the tool task itself failed.
 type WaveEntry = (
-    history::ToolCall,
+    ContentBlock,
     Result<Result<DispatchOutcome, String>, String>,
 );
 
 /// Join a finished wave, pairing each spawn-order result with its call.
 async fn join_wave(
     set: task_set::TaskSet<Result<DispatchOutcome, String>>,
-    wave: std::vec::Drain<'_, history::ToolCall>,
+    wave: std::vec::Drain<'_, ContentBlock>,
 ) -> Vec<WaveEntry> {
-    let ids: Vec<history::ToolCall> = wave.collect();
+    let ids: Vec<ContentBlock> = wave.collect();
     set.join_all()
         .await
         .into_iter()
@@ -669,93 +676,76 @@ async fn join_wave(
 /// per call. `Some(outcome)` when the run must stop.
 async fn commit_wave(
     results: Vec<WaveEntry>,
-    turn: &mut Vec<Message>,
+    turn: &mut Vec<history::StoredMessage>,
     batch: &mut doom::ToolBatchOutcome,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> Option<RunOutcome> {
-    let mut wave_results: Vec<history::ToolResult> = Vec::new();
+    let mut wave_results: Vec<ContentBlock> = Vec::new();
     for (call, outcome) in results {
+        let (id, name, arguments) = call_parts(&call);
+        let id = id.to_owned();
+        let name = name.to_owned();
+        let arguments = arguments.to_owned();
         // `guardrail_blocked` identifies the one Skipped outcome that is an
         // error (the guardrail block), so its skip surfaces as a warning
         // rather than silent tool output.
         let (guardrail_blocked, result) = match outcome {
             Ok(Ok(DispatchOutcome::Ran(result))) => (false, result),
-            Ok(Ok(DispatchOutcome::Skipped(result))) => (
-                result.is_error
-                    && result
-                        .content
-                        .first()
-                        .map(history::ToolResultContent::to_text)
-                        .as_deref()
-                        == Some(GUARDRAIL_BLOCK_MESSAGE),
-                result,
-            ),
+            Ok(Ok(DispatchOutcome::Skipped(result))) => {
+                let ContentBlock::ToolResult { is_error, .. } = &result else {
+                    unreachable!("skipped outcome carries a result");
+                };
+                (
+                    *is_error && result_first_text(&result) == GUARDRAIL_BLOCK_MESSAGE,
+                    result,
+                )
+            }
             Ok(Ok(DispatchOutcome::Stopped(_))) => return Some(RunOutcome::Cancelled),
             // A dispatch-level failure is one call's error, not the run's:
             // surface it as a result the model can adapt to instead of
             // dropping the whole turn.
-            Ok(Err(e)) => (
-                false,
-                history::ToolResult {
-                    call: call.id.clone(),
-                    name: call.function.name.clone(),
-                    content: vec![history::ToolResultContent::text(e)],
-                    is_error: true,
-                },
-            ),
+            Ok(Err(e)) => (false, ext::tool_result(id.clone(), Some(&name), e, true)),
             // The task itself failed: a panic or cancellation inside the
             // tool future, reported as a per-call error result.
             Err(panic) => (
                 false,
-                history::ToolResult {
-                    call: call.id.clone(),
-                    name: call.function.name.clone(),
-                    content: vec![history::ToolResultContent::text(format!(
-                        "internal error: tool panicked: {panic}"
-                    ))],
-                    is_error: true,
-                },
+                ext::tool_result(
+                    id.clone(),
+                    Some(&name),
+                    format!("internal error: tool panicked: {panic}"),
+                    true,
+                ),
             ),
         };
         // Guardrail warn/block statuses ride `Event::Info` so a surface can
         // show them as warnings instead of silent tool text.
         if guardrail_blocked {
-            let reason = result
-                .content
-                .first()
-                .map(history::ToolResultContent::to_text)
-                .unwrap_or_default()
+            let reason = result_first_text(&result)
                 .trim_start_matches("blocked by guardrails: ")
                 .to_owned();
-            emit(Event::Info(format!(
-                "guardrail blocked {}: {reason}",
-                call.function.name
-            )));
-        } else if let Some(warning) = result
-            .content
-            .first()
-            .map(history::ToolResultContent::to_text)
-            .filter(|text| text.starts_with(GUARDRAIL_WARN_PREFIX))
+            emit(Event::Info(format!("guardrail blocked {name}: {reason}")));
+        } else if let Some(warning) = result_first_text(&result)
+            .strip_prefix(GUARDRAIL_WARN_PREFIX)
+            .map(str::to_owned)
         {
             emit(Event::Info(format!(
-                "guardrail warning on {}: {}",
-                call.function.name,
-                warning.trim_start_matches(GUARDRAIL_WARN_PREFIX)
+                "guardrail warning on {name}: {warning}"
             )));
         }
-        if result.is_error {
+        let ContentBlock::ToolResult { is_error, .. } = &result else {
+            unreachable!("results are tool-result shaped");
+        };
+        if *is_error {
             batch.errors += 1;
         } else {
             batch.successes += 1;
         }
-        turn.push(Message::User {
-            content: vec![history::UserContent::ToolResult(result.clone())],
-        });
+        turn.push(ext::stored(ext::observation(vec![result.clone()])));
         wave_results.push(result.clone());
         emit(Event::ToolDone {
-            id: call.id.clone(),
-            name: call.function.name.clone(),
-            arguments: call.function.arguments.clone(),
+            id: id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
             result,
         });
     }
@@ -764,11 +754,11 @@ async fn commit_wave(
         // call order (reference semantics), independent of the per-call
         // messages committed to history above.
         emit(Event::ToolResultsSubmitted {
-            message: Message::User {
-                content: wave_results
-                    .into_iter()
-                    .map(history::UserContent::ToolResult)
-                    .collect(),
+            message: Message {
+                role: history::Role::User,
+                content: wave_results,
+                display_text: None,
+                kind: history::MessageKind::Observation,
             },
         });
     }
@@ -776,9 +766,36 @@ async fn commit_wave(
 }
 
 #[cfg(test)]
+mod result_content_tests {
+    use super::*;
+
+    /// Rig tools can return structured JSON; the model sees it pretty
+    /// printed as text, not a compact dump.
+    #[test]
+    fn rig_json_output_renders_to_pretty_text() {
+        let value = serde_json::json!({"matches": 3, "files": ["a.rs"]});
+        let contents =
+            rig_content_to_contents(&[rig_core::completion::message::ToolResultContent::json(
+                value,
+            )]);
+        let text = ext::tool_content_text(&contents);
+        assert!(text.contains("\"matches\": 3"), "{text}");
+        assert!(text.contains('\n'), "pretty, not compact: {text}");
+    }
+
+    #[test]
+    fn rig_text_output_passes_through() {
+        let contents =
+            rig_content_to_contents(&[rig_core::completion::message::ToolResultContent::text(
+                "plain",
+            )]);
+        assert_eq!(ext::tool_content_text(&contents), "plain");
+    }
+}
+
+#[cfg(test)]
 mod plan_mode_tests {
     use super::*;
-    use crate::history::ToolCall;
     use crate::tools::Workspace;
     use serde_json::json;
 
@@ -788,27 +805,34 @@ mod plan_mode_tests {
         workspace.register_with_mode(mode)
     }
 
-    fn write_call(path: &str) -> ToolCall {
-        ToolCall::new("t1", "write", json!({ "path": path, "content": "hi\n" }))
+    fn write_call(path: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "write".into(),
+            input: json!({ "path": path, "content": "hi\n" }),
+            thought_signature: None,
+        }
     }
 
-    fn result_text(result: &history::ToolResult) -> String {
-        use history::ToolResultContent;
-        result
-            .content
-            .iter()
-            .map(|c| match c {
-                ToolResultContent::Text(t) => t.text.clone(),
-                _ => String::new(),
-            })
-            .collect()
+    fn result_text(result: &ContentBlock) -> String {
+        let ContentBlock::ToolResult { content, .. } = result else {
+            panic!("tool result");
+        };
+        ext::tool_content_text(content)
     }
 
-    async fn run(dispatch: &ToolDispatch, call: ToolCall) -> history::ToolResult {
+    async fn run(dispatch: &ToolDispatch, call: ContentBlock) -> ContentBlock {
         match dispatch.execute(call).await.expect("dispatch") {
             DispatchOutcome::Ran(result) | DispatchOutcome::Skipped(result) => result,
             DispatchOutcome::Stopped(reason) => panic!("stopped: {reason}"),
         }
+    }
+
+    fn is_error(result: &ContentBlock) -> bool {
+        let ContentBlock::ToolResult { is_error, .. } = result else {
+            panic!("tool result");
+        };
+        *is_error
     }
 
     #[tokio::test]
@@ -817,7 +841,7 @@ mod plan_mode_tests {
         let plan = dir.path().join("state/plans/alpha.md");
         let dispatch = dispatch(dir.path(), AgentMode::Plan(plan.clone()));
         let result = run(&dispatch, write_call("src/main.rs")).await;
-        assert!(result.is_error, "non-plan write must be blocked");
+        assert!(is_error(&result), "non-plan write must be blocked");
         assert!(
             result_text(&result).contains(PLAN_WRITE_RESTRICTED),
             "wrong message: {}",
@@ -840,7 +864,7 @@ mod plan_mode_tests {
         let dispatch = dispatch(&root, AgentMode::Plan(plan.clone()));
         let result = run(&dispatch, write_call(&plan.display().to_string())).await;
         assert!(
-            !result.is_error,
+            !is_error(&result),
             "plan write must run: {}",
             result_text(&result)
         );
@@ -855,13 +879,14 @@ mod plan_mode_tests {
         let dir = tempfile::tempdir().unwrap();
         let plan = dir.path().join("state/plans/alpha.md");
         let dispatch = dispatch(dir.path(), AgentMode::Plan(plan));
-        let call = ToolCall::new(
-            "t1",
-            "batch",
-            json!({ "tool_calls": [ { "tool": "write", "parameters": {
+        let call = ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "batch".into(),
+            input: json!({ "tool_calls": [ { "tool": "write", "parameters": {
                 "path": "src/main.rs", "content": "hi\n"
             } } ] }),
-        );
+            thought_signature: None,
+        };
         // Batch reports partial child failures inside a successful result,
         // so the block message is the evidence, not `is_error`.
         let result = run(&dispatch, call).await;
@@ -878,7 +903,7 @@ mod plan_mode_tests {
         let dir = tempfile::tempdir().unwrap();
         let dispatch = dispatch(dir.path(), AgentMode::Build);
         let result = run(&dispatch, write_call("src/main.rs")).await;
-        assert!(!result.is_error, "build mode write must run");
+        assert!(!is_error(&result), "build mode write must run");
         assert!(dir.path().join("src/main.rs").exists());
     }
 
@@ -907,8 +932,13 @@ mod plan_mode_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "x").unwrap();
         let dispatch = dispatch(dir.path(), AgentMode::Plan(dir.path().join("p.md")));
-        let call = ToolCall::new("t1", "read", json!({ "path": "f.txt" }));
+        let call = ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "read".into(),
+            input: json!({ "path": "f.txt" }),
+            thought_signature: None,
+        };
         let result = run(&dispatch, call).await;
-        assert!(!result.is_error);
+        assert!(!is_error(&result));
     }
 }

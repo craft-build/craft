@@ -41,16 +41,27 @@ async fn read_routes_mcp_resources_and_rejects_unknown_pairs() {
 
 /// Run `read {path}` through a dispatch and return the error text.
 async fn read_error(dispatch: &crate::run::ToolDispatch, path: &str) -> String {
-    use crate::history::{ToolCall, ToolResultContent};
-    let call = ToolCall::new("t1", "read", serde_json::json!({"path": path}));
+    use crate::history::{ContentBlock, ToolContent};
+    let call = ContentBlock::ToolUse {
+        id: "t1".into(),
+        name: "read".into(),
+        input: serde_json::json!({"path": path}),
+        thought_signature: None,
+    };
     match dispatch.execute(call).await.expect("dispatch") {
         crate::run::DispatchOutcome::Ran(result) => {
-            assert!(result.is_error, "expected an error for {path}");
-            result
-                .content
+            let ContentBlock::ToolResult {
+                is_error, content, ..
+            } = &result
+            else {
+                panic!("expected a tool result for {path}, got {result:?}")
+            };
+            assert!(is_error, "expected an error for {path}");
+            content
+                .0
                 .iter()
                 .filter_map(|c| match c {
-                    ToolResultContent::Text(t) => Some(t.text.clone().to_string()),
+                    ToolContent::Text { text } => Some(text.clone()),
                     _ => None,
                 })
                 .collect()
@@ -80,19 +91,30 @@ async fn mcp_tools_register_dispatch_and_clear() {
     assert_eq!(echo.description, "Echo through MCP");
     assert_eq!(echo.input_schema["type"], "object");
 
-    use crate::history::ToolCall;
-    let call = ToolCall::new("t1", "srv__echo", serde_json::json!({"message": "hi"}));
+    use crate::history::ContentBlock;
+    let call = ContentBlock::ToolUse {
+        id: "t1".into(),
+        name: "srv__echo".into(),
+        input: serde_json::json!({"message": "hi"}),
+        thought_signature: None,
+    };
     match dispatch.execute(call).await.expect("dispatch") {
         crate::run::DispatchOutcome::Ran(result) => {
             // The stub session fails every call with `unknown MCP tool`, which
             // proves the call reached MCP routing rather than dying at name
             // lookup.
-            assert!(result.is_error, "stub call must fail");
-            let text: String = result
-                .content
+            let ContentBlock::ToolResult {
+                is_error, content, ..
+            } = &result
+            else {
+                panic!("expected a tool result, got {result:?}")
+            };
+            assert!(is_error, "stub call must fail");
+            let text: String = content
+                .0
                 .iter()
                 .filter_map(|c| match c {
-                    crate::history::ToolResultContent::Text(t) => Some(t.text.clone().to_string()),
+                    crate::history::ToolContent::Text { text } => Some(text.clone()),
                     _ => None,
                 })
                 .collect();

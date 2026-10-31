@@ -2,7 +2,7 @@
 //! cancel boundaries, nudges, and snapshot commits.
 
 use super::*;
-use crate::history::UserContent;
+use crate::history::{ContentBlock, Role, ext};
 use crate::run::*;
 
 #[tokio::test]
@@ -37,21 +37,26 @@ async fn multi_turn_tool_round_trip_commits_history() {
     assert_eq!(history.len(), 4);
     // The call id is the run-stable internal id the stream minted, not
     // the scripted "t1"; the result must answer whatever id was recorded.
-    let Message::Assistant { content } = &history[1] else {
-        panic!("assistant tool-call message");
-    };
-    let history::AssistantContent::ToolCall(call) = &content[0] else {
+    let assistant = history[1].message();
+    assert_eq!(
+        assistant.role,
+        Role::Assistant,
+        "assistant tool-call message"
+    );
+    let ContentBlock::ToolUse { id, name, .. } = &assistant.content[0] else {
         panic!("tool-call block");
     };
-    assert_eq!(call.function.name, "read");
-    assert!(matches!(&history[2],
-        Message::User { content } if matches!(&content[0], UserContent::ToolResult(r)
-            if r.call == call.id && r.name == "read")));
+    assert_eq!(name, "read");
+    let result_message = history[2].message();
+    assert_eq!(result_message.role, Role::User, "tool result message");
+    assert!(matches!(&result_message.content[0],
+        ContentBlock::ToolResult { tool_use_id, name, .. }
+            if tool_use_id == id && name.as_deref() == Some("read")));
     // The result the model sees on the next call is literal text.
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    let replayed = crate::testing::replay_history(&requests[1].messages);
-    assert_eq!(replayed[2], history[2]);
+    let replayed = &requests[1].messages;
+    assert_eq!(replayed[2], *history[2].message());
     // Events: tool start, tool done, usage per call, results submitted
     // per wave, one terminal Done.
     assert!(
@@ -59,11 +64,16 @@ async fn multi_turn_tool_round_trip_commits_history() {
             .iter()
             .any(|e| matches!(e, Event::ToolStart { name, .. } if name == "read"))
     );
-    assert!(
-        guard
-            .iter()
-            .any(|e| matches!(e, Event::ToolDone { result, .. } if !result.is_error))
-    );
+    assert!(guard.iter().any(|e| matches!(
+        e,
+        Event::ToolDone {
+            result: ContentBlock::ToolResult {
+                is_error: false,
+                ..
+            },
+            ..
+        }
+    )));
     assert_eq!(
         guard
             .iter()
@@ -72,9 +82,9 @@ async fn multi_turn_tool_round_trip_commits_history() {
         2
     );
     assert!(guard.iter().any(|e| matches!(e,
-            Event::ToolResultsSubmitted { message } if matches!(
-                &message, Message::User { content } if matches!(
-                    &content[0], history::UserContent::ToolResult(_))))));
+            Event::ToolResultsSubmitted { message }
+                if message.role == Role::User && matches!(
+                    &message.content[0], ContentBlock::ToolResult { .. }))));
     assert!(matches!(
         guard.iter().last(),
         Some(Event::Done {
@@ -154,7 +164,7 @@ async fn truncated_reply_continues_then_finishes() {
     assert_eq!(provider.requests().len(), 3);
     // prompt + three assistant messages, all committed
     assert_eq!(history.len(), 4);
-    assert_eq!(history[1].text(), "part one ");
+    assert_eq!(ext::message_text(&history[1]), "part one ");
 }
 
 #[tokio::test]
@@ -237,7 +247,7 @@ async fn continuations_respect_the_turn_budget() {
     .await;
     assert!(matches!(outcome, RunOutcome::MaxTurns));
     assert_eq!(provider.requests().len(), 1);
-    assert_eq!(history.last().unwrap().text(), END_MARKER);
+    assert_eq!(ext::message_text(history.last().unwrap()), END_MARKER);
 }
 
 #[tokio::test]
@@ -267,7 +277,7 @@ async fn empty_truncated_reply_is_committed_as_max_tokens() {
     assert_eq!(history.len(), 2);
     // prompt + the truncated assistant message (empty, not replaced by
     // the empty-response marker)
-    assert_ne!(history[1].text(), nudge::EMPTY_RESPONSE_MARKER);
+    assert_ne!(ext::message_text(&history[1]), nudge::EMPTY_RESPONSE_MARKER);
 }
 
 #[tokio::test]
@@ -335,15 +345,12 @@ async fn guardrails_warn_then_block_repeated_failures() {
     );
     let results: Vec<String> = history
         .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|b| match b {
-                    UserContent::ToolResult(r) => Some(r.content[0].to_text()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
+        .flat_map(|stored| ext::tool_results(stored.message()))
+        .map(|block| {
+            let ContentBlock::ToolResult { content, .. } = block else {
+                panic!("tool result block");
+            };
+            ext::tool_content_text(content)
         })
         .collect();
     assert_eq!(results.len(), 7);
@@ -370,7 +377,7 @@ async fn failed_run_preserves_prior_history_and_commits_the_turn() {
     let dir = tempfile::tempdir().unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = cancel_channel();
-    let mut history = vec![Message::user(doom::GRACE_CALL_PROMPT)];
+    let mut history = vec![ext::stored_user_text(doom::GRACE_CALL_PROMPT)];
     let before = history.clone();
     let outcome = run(
         &model,
@@ -391,11 +398,11 @@ async fn failed_run_preserves_prior_history_and_commits_the_turn() {
     // Grace prompt + failed-turn prompt + end marker + failure note.
     assert_eq!(history.len(), 4);
     assert_eq!(
-        history[1].text(),
+        ext::message_text(&history[1]),
         "go",
         "the failed turn's prompt is committed"
     );
-    let note = history[3].text();
+    let note = ext::message_text(&history[3]);
     assert!(
         note.starts_with("[Run failed: ") && note.contains("boom"),
         "the turn and its failure mode are committed, got: {note}"
@@ -438,7 +445,7 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
     assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply == "summarized"));
     let grace_count = history
         .iter()
-        .filter(|m| m.text() == doom::GRACE_CALL_PROMPT)
+        .filter(|m| ext::message_text(m) == doom::GRACE_CALL_PROMPT)
         .count();
     assert_eq!(grace_count, 1, "grace prompt fired exactly once");
     let stagnation_count = events
@@ -452,17 +459,19 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
         "grace posts exactly one StagnationDetected"
     );
     // The blocked call's result carries the doom-loop warning.
-    assert!(history.iter().any(|m| {
-        matches!(m, Message::User { content } if matches!(&content[0],
-            UserContent::ToolResult(r) if r.is_error
-                && r.content[0].to_text().contains("stuck in a loop")))
+    assert!(history.iter().any(|stored| {
+        let message = stored.message();
+        message.role == Role::User
+            && matches!(&message.content[0],
+                ContentBlock::ToolResult { is_error: true, content, .. }
+                    if ext::tool_content_text(content).contains("stuck in a loop"))
     }));
     // The second request saw the grace prompt as its trailing message.
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    let replayed = crate::testing::replay_history(&requests[1].messages);
+    let replayed = &requests[1].messages;
     assert_eq!(
-        replayed.last().map(Message::text),
+        replayed.last().map(ext::text),
         Some(doom::GRACE_CALL_PROMPT.to_owned())
     );
 }
@@ -507,7 +516,7 @@ async fn doom_score_hard_stops_the_run() {
         "no request after the hard stop"
     );
     assert_eq!(
-        history.last().map(Message::text),
+        history.last().map(ext::message_text),
         Some(END_MARKER.to_owned())
     );
 }
@@ -550,7 +559,7 @@ async fn failed_run_emits_error_then_done_with_error_reason() {
 async fn turn_complete_reports_a_nonzero_context_size() {
     let (model, _provider) = stream_turns(vec![crate::testing::text_turn("ok")]);
     let (_, cancel) = cancel_channel();
-    let mut history = vec![Message::user(
+    let mut history = vec![ext::stored_user_text(
         "a sufficiently long prompt to register a nonzero token estimate \
          beyond the estimator floor, padded out for good measure."
             .repeat(4),
@@ -613,32 +622,26 @@ async fn max_turns_bound_commits_sanitized_partial_history() {
     // Prompt + 2x(assistant+result) + end marker; the third call never ran.
     assert_eq!(provider.requests().len(), 2);
     assert_eq!(history.len(), 6);
-    assert_eq!(history.last().unwrap().text(), END_MARKER);
+    assert_eq!(ext::message_text(history.last().unwrap()), END_MARKER);
     // No dangling tool calls: every call has its result.
     let calls: Vec<String> = history
         .iter()
-        .flat_map(|m| match m {
-            Message::Assistant { content } => content
-                .iter()
-                .filter_map(|b| match b {
-                    history::AssistantContent::ToolCall(c) => Some(c.id.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
+        .flat_map(|stored| ext::tool_calls(stored.message()))
+        .map(|block| {
+            let ContentBlock::ToolUse { id, .. } = block else {
+                panic!("tool call block");
+            };
+            id.clone()
         })
         .collect();
     let answered: Vec<String> = history
         .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|b| match b {
-                    UserContent::ToolResult(r) => Some(r.call.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
+        .flat_map(|stored| ext::tool_results(stored.message()))
+        .map(|block| {
+            let ContentBlock::ToolResult { tool_use_id, .. } = block else {
+                panic!("tool result block");
+            };
+            tool_use_id.clone()
         })
         .collect();
     assert!(calls.iter().all(|id| answered.contains(id)));
@@ -662,7 +665,7 @@ async fn failed_run_commits_sanitized_partial_history() {
     std::fs::write(dir.path().join("f"), "x\n").unwrap();
     let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
     let (_, cancel) = cancel_channel();
-    let mut history = vec![Message::user("earlier")];
+    let mut history = vec![ext::stored_user_text("earlier")];
     let outcome = run(
         &model,
         &RunParams::default(),
@@ -676,8 +679,8 @@ async fn failed_run_commits_sanitized_partial_history() {
     assert!(matches!(outcome, RunOutcome::Failed(_)));
     // earlier + prompt + assistant + result + end marker + failure note.
     assert_eq!(history.len(), 6);
-    assert_eq!(history[4].text(), END_MARKER);
-    let note = history[5].text();
+    assert_eq!(ext::message_text(&history[4]), END_MARKER);
+    let note = ext::message_text(&history[5]);
     assert!(
         note.starts_with("[Run failed: ") && note.contains("boom"),
         "the failure note ends the committed turn, got: {note}"
@@ -690,7 +693,7 @@ async fn cancel_mid_tool_skips_execution_and_commits_sanitized_partial() {
     // standing in for a cancellation arriving at the dispatch boundary.
     struct StopAll;
     impl BeforeExecute for StopAll {
-        fn decide(&self, _call: history::ToolCall) -> BoxFuture<Decision> {
+        fn decide(&self, _call: ContentBlock) -> BoxFuture<Decision> {
             Box::pin(async { Decision::Stop("cancelled".into()) })
         }
     }
@@ -721,11 +724,13 @@ async fn cancel_mid_tool_skips_execution_and_commits_sanitized_partial() {
     // The cancelled turn is committed sanitized: the prompt, the
     // assistant's tool call, an error result closing it, and the marker.
     assert_eq!(history.len(), 4, "prompt + tool call + closure + marker");
-    assert_eq!(history[0].text(), "go");
-    assert!(matches!(&history[2], Message::User { content }
-        if matches!(&content[0], UserContent::ToolResult(r)
-            if r.is_error && r.name == "read")));
-    assert_eq!(history[3].text(), CANCEL_MARKER);
+    assert_eq!(ext::message_text(&history[0]), "go");
+    let closure = history[2].message();
+    assert_eq!(closure.role, Role::User, "tool result message");
+    assert!(matches!(&closure.content[0],
+        ContentBlock::ToolResult { is_error: true, name, .. }
+            if name.as_deref() == Some("read")));
+    assert_eq!(ext::message_text(&history[3]), CANCEL_MARKER);
 }
 
 #[tokio::test]
@@ -746,8 +751,8 @@ async fn cancel_before_the_first_model_call_commits_prompt_and_marker_only() {
     .await;
     assert!(matches!(outcome, RunOutcome::Cancelled));
     assert_eq!(history.len(), 2);
-    assert_eq!(history[0].text(), "stop");
-    assert_eq!(history[1].text(), CANCEL_MARKER);
+    assert_eq!(ext::message_text(&history[0]), "stop");
+    assert_eq!(ext::message_text(&history[1]), CANCEL_MARKER);
 }
 
 #[tokio::test]
@@ -835,22 +840,15 @@ async fn argument_fragments_accumulate_into_one_call() {
         .filter(|e| matches!(e, Event::ToolStart { .. }))
         .count();
     assert_eq!(starts, 1);
-    let history::Message::Assistant { content } = &history[1] else {
-        panic!("assistant message");
-    };
-    let tool_calls: Vec<_> = content
-        .iter()
-        .filter_map(|b| match b {
-            history::AssistantContent::ToolCall(c) => Some(c),
-            _ => None,
-        })
-        .collect();
+    let assistant = history[1].message();
+    assert_eq!(assistant.role, Role::Assistant, "assistant message");
+    let tool_calls: Vec<_> = ext::tool_calls(assistant).collect();
     assert_eq!(tool_calls.len(), 1);
-    assert_eq!(tool_calls[0].function.name, "read");
-    assert_eq!(
-        tool_calls[0].function.arguments,
-        serde_json::json!({"path": "f", "limit": 1})
-    );
+    let ContentBlock::ToolUse { name, input, .. } = tool_calls[0] else {
+        panic!("tool call block");
+    };
+    assert_eq!(name, "read");
+    assert_eq!(input, &serde_json::json!({"path": "f", "limit": 1}));
 }
 
 #[tokio::test]
@@ -887,11 +885,11 @@ async fn empty_reply_after_tool_call_is_nudged_to_continue() {
     );
     // prompt, tool call, result, empty marker, nudge prompt, final reply
     assert_eq!(history.len(), 6);
-    assert_eq!(history[3].text(), nudge::EMPTY_RESPONSE_MARKER);
+    assert_eq!(ext::message_text(&history[3]), nudge::EMPTY_RESPONSE_MARKER);
     assert!(
-        history[4].text().contains("returned an empty response"),
+        ext::message_text(&history[4]).contains("returned an empty response"),
         "nudge prompt must be committed: {}",
-        history[4].text()
+        ext::message_text(&history[4])
     );
     assert!(
         events
@@ -904,9 +902,9 @@ async fn empty_reply_after_tool_call_is_nudged_to_continue() {
     // The nudged retry carried the marker and the prompt.
     let requests = provider.requests();
     assert_eq!(requests.len(), 3);
-    let sent = crate::testing::replay_history(&requests[2].messages);
-    assert_eq!(sent[3].text(), nudge::EMPTY_RESPONSE_MARKER);
-    assert!(sent[4].text().contains("returned an empty response"));
+    let sent = &requests[2].messages;
+    assert_eq!(ext::text(&sent[3]), nudge::EMPTY_RESPONSE_MARKER);
+    assert!(ext::text(&sent[4]).contains("returned an empty response"));
 }
 
 #[tokio::test]
@@ -927,7 +925,7 @@ async fn empty_reply_without_recent_tool_results_ends_the_run() {
     assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply.is_empty()));
     // prompt + empty marker; no nudge prompt follows
     assert_eq!(history.len(), 2);
-    assert_eq!(history[1].text(), nudge::EMPTY_RESPONSE_MARKER);
+    assert_eq!(ext::message_text(&history[1]), nudge::EMPTY_RESPONSE_MARKER);
     assert_eq!(provider.requests().len(), 1);
 }
 
@@ -963,7 +961,7 @@ async fn empty_reply_counts_against_the_turn_budget() {
     assert!(matches!(outcome, RunOutcome::MaxTurns));
     assert_eq!(provider.requests().len(), 2, "nudged retry still ran");
     // The sanitized tail closes with the end marker.
-    assert_eq!(history.last().unwrap().text(), END_MARKER);
+    assert_eq!(ext::message_text(history.last().unwrap()), END_MARKER);
 }
 
 #[tokio::test]

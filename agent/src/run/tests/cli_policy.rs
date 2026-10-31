@@ -4,7 +4,7 @@
 //! children (shared `before` hook), and MCP wire tools.
 
 use super::*;
-use crate::history::UserContent;
+use crate::history::{ContentBlock, StoredMessage, ext};
 use crate::permissions::PERMISSION_DENIED_PREFIX;
 use crate::run::dispatch::BeforeExecute;
 use crate::run::*;
@@ -32,17 +32,17 @@ fn gated_tools(dir: &std::path::Path, flags: &[&str]) -> crate::run::ToolDispatc
 }
 
 /// First tool result's text, in call order.
-fn first_tool_text(history: &[Message]) -> String {
+fn first_tool_text(history: &[StoredMessage]) -> String {
     history
         .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content.as_slice(),
-            _ => &[],
+        .flat_map(|stored| ext::tool_results(stored.message()))
+        .map(|block| {
+            let ContentBlock::ToolResult { content, .. } = block else {
+                panic!("tool result block");
+            };
+            ext::tool_content_text(content)
         })
-        .find_map(|b| match b {
-            UserContent::ToolResult(r) => Some(r.content[0].to_text()),
-            _ => None,
-        })
+        .next()
         .expect("a tool result")
 }
 

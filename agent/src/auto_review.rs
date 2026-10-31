@@ -19,7 +19,7 @@ use serde::Deserialize;
 use snafu::Snafu;
 use tokio::time::timeout;
 
-use crate::history::{Message, UserContent};
+use crate::history::ext;
 
 const REVIEWER_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -255,17 +255,15 @@ pub(crate) fn reviewer_for(model: crate::provider::ModelHandle) -> Reviewer {
     }
 }
 
-fn review_message(tool: &str, scopes: &[String]) -> Message {
+fn review_message(tool: &str, scopes: &[String]) -> crate::history::Message {
     let scope_list = if scopes.is_empty() {
         "(none)".to_string()
     } else {
         scopes.join("; ")
     };
-    Message::User {
-        content: vec![UserContent::text(format!(
-            "Decide whether to allow this tool call without asking the user.\n\nTool: {tool}\nRequested scopes: {scope_list}\n\nReply with only the JSON object."
-        ))],
-    }
+    ext::user_text(format!(
+        "Decide whether to allow this tool call without asking the user.\n\nTool: {tool}\nRequested scopes: {scope_list}\n\nReply with only the JSON object."
+    ))
 }
 
 /// Run a single locked-down model call to review a proposed tool action.

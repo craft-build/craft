@@ -1271,7 +1271,9 @@ mod tests {
         session.replace_messages(
             turns
                 .iter()
-                .map(|turn| crate::history::Message::user(*turn))
+                .map(|turn| {
+                    crate::history::ext::entry(crate::history::ext::stored_user_text(*turn))
+                })
                 .collect(),
         );
         let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());

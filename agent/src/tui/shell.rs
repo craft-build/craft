@@ -74,7 +74,7 @@ pub(crate) struct ShellState {
     /// on drop, so removing a finished run's entry doubles as the cleanup
     /// that ends its parent-link task.
     triggers: std::collections::HashMap<String, CancelTrigger>,
-    pending_results: Vec<history::Message>,
+    pending_results: Vec<history::StoredMessage>,
 }
 
 impl ShellState {
@@ -115,12 +115,12 @@ impl ShellState {
     }
 
     /// Queue a visible run's `I ran: …` message for the next turn.
-    pub(crate) fn push_result(&mut self, msg: history::Message) {
+    pub(crate) fn push_result(&mut self, msg: history::StoredMessage) {
         self.pending_results.push(msg);
     }
 
     /// Take every queued visible-run result.
-    pub(crate) fn drain_results(&mut self) -> Vec<history::Message> {
+    pub(crate) fn drain_results(&mut self) -> Vec<history::StoredMessage> {
         std::mem::take(&mut self.pending_results)
     }
 
@@ -173,7 +173,9 @@ pub(crate) async fn run_shell(
     let mut shell_guard = shell.lock().unwrap_or_else(|e| e.into_inner());
     if visible {
         let label = if is_error { "Error" } else { "Output" };
-        let msg = history::Message::user(format!("I ran: $ {command}\n\n{label}:\n{output}"));
+        let msg = crate::history::ext::stored_user_text(format!(
+            "I ran: $ {command}\n\n{label}:\n{output}"
+        ));
         shell_guard.push_result(msg);
     }
     shell_guard.finish_run(&id);
@@ -432,8 +434,7 @@ mod tests {
         let queued = shell.lock().unwrap().drain_results();
         assert_eq!(queued.len(), 1);
         assert!(
-            queued[0]
-                .text()
+            crate::history::ext::message_text(&queued[0])
                 .starts_with("I ran: $ echo hi\n\nOutput:\nhi")
         );
         assert!(
@@ -521,10 +522,10 @@ mod tests {
         assert!(!state.active_ids().contains(&a));
         assert!(state.active_ids().contains(&b));
 
-        state.push_result(history::Message::user("I ran: x"));
+        state.push_result(crate::history::ext::stored_user_text("I ran: x"));
         assert_eq!(state.drain_results().len(), 1);
         assert!(state.drain_results().is_empty(), "drain takes everything");
-        state.push_result(history::Message::user("dropped"));
+        state.push_result(crate::history::ext::stored_user_text("dropped"));
         state.clear_results();
         assert!(state.drain_results().is_empty());
     }

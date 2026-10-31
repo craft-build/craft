@@ -104,10 +104,14 @@ impl TurnRenderer {
             } => {
                 // A finished task tool call settles its subagent's chat
                 // (task 96): is_error is the most specific ending it sees.
+                let is_error = match &result {
+                    crate::history::ContentBlock::ToolResult { is_error, .. } => *is_error,
+                    _ => false,
+                };
                 if name == "task" {
                     let _ = self.tx.send(AgentEvent::SubagentFinished {
                         tool_use_id: id.clone(),
-                        is_error: result.is_error,
+                        is_error,
                     });
                 }
                 let done = cards::tool_done(id, &name, &arguments, &result);
@@ -129,9 +133,10 @@ impl TurnRenderer {
                 }
             }
             run::Event::TurnComplete { usage, .. } => {
+                let in_tokens = u64::from(usage.input) + u64::from(usage.cache_read);
                 let _ = self.tx.send(AgentEvent::TokenUsage(cards::usage_label(
-                    usage.input_tokens + usage.output_tokens,
-                    usage.input_tokens,
+                    in_tokens + u64::from(usage.output),
+                    in_tokens,
                     self.context_length,
                 )));
             }
@@ -344,7 +349,7 @@ async fn compact_history(
     state: &Arc<Mutex<SessionState>>,
     config: &Config,
     model: &crate::provider::ModelHandle,
-    history: &mut Vec<history::Message>,
+    history: &mut Vec<history::StoredMessage>,
     context_length: Option<u32>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &CancelToken,
@@ -353,7 +358,8 @@ async fn compact_history(
     if let Some(mut compaction) = shared.lock().ok().map(|guard| guard.clone()) {
         // before/after speak the engine's currency: history + the request
         // overhead the surfaces refreshed onto the shared state.
-        let history_tokens = |c: &crate::compaction::CompactionState, h: &[history::Message]| {
+        let history_tokens = |c: &crate::compaction::CompactionState,
+                              h: &[history::StoredMessage]| {
             c.estimator
                 .scale(crate::compaction::estimate_tokens(h).saturating_add(c.request_overhead()))
         };
@@ -417,7 +423,7 @@ pub(super) async fn compact_now(
     };
     let mut session = state.lock().await;
     // The same overhead-inclusive currency as `compact_history` (E).
-    let history_tokens = |c: &crate::compaction::CompactionState, h: &[history::Message]| {
+    let history_tokens = |c: &crate::compaction::CompactionState, h: &[history::StoredMessage]| {
         c.estimator
             .scale(crate::compaction::estimate_tokens(h).saturating_add(c.request_overhead()))
     };
@@ -488,7 +494,7 @@ enum TurnFlow {
 async fn handle_outcome(
     outcome: RunOutcome,
     renderer: &TurnRenderer,
-    history: &[history::Message],
+    history: &[history::StoredMessage],
     prompt: &mut String,
     continuations: &mut usize,
     state: &Arc<Mutex<SessionState>>,
@@ -572,7 +578,11 @@ const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and
 /// covered, a hung server cannot pin the turn.
 const MCP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::history::ImageBlock>) {
+pub(super) async fn run_turn(
+    ctx: TurnCtx,
+    text: String,
+    images: Vec<crate::history::ContentBlock>,
+) {
     let TurnCtx {
         config,
         workspace,
@@ -847,7 +857,11 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
     // fails the turn.
     crate::knowledge_memory::spawn_extraction(
         model,
-        history,
+        history
+            .iter()
+            .map(crate::history::StoredMessage::message)
+            .cloned()
+            .collect(),
         workspace.root().to_path_buf(),
         config.agent.memory_extraction,
     );
@@ -881,7 +895,7 @@ mod tests {
                 {"id": "T1.1", "parent": "T1", "content": "Fix the renderer", "status": "in_progress"},
                 {"id": "T2", "parent": null, "content": "Add tests", "status": "pending"},
             ]}),
-            result: history::ToolResult::text("t1", "todo_write", "ok"),
+            result: history::ext::tool_result("t1", Some("todo_write"), "ok", false),
         });
         // Tool card first, then the plan snapshot.
         assert!(matches!(rx.try_recv(), Ok(AgentEvent::ToolCall(_))));
@@ -977,9 +991,7 @@ mod tests {
         let (renderer, _rx) = renderer();
         let (tx, _tx_out) = mpsc::unbounded_channel();
         let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
-        let history = vec![history::Message::User {
-            content: vec![history::UserContent::text("stop here")],
-        }];
+        let history = vec![history::ext::stored_user_text("stop here")];
         let mut prompt = String::new();
         let mut continuations = MAX_EMPTY_CONTINUATIONS;
         let flow = handle_outcome(

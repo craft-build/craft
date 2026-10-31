@@ -19,22 +19,20 @@ pub(crate) const PROGRESSIVE_TOOL_REMOVAL_RATIOS: &[f32] = &[0.10, 0.20, 0.50, 1
 pub use engine::{CompactionEngine, CompactionState};
 pub use estimate::{RequestOverhead, TokenEstimator, estimate_prompt_tokens, estimate_tokens};
 
-/// Constructors shared by compaction tests (history has no struct-literal
-/// sugar for the rich shapes these tests need).
+/// Constructors shared by compaction tests: wire messages for request-level
+/// suites, stored messages for history-level ones.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::history::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
+    use animist::history::{ContentBlock, Message, Role};
+
+    use crate::history::{StoredMessage, ext};
 
     pub fn user(text: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::text(text)],
-        }
+        ext::user_text(text)
     }
 
     pub fn assistant_text(text: &str) -> Message {
-        Message::Assistant {
-            content: vec![AssistantContent::text(text)],
-        }
+        ext::assistant_text(text)
     }
 
     pub fn assistant_tool(id: &str, name: &str) -> Message {
@@ -42,8 +40,16 @@ pub(crate) mod test_support {
     }
 
     pub fn assistant_tool_args(id: &str, name: &str, args: serde_json::Value) -> Message {
-        Message::Assistant {
-            content: vec![AssistantContent::ToolCall(ToolCall::new(id, name, args))],
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input: args,
+                thought_signature: None,
+            }],
+            display_text: None,
+            kind: animist::history::MessageKind::Turn,
         }
     }
 
@@ -52,10 +58,34 @@ pub(crate) mod test_support {
     }
 
     pub fn tool_result_of(id: &str, output: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::ToolResult(ToolResult::text(
-                id, "bash", output,
-            ))],
-        }
+        ext::observation(vec![ext::tool_result(id, Some("bash"), output, false)])
+    }
+
+    pub fn stored_user(text: &str) -> StoredMessage {
+        ext::stored(user(text))
+    }
+
+    pub fn stored_assistant_text(text: &str) -> StoredMessage {
+        ext::stored(assistant_text(text))
+    }
+
+    pub fn stored_assistant_tool(id: &str, name: &str) -> StoredMessage {
+        ext::stored(assistant_tool(id, name))
+    }
+
+    pub fn stored_assistant_tool_args(
+        id: &str,
+        name: &str,
+        args: serde_json::Value,
+    ) -> StoredMessage {
+        ext::stored(assistant_tool_args(id, name, args))
+    }
+
+    pub fn stored_tool_result(id: &str) -> StoredMessage {
+        ext::stored(tool_result(id))
+    }
+
+    pub fn stored_tool_result_of(id: &str, output: &str) -> StoredMessage {
+        ext::stored(tool_result_of(id, output))
     }
 }

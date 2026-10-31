@@ -50,7 +50,7 @@ pub(super) fn report(error: crate::error::Error) -> String {
 #[derive(Default)]
 struct SessionState {
     thinking: crate::thinking::ThinkingConfig,
-    history: Vec<crate::history::Message>,
+    history: Vec<crate::history::StoredMessage>,
     /// Shared with the run loop for in-run overflow recovery.
     compaction: crate::run::SharedCompactionState,
     /// Session-wide tool dedup cache, shared by the dispatcher and cleared

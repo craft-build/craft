@@ -45,7 +45,7 @@ mod advisor_tests {
     async fn run_with(
         model: &ModelHandle,
         params: &run::RunParams,
-    ) -> (RunOutcome, Vec<Message>, Vec<Event>) {
+    ) -> (RunOutcome, Vec<crate::history::StoredMessage>, Vec<Event>) {
         let (_, cancel) = cancel_channel();
         let mut history = Vec::new();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -107,9 +107,10 @@ mod advisor_tests {
         );
         assert_eq!(advisor_reviews(&provider).len(), 2);
         assert!(
-            history
-                .iter()
-                .any(|m| m.text().contains("<advisor-note>") && m.text().contains("fix x"),),
+            history.iter().any(|m| {
+                let text = crate::history::ext::message_text(m);
+                text.contains("<advisor-note>") && text.contains("fix x")
+            }),
             "follow-up must be committed to history"
         );
         // The review sees the advisor preamble and no tools.
@@ -136,7 +137,11 @@ mod advisor_tests {
             1,
             "no follow-up turn"
         );
-        assert!(!history.iter().any(|m| m.text().contains("<advisor-note>")));
+        assert!(
+            !history
+                .iter()
+                .any(|m| crate::history::ext::message_text(m).contains("<advisor-note>"))
+        );
     }
 
     #[tokio::test]
@@ -179,6 +184,4 @@ mod advisor_tests {
         assert!(matches!(outcome, RunOutcome::Done { .. }), "{outcome:?}");
         assert!(notes(&events).is_empty());
     }
-
-    use crate::history::Message;
 }

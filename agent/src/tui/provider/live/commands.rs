@@ -302,7 +302,7 @@ impl CraftProvider {
 pub(super) type PendingMessage = (
     String,
     crate::run::AgentMode,
-    Vec<crate::history::ImageBlock>,
+    Vec<crate::history::ContentBlock>,
 );
 
 /// `Command::SendMessage`: send now, or queue behind a still-running turn
@@ -315,7 +315,7 @@ pub(super) async fn handle_send_message(
     pending: &mut VecDeque<PendingMessage>,
     text: String,
     mode: crate::run::AgentMode,
-    images: Vec<crate::history::ImageBlock>,
+    images: Vec<crate::history::ContentBlock>,
 ) {
     if text.trim().is_empty() {
         return;
@@ -430,7 +430,7 @@ fn start_turn(
     selection: &Selection,
     text: String,
     mode: crate::run::AgentMode,
-    images: Vec<crate::history::ImageBlock>,
+    images: Vec<crate::history::ContentBlock>,
 ) -> AbortHandle {
     let handle = tokio::spawn(run_turn(
         TurnCtx {
@@ -655,11 +655,12 @@ pub(super) async fn close_aborted_turn(state: &Arc<Mutex<SessionState>>) {
     let already_closed = session
         .history
         .last()
-        .is_some_and(|message| message.text() == crate::run::CANCEL_MARKER);
+        .is_some_and(|message| crate::history::marker::is(message, crate::history::marker::CANCEL));
     if !already_closed {
-        session
-            .history
-            .push(crate::history::Message::user(crate::run::CANCEL_MARKER));
+        session.history.push(crate::history::marker::observation(
+            crate::history::marker::CANCEL,
+            crate::run::CANCEL_MARKER,
+        ));
     }
 }
 

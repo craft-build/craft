@@ -2,7 +2,7 @@
 //! compaction estimator). Deliberately approximate; the engine's
 //! effectiveness score keeps behavior safe when estimates drift.
 
-use crate::history::{AssistantContent, Message, ReasoningContent, ToolResultContent, UserContent};
+use animist::history::{ContentBlock, Message, StoredMessage, ToolContent};
 
 const CHARS_PER_TOKEN: usize = 4;
 
@@ -75,51 +75,45 @@ pub const TOKENS_PER_IMAGE: u64 = 1500;
 /// messages before the single `/4` rounding (N short messages must not
 /// estimate as 0 in aggregate), plus a flat structure cost per message.
 /// Image blocks are weighted at `TOKENS_PER_IMAGE`.
-pub fn estimate_tokens(messages: &[Message]) -> u64 {
+pub fn estimate_tokens(messages: &[StoredMessage]) -> u64 {
     let mut chars: usize = 0;
-    for message in messages {
-        chars += match message {
-            Message::System { content } => text_len(content),
-            Message::User { content } => content.iter().map(user_content_chars).sum(),
-            Message::Assistant { content } => content.iter().map(assistant_content_chars).sum(),
-        };
+    for stored in messages {
+        chars += stored
+            .message()
+            .content
+            .iter()
+            .map(block_chars)
+            .sum::<usize>();
     }
     (chars / CHARS_PER_TOKEN) as u64 + messages.len() as u64 * TOKENS_PER_MESSAGE
 }
 
-fn user_content_chars(block: &UserContent) -> usize {
-    match block {
-        UserContent::Text(text) => text_len(&text.text),
-        // Attached images weigh like tool-result images: a flat per-image
-        // token cost, in chars so the `/4` division stays consistent.
-        UserContent::Image(_) => TOKENS_PER_IMAGE as usize * CHARS_PER_TOKEN,
-        UserContent::ToolResult(result) => result
-            .content
-            .iter()
-            .map(|item| match item {
-                ToolResultContent::Text(text) => text_len(&text.text),
-                ToolResultContent::Json { value } => json_len(value) as usize,
-                // Flat weight expressed in chars so the `/4` division lands
-                // on `TOKENS_PER_IMAGE`.
-                ToolResultContent::Image(_) => TOKENS_PER_IMAGE as usize * CHARS_PER_TOKEN,
-            })
-            .sum(),
+/// The same estimate over wire messages (the request view).
+pub fn estimate_messages(messages: &[Message]) -> u64 {
+    let mut chars: usize = 0;
+    for message in messages {
+        chars += message.content.iter().map(block_chars).sum::<usize>();
     }
+    (chars / CHARS_PER_TOKEN) as u64 + messages.len() as u64 * TOKENS_PER_MESSAGE
 }
 
-fn assistant_content_chars(block: &AssistantContent) -> usize {
+fn block_chars(block: &ContentBlock) -> usize {
     match block {
-        AssistantContent::Text(text) => text_len(&text.text),
-        AssistantContent::ToolCall(call) => {
-            text_len(&call.function.name) + json_len(&call.function.arguments) as usize
-        }
-        AssistantContent::Reasoning(reasoning) => reasoning
-            .content
+        ContentBlock::Text { text } => text_len(text),
+        // Attached images weigh like tool-result images: a flat per-image
+        // token cost, in chars so the `/4` division stays consistent.
+        ContentBlock::Image { .. } => TOKENS_PER_IMAGE as usize * CHARS_PER_TOKEN,
+        ContentBlock::Thinking { thinking, .. } => text_len(thinking),
+        ContentBlock::RedactedThinking { data } => text_len(data),
+        ContentBlock::ToolUse { name, input, .. } => text_len(name) + json_len(input) as usize,
+        ContentBlock::ToolResult { content, .. } => content
+            .0
             .iter()
             .map(|item| match item {
-                ReasoningContent::Text { text, .. } => text_len(text),
-                ReasoningContent::Redacted { data, .. } => text_len(data),
-                ReasoningContent::Opaque(data) => text_len(data),
+                ToolContent::Text { text } => text_len(text),
+                // Flat weight expressed in chars so the `/4` division lands
+                // on `TOKENS_PER_IMAGE`.
+                ToolContent::Image { .. } => TOKENS_PER_IMAGE as usize * CHARS_PER_TOKEN,
             })
             .sum(),
     }
@@ -172,23 +166,27 @@ pub fn estimate_prompt_tokens(
     tools: &serde_json::Value,
 ) -> u64 {
     let overhead = RequestOverhead::from_chars(system.len() + json_len(tools) as usize);
-    estimate_tokens(messages).saturating_add(overhead.tokens())
+    estimate_messages(messages).saturating_add(overhead.tokens())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::ext;
 
     fn user(text: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::text(text)],
-        }
+        ext::user_text(text)
+    }
+
+    /// The stored-history view of wire messages, for `estimate_tokens`.
+    fn stored(messages: Vec<Message>) -> Vec<StoredMessage> {
+        messages.into_iter().map(ext::stored).collect()
     }
 
     #[test]
     fn estimates_by_chars_per_token() {
         // 400 chars / 4 = 100 tokens, plus one message's structure cost.
-        let messages = vec![user(&"x".repeat(400))];
+        let messages = stored(vec![user(&"x".repeat(400))]);
         assert_eq!(estimate_tokens(&messages), 100 + TOKENS_PER_MESSAGE);
     }
 
@@ -201,14 +199,17 @@ mod tests {
     fn short_messages_aggregate_before_rounding() {
         // 100 one-char messages: 0 tokens each under per-message rounding,
         // 25 from the aggregated chars plus 500 structure tokens together.
-        let messages: Vec<Message> = (0..100).map(|_| user("a")).collect();
+        let messages = stored((0..100).map(|_| user("a")).collect());
         assert_eq!(estimate_tokens(&messages), 25 + 100 * TOKENS_PER_MESSAGE);
     }
 
     #[test]
     fn single_short_message_counts_its_structure_cost() {
         // A lone short message must not estimate as zero either.
-        assert_eq!(estimate_tokens(&[user("a")]), TOKENS_PER_MESSAGE);
+        assert_eq!(
+            estimate_tokens(&stored(vec![user("a")])),
+            TOKENS_PER_MESSAGE
+        );
     }
 
     #[test]
@@ -220,14 +221,15 @@ mod tests {
     fn images_weigh_a_flat_token_cost() {
         // Image blocks count as their flat weight, not their (huge) base64
         // payload; the flat char weight keeps the `/4` at TOKENS_PER_IMAGE.
-        let image = crate::history::ImageBlock {
-            media_type: crate::history::ImageMedia::Png,
-            data: "z".repeat(4096),
-            caption: String::new(),
+        let image = ContentBlock::Image {
+            source: ext::image_source(ext::ImageMedia::Png, "z".repeat(4096)),
         };
-        let messages = vec![Message::User {
-            content: vec![crate::history::UserContent::Image(image)],
-        }];
+        let messages = stored(vec![Message {
+            role: animist::history::Role::User,
+            content: vec![image],
+            display_text: None,
+            kind: animist::history::MessageKind::Turn,
+        }]);
         assert_eq!(
             estimate_tokens(&messages),
             TOKENS_PER_IMAGE + TOKENS_PER_MESSAGE
@@ -279,7 +281,7 @@ mod tests {
             100 + TOKENS_PER_MESSAGE + overhead as u64
         );
         // The message-only estimate must not double-count the overhead.
-        assert_eq!(estimate_tokens(&messages), 100 + TOKENS_PER_MESSAGE);
+        assert_eq!(estimate_tokens(&stored(messages)), 100 + TOKENS_PER_MESSAGE);
     }
 
     #[test]

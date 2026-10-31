@@ -17,7 +17,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::config::{AgentConfig, ProviderConfig};
-use crate::history::Message;
+use crate::history::{StoredMessage, ext};
 use crate::model_registry::ModelTier;
 use crate::provider::ModelHandle;
 use crate::run::{self, CancelToken, Event, RunParams};
@@ -192,7 +192,7 @@ pub struct SubagentLauncher {
     /// The parent workspace (cloned; subagent tool tables are built from it).
     pub workspace: Workspace,
     /// Parent history snapshot for `context_mode`.
-    pub history: Vec<Message>,
+    pub history: Vec<StoredMessage>,
     /// Parent cancel token; the child is linked under it.
     pub cancel: CancelToken,
     /// Per-tool-call child cancellation (task 96): every spawn registers
@@ -274,7 +274,7 @@ impl SubagentLauncher {
             "subagent spawning"
         );
 
-        let seeded: Vec<Message> = match req.context_mode.as_str() {
+        let seeded: Vec<StoredMessage> = match req.context_mode.as_str() {
             "none" => Vec::new(),
             "summary" => self.history.iter().rev().take(8).rev().cloned().collect(),
             "full" => self.history.clone(),
@@ -472,7 +472,7 @@ impl SubagentLauncher {
                     }
                     Err(e) => {
                         last_error.clone_from(&e);
-                        conversation.push(Message::user(format!(
+                        conversation.push(ext::stored_user_text(format!(
                             "Your previous response did not match the required output schema: {e}"
                         )));
                         tracing::warn!(
@@ -512,22 +512,22 @@ fn parse_tier(tier: &str) -> Result<ModelTier, String> {
 }
 
 /// The last assistant text of the run: what the tool returns verbatim.
-pub fn final_text(messages: &[Message]) -> String {
+pub fn final_text(messages: &[StoredMessage]) -> String {
     messages
         .iter()
         .rev()
-        .find(|m| matches!(m, Message::Assistant { .. }))
-        .map(|m| m.text())
+        .find(|m| matches!(m.message().role, crate::history::Role::Assistant))
+        .map(ext::message_text)
         .unwrap_or_default()
 }
 
 /// Every assistant text of the run, unlike [`final_text`]'s last one: a
 /// cut-short run's value is everything it managed to say.
-fn partial_text(messages: &[Message]) -> String {
+fn partial_text(messages: &[StoredMessage]) -> String {
     messages
         .iter()
-        .filter(|m| matches!(m, Message::Assistant { .. }))
-        .map(|m| m.text())
+        .filter(|m| matches!(m.message().role, crate::history::Role::Assistant))
+        .map(ext::message_text)
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
@@ -652,25 +652,33 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn assistant(text: &str) -> Message {
-        Message::assistant(text)
+    fn assistant(text: &str) -> StoredMessage {
+        ext::stored(ext::assistant_text(text))
     }
 
     #[test]
     fn final_text_returns_last_assistant_text() {
-        let convo = vec![assistant("older"), Message::user("q"), assistant("newer")];
+        let convo = vec![
+            assistant("older"),
+            ext::stored_user_text("q"),
+            assistant("newer"),
+        ];
         assert_eq!(final_text(&convo), "newer");
     }
 
     #[test]
     fn final_text_is_empty_without_assistant_text() {
         assert_eq!(final_text(&[]), "");
-        assert_eq!(final_text(&[Message::user("q")]), "");
+        assert_eq!(final_text(&[ext::stored_user_text("q")]), "");
     }
 
     #[test]
     fn partial_text_joins_all_assistant_replies() {
-        let convo = vec![assistant("one"), Message::user("q"), assistant("two")];
+        let convo = vec![
+            assistant("one"),
+            ext::stored_user_text("q"),
+            assistant("two"),
+        ];
         assert_eq!(partial_text(&convo), "one\ntwo");
     }
 
@@ -769,15 +777,16 @@ mod tests {
 
     #[tokio::test]
     async fn approval_gate_governs_child_tool_calls() {
-        use crate::history::ToolCall;
+        use crate::history::ContentBlock;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[derive(Clone)]
         struct CountingGate(Arc<AtomicUsize>);
         impl run::dispatch::BeforeExecute for CountingGate {
-            fn decide(&self, call: ToolCall) -> run::BoxFuture<run::Decision> {
+            fn decide(&self, call: ContentBlock) -> run::BoxFuture<run::Decision> {
                 self.0.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(call.function.name, "list");
+                assert!(matches!(&call,
+                    ContentBlock::ToolUse { name, .. } if name == "list"));
                 Box::pin(async { run::Decision::Run })
             }
         }

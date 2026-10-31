@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::history::{Message, UserContent};
+use crate::history::{ContentBlock, StoredMessage, ext};
 
 const RECENCY_HEADER: &str = "<turn-context>";
 
@@ -64,28 +64,31 @@ pub trait RecencySource: Send + Sync {
 /// Return a copy of `messages` with the rendered tail appended to the last
 /// user message, or `None` when there is nothing to inject or no user
 /// message to carry it. The input is never modified.
-pub fn attach_recency_tail(messages: &[Message], facts: &RecencyFacts) -> Option<Vec<Message>> {
+pub fn attach_recency_tail(
+    messages: &[StoredMessage],
+    facts: &RecencyFacts,
+) -> Option<Vec<StoredMessage>> {
     if facts.is_empty() {
         return None;
     }
     let tail = facts.render();
     let last_user = messages
         .iter()
-        .rposition(|message| matches!(message, Message::User { .. }))?;
+        .rposition(|stored| ext::is_user(stored.message()))?;
     let mut out = messages.to_vec();
-    let Message::User { content } = &mut out[last_user] else {
-        return None;
-    };
-    content.push(UserContent::text(tail));
+    out[last_user]
+        .message_mut()
+        .content
+        .push(ContentBlock::Text { text: tail });
     Some(out)
 }
 
 /// Collect this turn's facts and attach them, if any.
 pub(crate) fn recency_view(
     source: &Arc<dyn RecencySource>,
-    messages: &[Message],
+    messages: &[StoredMessage],
     turn: u32,
-) -> Option<Vec<Message>> {
+) -> Option<Vec<StoredMessage>> {
     let facts = source.collect(&RecencyCtx { turn });
     attach_recency_tail(messages, &facts)
 }
@@ -93,53 +96,54 @@ pub(crate) fn recency_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::UserContent;
 
-    fn block_text(block: &UserContent) -> String {
+    fn block_text(block: &ContentBlock) -> String {
         match block {
-            UserContent::Text(text) => text.text.clone(),
-            UserContent::Image(image) => image.caption.clone(),
-            UserContent::ToolResult(result) => result
-                .content
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::Image { .. } => "[image]".to_owned(),
+            ContentBlock::ToolResult { content, .. } => content
+                .0
                 .first()
-                .map(|item| item.to_text())
+                .map(|item| match item {
+                    crate::history::ToolContent::Text { text } => text.clone(),
+                    crate::history::ToolContent::Image { .. } => "[image]".to_owned(),
+                })
                 .unwrap_or_default(),
+            _ => String::new(),
         }
     }
 
     #[test]
     fn empty_facts_are_a_noop() {
-        let messages = vec![Message::user("hello")];
+        let messages = vec![ext::stored_user_text("hello")];
         assert!(attach_recency_tail(&messages, &RecencyFacts::new()).is_none());
     }
 
     #[test]
     fn tail_lands_only_on_last_user_message() {
-        let messages = vec![Message::user("first"), Message::user("latest")];
+        let messages = vec![
+            ext::stored_user_text("first"),
+            ext::stored_user_text("latest"),
+        ];
         let mut facts = RecencyFacts::new();
         facts.push("fresh state".into());
 
         let out = attach_recency_tail(&messages, &facts).expect("non-empty facts attach");
         assert_eq!(out.len(), messages.len());
-        let Message::User { content } = &out[0] else {
-            panic!("user message");
-        };
-        assert_eq!(content.len(), 1, "earlier user message untouched");
-        let Message::User { content } = &out[1] else {
-            panic!("user message");
-        };
-        assert_eq!(content.len(), 2);
-        assert!(block_text(&content[1]).starts_with("<turn-context>"));
-        assert!(block_text(&content[1]).contains("fresh state"));
-        let Message::User { content } = &messages[1] else {
-            panic!("user message");
-        };
-        assert_eq!(content.len(), 1);
+        assert_eq!(
+            out[0].message().content.len(),
+            1,
+            "earlier user message untouched"
+        );
+        assert_eq!(out[1].message().content.len(), 2);
+        assert!(block_text(&out[1].message().content[1]).starts_with("<turn-context>"));
+        assert!(block_text(&out[1].message().content[1]).contains("fresh state"));
+        assert_eq!(messages[1].message().content.len(), 1);
     }
 
     #[test]
     fn no_user_message_is_a_noop() {
-        let messages = vec![Message::system("sys")];
+        let messages = vec![ext::stored(ext::system_text("sys"))];
         let mut facts = RecencyFacts::new();
         facts.push("x".into());
         assert!(attach_recency_tail(&messages, &facts).is_none());
@@ -165,11 +169,8 @@ mod tests {
     #[test]
     fn recency_view_carries_turn_context() {
         let source: Arc<dyn RecencySource> = Arc::new(FixedSource);
-        let messages = vec![Message::user("go")];
+        let messages = vec![ext::stored_user_text("go")];
         let out = recency_view(&source, &messages, 7).expect("facts attached");
-        let Message::User { content } = &out[0] else {
-            panic!("user message");
-        };
-        assert!(block_text(&content[1]).contains("turn 7"));
+        assert!(block_text(&out[0].message().content[1]).contains("turn 7"));
     }
 }

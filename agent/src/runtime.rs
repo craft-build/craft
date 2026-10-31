@@ -552,19 +552,22 @@ mod tests {
 
     // --- headless long run (the print-mode fix) ---
 
-    fn overflow_history() -> Vec<crate::history::Message> {
+    fn overflow_history() -> Vec<crate::history::StoredMessage> {
         use crate::compaction::test_support as ts;
         let mut messages = Vec::new();
         for i in 0..8 {
-            messages.push(ts::user(&format!(
+            messages.push(ts::stored_user(&format!(
                 "do task {i} with a fairly long instruction"
             )));
-            messages.push(ts::assistant_tool_args(
+            messages.push(ts::stored_assistant_tool_args(
                 &format!("t{i}"),
                 "bash",
                 serde_json::json!({"command": format!("echo {i}")}),
             ));
-            messages.push(ts::tool_result_of(&format!("t{i}"), &"x".repeat(200)));
+            messages.push(ts::stored_tool_result_of(
+                &format!("t{i}"),
+                &"x".repeat(200),
+            ));
         }
         messages
     }
@@ -669,10 +672,15 @@ mod tests {
         );
         drop(guard);
         assert!(
-            history.iter().any(|message| matches!(message,
-                crate::history::Message::Assistant { content, .. }
-                    if content.iter().any(|block| matches!(block,
-                        crate::history::AssistantContent::Text(text) if text.text == "recovered")))),
+            history.iter().any(|stored| {
+                let message = stored.message();
+                message.role == crate::history::Role::Assistant
+                    && message.content.iter().any(|block| {
+                        matches!(block,
+                        crate::history::ContentBlock::Text { text }
+                            if text == "recovered")
+                    })
+            }),
             "the committed history carries the final reply"
         );
     }

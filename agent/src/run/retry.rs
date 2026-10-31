@@ -334,7 +334,7 @@ mod tests {
         let mut options = animist::provider::RequestOptions::default();
         options.max_output_tokens = max_output_tokens.map(|n| n.min(u64::from(u32::MAX)) as u32);
         ProviderRequest {
-            messages: crate::edge::to_animist(&[crate::history::Message::user("hi")], false),
+            messages: vec![crate::history::ext::user_text("hi")],
             system: String::new(),
             tools: Vec::new(),
             options,
@@ -401,7 +401,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.0.assistant.text(), "recovered");
+        assert_eq!(crate::history::ext::text(&output.0.assistant), "recovered");
         assert_eq!(output.1, None, "the primary model served");
         let retries = retry_events(&events.lock().unwrap());
         assert_eq!(retries.len(), 1);
@@ -496,7 +496,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.0.assistant.text(), "ok");
+        assert_eq!(crate::history::ext::text(&output.0.assistant), "ok");
         // Rotation reports itself and waits a brief guard delay.
         let retries = retry_events(&events.lock().unwrap());
         assert_eq!(retries.len(), 1);
@@ -528,7 +528,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.0.assistant.text(), "fallback");
+        assert_eq!(crate::history::ext::text(&output.0.assistant), "fallback");
         assert_eq!(
             output.1,
             Some("fallback-model".to_owned()),
@@ -563,7 +563,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.0.assistant.text(), "ok");
+        assert_eq!(crate::history::ext::text(&output.0.assistant), "ok");
         assert_eq!(retry_events(&events.lock().unwrap()).len(), 2);
     }
 
@@ -647,7 +647,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.0.assistant.text(), "ok");
+        assert_eq!(crate::history::ext::text(&output.0.assistant), "ok");
         let retries = retry_events(&events.lock().unwrap());
         assert_eq!(retries.len(), MAX_ROTATIONS as usize + 1);
         assert!(retries[MAX_ROTATIONS as usize].1.contains("Rate limited"));
@@ -770,7 +770,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(crate::history::ext::text(&output.assistant), "fallback");
         assert_eq!(served, Some("capped-hop".to_owned()));
         assert_eq!(
             requests.requests()[0].options.max_output_tokens,
@@ -797,7 +797,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(crate::history::ext::text(&output.assistant), "fallback");
         assert_eq!(
             requests.requests()[0].options.max_output_tokens,
             Some(3_000),
@@ -823,7 +823,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(crate::history::ext::text(&output.assistant), "fallback");
         assert_eq!(
             requests.requests()[0].options.max_output_tokens,
             Some(10_000),
@@ -849,7 +849,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(crate::history::ext::text(&output.assistant), "fallback");
         assert_eq!(
             requests.requests()[0].options.max_output_tokens,
             Some(crate::run::MIN_OUTPUT_TOKENS as u32),
@@ -879,7 +879,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "fit");
+        assert_eq!(crate::history::ext::text(&output.assistant), "fit");
         assert_eq!(served, Some("fit-hop".to_owned()));
         assert!(
             unfit_requests.requests().is_empty(),
@@ -974,7 +974,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "b");
+        assert_eq!(crate::history::ext::text(&output.assistant), "b");
         assert_eq!(
             a_requests.requests()[0].options.max_output_tokens,
             Some(2_000)

@@ -1,16 +1,18 @@
 //! Overflow-pruning helpers for the LLM compaction request (ported from
-//! Craft's `compaction/strip.rs`, adapted to this repo's history types).
+//! Craft's `compaction/strip.rs`, adapted to animist's history types).
 //! Every function here exists so a summarization request that overflowed
 //! the provider's context window can be cheaply shrunk and retried.
 
-use crate::history::{AssistantContent, Message, ToolResult, UserContent};
+use animist::history::{ContentBlock, Message, Role, ToolContents};
+
+use crate::history::ext;
 
 use super::TOOL_RESULT_PLACEHOLDER;
 
 pub(super) fn strip_thinking(messages: &mut [Message]) {
     for message in messages {
-        if let Message::Assistant { content } = message {
-            content.retain(|block| !matches!(block, AssistantContent::Reasoning(_)));
+        if matches!(message.role, Role::Assistant) {
+            message.content.retain(|block| !block.is_thinking());
         }
     }
 }
@@ -21,40 +23,35 @@ pub(super) fn strip_thinking(messages: &mut [Message]) {
 pub(super) fn remove_orphaned_tool_results(messages: &mut Vec<Message>) {
     let calls: std::collections::HashSet<String> = messages
         .iter()
-        .flat_map(|message| match message {
-            Message::Assistant { content } => content.iter(),
-            _ => [].iter(),
-        })
+        .filter(|message| matches!(message.role, Role::Assistant))
+        .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
-            AssistantContent::ToolCall(call) => Some(call.id.clone()),
+            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
     for message in messages.iter_mut() {
-        if let Message::User { content } = message {
-            content.retain(|block| match block {
-                UserContent::ToolResult(result) => calls.contains(&result.call),
-                UserContent::Text(_) | UserContent::Image(_) => true,
+        if matches!(message.role, Role::User) {
+            message.content.retain(|block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => calls.contains(tool_use_id),
+                _ => true,
             });
         }
     }
-    messages.retain(|message| match message {
-        Message::User { content } => !content.is_empty(),
-        Message::Assistant { content } => !content.is_empty(),
-        Message::System { .. } => true,
+    messages.retain(|message| match message.role {
+        Role::System => true,
+        _ => !message.content.is_empty(),
     });
 }
 
-fn result_len(result: &ToolResult) -> usize {
-    result
-        .content
-        .iter()
-        .map(|block| block.to_text().len())
-        .sum()
+fn result_len(content: &ToolContents) -> usize {
+    ext::tool_content_text(content).len()
 }
 
-fn is_placeholder(result: &ToolResult) -> bool {
-    result.content.len() == 1 && result.content[0].to_text() == TOOL_RESULT_PLACEHOLDER
+fn is_placeholder(content: &ToolContents) -> bool {
+    content.0.len() == 1
+        && matches!(&content.0[0],
+            animist::history::ToolContent::Text { text } if text == TOOL_RESULT_PLACEHOLDER)
 }
 
 /// Walks newest first and collapses every tool result that does not fit in
@@ -66,21 +63,28 @@ fn is_placeholder(result: &ToolResult) -> bool {
 pub(super) fn collapse_tool_results(messages: &mut [Message], mut budget: usize) -> bool {
     let mut collapsed = false;
     for message in messages.iter_mut().rev() {
-        let Message::User { content } = message else {
+        if !matches!(message.role, Role::User) {
             continue;
-        };
-        for block in content.iter_mut().rev() {
-            let UserContent::ToolResult(result) = block else {
+        }
+        for block in message.content.iter_mut().rev() {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                name,
+                content,
+                ..
+            } = block
+            else {
                 continue;
             };
-            match budget.checked_sub(result_len(result)) {
+            match budget.checked_sub(result_len(content)) {
                 Some(rest) => budget = rest,
                 None => {
-                    collapsed |= !is_placeholder(result);
-                    *result = ToolResult::text(
-                        result.call.clone(),
-                        &result.name,
+                    collapsed |= !is_placeholder(content);
+                    *block = ext::tool_result(
+                        tool_use_id.clone(),
+                        name.as_deref(),
                         TOOL_RESULT_PLACEHOLDER,
+                        false,
                     );
                 }
             }
@@ -94,12 +98,12 @@ pub(super) fn collapse_tool_results(messages: &mut [Message], mut budget: usize)
 pub(super) fn strip_tool_results_by_ratio(messages: &mut [Message], ratio: f32) -> usize {
     let mut indices: Vec<(usize, usize)> = Vec::new();
     for (mi, message) in messages.iter().enumerate() {
-        let Message::User { content } = message else {
+        if !matches!(message.role, Role::User) {
             continue;
-        };
-        for (bi, block) in content.iter().enumerate() {
-            if let UserContent::ToolResult(result) = block
-                && !is_placeholder(result)
+        }
+        for (bi, block) in message.content.iter().enumerate() {
+            if let ContentBlock::ToolResult { content, .. } = block
+                && !is_placeholder(content)
             {
                 indices.push((mi, bi));
             }
@@ -112,11 +116,20 @@ pub(super) fn strip_tool_results_by_ratio(messages: &mut [Message], ratio: f32) 
     let target = (total as f32 * ratio).ceil() as usize;
     let mut dropped = 0;
     for (mi, bi) in indices.into_iter().take(target) {
-        if let Message::User { content } = &mut messages[mi]
-            && let UserContent::ToolResult(result) = &mut content[bi]
-            && !is_placeholder(result)
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            name,
+            content,
+            ..
+        } = &messages[mi].content[bi]
+            && !is_placeholder(content)
         {
-            *result = ToolResult::text(result.call.clone(), &result.name, TOOL_RESULT_PLACEHOLDER);
+            messages[mi].content[bi] = ext::tool_result(
+                tool_use_id.clone(),
+                name.as_deref(),
+                TOOL_RESULT_PLACEHOLDER,
+                false,
+            );
             dropped += 1;
         }
     }
@@ -131,16 +144,16 @@ pub(super) fn truncate_oldest_round(messages: &mut Vec<Message>) {
         return;
     }
 
-    let removed_user = matches!(messages.remove(0), Message::User { .. });
+    let removed_user = matches!(messages.remove(0).role, Role::User);
     if removed_user
         && messages.len() > 1
-        && matches!(messages.first(), Some(Message::Assistant { .. }))
+        && matches!(messages.first().map(|m| &m.role), Some(Role::Assistant))
     {
         messages.remove(0);
     }
     remove_orphaned_tool_results(messages);
 
-    while messages.len() > 1 && matches!(messages.first(), Some(Message::Assistant { .. })) {
+    while messages.len() > 1 && matches!(messages.first().map(|m| &m.role), Some(Role::Assistant)) {
         messages.remove(0);
         remove_orphaned_tool_results(messages);
     }
@@ -154,16 +167,24 @@ mod tests {
     #[test]
     fn strip_thinking_removes_reasoning_blocks() {
         let mut messages = vec![
-            Message::Assistant {
+            Message {
+                role: Role::Assistant,
                 content: vec![
-                    AssistantContent::Reasoning(Default::default()),
-                    AssistantContent::text("hello"),
+                    ContentBlock::Thinking {
+                        thinking: "hmm".into(),
+                        signature: None,
+                    },
+                    ContentBlock::Text {
+                        text: "hello".into(),
+                    },
                 ],
+                display_text: None,
+                kind: animist::history::MessageKind::Turn,
             },
             user("keep"),
         ];
         strip_thinking(&mut messages);
-        assert_eq!(messages[0].text(), "hello");
+        assert_eq!(ext::text(&messages[0]), "hello");
     }
 
     #[test]
@@ -176,32 +197,35 @@ mod tests {
         ];
         remove_orphaned_tool_results(&mut messages);
         assert_eq!(messages.len(), 3);
-        assert!(matches!(&messages[1], Message::User { content }
-            if matches!(&content[0], UserContent::ToolResult(r) if r.call == "t1")));
+        assert!(matches!(&messages[1].content[0],
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t1"));
     }
 
     #[test]
     fn collapse_tool_results_budgets_the_tail() {
-        let mut messages = vec![Message::User {
+        let mut messages = vec![Message {
+            role: Role::User,
             content: vec![
-                UserContent::ToolResult(crate::history::ToolResult::text("t1", "bash", "old")),
-                UserContent::ToolResult(crate::history::ToolResult::text("t2", "bash", "new")),
-                UserContent::text("keep me"),
+                ext::tool_result("t1", Some("bash"), "old", false),
+                ext::tool_result("t2", Some("bash"), "new", false),
+                ContentBlock::Text {
+                    text: "keep me".into(),
+                },
             ],
+            display_text: None,
+            kind: animist::history::MessageKind::Turn,
         }];
         // Only "new" fits: the older result collapses.
         assert!(collapse_tool_results(&mut messages, 3));
-        let texts: Vec<String> = match &messages[0] {
-            Message::User { content } => content
-                .iter()
-                .map(|block| match block {
-                    UserContent::ToolResult(r) => r.content[0].to_text(),
-                    UserContent::Text(t) => t.text.clone(),
-                    UserContent::Image(_) => String::new(),
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+        let texts: Vec<String> = messages[0]
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => ext::tool_content_text(content),
+                ContentBlock::Text { text } => text.clone(),
+                _ => String::new(),
+            })
+            .collect();
         assert_eq!(texts, vec![TOOL_RESULT_PLACEHOLDER, "new", "keep me"]);
         // A zero budget collapses what is left, and only then reports no
         // progress on a further pass.
@@ -211,25 +235,26 @@ mod tests {
 
     #[test]
     fn strip_by_ratio_removes_oldest_first() {
-        let mut messages = vec![Message::User {
+        let mut messages = vec![Message {
+            role: Role::User,
             content: vec![
-                UserContent::ToolResult(crate::history::ToolResult::text("t1", "bash", "old1")),
-                UserContent::ToolResult(crate::history::ToolResult::text("t2", "bash", "old2")),
-                UserContent::ToolResult(crate::history::ToolResult::text("t3", "bash", "keep")),
+                ext::tool_result("t1", Some("bash"), "old1", false),
+                ext::tool_result("t2", Some("bash"), "old2", false),
+                ext::tool_result("t3", Some("bash"), "keep", false),
             ],
+            display_text: None,
+            kind: animist::history::MessageKind::Turn,
         }];
         assert_eq!(strip_tool_results_by_ratio(&mut messages, 0.5), 2);
-        let texts: Vec<String> = match &messages[0] {
-            Message::User { content } => content
-                .iter()
-                .map(|block| match block {
-                    UserContent::ToolResult(r) => r.content[0].to_text(),
-                    UserContent::Text(t) => t.text.clone(),
-                    UserContent::Image(_) => String::new(),
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+        let texts: Vec<String> = messages[0]
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => ext::tool_content_text(content),
+                ContentBlock::Text { text } => text.clone(),
+                _ => String::new(),
+            })
+            .collect();
         assert_eq!(texts[0], TOOL_RESULT_PLACEHOLDER);
         assert_eq!(texts[1], TOOL_RESULT_PLACEHOLDER);
         assert_eq!(texts[2], "keep");
@@ -239,10 +264,10 @@ mod tests {
 
     #[test]
     fn truncate_oldest_round_removes_user_and_assistant() {
-        let mut messages = vec![user("first"), Message::assistant("reply"), user("second")];
+        let mut messages = vec![user("first"), ext::assistant_text("reply"), user("second")];
         truncate_oldest_round(&mut messages);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].text(), "second");
+        assert_eq!(ext::text(&messages[0]), "second");
     }
 
     #[test]
@@ -255,7 +280,7 @@ mod tests {
         ];
         truncate_oldest_round(&mut messages);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].text(), "keep me");
+        assert_eq!(ext::text(&messages[0]), "keep me");
     }
 
     #[test]

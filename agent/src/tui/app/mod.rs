@@ -128,9 +128,9 @@ pub struct Images {
     pub states_order: std::collections::VecDeque<String>,
     /// Image attachments staged in the composer (path picks and clipboard
     /// pastes); sent with the next message and cleared on submit.
-    pub attached: Vec<crate::history::ImageBlock>,
+    pub attached: Vec<crate::history::ContentBlock>,
     /// Finished clipboard/file loads awaiting pickup by the render loop.
-    pub loads: Vec<std::sync::mpsc::Receiver<Result<crate::history::ImageBlock, String>>>,
+    pub loads: Vec<std::sync::mpsc::Receiver<Result<crate::history::ContentBlock, String>>>,
 }
 
 pub struct App {
@@ -368,7 +368,7 @@ impl App {
     pub fn start_file_image_paste(
         &mut self,
         path: std::path::PathBuf,
-        media: crate::history::ImageMedia,
+        media: crate::history::ext::ImageMedia,
     ) {
         if !self.model_supports_vision() {
             self.flash("Model does not support image input");
@@ -395,7 +395,7 @@ impl App {
     fn spawn_image_load(
         &mut self,
         flash: String,
-        f: impl FnOnce() -> Result<crate::history::ImageBlock, String> + Send + 'static,
+        f: impl FnOnce() -> Result<crate::history::ContentBlock, String> + Send + 'static,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

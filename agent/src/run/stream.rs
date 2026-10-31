@@ -11,17 +11,17 @@ use std::collections::HashMap;
 use animist::provider::{ExchangeEvent, InferenceExchange, ProviderError, ProviderEvent};
 use animist::provider::{RequestOptions, StopReason, Tool};
 
-use crate::edge;
-use crate::history;
+use crate::history::{ContentBlock, Message};
 use crate::provider::ModelHandle;
+use crate::run::view;
 
 use super::{CancelToken, Event};
 
 /// The aggregated result of one model call.
 #[derive(Debug, Clone)]
 pub struct TurnOutput {
-    pub assistant: history::Message,
-    pub usage: history::Usage,
+    pub assistant: Message,
+    pub usage: crate::usage::TokenUsage,
     /// Why the model stopped, when the provider reported it.
     /// [`StopReason::MaxTokens`] means the reply was truncated at the
     /// output limit; [`StopReason::ContextWindowExceeded`] is converted to
@@ -307,7 +307,7 @@ pub(crate) async fn run_model_stream(
         tools,
         options,
     } = request;
-    edge::assert_replay_valid(&messages, &tools);
+    view::assert_replay_valid(&messages, &tools);
     let model = handle.model.clone();
     let mut exchange = InferenceExchange::new(move |event_tx| {
         let model = model.clone();
@@ -407,22 +407,30 @@ pub(crate) async fn run_model_stream(
             provider_retried: false,
         });
     }
-    let usage = history::Usage {
-        input_tokens: u64::from(response.usage.input + response.usage.cache_read),
-        output_tokens: u64::from(response.usage.output),
-        total_tokens: u64::from(
-            response.usage.input
-                + response.usage.output
-                + response.usage.cache_read
-                + response.usage.cache_creation,
-        ),
-    };
-    let assistant = edge::assistant_from_animist(&response.message, &call_ids);
+    let usage = response.usage;
+    let assistant = assistant_from_response(response.message, &call_ids);
     Ok(TurnOutput {
         assistant,
         usage,
         finish_reason: response.stop_reason,
     })
+}
+
+/// Assemble the stored assistant message for one completed model call.
+/// `call_ids` remaps provider tool-call ids to the run-stable internal ids
+/// minted at call time, so results correlate with whatever id the stream
+/// recorded. The content blocks carry the reply; `display_text` is cleared
+/// so the stored message holds no duplicate of what the blocks already say.
+fn assistant_from_response(mut response: Message, call_ids: &HashMap<String, String>) -> Message {
+    response.display_text = None;
+    for block in &mut response.content {
+        if let ContentBlock::ToolUse { id, .. } = block
+            && let Some(internal) = call_ids.get(id)
+        {
+            *id = internal.clone();
+        }
+    }
+    response
 }
 
 impl StreamFailure {
@@ -644,7 +652,7 @@ mod tests {
             crate::testing::model_info("m", 1000, 100, false, false),
         ));
         let request = ProviderRequest {
-            messages: crate::edge::to_animist(&[crate::history::Message::user("hi")], false),
+            messages: vec![crate::history::ext::user_text("hi")],
             system: String::new(),
             tools: Vec::new(),
             options: RequestOptions::default(),
@@ -654,8 +662,8 @@ mod tests {
         let output = run_model_stream(&handle, request, &cancel, &|_| {})
             .await
             .unwrap();
-        assert_eq!(output.assistant.text(), "hello");
-        assert_eq!(output.usage.total_tokens, 12);
+        assert_eq!(crate::history::ext::text(&output.assistant), "hello");
+        assert_eq!(crate::usage::context_tokens(&output.usage), 12);
         assert_eq!(output.finish_reason, Some(StopReason::EndTurn));
     }
 
@@ -670,7 +678,7 @@ mod tests {
             crate::testing::model_info("m", 1000, 100, false, false),
         ));
         let request = ProviderRequest {
-            messages: crate::edge::to_animist(&[crate::history::Message::user("hi")], false),
+            messages: vec![crate::history::ext::user_text("hi")],
             system: String::new(),
             tools: Vec::new(),
             options: RequestOptions::default(),

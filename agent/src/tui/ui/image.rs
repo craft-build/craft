@@ -187,15 +187,15 @@ pub(crate) fn cell_dims(data_b64: &str, font_w: u16, font_h: u16) -> Option<(u16
 const MAX_IMAGE_PIXELS: usize = 8_000_000;
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
-const IMAGE_EXTENSIONS: &[(&str, crate::history::ImageMedia)] = &[
-    ("png", crate::history::ImageMedia::Png),
-    ("jpg", crate::history::ImageMedia::Jpeg),
-    ("jpeg", crate::history::ImageMedia::Jpeg),
-    ("gif", crate::history::ImageMedia::Gif),
-    ("webp", crate::history::ImageMedia::Webp),
+const IMAGE_EXTENSIONS: &[(&str, crate::history::ext::ImageMedia)] = &[
+    ("png", crate::history::ext::ImageMedia::Png),
+    ("jpg", crate::history::ext::ImageMedia::Jpeg),
+    ("jpeg", crate::history::ext::ImageMedia::Jpeg),
+    ("gif", crate::history::ext::ImageMedia::Gif),
+    ("webp", crate::history::ext::ImageMedia::Webp),
 ];
 
-fn media_type_for(path: &std::path::Path) -> Option<crate::history::ImageMedia> {
+fn media_type_for(path: &std::path::Path) -> Option<crate::history::ext::ImageMedia> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     IMAGE_EXTENSIONS
         .iter()
@@ -207,7 +207,7 @@ fn media_type_for(path: &std::path::Path) -> Option<crate::history::ImageMedia> 
 /// `file://` URI, with an image extension. Anything else is text.
 pub fn try_parse_image_path(
     text: &str,
-) -> Option<(std::path::PathBuf, crate::history::ImageMedia)> {
+) -> Option<(std::path::PathBuf, crate::history::ext::ImageMedia)> {
     let trimmed = text.trim().trim_matches('\'');
     let (path_str, was_file_uri) = match trimmed.strip_prefix("file://") {
         Some(rest) => (rest.replace("\\ ", " "), true),
@@ -238,22 +238,20 @@ fn env_home() -> Option<std::path::PathBuf> {
 /// Read an image file into a base64 attachment block.
 pub fn load_file_image(
     path: &std::path::Path,
-    media_type: crate::history::ImageMedia,
-) -> Result<crate::history::ImageBlock, String> {
+    media_type: crate::history::ext::ImageMedia,
+) -> Result<crate::history::ContentBlock, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err("Image file exceeds 20MB limit".into());
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(crate::history::ImageBlock {
-        media_type,
-        data: b64,
-        caption: format!("[image: {}]", path.display()),
+    Ok(crate::history::ContentBlock::Image {
+        source: crate::history::ext::image_source(media_type, b64),
     })
 }
 
 /// Read the clipboard image (Ctrl+V) into a base64 PNG attachment block.
-pub fn load_clipboard_image() -> Result<crate::history::ImageBlock, String> {
+pub fn load_clipboard_image() -> Result<crate::history::ContentBlock, String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     let img = cb.get_image().map_err(|e| e.to_string())?;
     let pixels = img
@@ -268,10 +266,8 @@ pub fn load_clipboard_image() -> Result<crate::history::ImageBlock, String> {
         return Err("Encoded image exceeds 20MB limit".into());
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-    Ok(crate::history::ImageBlock {
-        media_type: crate::history::ImageMedia::Png,
-        data: b64,
-        caption: "[pasted image]".into(),
+    Ok(crate::history::ContentBlock::Image {
+        source: crate::history::ext::image_source(crate::history::ext::ImageMedia::Png, b64),
     })
 }
 
@@ -302,7 +298,7 @@ mod tests {
     fn parse_image_path_accepts_file_uris_and_absolute_paths() {
         let (p, m) = try_parse_image_path("file:///home/user/photo.png").unwrap();
         assert_eq!(p.to_str().unwrap(), "/home/user/photo.png");
-        assert_eq!(m, crate::history::ImageMedia::Png);
+        assert_eq!(m, crate::history::ext::ImageMedia::Png);
         let (p, _) = try_parse_image_path("  '/home/user/photo.jpg'\n").unwrap();
         assert_eq!(p.to_str().unwrap(), "/home/user/photo.jpg");
     }
@@ -321,7 +317,7 @@ mod tests {
         assert!(
             load_file_image(
                 std::path::Path::new("/nonexistent/image.png"),
-                crate::history::ImageMedia::Png
+                crate::history::ext::ImageMedia::Png
             )
             .is_err()
         );

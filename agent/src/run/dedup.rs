@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::history::{ToolResult, ToolResultContent};
+use animist::history::{ContentBlock, ToolContent, ToolContents};
+
+use crate::history::ext;
 
 const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob", "view_image", "sessions"];
 const WRITE_TOOLS: &[&str] = &[
@@ -103,7 +105,7 @@ fn is_absolute(path: &str) -> bool {
 
 #[derive(Debug, Clone)]
 struct Entry {
-    result: ToolResult,
+    result: ContentBlock,
     /// The argument path, if any, scoping per-path invalidation.
     path: Option<String>,
     /// Canonical `(name, args)` serialization used to verify a hit: a
@@ -153,7 +155,7 @@ impl ToolDedupCache {
         CACHE_CLEARING_TOOLS.contains(&name) || name.contains("__")
     }
 
-    pub fn get(&self, key: u64, name: &str, input: &Value) -> Option<&ToolResult> {
+    pub fn get(&self, key: u64, name: &str, input: &Value) -> Option<&ContentBlock> {
         self.entries
             .get(&key)
             .filter(|e| e.check == canonical_args(name, input))
@@ -167,12 +169,15 @@ impl ToolDedupCache {
     pub fn insert(
         &mut self,
         key: u64,
-        result: &ToolResult,
+        result: &ContentBlock,
         path: Option<&str>,
         name: &str,
         input: &Value,
     ) {
-        if result.is_error {
+        let ContentBlock::ToolResult { is_error, .. } = result else {
+            return;
+        };
+        if *is_error {
             return;
         }
         let entry = Entry {
@@ -229,30 +234,38 @@ impl ToolDedupCache {
 
 /// Adapt a cached result for replay: the same content with the `[cached] `
 /// marker on the leading text block, answering this call's id.
-pub fn cached_result(cached: &ToolResult, call_id: &str) -> ToolResult {
-    let mut content = cached.content.clone();
-    match content.first_mut() {
-        Some(ToolResultContent::Text(text)) => {
-            text.text = format!("{CACHED_PREFIX}{}", text.text);
-        }
-        Some(ToolResultContent::Json { value }) => {
-            let rendered = ToolResultContent::Json {
-                value: value.clone(),
-            }
-            .to_text();
-            content[0] = ToolResultContent::text(format!("{CACHED_PREFIX}{rendered}"));
-        }
-        Some(ToolResultContent::Image(image)) => {
-            image.caption = format!("{CACHED_PREFIX}{}", image.caption);
-        }
-        None => content.push(ToolResultContent::text(CACHED_PREFIX.trim_end())),
-    }
-    ToolResult {
-        call: call_id.to_owned(),
-        name: cached.name.clone(),
+pub fn cached_result(cached: &ContentBlock, call_id: &str) -> ContentBlock {
+    let ContentBlock::ToolResult {
+        name,
         content,
-        is_error: false,
+        is_error,
+        ..
+    } = cached
+    else {
+        unreachable!("cache stores tool-result blocks");
+    };
+    let mut blocks = content.0.clone();
+    match blocks.first_mut() {
+        Some(ToolContent::Text { text }) => {
+            *text = format!("{CACHED_PREFIX}{text}");
+        }
+        // A leading image is never cached (image-bearing results skip the
+        // cache), but keep the prefix visible if one ever arrives.
+        Some(ToolContent::Image { .. }) | None => {
+            blocks.insert(
+                0,
+                ToolContent::Text {
+                    text: CACHED_PREFIX.trim_end().to_owned(),
+                },
+            );
+        }
     }
+    ext::tool_result(
+        call_id,
+        name.as_deref(),
+        ToolContents::from(blocks),
+        *is_error,
+    )
 }
 
 /// The path whose contents a call reads or writes, if its arguments name one.
@@ -461,8 +474,15 @@ fn walk(val: &Value, hasher: &mut std::collections::hash_map::DefaultHasher) {
 mod tests {
     use super::*;
 
-    fn result(text: &str) -> ToolResult {
-        ToolResult::text("c1", "read", text)
+    fn result(text: &str) -> ContentBlock {
+        ext::tool_result("c1", Some("read"), text, false)
+    }
+
+    fn result_text(block: &ContentBlock) -> String {
+        let ContentBlock::ToolResult { content, .. } = block else {
+            panic!("tool result");
+        };
+        ext::tool_content_text(content)
     }
 
     #[test]
@@ -560,9 +580,7 @@ mod tests {
         let key = ToolDedupCache::key("read", &input);
         cache.insert(key, &result("x"), None, "read", &input);
         assert_eq!(
-            cache
-                .get(key, "read", &input)
-                .map(|r| r.content[0].to_text()),
+            cache.get(key, "read", &input).map(result_text),
             Some("x".to_string())
         );
         cache.clear();
@@ -600,8 +618,7 @@ mod tests {
     #[test]
     fn errors_are_never_cached() {
         let mut cache = ToolDedupCache::new();
-        let mut errored = result("boom");
-        errored.is_error = true;
+        let errored = ext::tool_result("c1", Some("read"), "boom", true);
         cache.insert(1, &errored, None, "read", &serde_json::json!({}));
         assert!(cache.get(1, "read", &serde_json::json!({})).is_none());
     }
@@ -762,10 +779,20 @@ mod tests {
     fn cached_result_marks_and_rekeys() {
         let cached = result("1: hello");
         let replay = cached_result(&cached, "call-2");
-        assert_eq!(replay.call, "call-2");
-        assert_eq!(replay.name, "read");
-        assert!(replay.content[0].to_text().starts_with("[cached] 1: hello"));
-        assert_eq!(cached.content[0].to_text(), "1: hello", "source untouched");
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            name,
+            content,
+            ..
+        } = &replay
+        else {
+            panic!("tool result");
+        };
+        assert_eq!(tool_use_id, "call-2");
+        assert_eq!(name.as_deref(), Some("read"));
+        assert!(result_text(&replay).starts_with("[cached] 1: hello"));
+        assert_eq!(result_text(&cached), "1: hello", "source untouched");
+        let _ = content;
     }
 
     #[test]

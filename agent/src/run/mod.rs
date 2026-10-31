@@ -1,14 +1,19 @@
 //! The crate-owned multi-turn agent loop.
 //!
-//! Per turn: build the request through the provider [`crate::edge`], stream
-//! the model call ([`stream`]), dispatch its tool calls ([`dispatch`]), append
-//! the results, and continue while the model emits tool calls — bounded by
+//! Per turn: shape the request view ([`view`]), stream the model call
+//! ([`stream`]), dispatch its tool calls ([`dispatch`]), append the
+//! results, and continue while the model emits tool calls — bounded by
 //! `max_turns`. History is committed to the caller on success; a failed run
 //! commits nothing, while a cancelled run commits a sanitized partial
 //! (dangling tool calls closed, cancel marker appended) so the next prompt
 //! replays cleanly; a run that hits the turn budget
 //! commits its sanitized partial history with an end marker so the next
 //! prompt continues from where the budget ran out.
+//!
+//! The loop and its callers speak `Vec<StoredMessage>`: tags (marker
+//! identity) ride the stored wrapper. Provider calls take plain
+//! `Vec<Message>`, mapped through [`view::request_messages`] at the call
+//! site.
 
 pub mod advisor;
 pub mod cancel;
@@ -18,16 +23,16 @@ pub(crate) mod doom;
 pub mod events;
 pub mod guardrails;
 pub mod mode;
-mod nudge;
+pub(crate) mod nudge;
 mod overflow;
 mod read_lifecycle;
-mod recency;
+pub mod recency;
 mod retry;
 mod stats;
 mod stream;
 mod task_set;
 mod turns;
-mod view;
+pub mod view;
 
 pub use cancel::{CancelFlag, CancelToken, cancel_channel};
 pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
@@ -40,12 +45,11 @@ pub use events::{
 };
 pub use guardrails::{SharedGuardrails, shared_guardrails};
 pub use mode::{AgentMode, PLAN_WRITE_RESTRICTED};
-pub(crate) use overflow::CANCEL_MARKER;
-#[cfg(test)]
-use overflow::END_MARKER;
+pub(crate) use nudge::NUDGE_PROMPT;
+pub(crate) use overflow::{CANCEL_MARKER, END_MARKER};
 use overflow::{
     commit_cancelled, commit_partial, handle_terminal_reply, recover_from_overflow,
-    sanitize_partial, strip_trailing_grace_prompt,
+    sanitize_partial, strip_trailing_markers,
 };
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use retry::RetryCtx;
@@ -55,15 +59,12 @@ use view::compress_request_view;
 
 use std::sync::Arc;
 
+use crate::history::{self, ContentBlock, Message, StoredMessage};
+use crate::history::{ext, marker};
 use crate::provider::ModelHandle;
 
 use crate::compression::CompressionConfig;
 use crate::config::{CompactionBuffer, CompactionConfig};
-use crate::history::{ImageBlock, Message};
-// Module names for the test tree: `run/tests/*` qualifies `history::` and
-// `compression::` through this scope.
-#[cfg(test)]
-use crate::history;
 
 /// How many times a run recovers from a context-overflow stream error by
 /// compacting and retrying before the error is surfaced (reference
@@ -282,7 +283,7 @@ pub async fn run(
     model: &ModelHandle,
     params: &RunParams,
     tools: &ToolDispatch,
-    history: &mut Vec<Message>,
+    history: &mut Vec<StoredMessage>,
     prompt: &str,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
@@ -299,9 +300,9 @@ pub async fn run_with_images(
     model: &ModelHandle,
     params: &RunParams,
     tools: &ToolDispatch,
-    history: &mut Vec<Message>,
+    history: &mut Vec<StoredMessage>,
     prompt: &str,
-    images: &[crate::history::ImageBlock],
+    images: &[ContentBlock],
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> RunOutcome {
@@ -348,17 +349,17 @@ async fn run_inner(
     model: &ModelHandle,
     params: &RunParams,
     tools: &ToolDispatch,
-    history: &mut Vec<Message>,
+    history: &mut Vec<StoredMessage>,
     prompt: &str,
-    images: &[crate::history::ImageBlock],
+    images: &[ContentBlock],
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> (RunOutcome, RunStats) {
-    // A trailing grace prompt from a previous run must not replay as if
-    // the user asked for it, and a failed run must not keep the overflow
-    // recovery's in-place compaction: keep a pristine snapshot and restore
-    // it on failure. The failed turn itself is still committed, though —
-    // tool calls that already ran have real workspace effects, and
+    // Trailing grace/nudge observations from a previous run must not replay
+    // as if the user asked for them, and a failed run must not keep the
+    // overflow recovery's in-place compaction: keep a pristine snapshot and
+    // restore it on failure. The failed turn itself is still committed,
+    // though — tool calls that already ran have real workspace effects, and
     // dropping them desyncs both the model and any resumed session from
     // what actually happened.
     let pristine = history.clone();
@@ -366,13 +367,16 @@ async fn run_inner(
         .compaction
         .as_ref()
         .map(|ctx| ctx.state.lock().ok().and_then(|guard| guard.carry_from()));
-    strip_trailing_grace_prompt(history);
+    strip_trailing_markers(history);
     let (outcome, stats, mut leftover) =
         run_loop(model, params, tools, history, prompt, images, cancel, emit).await;
     if let RunOutcome::Failed(message) = &outcome {
         *history = pristine;
         sanitize_partial(&mut leftover);
-        leftover.push(Message::user(format!("[Run failed: {message}]")));
+        leftover.push(marker::observation(
+            marker::FAILED,
+            format!("[Run failed: {message}]"),
+        ));
         history.append(&mut leftover);
         if let (Some(ctx), Some(anchor)) = (&params.compaction, carry_anchor)
             && let Ok(mut guard) = ctx.state.lock()
@@ -388,17 +392,17 @@ async fn run_inner(
 
 /// The turn's first user message: the prompt text, with any composer image
 /// attachments as trailing vision blocks (F.6).
-pub(crate) fn prompt_message(prompt: &str, images: &[ImageBlock]) -> Message {
-    if images.is_empty() {
-        return Message::user(prompt);
-    }
-    let mut content = vec![crate::history::UserContent::text(prompt)];
-    content.extend(
-        images
-            .iter()
-            .map(|image| crate::history::UserContent::Image(image.clone())),
-    );
-    Message::User { content }
+pub(crate) fn prompt_message(prompt: &str, images: &[ContentBlock]) -> StoredMessage {
+    let mut content = vec![history::ContentBlock::Text {
+        text: prompt.to_owned(),
+    }];
+    content.extend(images.iter().cloned());
+    ext::stored(Message {
+        role: history::Role::User,
+        content,
+        display_text: None,
+        kind: history::MessageKind::Turn,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -406,12 +410,12 @@ async fn run_loop(
     model: &ModelHandle,
     params: &RunParams,
     tools: &ToolDispatch,
-    history: &mut Vec<Message>,
+    history: &mut Vec<StoredMessage>,
     prompt: &str,
-    images: &[crate::history::ImageBlock],
+    images: &[ContentBlock],
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
-) -> (RunOutcome, RunStats, Vec<Message>) {
+) -> (RunOutcome, RunStats, Vec<StoredMessage>) {
     let definitions = tools.definitions();
     // Request overhead (preamble + tool schemas) is fixed per run: compute
     // once, publish to the shared compaction state (so in-run overflow
@@ -479,7 +483,7 @@ async fn run_loop(
             emit(Event::StagnationDetected {
                 similarity: doom.score() as f32 / doom::HARD_STOP_THRESHOLD as f32,
             });
-            turn.push(Message::user(doom::GRACE_CALL_PROMPT));
+            turn.push(marker::observation(marker::GRACE, doom::GRACE_CALL_PROMPT));
             continue;
         }
         let mut full = history.clone();
@@ -490,22 +494,33 @@ async fn run_loop(
         {
             full = with_tail;
         }
+        // The request view: stored messages mapped to wire messages. The
+        // rewrites below (recency already applied, then read lifecycle and
+        // compression) touch this copy only, never history or the turn;
+        // protocol shaping follows them, so a stale-marked result is
+        // replaced before its images could be relocated out of it.
+        let target = refreshed_model.as_ref().unwrap_or(model);
+        let mut request = view::plain_messages(&full);
         let write_root = tools
             .write_root()
             .map(|root| root.to_string_lossy().into_owned());
         read_lifecycle::apply_to_request(
-            &mut full,
+            &mut request,
             tools.compression_store(),
             write_root.as_deref(),
         );
-        compress_request_view(&mut full, &params.compression);
-        let prompt_tokens = crate::compaction::estimate_tokens(&full)
+        compress_request_view(&mut request, &params.compression);
+        // Both gauges measure the rewritten view before protocol shaping,
+        // the way the estimator always has: what the rewrites kept, not how
+        // the adapter grouped it.
+        let context_estimate = crate::compaction::estimate::estimate_messages(&request);
+        let request = view::shape_messages(request, target.relocates_tool_images());
+        let prompt_tokens = context_estimate
             .saturating_add(overhead.tokens())
             .max(measured_prompt_tokens);
         let window = params.compaction.as_ref().and_then(|c| c.context_length);
-        let target = refreshed_model.as_ref().unwrap_or(model);
         let request = stream::ProviderRequest {
-            messages: crate::edge::to_animist(&full, target.relocates_tool_images()),
+            messages: request,
             system: params.preamble.clone().unwrap_or_default(),
             tools: definitions.clone(),
             options: stream::request_options(
@@ -556,6 +571,7 @@ async fn run_loop(
                     &mut overflow_recoveries,
                     &mut reauth_attempts,
                     &mut measured_prompt_tokens,
+                    context_estimate,
                 )
                 .await
                 {
@@ -621,32 +637,26 @@ mod run_tests;
 #[cfg(test)]
 mod tests {
     use super::prompt_message;
-    use crate::history::{ImageBlock, ImageMedia, Message, UserContent};
+    use crate::history::ContentBlock;
+    use crate::history::ext::{self, ImageMedia};
 
     #[test]
     fn prompt_message_is_plain_text_without_attachments() {
         let msg = prompt_message("hello", &[]);
-        assert_eq!(msg.text(), "hello");
+        assert_eq!(ext::message_text(&msg), "hello");
     }
 
     #[test]
     fn prompt_message_carries_image_attachments() {
-        let images = vec![ImageBlock {
-            media_type: ImageMedia::Png,
-            data: "aGk=".into(),
-            caption: "[image]".into(),
+        let images = vec![ContentBlock::Image {
+            source: ext::image_source(ImageMedia::Png, "aGk="),
         }];
         let msg = prompt_message("look", &images);
-        let UserContent::Image(block) = &msg_user_content(&msg)[1] else {
-            panic!("image attachment");
-        };
-        assert_eq!(block.data, "aGk=");
-    }
-
-    fn msg_user_content(msg: &Message) -> &Vec<UserContent> {
-        match msg {
-            Message::User { content } => content,
-            _ => panic!("user message"),
-        }
+        assert!(matches!(
+            &msg.message().content[1],
+            ContentBlock::Image {
+                source: crate::history::ImageSource::Base64 { data, .. },
+            } if data == "aGk="
+        ));
     }
 }

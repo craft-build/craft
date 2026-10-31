@@ -11,7 +11,7 @@
 use crate::provider::ModelHandle;
 use snafu::ResultExt;
 
-use crate::history::{AssistantContent, Message, ToolResultContent, UserContent};
+use crate::history::{Message, Role, StoredMessage, ext};
 use crate::prompt::{COMPACTION_SYSTEM, COMPACTION_TARGETED_USER, COMPACTION_USER};
 
 use super::estimate::estimate_tokens;
@@ -43,7 +43,7 @@ pub type RelevanceScores<'a> = &'a [(usize, f32)];
 /// `token_limit`.
 pub async fn llm_compact(
     model: &ModelHandle,
-    history: &mut Vec<Message>,
+    history: &mut Vec<StoredMessage>,
     token_limit: u64,
     carry_len: usize,
     relevance_scores: Option<RelevanceScores<'_>>,
@@ -88,45 +88,42 @@ fn build_compaction_user_message(relevance_scores: Option<RelevanceScores<'_>>) 
             let prompt = COMPACTION_TARGETED_USER
                 .replace("{topics}", &top_topics.join(", "))
                 .replace("{intent_summary}", "see most recent messages");
-            return Message::user(prompt);
+            return ext::user_text(prompt);
         }
     }
-    Message::user(COMPACTION_USER.to_string())
+    ext::user_text(COMPACTION_USER.to_string())
 }
 
 /// Extract text from a history message for the static fallback summary.
-fn message_text(message: &Message) -> Option<String> {
-    match message {
-        Message::System { content } => Some(content.clone()),
-        Message::User { content } => {
-            let parts: Vec<_> = content
+fn message_text(stored: &StoredMessage) -> Option<String> {
+    let message = stored.message();
+    match message.role {
+        Role::System => Some(ext::text(message)),
+        Role::User => {
+            let parts: Vec<_> = message
+                .content
                 .iter()
                 .map(|block| match block {
-                    UserContent::Text(text) => text.text.clone(),
-                    UserContent::Image(image) => image.caption.clone(),
-                    UserContent::ToolResult(result) => {
-                        let output = result
-                            .content
-                            .iter()
-                            .map(ToolResultContent::to_text)
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!("tool result: {output}")
+                    crate::history::ContentBlock::Text { text } => text.clone(),
+                    crate::history::ContentBlock::Image { .. } => "[image]".to_owned(),
+                    crate::history::ContentBlock::ToolResult { content, .. } => {
+                        format!("tool result: {}", ext::tool_content_text(content))
                     }
+                    _ => String::new(),
                 })
                 .collect();
             Some(parts.join("\n"))
         }
-        Message::Assistant { content } => {
-            let parts: Vec<_> = content
+        Role::Assistant => {
+            let parts: Vec<_> = message
+                .content
                 .iter()
                 .map(|block| match block {
-                    AssistantContent::Text(text) => text.text.clone(),
-                    AssistantContent::ToolCall(call) => format!(
-                        "tool call: {} {}",
-                        call.function.name, call.function.arguments
-                    ),
-                    AssistantContent::Reasoning(_) => String::new(),
+                    crate::history::ContentBlock::Text { text } => text.clone(),
+                    crate::history::ContentBlock::ToolUse { name, input, .. } => {
+                        format!("tool call: {name} {input}")
+                    }
+                    _ => String::new(),
                 })
                 .collect();
             Some(parts.join("\n"))
@@ -185,10 +182,11 @@ fn is_context_overflow(error: &crate::error::Error) -> bool {
 /// ladder is exhausted does the caller's static fallback apply.
 async fn summarize(
     model: &ModelHandle,
-    head: &[Message],
+    head: &[StoredMessage],
     relevance_scores: Option<RelevanceScores<'_>>,
 ) -> Result<String> {
-    let mut request_messages = head.to_vec();
+    let mut request_messages: Vec<Message> =
+        head.iter().map(StoredMessage::message).cloned().collect();
     strip_thinking(&mut request_messages);
     remove_orphaned_tool_results(&mut request_messages);
     collapse_tool_results(&mut request_messages, super::RECENT_TOOL_RESULT_BUDGET);
@@ -228,25 +226,24 @@ async fn summarize(
     }
 }
 
-fn summary_message(summary: String) -> Message {
-    Message::Assistant {
-        content: vec![AssistantContent::text(format!(
-            "{LLM_SUMMARY_PREFIX}\n\n{summary}"
-        ))],
-    }
+fn summary_message(summary: String) -> StoredMessage {
+    ext::stored(ext::assistant_text(format!(
+        "{LLM_SUMMARY_PREFIX}\n\n{summary}"
+    )))
 }
 
 /// Deterministic fallback when the summarization call fails: a terse digest
 /// of user prompts and assistant text in the head.
-pub(crate) fn build_static_summary(head: &[Message]) -> String {
+pub(crate) fn build_static_summary(head: &[StoredMessage]) -> String {
     let mut lines = Vec::new();
-    for message in head {
-        let role = match message {
-            Message::User { .. } => "user",
-            Message::Assistant { .. } => "assistant",
-            Message::System { .. } => continue,
+    for stored in head {
+        let message = stored.message();
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::System => continue,
         };
-        let Some(text) = message_text(message) else {
+        let Some(text) = message_text(stored) else {
             continue;
         };
         let trimmed = text.trim();
@@ -262,34 +259,34 @@ pub(crate) fn build_static_summary(head: &[Message]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::test_support::{assistant_tool, tool_result_of};
+    use crate::compaction::test_support::{
+        stored_assistant_text, stored_assistant_tool, stored_tool_result_of, stored_user,
+    };
 
     const OVERFLOW: &str = "prompt is too long";
 
-    fn user(text: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::text(text)],
-        }
+    fn user(text: &str) -> StoredMessage {
+        stored_user(text)
     }
 
-    fn history() -> Vec<Message> {
+    fn history() -> Vec<StoredMessage> {
         let mut messages = Vec::new();
         for i in 0..6 {
             messages.push(user(&format!(
                 "task {i}: please do the thing carefully {i}"
             )));
-            messages.push(Message::assistant(format!("working on task {i}")));
+            messages.push(stored_assistant_text(&format!("working on task {i}")));
         }
         messages
     }
 
     /// History with tool rounds, so the overflow ladder has tool results to
     /// prune.
-    fn tool_history() -> Vec<Message> {
+    fn tool_history() -> Vec<StoredMessage> {
         let mut messages = vec![user("request")];
         for i in 0..4 {
-            messages.push(assistant_tool(&format!("t{i}"), "bash"));
-            messages.push(tool_result_of(&format!("t{i}"), &"x".repeat(500)));
+            messages.push(stored_assistant_tool(&format!("t{i}"), "bash"));
+            messages.push(stored_tool_result_of(&format!("t{i}"), &"x".repeat(500)));
         }
         messages.push(user("prompt"));
         messages
@@ -322,26 +319,21 @@ mod tests {
     /// Model-visible text of one user message (text blocks plus tool
     /// result text), for asserting what the summarizer was sent.
     fn message_text(message: &Message) -> String {
-        match message {
-            Message::User { content } => content
-                .iter()
-                .map(|block| match block {
-                    crate::history::UserContent::Text(text) => text.text.clone(),
-                    crate::history::UserContent::ToolResult(result) => result
-                        .content
-                        .iter()
-                        .map(|item| match item {
-                            crate::history::ToolResultContent::Text(text) => text.text.clone(),
-                            _ => String::new(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    _ => String::new(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            other => other.text(),
+        if !crate::history::ext::is_user(message) {
+            return crate::history::ext::text(message);
         }
+        message
+            .content
+            .iter()
+            .map(|block| match block {
+                crate::history::ContentBlock::Text { text } => text.clone(),
+                crate::history::ContentBlock::ToolResult { content, .. } => {
+                    crate::history::ext::tool_content_text(content)
+                }
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn request_texts(provider: &crate::testing::ScriptedProvider) -> Vec<String> {
@@ -349,7 +341,8 @@ mod tests {
             .requests()
             .iter()
             .map(|request| {
-                crate::testing::replay_history(&request.messages)
+                request
+                    .messages
                     .iter()
                     .map(message_text)
                     .collect::<Vec<_>>()
@@ -366,20 +359,17 @@ mod tests {
             .await
             .unwrap();
         assert!(under);
-        assert!(matches!(&messages[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains(LLM_SUMMARY_PREFIX)
-                    && t.text.contains("condensed summary"))));
+        let summary = ext::message_text(&messages[0]);
+        assert!(summary.contains(LLM_SUMMARY_PREFIX));
+        assert!(summary.contains("condensed summary"));
         assert!(messages.len() > 1, "tail must be preserved");
         assert_eq!(provider.requests().len(), 1);
         let request = &provider.requests()[0];
         // The preamble travels as the request's preamble field.
         assert_eq!(request.system, COMPACTION_SYSTEM);
         assert_eq!(
-            crate::testing::replay_history(&request.messages)
-                .last()
-                .map(|message| message.text()),
-            Some(COMPACTION_USER.to_owned())
+            request.messages.last().map(ext::text).as_deref(),
+            Some(COMPACTION_USER)
         );
     }
 
@@ -391,9 +381,7 @@ mod tests {
             .await
             .unwrap();
         assert!(under);
-        assert!(matches!(&messages[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains("task 0"))));
+        assert!(ext::message_text(&messages[0]).contains("task 0"));
     }
 
     #[test]
@@ -452,7 +440,7 @@ mod tests {
         assert!(!requests[1].contains("xxxx"));
         // Attempt 3 dropped the oldest round entirely.
         assert!(!requests[2].contains("tool result: [tool result]"));
-        assert!(messages[0].text().contains("made it"));
+        assert!(ext::message_text(&messages[0]).contains("made it"));
     }
 
     #[tokio::test]
@@ -469,9 +457,7 @@ mod tests {
         // leaving a single message), then 4 ratio no-ops, then the failure.
         assert_eq!(provider.requests().len(), 7);
         assert!(
-            matches!(&messages[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains("user"))),
+            ext::message_text(&messages[0]).contains("user"),
             "static fallback summarizes the head"
         );
     }
@@ -484,9 +470,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(provider.requests().len(), 1, "only errors are not retried");
-        assert!(matches!(&messages[0], Message::Assistant { content, .. }
-            if matches!(&content[0], AssistantContent::Text(t)
-                if t.text.contains("user"))));
+        assert!(ext::message_text(&messages[0]).contains("user"));
     }
 
     /// Provider overflow messages ported verbatim from Craft's error-classifier

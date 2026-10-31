@@ -1011,10 +1011,12 @@ fn paste_of_image_path_attaches_image() {
         app.poll_image_loads();
     }
     assert_eq!(app.images.attached.len(), 1);
-    assert_eq!(
-        app.images.attached[0].media_type,
-        crate::history::ImageMedia::Png
-    );
+    assert!(matches!(
+        &app.images.attached[0],
+        crate::history::ContentBlock::Image {
+            source: crate::history::ImageSource::Base64 { media_type, .. },
+        } if media_type == "image/png"
+    ));
 
     // Plain text pastes are unaffected.
     app.insert_paste("just words");

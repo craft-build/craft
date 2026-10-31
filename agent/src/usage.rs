@@ -24,123 +24,106 @@ const PER_MILLION: f64 = 1_000_000.0;
 /// Multiplier of a provider that bills the same rate around the clock.
 pub(crate) const FLAT_RATE: f64 = 1.0;
 
-/// Token usage reported by the provider for one model call.
-///
-/// Cache fields stay in the accounting even though the Rig seam reads 0
-/// for them, so the math is right the day they arrive.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    /// Non-cached input tokens. Total input = `input + cache_read + cache_creation`.
-    #[serde(rename = "input_tokens")]
-    pub input: u32,
-    #[serde(rename = "output_tokens")]
-    pub output: u32,
-    #[serde(rename = "cache_creation_input_tokens")]
-    pub cache_creation: u32,
-    #[serde(rename = "cache_read_input_tokens")]
-    pub cache_read: u32,
+/// Token usage reported by the provider for one model call: animist's
+/// counters, re-exported so every surface reads one type. Pricing stays
+/// here because animist 0.7.0 leaves `cost` unset (followup F08 is open).
+pub use animist::provider::TokenUsage;
+
+/// Whether every counter is zero.
+pub fn is_zero(usage: &TokenUsage) -> bool {
+    usage.input == 0 && usage.output == 0 && usage.cache_creation == 0 && usage.cache_read == 0
 }
 
-impl From<&crate::history::Usage> for TokenUsage {
-    /// Convert the Rig-reported counters. Rig exposes no cache-token fields,
-    /// so those stay zero until the SSE layer grows them.
-    fn from(u: &crate::history::Usage) -> Self {
-        Self {
-            input: u32::try_from(u.input_tokens).unwrap_or(u32::MAX),
-            output: u32::try_from(u.output_tokens).unwrap_or(u32::MAX),
-            cache_creation: 0,
-            cache_read: 0,
-        }
-    }
+/// Fold a later report into a running total.
+pub fn accumulate(total: &mut TokenUsage, other: &TokenUsage) {
+    total.input = total.input.saturating_add(other.input);
+    total.output = total.output.saturating_add(other.output);
+    total.cache_creation = total.cache_creation.saturating_add(other.cache_creation);
+    total.cache_read = total.cache_read.saturating_add(other.cache_read);
 }
 
-impl AddAssign for TokenUsage {
-    fn add_assign(&mut self, rhs: Self) {
-        self.input = self.input.saturating_add(rhs.input);
-        self.output = self.output.saturating_add(rhs.output);
-        self.cache_creation = self.cache_creation.saturating_add(rhs.cache_creation);
-        self.cache_read = self.cache_read.saturating_add(rhs.cache_read);
+/// Ready to store, with what the turn was billed. Not a `From<TokenUsage>`
+/// on purpose: a caller that forgets the cost quietly loses money from
+/// the session total.
+pub fn billed(usage: &TokenUsage, cost: Option<f64>) -> StoredTokenUsage {
+    StoredTokenUsage {
+        input: usage.input,
+        output: usage.output,
+        cache_creation: usage.cache_creation,
+        cache_read: usage.cache_read,
+        cost,
     }
 }
 
-impl TokenUsage {
-    /// Ready to store, with what the turn was billed. No `From<TokenUsage>`
-    /// on purpose: a caller that forgets the cost quietly loses money from
-    /// the session total.
-    pub fn billed(&self, cost: Option<f64>) -> StoredTokenUsage {
-        StoredTokenUsage {
-            input: self.input,
-            output: self.output,
-            cache_creation: self.cache_creation,
-            cache_read: self.cache_read,
-            cost,
-        }
-    }
+pub fn total_input(usage: &TokenUsage) -> u32 {
+    usage
+        .input
+        .saturating_add(usage.cache_read)
+        .saturating_add(usage.cache_creation)
+}
 
-    pub fn total_input(&self) -> u32 {
-        self.input
-            .saturating_add(self.cache_read)
-            .saturating_add(self.cache_creation)
-    }
+pub fn context_tokens(usage: &TokenUsage) -> u32 {
+    total_input(usage).saturating_add(usage.output)
+}
 
-    pub fn context_tokens(&self) -> u32 {
-        self.total_input().saturating_add(self.output)
-    }
+pub fn format(usage: &TokenUsage, cost: Option<f64>) -> String {
+    format_cost(usage, cost, "")
+}
 
-    pub fn format(&self, cost: Option<f64>) -> String {
-        self.format_cost(cost, "")
-    }
+/// Like [`format`], but marks the cost as a running total.
+pub fn format_sum_cost(usage: &TokenUsage, cost: Option<f64>) -> String {
+    format_cost(usage, cost, "Σ")
+}
 
-    /// Like [`format`](Self::format), but marks the cost as a running total.
-    pub fn format_sum_cost(&self, cost: Option<f64>) -> String {
-        self.format_cost(cost, "Σ")
+fn format_cost(usage: &TokenUsage, cost: Option<f64>, prefix: &str) -> String {
+    let tokens = format!(
+        "{}\u{2191} {}\u{2193}",
+        format_tokens(total_input(usage)),
+        format_tokens(usage.output)
+    );
+    match cost {
+        Some(cost) => format!("{tokens} {prefix}${cost:.3}"),
+        None => tokens,
     }
+}
 
-    fn format_cost(&self, cost: Option<f64>, prefix: &str) -> String {
-        let tokens = format!(
-            "{}\u{2191} {}\u{2193}",
-            format_tokens(self.total_input()),
-            format_tokens(self.output)
-        );
-        match cost {
-            Some(cost) => format!("{tokens} {prefix}${cost:.3}"),
-            None => tokens,
-        }
-    }
-
-    /// Crate-private on purpose: pricing outside a priced model skips the
-    /// provider's schedule.
-    pub(crate) fn cost(&self, pricing: &ModelPricing, fast: bool) -> f64 {
-        let (input, output, cache_write, cache_read) = match &pricing.fast {
-            Some(f) if fast => (
-                f.input,
-                f.output,
-                f.input * ModelPricing::CACHE_WRITE_MULTIPLIER,
-                f.input * ModelPricing::CACHE_READ_MULTIPLIER,
-            ),
-            _ => (
-                pricing.input,
-                pricing.output,
-                pricing.cache_write,
-                pricing.cache_read,
-            ),
-        };
-        self.input as f64 * input / PER_MILLION
-            + self.output as f64 * output / PER_MILLION
-            + self.cache_creation as f64 * cache_write / PER_MILLION
-            + self.cache_read as f64 * cache_read / PER_MILLION
-    }
+/// Crate-private on purpose: pricing outside a priced model skips the
+/// provider's schedule.
+pub(crate) fn cost(usage: &TokenUsage, pricing: &ModelPricing, fast: bool) -> f64 {
+    let (input, output, cache_write, cache_read) = match &pricing.fast {
+        Some(f) if fast => (
+            f.input,
+            f.output,
+            f.input * ModelPricing::CACHE_WRITE_MULTIPLIER,
+            f.input * ModelPricing::CACHE_READ_MULTIPLIER,
+        ),
+        _ => (
+            pricing.input,
+            pricing.output,
+            pricing.cache_write,
+            pricing.cache_read,
+        ),
+    };
+    usage.input as f64 * input / PER_MILLION
+        + usage.output as f64 * output / PER_MILLION
+        + usage.cache_creation as f64 * cache_write / PER_MILLION
+        + usage.cache_read as f64 * cache_read / PER_MILLION
 }
 
 /// A [`TokenUsage`] plus what it was billed, ready for the session ledger.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StoredTokenUsage {
+    #[serde(default)]
     pub input: u32,
+    #[serde(default)]
     pub output: u32,
+    #[serde(default)]
     pub cache_creation: u32,
+    #[serde(default)]
     pub cache_read: u32,
     /// What the turns that made up this entry actually paid, when they
     /// recorded it. `None` means the entry holds legacy counters only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
 }
 
@@ -151,19 +134,38 @@ impl From<StoredTokenUsage> for TokenUsage {
             output: s.output,
             cache_creation: s.cache_creation,
             cache_read: s.cache_read,
+            cost: None,
         }
+    }
+}
+
+impl StoredTokenUsage {
+    pub fn total_input(&self) -> u32 {
+        self.input
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_creation)
+    }
+
+    pub fn total(&self) -> u32 {
+        self.total_input().saturating_add(self.output)
     }
 }
 
 impl AddAssign for StoredTokenUsage {
     fn add_assign(&mut self, rhs: Self) {
-        let cost = match (self.cost, rhs.cost) {
-            (Some(a), Some(b)) => Some(a + b),
-            (cost, None) | (None, cost) => cost,
-        };
+        let cost = add_cost_opt(self.cost, rhs.cost);
         let mut tokens = TokenUsage::from(*self);
-        tokens += TokenUsage::from(rhs);
-        *self = tokens.billed(cost);
+        accumulate(&mut tokens, &TokenUsage::from(rhs));
+        *self = billed(&tokens, cost);
+    }
+}
+
+/// The one way costs are summed, so every running total agrees: `None` until
+/// the first priced turn shows up, and from there it only grows.
+pub fn add_cost_opt(total: Option<f64>, addend: Option<f64>) -> Option<f64> {
+    match (total, addend) {
+        (Some(a), Some(b)) => Some(a + b),
+        (cost, None) | (None, cost) => cost,
     }
 }
 
@@ -347,7 +349,7 @@ impl PricedModel {
     /// running.
     pub fn list_cost(&self, usage: &TokenUsage, fast: bool) -> Option<f64> {
         let fast = fast && self.pricing.fast.is_some();
-        (!self.pricing.is_zero()).then(|| usage.cost(&self.pricing, fast))
+        (!self.pricing.is_zero()).then(|| cost(usage, &self.pricing, fast))
     }
 
     /// What the provider charges right now, so it is only ever correct for a
@@ -585,8 +587,8 @@ pub fn settle_session(
     current_spec: &str,
     fast: bool,
 ) -> Option<f64> {
-    if by_model.is_empty() && *total != TokenUsage::default() {
-        by_model.insert(current_spec.to_owned(), total.billed(None));
+    if by_model.is_empty() && !is_zero(total) {
+        by_model.insert(current_spec.to_owned(), billed(total, None));
     }
     for (spec, usage) in by_model.iter_mut() {
         usage.cost = model_cost(spec, usage, current_spec, fast);
@@ -645,6 +647,7 @@ mod tests {
         output: 22,
         cache_creation: 33,
         cache_read: 44,
+        cost: None,
     };
 
     fn utc(day: i64, hour: i64, minute: i64, second: i64) -> Timestamp {
@@ -728,11 +731,11 @@ mod tests {
         assert_eq!(format_tokens(tokens), expected);
     }
 
-    #[test_case(TokenUsage { input: 12_000, output: 456, cache_creation: 200, cache_read: 100 }, None, "12.3k\u{2191} 456\u{2193}" ; "without_cost")]
-    #[test_case(TokenUsage { input: 1_000_000, output: 100_000, cache_creation: 200_000, cache_read: 500_000 }, Some(5.4), "1.7m\u{2191} 100.0k\u{2193} $5.400" ; "with_cost")]
-    #[test_case(TokenUsage { input: u32::MAX, output: 1, cache_creation: 1, cache_read: 1 }, None, "4295.0m\u{2191} 1\u{2193}" ; "input_saturates")]
+    #[test_case(TokenUsage { input: 12_000, output: 456, cache_creation: 200, cache_read: 100, cost: None }, None, "12.3k\u{2191} 456\u{2193}" ; "without_cost")]
+    #[test_case(TokenUsage { input: 1_000_000, output: 100_000, cache_creation: 200_000, cache_read: 500_000, cost: None }, Some(5.4), "1.7m\u{2191} 100.0k\u{2193} $5.400" ; "with_cost")]
+    #[test_case(TokenUsage { input: u32::MAX, output: 1, cache_creation: 1, cache_read: 1, cost: None }, None, "4295.0m\u{2191} 1\u{2193}" ; "input_saturates")]
     fn usage_formatting(usage: TokenUsage, cost: Option<f64>, expected: &str) {
-        assert_eq!(usage.format(cost), expected);
+        assert_eq!(format(&usage, cost), expected);
     }
 
     #[test]
@@ -742,6 +745,7 @@ mod tests {
             output: MILLION,
             cache_creation: MILLION,
             cache_read: MILLION,
+            cost: None,
         };
         let pricing = ModelPricing {
             input: 1.0,
@@ -750,7 +754,7 @@ mod tests {
             cache_read: 0.1,
             fast: None,
         };
-        assert_eq!(usage.cost(&pricing, false), 1.0 + 10.0 + 1.25 + 0.1);
+        assert_eq!(cost(&usage, &pricing, false), 1.0 + 10.0 + 1.25 + 0.1);
     }
 
     #[test_case(false ; "standard_rates")]
@@ -771,6 +775,7 @@ mod tests {
             output: MILLION,
             cache_creation: MILLION,
             cache_read: MILLION,
+            cost: None,
         };
         // Cache rates under fast mode derive from the fast input rate.
         let expected = if fast {
@@ -778,12 +783,12 @@ mod tests {
         } else {
             1.0 + 2.0
         };
-        assert_eq!(usage.cost(&pricing, fast), expected);
+        assert_eq!(cost(&usage, &pricing, fast), expected);
     }
 
     #[test]
     fn billed_keeps_counters_and_add_saturates() {
-        let stored = COUNTERS.billed(Some(0.25));
+        let stored = billed(&COUNTERS, Some(0.25));
         assert_eq!(
             stored,
             StoredTokenUsage {
@@ -798,7 +803,7 @@ mod tests {
             input: u32::MAX,
             ..Default::default()
         };
-        sum += COUNTERS;
+        accumulate(&mut sum, &COUNTERS);
         assert_eq!(sum.input, u32::MAX);
         assert_eq!(sum.output, COUNTERS.output);
     }
@@ -976,24 +981,6 @@ mod tests {
         } else {
             assert_eq!(fast, standard);
         }
-    }
-
-    #[test]
-    fn rig_usage_converts_with_zero_cache_counters() {
-        let rig = crate::history::Usage {
-            input_tokens: 1_500,
-            output_tokens: 300,
-            total_tokens: 1_800,
-        };
-        assert_eq!(
-            TokenUsage::from(&rig),
-            TokenUsage {
-                input: 1_500,
-                output: 300,
-                cache_creation: 0,
-                cache_read: 0,
-            }
-        );
     }
 
     #[test]

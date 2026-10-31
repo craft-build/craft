@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::history::{self, Message};
+use crate::history::{self, ContentBlock, StoredMessage, ext};
 use crate::id::SessionRef;
 use crate::permissions::{
     PermissionCheck, PermissionError, PermissionManager, ToolKey, scope_for_call,
@@ -27,14 +27,14 @@ use crate::provider::ModelHandle;
 use crate::run::dispatch::BeforeExecute;
 use crate::run::events::{SessionEvents, event_stream};
 use crate::run::{Event, RunParams, cancel_channel};
-use crate::storage::sessions::{self, SessionError, StoredTokenUsage};
+use crate::storage::sessions::SessionError;
 use crate::storage::stats::{self, CostLedger, CostUsage};
 use crate::storage::{StateDir, StorageError};
 use crate::tools::Workspace;
 
 /// The persisted shape of a live session: our own message/usage/tool-result
 /// domain types.
-pub type StoredSession = sessions::Session<Message, StoredTokenUsage, history::ToolResult>;
+pub use crate::storage::sessions::StoredSession;
 
 /// The shortest gap between two writes that carry only soft session state
 /// (the composer draft). Ported from the reference `SOFT_SAVE_DELAY`.
@@ -150,14 +150,15 @@ impl SessionStore {
     /// The loaded session's persisted messages, so a resumed run seeds its
     /// history from the store instead of starting empty — the first save
     /// would otherwise wipe every prior turn.
-    pub fn messages(&self) -> &[Message] {
+    pub fn messages(&self) -> &[animist::history::HistoryEntry] {
         self.session.messages()
     }
 
     /// Persist the post-turn history and the model that served it, deriving
     /// the title from the first user message when it is still the default.
-    pub fn record_turn(&mut self, messages: &[Message], model_spec: String) {
-        self.session.replace_messages(messages.to_vec());
+    pub fn record_turn(&mut self, messages: &[StoredMessage], model_spec: String) {
+        self.session
+            .replace_messages(crate::history::ext::entries(messages.to_vec()));
         self.session.set_model(model_spec);
         self.session.update_title_if_default();
         self.save();
@@ -204,7 +205,7 @@ impl SessionStore {
             return;
         }
         for (spec, usage) in by_model {
-            let stored = sessions::StoredTokenUsage::from(*usage);
+            let stored = *usage;
             self.session.add_model_usage(spec, stored);
             if let Some(ledger) = &self.ledger {
                 let (provider, model) = spec.split_once('/').unwrap_or(("", spec.as_str()));
@@ -253,7 +254,7 @@ impl HeadlessGate {
 }
 
 impl BeforeExecute for HeadlessGate {
-    fn decide(&self, call: history::ToolCall) -> crate::run::BoxFuture<crate::run::Decision> {
+    fn decide(&self, call: ContentBlock) -> crate::run::BoxFuture<crate::run::Decision> {
         let gate = Self {
             permissions: Arc::clone(&self.permissions),
             reviewer: self.reviewer.clone(),
@@ -280,14 +281,22 @@ fn headless_deny_message(tool: &ToolKey, scopes: &[String]) -> String {
     .to_string()
 }
 
-async fn gate_decide(gate: HeadlessGate, call: history::ToolCall) -> crate::run::Decision {
+async fn gate_decide(gate: HeadlessGate, call: ContentBlock) -> crate::run::Decision {
+    let history::ContentBlock::ToolUse {
+        name,
+        input: arguments,
+        ..
+    } = call
+    else {
+        return crate::run::Decision::Skip("not a tool call".into());
+    };
     let HeadlessGate {
         permissions,
         reviewer,
     } = gate;
-    let name = call.function.name.as_str();
+    let name = name.as_str();
     let tool = ToolKey::parse(name);
-    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &call.function.arguments);
+    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &arguments);
     match permissions.check_multi(&tool, &scopes, force_prompt) {
         PermissionCheck::Allowed => crate::run::Decision::Run,
         PermissionCheck::Denied => crate::run::Decision::Skip(denied_message(&tool, &scopes)),
@@ -363,7 +372,7 @@ pub struct HeadlessParams {
     pub before: Option<Arc<dyn BeforeExecute>>,
     pub prompt: String,
     /// Vision attachments staged on the prompt message (`-p --image`).
-    pub images: Vec<crate::history::ImageBlock>,
+    pub images: Vec<ContentBlock>,
     pub initial_wd: PathBuf,
     /// Where the session is persisted; `None` disables persistence.
     pub state_dir: Option<StateDir>,
@@ -419,7 +428,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         // starts empty (H.9: `record_turn` persists old + new alike).
         let mut history = store
             .as_ref()
-            .map(|s| s.messages().to_vec())
+            .map(|s| ext::stored_of_entries(s.messages()))
             .unwrap_or_default();
         let (_flag, cancel) = cancel_channel();
         let mut run_params = params.run;
@@ -520,7 +529,7 @@ pub struct InteractiveParams {
     /// Resume an existing session; omitted generates a fresh id.
     pub session_id: Option<SessionRef>,
     /// Seeded history (e.g. replayed from a prior session).
-    pub initial_history: Vec<Message>,
+    pub initial_history: Vec<StoredMessage>,
     /// Where the session is persisted; `None` disables persistence.
     pub state_dir: Option<StateDir>,
     /// Post-turn argosy memory extraction (Phase 4): mirrors
@@ -691,7 +700,11 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
             // project's local argosy. Never blocks or fails the turn.
             crate::knowledge_memory::spawn_extraction(
                 model.clone(),
-                history.clone(),
+                history
+                    .iter()
+                    .map(crate::history::StoredMessage::message)
+                    .cloned()
+                    .collect(),
                 params.workspace.root().to_path_buf(),
                 params.memory_extraction,
             );
@@ -784,12 +797,15 @@ mod tests {
     fn record_turn_persists_messages_and_title() {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = store_in(&tmp);
-        let messages = vec![Message::user("fix the login bug")];
+        let messages = vec![crate::history::ext::stored_user_text("fix the login bug")];
         store.record_turn(&messages, MODEL_SPEC.into());
 
         let loaded = load(&tmp);
         assert_eq!(loaded.messages().len(), 1);
-        assert_eq!(loaded.title, generate_title(&messages));
+        assert_eq!(
+            loaded.title,
+            generate_title(&crate::history::ext::entries(messages.clone()))
+        );
     }
 
     /// F.3 draft preservation: a draft-only change waits for its soft-write
@@ -821,7 +837,10 @@ mod tests {
         // A changed draft within the window again defers; the next turn's
         // record_turn write carries it regardless of the delay.
         store.checkpoint_draft("edited");
-        store.record_turn(&[Message::user("sent")], MODEL_SPEC.into());
+        store.record_turn(
+            &[crate::history::ext::stored_user_text("sent")],
+            MODEL_SPEC.into(),
+        );
         let loaded = load(&tmp);
         assert_eq!(loaded.meta.input_draft.as_deref(), Some("edited"));
         assert_eq!(loaded.messages().len(), 1);
@@ -847,17 +866,10 @@ mod tests {
         let mut store = store_in(&tmp);
         store.record_turn(
             &[
-                Message::user("fix the login bug"),
-                Message::User {
-                    content: vec![crate::history::UserContent::ToolResult(
-                        history::ToolResult {
-                            call: "t1".into(),
-                            name: "read".into(),
-                            content: vec![history::ToolResultContent::text("build failed")],
-                            is_error: false,
-                        },
-                    )],
-                },
+                crate::history::ext::stored_user_text("fix the login bug"),
+                crate::history::ext::stored(crate::history::ext::observation(vec![
+                    crate::history::ext::tool_result("t1", Some("read"), "build failed", false),
+                ])),
             ],
             MODEL_SPEC.into(),
         );
@@ -870,7 +882,10 @@ mod tests {
     fn reopening_resumes_existing_session() {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = store_in(&tmp);
-        store.record_turn(&[Message::user("first prompt")], MODEL_SPEC.into());
+        store.record_turn(
+            &[crate::history::ext::stored_user_text("first prompt")],
+            MODEL_SPEC.into(),
+        );
         drop(store);
 
         let mut store = store_in(&tmp);
@@ -878,8 +893,8 @@ mod tests {
 
         store.record_turn(
             &[
-                Message::user("first prompt"),
-                Message::user("second prompt"),
+                crate::history::ext::stored_user_text("first prompt"),
+                crate::history::ext::stored_user_text("second prompt"),
             ],
             "other/model".into(),
         );
@@ -939,7 +954,9 @@ mod tests {
         let loaded = StoredSession::load(handle.session_id.id(), &state_dir(&tmp)).unwrap();
         // User prompt + assistant reply.
         assert_eq!(loaded.messages().len(), 2);
-        assert!(loaded.messages()[1].text().contains("all done"));
+        assert!(
+            crate::history::ext::message_text(loaded.messages()[1].latest()).contains("all done")
+        );
     }
 
     /// H.9 regression: a resumed run seeds its history from the loaded
@@ -950,7 +967,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         {
             let mut store = store_in(&tmp);
-            store.record_turn(&[Message::user("earlier turn")], MODEL_SPEC.into());
+            store.record_turn(
+                &[crate::history::ext::stored_user_text("earlier turn")],
+                MODEL_SPEC.into(),
+            );
         }
         let model = mock(vec![crate::testing::text_turn("fresh reply")]);
         let mut handle = spawn(HeadlessParams {
@@ -965,8 +985,14 @@ mod tests {
         let loaded = StoredSession::load(handle.session_id.id(), &state_dir(&tmp)).unwrap();
         // The earlier turn survives, then this run's user prompt and reply.
         assert_eq!(loaded.messages().len(), 3);
-        assert_eq!(loaded.messages()[0].text(), "earlier turn");
-        assert!(loaded.messages()[2].text().contains("fresh reply"));
+        assert_eq!(
+            crate::history::ext::message_text(loaded.messages()[0].latest()),
+            "earlier turn"
+        );
+        assert!(
+            crate::history::ext::message_text(loaded.messages()[2].latest())
+                .contains("fresh reply")
+        );
     }
 
     #[tokio::test]
@@ -1152,7 +1178,7 @@ mod tests {
     impl BeforeExecute for GatedHook {
         fn decide(
             &self,
-            _call: history::ToolCall,
+            _call: history::ContentBlock,
         ) -> crate::run::BoxFuture<crate::run::dispatch::Decision> {
             let release = Arc::clone(&self.0);
             Box::pin(async move {
@@ -1239,7 +1265,13 @@ mod tests {
         name: &str,
         args: serde_json::Value,
     ) -> crate::run::Decision {
-        gate.decide(history::ToolCall::new("t1", name, args)).await
+        let call = history::ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: name.into(),
+            input: args,
+            thought_signature: None,
+        };
+        gate.decide(call).await
     }
 
     fn allow_reviewer() -> (crate::auto_review::Reviewer, Arc<AtomicUsize>) {
@@ -1444,16 +1476,11 @@ mod tests {
     // --- Gate-wired execution -------------------------------------------------
 
     /// The concatenated text of one tool result, for deny-text assertions.
-    fn result_text(result: &history::ToolResult) -> String {
-        result
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                history::ToolResultContent::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    fn result_text(result: &history::ContentBlock) -> String {
+        let history::ContentBlock::ToolResult { content, .. } = result else {
+            return String::new();
+        };
+        history::ext::tool_content_text(content)
     }
 
     fn tool_results(events: &[Event]) -> Vec<(String, String)> {

@@ -143,7 +143,8 @@ async fn output_cap_clamp_counts_request_overhead() {
     let (_, cancel) = cancel_channel();
     // The prompt is the only history: its estimate is the message-structure
     // cost alone, far under the overhead.
-    let prompt_tokens = crate::compaction::estimate_tokens(&[Message::user("hi")]);
+    let prompt_tokens =
+        crate::compaction::estimate_tokens(&[crate::history::ext::stored_user_text("hi")]);
     let margin: u64 = 50_000;
     let window = (prompt_tokens + overhead + margin) as u32;
     // A history-only estimate would leave margin + overhead of window;

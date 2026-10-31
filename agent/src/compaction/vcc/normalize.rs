@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::history::{AssistantContent, Message, ReasoningContent, ToolResultContent, UserContent};
+use crate::history::{ContentBlock, Role, StoredMessage, ToolContent};
 
 use super::util::sanitize;
 
@@ -43,22 +43,23 @@ pub(crate) enum NormalizedBlock {
     },
 }
 
-fn text_of_user(content: &[UserContent]) -> String {
+fn text_of_user(content: &[ContentBlock]) -> String {
     content
         .iter()
         .filter_map(|b| match b {
-            UserContent::Text(t) => Some(t.text.as_str()),
+            ContentBlock::Text { text } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn tool_result_text(content: &[ToolResultContent]) -> String {
+fn tool_result_text(content: &animist::history::ToolContents) -> String {
     content
+        .0
         .iter()
         .filter_map(|c| match c {
-            ToolResultContent::Text(t) => Some(t.text.as_str()),
+            ToolContent::Text { text } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -71,29 +72,34 @@ fn tool_result_text(content: &[ToolResultContent]) -> String {
 /// command (from the tool-call arguments) with the output/exit code (from the
 /// paired tool result). Their tool result is not emitted separately. Error
 /// flags come from the recorded tool result.
-pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
+pub(crate) fn normalize(messages: &[StoredMessage]) -> Vec<NormalizedBlock> {
     let mut name_by_id: HashMap<String, String> = HashMap::new();
     let mut result_by_id: HashMap<String, (String, bool)> = HashMap::new();
-    for msg in messages {
-        match msg {
-            Message::Assistant { content } => {
-                for block in content {
-                    if let AssistantContent::ToolCall(call) = block {
-                        name_by_id.insert(call.id.clone(), call.function.name.clone());
+    for stored in messages {
+        let message = stored.message();
+        match message.role {
+            Role::Assistant => {
+                for block in &message.content {
+                    if let ContentBlock::ToolUse { id, name, .. } = block {
+                        name_by_id.insert(id.clone(), name.clone());
                     }
                 }
             }
-            Message::User { content } => {
-                for block in content {
-                    if let UserContent::ToolResult(result) = block {
-                        result_by_id.insert(
-                            result.call.clone(),
-                            (tool_result_text(&result.content), result.is_error),
-                        );
+            Role::User => {
+                for block in &message.content {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        ..
+                    } = block
+                    {
+                        result_by_id
+                            .insert(tool_use_id.clone(), (tool_result_text(content), *is_error));
                     }
                 }
             }
-            Message::System { .. } => {}
+            Role::System => {}
         }
     }
 
@@ -104,28 +110,35 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
         .collect();
 
     let mut out = Vec::new();
-    for (msg_index, msg) in messages.iter().enumerate() {
-        match msg {
-            Message::User { content } => {
-                let text = sanitize(&text_of_user(content));
+    for (msg_index, stored) in messages.iter().enumerate() {
+        let message = stored.message();
+        match message.role {
+            Role::User => {
+                let text = sanitize(&text_of_user(&message.content));
                 if !text.is_empty() {
                     out.push(NormalizedBlock::User {
                         text,
                         source_index: msg_index,
                     });
                 }
-                for block in content {
-                    if let UserContent::ToolResult(result) = block {
-                        let tool_use_id = result.call.clone();
-                        if bash_ids.contains_key(&tool_use_id) {
+                for block in &message.content {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        name: result_name,
+                        ..
+                    } = block
+                    {
+                        if bash_ids.contains_key(tool_use_id) {
                             continue;
                         }
-                        let name = name_by_id
-                            .get(&tool_use_id)
-                            .cloned()
+                        // The result's stored name wins; a legacy result with
+                        // none falls back to the call it answered.
+                        let name = result_name
+                            .clone()
+                            .or_else(|| name_by_id.get(tool_use_id).cloned())
                             .unwrap_or_else(|| "unknown".to_string());
                         let (text, is_error) =
-                            result_by_id.get(&tool_use_id).cloned().unwrap_or_default();
+                            result_by_id.get(tool_use_id).cloned().unwrap_or_default();
                         out.push(NormalizedBlock::ToolResult {
                             name,
                             text: sanitize(&text),
@@ -135,11 +148,11 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                     }
                 }
             }
-            Message::Assistant { content } => {
-                for block in content {
+            Role::Assistant => {
+                for block in &message.content {
                     match block {
-                        AssistantContent::Text(t) => {
-                            let text = sanitize(&t.text);
+                        ContentBlock::Text { text } => {
+                            let text = sanitize(text);
                             if !text.is_empty() {
                                 out.push(NormalizedBlock::Assistant {
                                     text,
@@ -147,29 +160,19 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                                 });
                             }
                         }
-                        AssistantContent::Reasoning(reasoning) => {
-                            let text: String = reasoning
-                                .content
-                                .iter()
-                                .filter_map(|c| match c {
-                                    ReasoningContent::Text { text, .. } => Some(text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            let t = sanitize(&text);
-                            if !t.is_empty() {
+                        ContentBlock::Thinking { thinking, .. } => {
+                            let text = sanitize(thinking);
+                            if !text.is_empty() {
                                 out.push(NormalizedBlock::Thinking {
-                                    text: t,
+                                    text,
                                     redacted: false,
                                     source_index: msg_index,
                                 });
                             }
                         }
-                        AssistantContent::ToolCall(call) => {
-                            let name = &call.function.name;
-                            let input = &call.function.arguments;
-                            let id = call.id.clone();
+                        ContentBlock::ToolUse {
+                            id, name, input, ..
+                        } => {
                             if name.eq_ignore_ascii_case("bash") {
                                 let command = input
                                     .get("command")
@@ -178,7 +181,7 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                                     .unwrap_or("")
                                     .to_string();
                                 let (output, is_error) =
-                                    result_by_id.get(&id).cloned().unwrap_or_default();
+                                    result_by_id.get(id).cloned().unwrap_or_default();
                                 let exit_code = if is_error { Some(1) } else { Some(0) };
                                 out.push(NormalizedBlock::Bash {
                                     command,
@@ -194,10 +197,11 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                                 });
                             }
                         }
+                        _ => {}
                     }
                 }
             }
-            Message::System { .. } => {}
+            Role::System => {}
         }
     }
     out
@@ -206,14 +210,13 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::test_support::{assistant_tool_args, tool_result_of, user};
+    use crate::compaction::test_support::{
+        stored_assistant_text, stored_assistant_tool_args, stored_tool_result_of, stored_user,
+    };
 
     #[test]
     fn normalize_user_and_assistant_text() {
-        let msgs = vec![
-            user("hello"),
-            crate::compaction::test_support::assistant_text("hi there"),
-        ];
+        let msgs = vec![stored_user("hello"), stored_assistant_text("hi there")];
         let blocks = normalize(&msgs);
         assert!(matches!(&blocks[0], NormalizedBlock::User { text, .. } if text == "hello"));
         assert!(
@@ -224,13 +227,13 @@ mod tests {
     #[test]
     fn normalize_folds_bash_into_bash_block() {
         let msgs = vec![
-            user("run it"),
-            assistant_tool_args(
+            stored_user("run it"),
+            stored_assistant_tool_args(
                 "t1",
                 "bash",
                 serde_json::json!({"command": "git commit -m 'fix'"}),
             ),
-            tool_result_of("t1", "[main abc123] fix"),
+            stored_tool_result_of("t1", "[main abc123] fix"),
         ];
         let blocks = normalize(&msgs);
         assert!(

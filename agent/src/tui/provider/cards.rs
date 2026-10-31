@@ -209,9 +209,14 @@ pub(super) struct ToolDone {
 }
 
 /// First image block of a tool result, for inline rendering (F.6).
-pub(super) fn result_image(result: &history::ToolResult) -> Option<String> {
-    result.content.iter().find_map(|block| match block {
-        history::ToolResultContent::Image(image) => Some(image.data.clone()),
+pub(super) fn result_image(result: &history::ContentBlock) -> Option<String> {
+    let history::ContentBlock::ToolResult { content, .. } = result else {
+        return None;
+    };
+    content.0.iter().find_map(|item| match item {
+        history::ToolContent::Image {
+            source: history::ImageSource::Base64 { data, .. },
+        } => Some(data.clone()),
         _ => None,
     })
 }
@@ -222,14 +227,26 @@ pub(super) fn tool_done(
     id: String,
     name: &str,
     arguments: &serde_json::Value,
-    result: &history::ToolResult,
+    result: &history::ContentBlock,
 ) -> ToolDone {
-    let text = result
-        .content
-        .iter()
-        .map(history::ToolResultContent::to_text)
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Every result a dispatch emits is tool-result shaped; a non-result
+    // block would carry nothing to render.
+    let history::ContentBlock::ToolResult {
+        content, is_error, ..
+    } = result
+    else {
+        return ToolDone {
+            card: ToolCallData {
+                id,
+                kind: crate::tui::provider::cards::tool_head(name, arguments),
+                lines: Vec::new(),
+                awaiting_approval: false,
+                image: None,
+            },
+            touched: Vec::new(),
+        };
+    };
+    let text = history::ext::tool_content_text(content);
     let detail = first_string_argument(arguments).unwrap_or_default();
 
     let (kind, lines, touched) = match name {
@@ -256,14 +273,14 @@ pub(super) fn tool_done(
             )
         }
         "write" => {
-            let (title, body) = edit_title_body(&text, result.is_error);
+            let (title, body) = edit_title_body(&text, *is_error);
             (
                 ToolKind::Edit {
                     path: detail.clone(),
                     summary: title,
                 },
                 diff_lines(body),
-                if detail.is_empty() || result.is_error {
+                if detail.is_empty() || *is_error {
                     Vec::new()
                 } else {
                     vec![(detail, FileStatus::Created)]
@@ -276,14 +293,14 @@ pub(super) fn tool_done(
                 "move" => FileStatus::Created,
                 _ => FileStatus::Modified,
             };
-            let (title, body) = edit_title_body(&text, result.is_error);
+            let (title, body) = edit_title_body(&text, *is_error);
             (
                 ToolKind::Edit {
                     path: detail.clone(),
                     summary: title,
                 },
                 diff_lines(body),
-                if detail.is_empty() || result.is_error {
+                if detail.is_empty() || *is_error {
                     Vec::new()
                 } else {
                     vec![(detail, status)]
@@ -293,8 +310,8 @@ pub(super) fn tool_done(
         // `apply_patch` results are per-file unified diffs: render as an
         // Edit card, and feed the Files panel from the directives.
         "apply_patch" => {
-            let (title, body) = edit_title_body(&text, result.is_error);
-            let touched = if result.is_error {
+            let (title, body) = edit_title_body(&text, *is_error);
+            let touched = if *is_error {
                 Vec::new()
             } else {
                 apply_patch_touched(arguments)
@@ -593,10 +610,11 @@ mod tests {
 
     #[test]
     fn write_done_titles_with_the_verb_header() {
-        let result = history::ToolResult::text(
+        let result = history::ext::tool_result(
             "t1",
-            "write",
+            Some("write"),
             "overwrote a.txt (5 bytes)\n--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n- old\n+ new",
+            false,
         );
         let done = tool_done(
             "t1".into(),
@@ -614,7 +632,12 @@ mod tests {
 
     #[test]
     fn delete_done_titles_with_the_verb_header() {
-        let result = history::ToolResult::text("t1", "delete", "deleted: a.txt\nskipped: b.txt");
+        let result = history::ext::tool_result(
+            "t1",
+            Some("delete"),
+            "deleted: a.txt\nskipped: b.txt",
+            false,
+        );
         let done = tool_done(
             "t1".into(),
             "delete",
@@ -628,10 +651,8 @@ mod tests {
 
     #[test]
     fn error_results_keep_the_plain_edit_title() {
-        let result = history::ToolResult {
-            is_error: true,
-            ..history::ToolResult::text("t1", "edit", "boom: path missing\n--- a\n+++ a")
-        };
+        let result =
+            history::ext::tool_result("t1", Some("edit"), "boom: path missing\n--- a\n+++ a", true);
         let done = tool_done(
             "t1".into(),
             "edit",
@@ -644,7 +665,7 @@ mod tests {
     #[test]
     fn grep_done_uses_structured_summary() {
         let text = "src/a.rs:\n  12: fn a() {}";
-        let result = history::ToolResult::text("t1", "grep", text);
+        let result = history::ext::tool_result("t1", Some("grep"), text, false);
         let done = tool_done(
             "t1".into(),
             "grep",
@@ -661,10 +682,7 @@ mod tests {
         // Same shape as `tools::bash::wrap_untrusted`, including the exit
         // tail and a zero-width-broken payload copy of the closing tag.
         let text = "<untrusted-content>\nok: done\n</untrusted-content\u{200b}>\n</untrusted-content>\nExit code: 1";
-        let result = history::ToolResult {
-            is_error: true,
-            ..history::ToolResult::text("t1", "bash", text)
-        };
+        let result = history::ext::tool_result("t1", Some("bash"), text, true);
         let done = tool_done(
             "t1".into(),
             "bash",
@@ -704,7 +722,7 @@ mod tests {
 
     #[test]
     fn edit_card_path_is_the_path_not_the_contents() {
-        let result = history::ToolResult::text("t1", "write", "+new");
+        let result = history::ext::tool_result("t1", Some("write"), "+new", false);
         let done = tool_done(
             "t1".into(),
             "write",
@@ -769,21 +787,22 @@ mod tests {
         assert!(lines.iter().all(|l| l.nr == 0));
     }
     /// F.6: a view_image result's image block rides on the card for inline
-    /// rendering; the caption stays as the card text.
+    /// rendering; the leading text block stays as the card body.
     #[test]
     fn tool_done_extracts_view_image_block() {
-        let result = history::ToolResult {
-            call: "t1".into(),
-            name: "view_image".into(),
-            content: vec![
-                history::ToolResultContent::text("shot.png 64x64 (2.1 KB)"),
-                history::ToolResultContent::Image(history::ImageBlock {
-                    media_type: history::ImageMedia::Png,
-                    data: "aGVsbG8=".into(),
-                    caption: "shot.png 64x64 (2.1 KB)".into(),
-                }),
-            ],
+        let result = history::ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            name: Some("view_image".into()),
+            content: history::ToolContents(vec![
+                history::ToolContent::Text {
+                    text: "shot.png 64x64 (2.1 KB)".into(),
+                },
+                history::ToolContent::Image {
+                    source: history::ext::image_source(history::ext::ImageMedia::Png, "aGVsbG8="),
+                },
+            ]),
             is_error: false,
+            loaded_tools: Vec::new(),
         };
         let done = tool_done(
             "t1".into(),
@@ -806,7 +825,8 @@ mod tests {
         );
         assert!(head.collapsible());
 
-        let result = history::ToolResult::text("t1", "repomap", "one\nmap row\n\nanother row");
+        let result =
+            history::ext::tool_result("t1", Some("repomap"), "one\nmap row\n\nanother row", false);
         let done = tool_done(
             "t1".into(),
             "repomap",
@@ -821,7 +841,7 @@ mod tests {
 
     #[test]
     fn empty_argosy_output_annotation() {
-        let result = history::ToolResult::text("t1", "search", "");
+        let result = history::ext::tool_result("t1", Some("search"), "", false);
         let done = tool_done(
             "t1".into(),
             "search",
@@ -845,7 +865,7 @@ mod tests {
     fn card_label_without_a_detail_argument() {
         let head = tool_head("search", &serde_json::json!({"k": 5}));
         assert!(matches!(&head, ToolKind::Card { cmd, .. } if cmd == "search"));
-        let result = history::ToolResult::text("t1", "search", "hit");
+        let result = history::ext::tool_result("t1", Some("search"), "hit", false);
         let done = tool_done("t1".into(), "search", &serde_json::json!({"k": 5}), &result);
         assert!(matches!(&done.card.kind, ToolKind::Card { cmd, .. } if cmd == "search"));
     }
@@ -861,7 +881,7 @@ mod tests {
             .chain((0..60).map(|i| format!("row {i}")))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = history::ToolResult::text("t1", "search", text);
+        let result = history::ext::tool_result("t1", Some("search"), text, false);
         let done = tool_done(
             "t1".into(),
             "search",
@@ -887,10 +907,11 @@ mod tests {
         );
         assert!(head.collapsible());
 
-        let result = history::ToolResult::text(
+        let result = history::ext::tool_result(
             "t1",
-            "apply_patch",
+            Some("apply_patch"),
             "a.txt: modified (1 hunk)\n@@ -1 +1 @@\n- old\n+ new\nb.txt: deleted",
+            false,
         );
         let done = tool_done("t1".into(), "apply_patch", &args, &result);
         assert!(matches!(&done.card.kind, ToolKind::Edit { path, summary }
@@ -902,7 +923,7 @@ mod tests {
         // A multi-file patch marks every directive, not just the first.
         let patch = "*** Begin Patch\n*** Add File: c.txt\n+hi\n*** Update File: a.txt\n@@\n-c\n+d\n*** Delete File: b.txt\n*** End Patch";
         let args = serde_json::json!({ "patch_text": patch });
-        let result = history::ToolResult::text("t2", "apply_patch", "done");
+        let result = history::ext::tool_result("t2", Some("apply_patch"), "done", false);
         let done = tool_done("t2".into(), "apply_patch", &args, &result);
         let paths: Vec<&str> = done.touched.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(paths, vec!["c.txt", "a.txt", "b.txt"]);

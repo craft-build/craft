@@ -192,7 +192,7 @@ async fn stale_turn_does_not_commit_history() {
         &sessions,
         &session_id,
         1,
-        vec![history::Message::system("stale")],
+        vec![history::ext::stored(history::ext::system_text("stale"))],
     )
     .await;
     {
@@ -206,7 +206,7 @@ async fn stale_turn_does_not_commit_history() {
         &sessions,
         &session_id,
         2,
-        vec![history::Message::system("fresh")],
+        vec![history::ext::stored(history::ext::system_text("fresh"))],
     )
     .await;
     {
@@ -230,7 +230,7 @@ fn tool_kinds_follow_the_registered_tools() {
 async fn run_turn_tools_route_task_calls_to_the_installed_launcher() {
     struct AllowAll;
     impl run::BeforeExecute for AllowAll {
-        fn decide(&self, _call: history::ToolCall) -> run::BoxFuture<run::Decision> {
+        fn decide(&self, _call: history::ContentBlock) -> run::BoxFuture<run::Decision> {
             Box::pin(async { run::Decision::Run })
         }
     }
@@ -263,25 +263,29 @@ async fn run_turn_tools_route_task_calls_to_the_installed_launcher() {
         Arc::new(AllowAll),
         run::shared_cache(),
     );
-    let call = || history::ToolCall {
+    let call = || history::ContentBlock::ToolUse {
         id: "1".into(),
-        function: history::ToolFunction {
-            name: "task".into(),
-            arguments: serde_json::json!({
-                "description": "probe",
-                "prompt": "probe",
-                "subagent_type": "bogus",
-            }),
-        },
+        name: "task".into(),
+        input: serde_json::json!({
+            "description": "probe",
+            "prompt": "probe",
+            "subagent_type": "bogus",
+        }),
+        thought_signature: None,
     };
     let result = match tools.execute(call()).await {
         Ok(run::DispatchOutcome::Ran(result)) => result,
         other => panic!("the task call must run: {other:?}"),
     };
-    assert!(result.is_error);
+    let history::ContentBlock::ToolResult {
+        is_error, content, ..
+    } = &result
+    else {
+        panic!("the task result is a tool-result block: {result:?}");
+    };
+    assert!(*is_error);
     assert!(
-        history::ToolResultContent::to_text(&result.content[0])
-            .contains("unknown subagent type: bogus"),
+        history::ext::tool_content_text(content).contains("unknown subagent type: bogus"),
         "the registered task tool must reach the installed launcher"
     );
 
@@ -292,9 +296,15 @@ async fn run_turn_tools_route_task_calls_to_the_installed_launcher() {
         Ok(run::DispatchOutcome::Ran(result)) => result,
         other => panic!("the task call must run: {other:?}"),
     };
-    assert!(result.is_error);
+    let history::ContentBlock::ToolResult {
+        is_error, content, ..
+    } = &result
+    else {
+        panic!("the task result is a tool-result block: {result:?}");
+    };
+    assert!(*is_error);
     assert!(
-        history::ToolResultContent::to_text(&result.content[0])
+        history::ext::tool_content_text(content)
             .contains("task tool is not available in this session"),
         "a missing launcher degrades to the availability error"
     );
@@ -367,8 +377,11 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
             else {
                 panic!("ACP must display tool text");
             };
-            assert_eq!(result.content.len(), 1);
-            let model_text = history::ToolResultContent::to_text(&result.content[0]);
+            let history::ContentBlock::ToolResult { content, .. } = result else {
+                panic!("tool results are ToolResult blocks");
+            };
+            assert_eq!(content.0.len(), 1);
+            let model_text = history::ext::tool_content_text(content);
             assert_eq!(display.text, model_text);
             results.push((name.clone(), model_text));
         }
@@ -383,24 +396,19 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
     // display events: all four results must remain literal text.
     let requests = provider.requests();
     assert_eq!(requests.len(), 5);
-    let model_results = crate::testing::replay_history(&requests[4].messages)
+    let model_results = requests[4]
+        .messages
         .iter()
-        .flat_map(|message| match message {
-            history::Message::User { content } => content
-                .iter()
-                .filter_map(|item| {
-                    if let history::UserContent::ToolResult(result) = item {
-                        assert_eq!(result.content.len(), 1);
-                        Some((
-                            result.name.clone(),
-                            history::ToolResultContent::to_text(&result.content[0]),
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>(),
-            _ => vec![],
+        .flat_map(history::ext::tool_results)
+        .map(|block| {
+            let history::ContentBlock::ToolResult { name, content, .. } = block else {
+                unreachable!("tool_results yields ToolResult blocks only");
+            };
+            assert_eq!(content.0.len(), 1);
+            (
+                name.clone().unwrap_or_default(),
+                history::ext::tool_content_text(content),
+            )
         })
         .collect::<Vec<_>>();
     assert_eq!(model_results, results);
@@ -410,19 +418,22 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
 #[test]
 fn tool_result_text_preserves_literal_json_and_errors() {
     for text in [r#"{"lines":[],"total_lines":0}"#, "file not found", ""] {
-        assert_eq!(
-            tool_result_text(&[history::ToolResultContent::text(text)]),
-            text
-        );
+        let result = history::ext::tool_result("1", None, text, false);
+        assert_eq!(tool_result_text(&result), text);
     }
 }
 
 #[test]
 fn tool_result_text_pretty_prints_json_results() {
-    let items = vec![history::ToolResultContent::Json {
-        value: serde_json::json!({ "path": "Cargo.lock", "total_lines": 2 }),
-    }];
-    let text = tool_result_text(&items);
+    // JSON results render to pretty text inside a Text block at conversion
+    // time, so the fixture carries the pretty-printed JSON as literal text.
+    let pretty = serde_json::to_string_pretty(&serde_json::json!({
+        "path": "Cargo.lock",
+        "total_lines": 2,
+    }))
+    .unwrap();
+    let result = history::ext::tool_result("1", Some("read"), pretty, false);
+    let text = tool_result_text(&result);
     assert!(
         text.contains("\"path\": \"Cargo.lock\""),
         "unexpected: {text}"
@@ -499,11 +510,18 @@ fn gate_decides_run_skip_and_stop_without_a_client() {
         crate::permissions::PermissionsConfig::default(),
         tmp.path().to_path_buf(),
     ));
-    let read_call = history::ToolCall::new("1", "read", serde_json::json!({"path": "x"}));
+    let read_call = history::ContentBlock::ToolUse {
+        id: "1".into(),
+        name: "read".into(),
+        input: serde_json::json!({"path": "x"}),
+        thought_signature: None,
+    };
     // read-only tool: allowed by default.
     let tool = ToolKey::native("read");
-    let (scopes, force_prompt) =
-        scope_for_call(permissions.cwd(), "read", &read_call.function.arguments);
+    let history::ContentBlock::ToolUse { input, .. } = &read_call else {
+        unreachable!("the fixture call is a ToolUse block");
+    };
+    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), "read", input);
     assert!(matches!(
         permissions.check_multi(&tool, &scopes, force_prompt),
         PermissionCheck::Allowed
@@ -694,9 +712,9 @@ async fn load_session_restores_history_and_model() {
         crate::id::SessionRef::from_id("01965087-4c71-7f00-8000-000000000000".parse().unwrap());
     let mut stored = crate::headless::StoredSession::new("openai/gpt-x", "/tmp/proj");
     stored.id = session_ref.clone();
-    stored.push_message(history::Message::User {
-        content: vec![history::UserContent::text("hello")],
-    });
+    stored.push_message(history::ext::entry(history::ext::stored(
+        history::ext::user_text("hello"),
+    )));
     stored.save(&dir).unwrap();
 
     let loaded = crate::headless::StoredSession::load(session_ref.id(), &dir).unwrap();

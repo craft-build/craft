@@ -8,7 +8,7 @@ mod normalize;
 mod sections;
 mod util;
 
-use crate::history::{AssistantContent, Message};
+use crate::history::{Role, StoredMessage, ext};
 
 pub(crate) use cut::find_cut;
 use filter::filter_noise;
@@ -29,7 +29,7 @@ pub struct VccSummary {
 /// `prev_summary` (a prior VCC summary, with its preamble) is merged so that
 /// sticky sections accumulate across compactions while volatile sections are
 /// replaced. The returned `tail_start` is 0 for compact-all.
-pub fn compact(messages: &[Message], prev_summary: Option<&str>) -> VccSummary {
+pub fn compact(messages: &[StoredMessage], prev_summary: Option<&str>) -> VccSummary {
     let tail_start = match cut::find_cut(messages) {
         Some(c) => c.tail_start,
         None => 0,
@@ -66,23 +66,24 @@ pub fn compact(messages: &[Message], prev_summary: Option<&str>) -> VccSummary {
 const VCC_SUMMARY_PREFIX: &str = "This summary captures";
 
 /// Whether `msg` is a VCC summary handoff message.
-pub fn is_vcc_summary(msg: &Message) -> bool {
-    matches!(
-        msg,
-        Message::Assistant { content } if content.iter().any(
-            |b| matches!(b, AssistantContent::Text(t) if t.text.starts_with(VCC_SUMMARY_PREFIX))
-        )
-    )
+pub fn is_vcc_summary(stored: &StoredMessage) -> bool {
+    let message = stored.message();
+    matches!(message.role, Role::Assistant)
+        && message.content.iter().any(|b| {
+            matches!(b, crate::history::ContentBlock::Text { text }
+                if text.starts_with(VCC_SUMMARY_PREFIX))
+        })
 }
 
-fn summary_text(msg: &Message) -> Option<&str> {
-    match msg {
-        Message::Assistant { content } => content.iter().find_map(|b| match b {
-            AssistantContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        }),
-        _ => None,
+fn summary_text(stored: &StoredMessage) -> Option<&str> {
+    let message = stored.message();
+    if !matches!(message.role, Role::Assistant) {
+        return None;
     }
+    message.content.iter().find_map(|b| match b {
+        crate::history::ContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 /// No-LLM VCC compaction: summarize the head, keep the tail.
@@ -93,16 +94,16 @@ fn summary_text(msg: &Message) -> Option<&str> {
 /// stage). Returns `false` when the result still exceeds `token_limit`,
 /// signaling the caller to fall back to a heavier compactor.
 pub fn vcc_compact(
-    messages: &mut Vec<Message>,
+    messages: &mut Vec<StoredMessage>,
     token_limit: u64,
-    estimate_tokens: fn(&[Message]) -> u64,
+    estimate_tokens: fn(&[StoredMessage]) -> u64,
     carry_len: usize,
 ) -> bool {
     let (prev, live_start) = match messages.first() {
         Some(m) if is_vcc_summary(m) => (summary_text(m), 1),
         _ => (None, 0),
     };
-    let live: Vec<Message> = messages[live_start..].to_vec();
+    let live: Vec<StoredMessage> = messages[live_start..].to_vec();
     let carry_len = carry_len.min(live.len());
     if live.len() <= 2 {
         return false;
@@ -118,8 +119,8 @@ pub fn vcc_compact(
     }
     let tail_start = tail_start.min(summarize_end);
     let tail_msgs = live.len() - tail_start;
-    let mut new_history: Vec<Message> = Vec::with_capacity(1 + tail_msgs);
-    new_history.push(Message::assistant(summary));
+    let mut new_history: Vec<StoredMessage> = Vec::with_capacity(1 + tail_msgs);
+    new_history.push(ext::stored(ext::assistant_text(summary)));
     new_history.extend(live.into_iter().skip(tail_start));
     *messages = new_history;
     estimate_tokens(messages) <= token_limit
@@ -128,50 +129,59 @@ pub fn vcc_compact(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::test_support::{assistant_tool_args, tool_result_of, user};
-    use crate::history::UserContent;
+    use crate::compaction::test_support::{
+        stored_assistant_tool_args, stored_tool_result_of, stored_user,
+    };
 
     /// History with a second text prompt mid-way, so the first compaction
     /// leaves a multi-message tail for the second (merging) compaction.
-    fn two_task_history() -> Vec<Message> {
+    fn two_task_history() -> Vec<StoredMessage> {
         let mut msgs = Vec::new();
         for i in 0..8 {
-            msgs.push(user(&format!("do task {i} with a fairly long instruction")));
-            msgs.push(assistant_tool_args(
+            msgs.push(stored_user(&format!(
+                "do task {i} with a fairly long instruction"
+            )));
+            msgs.push(stored_assistant_tool_args(
                 &format!("t{i}"),
                 "bash",
                 serde_json::json!({"command": format!("echo step{i}")}),
             ));
-            msgs.push(tool_result_of(&format!("t{i}"), &format!("output {i}")));
+            msgs.push(stored_tool_result_of(
+                &format!("t{i}"),
+                &format!("output {i}"),
+            ));
         }
-        msgs.push(user("second task begins here"));
+        msgs.push(stored_user("second task begins here"));
         for i in 8..16 {
-            msgs.push(user(&format!(
+            msgs.push(stored_user(&format!(
                 "do subtask {i} with a fairly long instruction"
             )));
-            msgs.push(assistant_tool_args(
+            msgs.push(stored_assistant_tool_args(
                 &format!("t{i}"),
                 "bash",
                 serde_json::json!({"command": format!("echo step{i}")}),
             ));
-            msgs.push(tool_result_of(&format!("t{i}"), &format!("output {i}")));
+            msgs.push(stored_tool_result_of(
+                &format!("t{i}"),
+                &format!("output {i}"),
+            ));
         }
         // No trailing user prompt: the tail must be the last complete round
         // so a second (merging) compaction has live messages to work on.
         msgs
     }
 
-    fn sample_history() -> Vec<Message> {
+    fn sample_history() -> Vec<StoredMessage> {
         vec![
-            user("Implement the login feature"),
-            assistant_tool_args("t1", "bash", serde_json::json!({"command": "ls"})),
-            tool_result_of("t1", "done"),
-            user("Now add tests for it"),
-            assistant_tool_args("t2", "bash", serde_json::json!({"command": "ls"})),
-            tool_result_of("t1", "done"),
-            user("Run the test suite"),
-            assistant_tool_args("t3", "bash", serde_json::json!({"command": "ls"})),
-            tool_result_of("t1", "done"),
+            stored_user("Implement the login feature"),
+            stored_assistant_tool_args("t1", "bash", serde_json::json!({"command": "ls"})),
+            stored_tool_result_of("t1", "done"),
+            stored_user("Now add tests for it"),
+            stored_assistant_tool_args("t2", "bash", serde_json::json!({"command": "ls"})),
+            stored_tool_result_of("t1", "done"),
+            stored_user("Run the test suite"),
+            stored_assistant_tool_args("t3", "bash", serde_json::json!({"command": "ls"})),
+            stored_tool_result_of("t1", "done"),
         ]
     }
 
@@ -217,50 +227,49 @@ mod tests {
         let tail = &history[result.tail_start..];
         assert!(!tail.is_empty());
         // The tail always starts at a user prompt and is kept as-is by the glue.
-        assert!(matches!(&history[result.tail_start], Message::User { .. }));
+        assert!(ext::is_user(history[result.tail_start].message()));
     }
 
-    fn char_estimate(messages: &[Message]) -> u64 {
+    fn char_estimate(messages: &[StoredMessage]) -> u64 {
         messages
             .iter()
-            .map(|m| match m {
-                Message::System { content } => content.chars().count() as u64,
-                Message::User { content } => content
+            .map(|stored| {
+                stored
+                    .message()
+                    .content
                     .iter()
                     .map(|b| match b {
-                        UserContent::Text(t) => t.text.chars().count() as u64,
-                        UserContent::Image(_) => 0,
-                        UserContent::ToolResult(r) => {
-                            r.content.iter().map(|c| c.to_text().len() as u64).sum()
+                        crate::history::ContentBlock::Text { text } => text.chars().count() as u64,
+                        crate::history::ContentBlock::ToolUse { input, .. } => {
+                            input.to_string().len() as u64
                         }
-                    })
-                    .sum::<u64>(),
-                Message::Assistant { content } => content
-                    .iter()
-                    .map(|b| match b {
-                        AssistantContent::Text(t) => t.text.chars().count() as u64,
-                        AssistantContent::ToolCall(c) => {
-                            c.function.arguments.to_string().len() as u64
+                        crate::history::ContentBlock::ToolResult { content, .. } => {
+                            ext::tool_content_text(content).len() as u64
                         }
                         _ => 0,
                     })
-                    .sum::<u64>(),
+                    .sum::<u64>()
             })
             .sum()
     }
 
-    fn long_history() -> Vec<Message> {
+    fn long_history() -> Vec<StoredMessage> {
         let mut msgs = Vec::new();
         for i in 0..16 {
-            msgs.push(user(&format!("do task {i} with a fairly long instruction")));
-            msgs.push(assistant_tool_args(
+            msgs.push(stored_user(&format!(
+                "do task {i} with a fairly long instruction"
+            )));
+            msgs.push(stored_assistant_tool_args(
                 &format!("t{i}"),
                 "bash",
                 serde_json::json!({"command": format!("echo step{i}")}),
             ));
-            msgs.push(tool_result_of(&format!("t{i}"), &format!("output {i}")));
+            msgs.push(stored_tool_result_of(
+                &format!("t{i}"),
+                &format!("output {i}"),
+            ));
         }
-        msgs.push(user("final user message"));
+        msgs.push(stored_user("final user message"));
         msgs
     }
 
@@ -273,11 +282,11 @@ mod tests {
         assert!(is_vcc_summary(&messages[0]));
         assert!(messages.len() > 1, "tail must be preserved");
         // The final user message must survive verbatim in the tail.
-        assert!(messages.iter().any(
-            |m| matches!(m, Message::User { content } if content.iter().any(
-                |b| matches!(b, UserContent::Text(t) if t.text == original_tail_user)
-            ))
-        ));
+        assert!(
+            messages
+                .iter()
+                .any(|m| ext::message_text(m) == original_tail_user)
+        );
         assert!(messages.len() < 20);
     }
 
@@ -307,7 +316,7 @@ mod tests {
 
     #[test]
     fn vcc_compact_returns_false_for_short_history() {
-        let mut messages = vec![user("hi"), user("there")];
+        let mut messages = vec![stored_user("hi"), stored_user("there")];
         assert!(!vcc_compact(&mut messages, u64::MAX, char_estimate, 0));
         assert_eq!(messages.len(), 2);
     }

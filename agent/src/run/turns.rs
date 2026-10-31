@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::history::{self, Message};
+use crate::history::{self, ContentBlock, Role, StoredMessage};
 use crate::provider::ModelHandle;
 
 use super::dispatch_tool_calls;
@@ -38,8 +38,8 @@ pub(super) async fn stream_turn(
     params: &RunParams,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
-    history: &mut Vec<Message>,
-    turn: &mut Vec<Message>,
+    history: &mut Vec<StoredMessage>,
+    turn: &mut Vec<StoredMessage>,
     doom: &mut doom::DoomTracker,
     refreshed_model: &mut Option<ModelHandle>,
     overflow_recoveries: &mut u32,
@@ -92,9 +92,7 @@ pub(super) async fn stream_turn(
             // Keep the partial reply the user already saw, so the next
             // prompt replays from what was on screen.
             if !streamed.is_empty() {
-                turn.push(Message::Assistant {
-                    content: vec![history::AssistantContent::text(streamed)],
-                });
+                turn.push(history::ext::stored(history::ext::assistant_text(streamed)));
             }
             Streamed::Stop(super::commit_cancelled(history, turn))
         }
@@ -178,9 +176,9 @@ pub(super) async fn finish_turn(
     tools: &ToolDispatch,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
-    history: &mut Vec<Message>,
-    turn: &mut Vec<Message>,
-    full: &[Message],
+    history: &mut Vec<StoredMessage>,
+    turn: &mut Vec<StoredMessage>,
+    full: &[StoredMessage],
     output: TurnOutput,
     served_spec: Option<Arc<str>>,
     stats: &mut RunStats,
@@ -192,45 +190,46 @@ pub(super) async fn finish_turn(
     overflow_recoveries: &mut u32,
     reauth_attempts: &mut u32,
     measured_prompt_tokens: &mut u64,
+    context_estimate: u64,
 ) -> TurnEnd {
     *overflow_recoveries = 0;
     *reauth_attempts = 0;
     // Track the last measured count (zero is the missing-report
     // sentinel, kept at the previous value); it naturally shrinks
     // again after compaction, unlike a running max.
-    if output.usage.input_tokens > 0 {
-        *measured_prompt_tokens = output.usage.input_tokens;
+    let measured_input = u64::from(output.usage.input) + u64::from(output.usage.cache_read);
+    if measured_input > 0 {
+        *measured_prompt_tokens = measured_input;
     }
     stats.add_usage(&output.usage, served_spec.as_deref(), params.fast);
-    stats.context_size = crate::compaction::estimate_tokens(full);
+    stats.context_size = context_estimate;
     stats.turns = *turns as u32 + 1;
+    let usage = output.usage.clone();
     emit(Event::TurnComplete {
-        usage: output.usage,
+        usage,
         context_size: stats.context_size,
     });
-    let Message::Assistant { content } = &output.assistant else {
+    if output.assistant.role != Role::Assistant {
         return TurnEnd::Stop(RunOutcome::Failed(
             "model produced a non-assistant message".into(),
         ));
-    };
-    let tool_calls: Vec<history::ToolCall> = content
-        .iter()
-        .filter_map(|block| match block {
-            history::AssistantContent::ToolCall(call) => Some(call.clone()),
-            _ => None,
-        })
+    }
+    let tool_calls: Vec<ContentBlock> = history::ext::tool_calls(&output.assistant)
+        .cloned()
         .collect();
     // An empty reply is replaced by the `(empty)` marker and its evidence
     // discarded below; record what the model actually did here — this is
     // the only place the cause survives. (The reasoning-presence flag in
     // particular distinguishes a thinking-only turn from a stream that
     // produced nothing.) Computed before the move into `turn`.
-    let empty_reasoning = content
+    let empty_reasoning = output
+        .assistant
+        .content
         .iter()
-        .any(|block| matches!(block, history::AssistantContent::Reasoning(_)));
-    turn.push(output.assistant);
+        .any(ContentBlock::is_thinking);
+    turn.push(history::ext::stored(output.assistant));
     if tool_calls.is_empty() {
-        let reply = turn.last().expect("assistant pushed").text();
+        let reply = history::ext::message_text(turn.last().expect("assistant pushed"));
         // A truncated reply continues: the model's cut-off message is
         // already in `turn`, so the next request resumes from it.
         let truncated = output.finish_reason == Some(animist::provider::StopReason::MaxTokens);
@@ -238,8 +237,8 @@ pub(super) async fn finish_turn(
             tracing::warn!(
                 model = params.model_spec.as_deref().unwrap_or("unknown"),
                 finish_reason = ?output.finish_reason,
-                input_tokens = output.usage.input_tokens,
-                output_tokens = output.usage.output_tokens,
+                input_tokens = measured_input,
+                output_tokens = output.usage.output,
                 reasoning = empty_reasoning,
                 "model reply had no text and no tool calls; replacing with the (empty) marker"
             );

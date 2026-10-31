@@ -112,7 +112,7 @@ Paths are workspace-relative or absolute beneath the canonical workspace root; `
 
 ratatui interface: 30 built-in themes (`/theme`), rebindable keymaps, command palette (Ctrl-P), fuzzy search (Ctrl-F), subagent chat windows (Ctrl-N / Ctrl-P), clipboard image paste (Ctrl-V), editor integration, plan mode with a plan form and todo cards, `!` / `!!` bash passthrough, input history, and session resume. Slash commands: `/new`, `/resume`, `/continue`, `/sessions`, `/model`, `/clear`, `/undo`, `/mcp`, `/compact`, `/usage`, `/stats`, `/auto-review`, `/theme`, `/recipe`, `/review`, `/scan`, `/dream`, `/memory`, plus custom namespaced commands.
 
-Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (`craft stats`, `/stats`).
+Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (`craft stats`, `/stats`). Messages persist as animist entry records (format version 4); sessions saved by older `crafty` builds (message records, `.json` files) load transparently and rewrite to the current format on next save. The rewrite is one-way: older `crafty` builds cannot read the new saves.
 
 ## CLI
 

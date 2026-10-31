@@ -131,7 +131,7 @@ pub(super) struct AcpPermissionGate {
 }
 
 impl run::BeforeExecute for AcpPermissionGate {
-    fn decide(&self, call: history::ToolCall) -> run::BoxFuture<run::Decision> {
+    fn decide(&self, call: history::ContentBlock) -> run::BoxFuture<run::Decision> {
         let gate = AcpPermissionGate {
             connection: self.connection.clone(),
             session_id: self.session_id.clone(),
@@ -142,7 +142,16 @@ impl run::BeforeExecute for AcpPermissionGate {
     }
 }
 
-async fn gate_decide(gate: AcpPermissionGate, call: history::ToolCall) -> run::Decision {
+async fn gate_decide(gate: AcpPermissionGate, call: history::ContentBlock) -> run::Decision {
+    let history::ContentBlock::ToolUse {
+        id: call_id,
+        name,
+        input: arguments,
+        ..
+    } = call
+    else {
+        return run::Decision::Skip("not a tool call".into());
+    };
     let AcpPermissionGate {
         connection,
         session_id,
@@ -152,21 +161,15 @@ async fn gate_decide(gate: AcpPermissionGate, call: history::ToolCall) -> run::D
     if cancel.cancelled() {
         return run::Decision::Stop("cancelled by client".into());
     }
-    let name = call.function.name.as_str();
+    let name = name.as_str();
     let tool = ToolKey::parse(name);
-    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &call.function.arguments);
+    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &arguments);
     match permissions.check_multi(&tool, &scopes, force_prompt) {
         PermissionCheck::Allowed => return run::Decision::Run,
         PermissionCheck::Denied => return run::Decision::Skip(denied_message(&tool, &scopes)),
         PermissionCheck::NeedsPrompt { .. } => {}
     }
-    let request = permission_request(
-        &session_id,
-        &call.id,
-        name,
-        &call.function.arguments,
-        &scopes,
-    );
+    let request = permission_request(&session_id, &call_id, name, &arguments, &scopes);
     // Dropping the sent request on cancel asks the client to cancel it.
     let mut cancel_rx = cancel.subscribe();
     let answer = {

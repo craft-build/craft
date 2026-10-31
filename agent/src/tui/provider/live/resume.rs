@@ -75,7 +75,7 @@ pub(super) async fn load_session(
         Some("build") => Some(SessionMode::Build),
         _ => None,
     };
-    let messages = loaded.messages().to_vec();
+    let messages = crate::history::ext::stored_of_entries(loaded.messages());
     let rendered = transcript(&messages);
     {
         // Swap history + persistence in one critical section. Compaction/
@@ -164,17 +164,18 @@ pub(super) async fn resume_latest(
 /// User/assistant text of a persisted session, for the conversation view's
 /// rebuild: tool calls and results carry no displayable text, so messages
 /// containing only those are skipped (they leave an empty `text()`).
-pub(super) fn transcript(messages: &[crate::history::Message]) -> Vec<LoadedMessage> {
+pub(super) fn transcript(messages: &[crate::history::StoredMessage]) -> Vec<LoadedMessage> {
     messages
         .iter()
-        .filter_map(|message| {
-            let text = message.text();
+        .filter_map(|stored| {
+            let text = crate::history::ext::message_text(stored);
             if text.trim().is_empty() {
                 return None;
             }
-            Some(match message {
-                crate::history::Message::User { .. } => LoadedMessage::User(text),
-                _ => LoadedMessage::Assistant(text),
+            Some(if crate::history::ext::is_user(stored.message()) {
+                LoadedMessage::User(text)
+            } else {
+                LoadedMessage::Assistant(text)
             })
         })
         .collect()

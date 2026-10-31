@@ -17,8 +17,11 @@ pub(super) const ARCHIVE_KEEP: usize = 3;
 /// Three copies of a log full of tool output add up fast, so the bytes get a
 /// budget of their own. The newest archive always survives, whatever it weighs.
 pub(super) const ARCHIVE_MAX_BYTES: u64 = 32 * 1024 * 1024;
-/// A `msg` line starts with this. Matching the prefix beats parsing the log.
-pub(super) const MSG_PREFIX: &[u8] = br#"{"t":"msg""#;
+/// A message-record line starts with one of these. Matching prefixes
+/// beats parsing the log.
+/// Message-record prefixes of every vocabulary a log on disk can carry:
+/// the current entry records and the pre-entry `msg` records.
+pub(super) const MSG_PREFIXES: &[&[u8]] = &[br#"{"t":"entry""#, br#"{"t":"msg""#];
 
 /// Compaction and rewind hand the log a shorter message list, and writing that
 /// out would take the dropped turns with it, so the old file gets a second name
@@ -72,7 +75,7 @@ fn count_msg_lines(path: &Path) -> Option<usize> {
             Ok(0) | Err(_) => return Some(count),
             Ok(_) => {}
         }
-        if line.starts_with(MSG_PREFIX) {
+        if MSG_PREFIXES.iter().any(|prefix| line.starts_with(prefix)) {
             count += 1;
         }
     }

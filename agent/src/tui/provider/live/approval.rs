@@ -139,7 +139,7 @@ async fn auto_review_decide(
 }
 
 impl crate::run::BeforeExecute for ApprovalGate {
-    fn decide(&self, call: history::ToolCall) -> crate::run::BoxFuture<Decision> {
+    fn decide(&self, call: history::ContentBlock) -> crate::run::BoxFuture<Decision> {
         let ApprovalGate {
             state,
             tx,
@@ -192,14 +192,23 @@ async fn gate_decide(
     cancel: CancelToken,
     permissions: Arc<PermissionManager>,
     reviewer: Option<Reviewer>,
-    call: history::ToolCall,
+    call: history::ContentBlock,
 ) -> Decision {
     if cancel.cancelled() {
         return Decision::Stop("cancelled by client".into());
     }
-    let name = call.function.name.as_str();
+    let history::ContentBlock::ToolUse {
+        id: call_id,
+        name,
+        input: arguments,
+        ..
+    } = call
+    else {
+        return Decision::Skip("not a tool call".into());
+    };
+    let name = name.as_str();
     let tool = ToolKey::parse(name);
-    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &call.function.arguments);
+    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &arguments);
     match permissions.check_multi(&tool, &scopes, force_prompt) {
         PermissionCheck::Allowed => return Decision::Run,
         PermissionCheck::Denied => {
@@ -216,7 +225,7 @@ async fn gate_decide(
             }
         }
     }
-    let id = call.id.clone();
+    let id = call_id.clone();
     if permissions.is_auto_review()
         && let Some(reviewer) = reviewer.as_ref()
     {
@@ -225,13 +234,13 @@ async fn gate_decide(
     let _ = tx.send(AgentEvent::AssistantEnd);
     let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
         id: id.clone(),
-        kind: cards::tool_head(&call.function.name, &call.function.arguments),
+        kind: cards::tool_head(name, &arguments),
         lines: Vec::new(),
         awaiting_approval: true,
         image: None,
     }));
     let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
-    let (files, commands) = display_context(name, &call.function.arguments, &scopes);
+    let (files, commands) = display_context(name, &arguments, &scopes);
     // Register before emitting: an answer racing in on event receipt
     // must find the oneshot already parked.
     let (decision_tx, mut decision_rx) = oneshot::channel();
@@ -294,14 +303,20 @@ mod tests {
     use crate::permissions::PermissionsConfig;
     use crate::run::BeforeExecute;
 
-    fn tool_call(id: &str, name: &str) -> history::ToolCall {
-        history::ToolCall {
+    fn tool_call(id: &str, name: &str) -> history::ContentBlock {
+        history::ContentBlock::ToolUse {
             id: id.into(),
-            function: history::ToolFunction {
-                name: name.into(),
-                arguments: serde_json::json!({}),
-            },
+            name: name.into(),
+            input: serde_json::json!({}),
+            thought_signature: None,
         }
+    }
+
+    fn set_input(call: &mut history::ContentBlock, input: serde_json::Value) {
+        let history::ContentBlock::ToolUse { input: slot, .. } = call else {
+            panic!("tool call");
+        };
+        *slot = input;
     }
 
     fn gate(state: &Arc<Mutex<SessionState>>) -> (ApprovalGate, crate::run::CancelFlag) {
@@ -355,7 +370,7 @@ mod tests {
         let state = Arc::new(Mutex::new(SessionState::default()));
         let (gate, _flag) = gate(&state);
         let mut call = tool_call("t1", "task");
-        call.function.arguments = serde_json::json!({"description": "research"});
+        set_input(&mut call, serde_json::json!({"description": "research"}));
         let decision = gate.decide(call).await;
         assert!(matches!(decision, Decision::Run));
         assert!(state.lock().await.pending_approval.is_none());
@@ -369,7 +384,10 @@ mod tests {
         let (gate, _flag) = gate(&state);
         let inside = std::env::temp_dir().join("craft_builtin_allow_test.rs");
         let mut call = tool_call("t1", "write");
-        call.function.arguments = serde_json::json!({ "path": inside.display().to_string() });
+        set_input(
+            &mut call,
+            serde_json::json!({ "path": inside.display().to_string() }),
+        );
         assert!(matches!(gate.decide(call).await, Decision::Run));
         assert!(state.lock().await.pending_approval.is_none());
     }
@@ -502,7 +520,7 @@ mod tests {
         let mut call = tool_call("t1", "write");
         // Out-of-project: an in-project write is now a builtin allow and would
         // run without a prompt, so the approval flow is exercised off-project.
-        call.function.arguments = serde_json::json!({ "path": "/proj/src/lib.rs" });
+        set_input(&mut call, serde_json::json!({ "path": "/proj/src/lib.rs" }));
         let pending = tokio::spawn(async move { gate.decide(call).await });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while state.lock().await.pending_approval.is_none() {
@@ -516,7 +534,10 @@ mod tests {
         // a sibling write now runs without asking again.
         let (gate, _flag) = make_gate(permissions);
         let mut sibling = tool_call("t2", "write");
-        sibling.function.arguments = serde_json::json!({ "path": "/proj/src/other.rs" });
+        set_input(
+            &mut sibling,
+            serde_json::json!({ "path": "/proj/src/other.rs" }),
+        );
         assert!(matches!(gate.decide(sibling).await, Decision::Run));
         assert!(state.lock().await.pending_approval.is_none());
     }
@@ -576,7 +597,7 @@ mod tests {
             let (gate, _flag) = make_gate(permissions.clone());
             let mut call = tool_call(&id, "write");
             // Off-project so it still prompts (in-project writes auto-allow).
-            call.function.arguments = serde_json::json!({ "path": "/proj/src/lib.rs" });
+            set_input(&mut call, serde_json::json!({ "path": "/proj/src/lib.rs" }));
             let pending = tokio::spawn(async move { gate.decide(call).await });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while state.lock().await.pending_approval.is_none() {
@@ -610,7 +631,7 @@ mod tests {
         let _ = flag;
 
         let mut call = tool_call("t1", "bash");
-        call.function.arguments = serde_json::json!({ "command": "echo hi" });
+        set_input(&mut call, serde_json::json!({ "command": "echo hi" }));
         let pending = tokio::spawn(async move { gate.decide(call).await });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while state.lock().await.pending_approval.is_none() {
@@ -661,7 +682,7 @@ mod tests {
         let gate = ApprovalGate::new(state.clone(), tx, cancel, permissions, None);
 
         let mut call = tool_call("t1", "bash");
-        call.function.arguments = serde_json::json!({ "command": "echo hi" });
+        set_input(&mut call, serde_json::json!({ "command": "echo hi" }));
         let pending = tokio::spawn(async move { gate.decide(call).await });
         while state.lock().await.pending_approval.is_none() {
             tokio::task::yield_now().await;
@@ -798,7 +819,7 @@ mod tests {
         }));
         let (gate, _state, permissions) = auto_review_gate(reviewer);
         let mut call = tool_call("t1", "bash");
-        call.function.arguments = serde_json::json!({ "command": "rm -rf /" });
+        set_input(&mut call, serde_json::json!({ "command": "rm -rf /" }));
         let decision = gate.decide(call).await;
         let Decision::Skip(message) = decision else {
             panic!("expected skip, got {decision:?}");
@@ -809,7 +830,7 @@ mod tests {
             "the reviewer rationale replaces the generic guidance: {message}"
         );
         let mut sibling = tool_call("t2", "bash");
-        sibling.function.arguments = serde_json::json!({ "command": "rm -rf /" });
+        set_input(&mut sibling, serde_json::json!({ "command": "rm -rf /" }));
         assert!(matches!(gate.decide(sibling).await, Decision::Skip(_)));
         assert!(matches!(
             permissions.check(&ToolKey::native("bash"), &["rm -rf /".to_string()]),
@@ -826,7 +847,10 @@ mod tests {
         let mut call = tool_call("t1", "write");
         // Out-of-project: in-project writes are a builtin allow now, so this
         // path is what still reaches the auto-reviewer.
-        call.function.arguments = serde_json::json!({ "path": "/outside/src/a.rs" });
+        set_input(
+            &mut call,
+            serde_json::json!({ "path": "/outside/src/a.rs" }),
+        );
         let Decision::Skip(message) = gate.decide(call).await else {
             panic!("expected skip");
         };
@@ -867,7 +891,7 @@ mod tests {
             effect: crate::permissions::Effect::Deny,
         });
         let mut call = tool_call("t2", "write");
-        call.function.arguments = serde_json::json!({ "path": "src/blocked.rs" });
+        set_input(&mut call, serde_json::json!({ "path": "src/blocked.rs" }));
         assert!(matches!(gate.decide(call).await, Decision::Skip(_)));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),

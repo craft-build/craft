@@ -17,7 +17,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{Result, invalid};
-use crate::history::{ToolCall, ToolFunction, ToolResultContent};
+use crate::history::ContentBlock;
+use crate::history::ext;
 use crate::run::{DispatchOutcome, ToolDispatch};
 
 pub const MAX_BATCH_SIZE: usize = 25;
@@ -112,24 +113,23 @@ impl Batch {
 
         let calls = active.iter().enumerate().map(|(index, (tool, arguments))| {
             let dispatch = dispatch.clone();
-            let call = ToolCall {
+            let call = ContentBlock::ToolUse {
                 id: format!("batch-{index}"),
-                function: ToolFunction {
-                    name: tool.clone(),
-                    arguments: arguments.clone(),
-                },
+                name: tool.clone(),
+                input: arguments.clone(),
+                thought_signature: None,
             };
             async move {
                 let (text, is_error) = match dispatch.execute(call).await {
-                    Ok(DispatchOutcome::Ran(result)) | Ok(DispatchOutcome::Skipped(result)) => (
-                        result
-                            .content
-                            .iter()
-                            .map(ToolResultContent::to_text)
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        result.is_error,
-                    ),
+                    Ok(DispatchOutcome::Ran(result)) | Ok(DispatchOutcome::Skipped(result)) => {
+                        let ContentBlock::ToolResult {
+                            content, is_error, ..
+                        } = &result
+                        else {
+                            unreachable!("dispatch returns tool results");
+                        };
+                        (ext::tool_content_text(content), *is_error)
+                    }
                     Ok(DispatchOutcome::Stopped(reason)) => {
                         (format!("run stopped: {reason}"), true)
                     }
@@ -329,17 +329,20 @@ mod tests {
     /// exposes post-registration hooks: the batch tool's child table is a clone
     /// taken during registration, before callers attach hooks.
     async fn run_batch(dispatch: &ToolDispatch, children: Vec<Map<String, Value>>) -> String {
-        let call = ToolCall::new("t1", "batch", json!({ "tool_calls": children }));
+        let call = ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "batch".into(),
+            input: json!({ "tool_calls": children }),
+            thought_signature: None,
+        };
         let result = match dispatch.execute(call).await.unwrap() {
             DispatchOutcome::Ran(result) | DispatchOutcome::Skipped(result) => result,
             DispatchOutcome::Stopped(reason) => panic!("stopped: {reason}"),
         };
-        result
-            .content
-            .iter()
-            .map(ToolResultContent::to_text)
-            .collect::<Vec<_>>()
-            .join("\n")
+        let ContentBlock::ToolResult { content, .. } = &result else {
+            panic!("tool result");
+        };
+        ext::tool_content_text(content)
     }
 
     #[tokio::test]
@@ -348,12 +351,12 @@ mod tests {
 
         struct DenyAll;
         impl BeforeExecute for DenyAll {
-            fn decide(&self, call: crate::history::ToolCall) -> crate::run::BoxFuture<Decision> {
+            fn decide(&self, call: ContentBlock) -> crate::run::BoxFuture<Decision> {
                 // Allow the outer batch so the test reaches the children.
-                let decision = if call.function.name == "batch" {
-                    Decision::Run
-                } else {
-                    Decision::Skip(format!("denied: {}", call.function.name))
+                let decision = match &call {
+                    ContentBlock::ToolUse { name, .. } if name == "batch" => Decision::Run,
+                    ContentBlock::ToolUse { name, .. } => Decision::Skip(format!("denied: {name}")),
+                    _ => Decision::Run,
                 };
                 Box::pin(std::future::ready(decision))
             }
@@ -401,12 +404,16 @@ mod tests {
         impl AfterExecute for TagList {
             fn transform(
                 &self,
-                call: ToolCall,
-                mut result: crate::history::ToolResult,
-            ) -> crate::run::BoxFuture<crate::history::ToolResult> {
+                call: ContentBlock,
+                mut result: ContentBlock,
+            ) -> crate::run::BoxFuture<ContentBlock> {
                 Box::pin(async move {
-                    if call.function.name == "list" {
-                        result.content.push(ToolResultContent::text("AFTER-CHILD"));
+                    let is_list = matches!(&call,
+                        ContentBlock::ToolUse { name, .. } if name == "list");
+                    if is_list && let ContentBlock::ToolResult { content, .. } = &mut result {
+                        content.0.push(crate::history::ToolContent::Text {
+                            text: "AFTER-CHILD".into(),
+                        });
                     }
                     result
                 })

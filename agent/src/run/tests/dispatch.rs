@@ -2,24 +2,25 @@
 //! the write-conflict barrier.
 
 use super::*;
-use crate::history::UserContent;
+use crate::history::{ContentBlock, Message, Role, StoredMessage, ToolContent, ext};
 use crate::run::*;
 
-/// Collect every tool result's first text block, in call order.
-fn collect_tool_text(history: &[Message]) -> Vec<String> {
-    history
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|b| match b {
-                    UserContent::ToolResult(r) => Some(r.content[0].to_text()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
+/// Every tool result's model-visible text, in call order.
+fn tool_texts<'a>(messages: impl Iterator<Item = &'a Message>) -> Vec<String> {
+    messages
+        .flat_map(ext::tool_results)
+        .map(|block| {
+            let ContentBlock::ToolResult { content, .. } = block else {
+                panic!("tool result block");
+            };
+            ext::tool_content_text(content)
         })
         .collect()
+}
+
+/// Collect every tool result's first text block, in call order.
+fn collect_tool_text(history: &[StoredMessage]) -> Vec<String> {
+    tool_texts(history.iter().map(StoredMessage::message))
 }
 
 #[tokio::test]
@@ -61,8 +62,8 @@ async fn unknown_tool_surfaces_error_and_run_continues() {
     // The retried request carries the error result, so the model sees what
     // went wrong and can correct the name.
     let requests = provider.requests();
-    let replayed = crate::testing::replay_history(&requests[1].messages);
-    let replayed_errors = collect_tool_text(&replayed);
+    let replayed = &requests[1].messages;
+    let replayed_errors = tool_texts(replayed.iter());
     assert!(
         replayed_errors[0].contains("unknown tool: no_such_tool"),
         "got: {replayed_errors:?}"
@@ -73,7 +74,7 @@ async fn unknown_tool_surfaces_error_and_run_continues() {
 async fn skip_decision_reports_reason_to_model() {
     struct Deny;
     impl BeforeExecute for Deny {
-        fn decide(&self, _call: history::ToolCall) -> BoxFuture<Decision> {
+        fn decide(&self, _call: ContentBlock) -> BoxFuture<Decision> {
             Box::pin(async { Decision::Skip("not allowed".into()) })
         }
     }
@@ -103,14 +104,16 @@ async fn skip_decision_reports_reason_to_model() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply == "okay"));
-    let history::Message::User { content } = &history[2] else {
-        panic!("tool result message");
-    };
-    let UserContent::ToolResult(result) = &content[0] else {
+    let result_message = history[2].message();
+    assert_eq!(result_message.role, Role::User, "tool result message");
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &result_message.content[0]
+    else {
         panic!("tool result block");
     };
-    assert_eq!(result.content[0].to_text(), "not allowed");
-    assert!(!result.is_error);
+    assert_eq!(ext::tool_content_text(content), "not allowed");
+    assert!(!is_error);
 }
 
 #[tokio::test]
@@ -119,13 +122,15 @@ async fn after_execute_transform_rewrites_results() {
     impl AfterExecute for Upper {
         fn transform(
             &self,
-            _call: history::ToolCall,
-            mut result: history::ToolResult,
-        ) -> BoxFuture<history::ToolResult> {
+            _call: ContentBlock,
+            mut result: ContentBlock,
+        ) -> BoxFuture<ContentBlock> {
             Box::pin(async move {
-                for item in &mut result.content {
-                    if let history::ToolResultContent::Text(text) = item {
-                        text.text = text.text.to_uppercase();
+                if let ContentBlock::ToolResult { content, .. } = &mut result {
+                    for item in &mut content.0 {
+                        if let ToolContent::Text { text } = item {
+                            *text = text.to_uppercase();
+                        }
                     }
                 }
                 result
@@ -158,13 +163,12 @@ async fn after_execute_transform_rewrites_results() {
         &|_| {},
     )
     .await;
-    let history::Message::User { content } = &history[2] else {
-        panic!("tool result message");
-    };
-    let UserContent::ToolResult(result) = &content[0] else {
+    let result_message = history[2].message();
+    assert_eq!(result_message.role, Role::User, "tool result message");
+    let ContentBlock::ToolResult { content, .. } = &result_message.content[0] else {
         panic!("tool result block");
     };
-    assert_eq!(result.content[0].to_text(), "1: BODY");
+    assert_eq!(ext::tool_content_text(content), "1: BODY");
 }
 
 #[tokio::test]
@@ -195,25 +199,11 @@ async fn dedup_replays_identical_read_calls() {
     )
     .await;
     assert!(matches!(outcome, RunOutcome::Done { .. }));
-    let results: Vec<&history::ToolResult> = history
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|b| match b {
-                    UserContent::ToolResult(r) => Some(r),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
-        .collect();
+    let results = collect_tool_text(&history);
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].content[0].to_text(), "1: body");
+    assert_eq!(results[0], "1: body");
     assert!(
-        results[1].content[0]
-            .to_text()
-            .starts_with("[cached] 1: body"),
+        results[1].starts_with("[cached] 1: body"),
         "second identical read must replay from cache"
     );
 }
@@ -252,19 +242,7 @@ async fn dedup_invalidated_by_write_to_same_path() {
         &|_| {},
     )
     .await;
-    let results: Vec<String> = history
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|b| match b {
-                    UserContent::ToolResult(r) => Some(r.content[0].to_text()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
-        .collect();
+    let results = collect_tool_text(&history);
     assert_eq!(results.len(), 3);
     assert_eq!(results[0], "1: old");
     assert!(!results[1].contains("cached"), "writes are never cached");
@@ -427,11 +405,7 @@ async fn dedup_replays_through_after_hook() {
         count: std::sync::Arc<AtomicUsize>,
     }
     impl AfterExecute for Counting {
-        fn transform(
-            &self,
-            _call: history::ToolCall,
-            result: history::ToolResult,
-        ) -> BoxFuture<history::ToolResult> {
+        fn transform(&self, _call: ContentBlock, result: ContentBlock) -> BoxFuture<ContentBlock> {
             let count = self.count.clone();
             Box::pin(async move {
                 count.fetch_add(1, Ordering::Relaxed);
@@ -473,14 +447,12 @@ async fn dedup_replays_through_after_hook() {
         "after hook must run on both the execution and the replay"
     );
     assert!(history.len() >= 5);
-    let replayed = &history[history.len() - 2];
-    let Message::User { content } = replayed else {
-        panic!("tool result message");
-    };
-    let UserContent::ToolResult(result) = &content[0] else {
+    let replayed = history[history.len() - 2].message();
+    assert_eq!(replayed.role, Role::User, "tool result message");
+    let ContentBlock::ToolResult { content, .. } = &replayed.content[0] else {
         panic!("tool result block");
     };
-    assert!(result.content[0].to_text().starts_with("[cached]"));
+    assert!(ext::tool_content_text(content).starts_with("[cached]"));
 }
 
 // --- parallel dispatch with write-conflict barrier ---
@@ -492,13 +464,12 @@ use rig_core::tool::{DynamicTool, ToolOutput};
 
 use crate::run::dispatch_tool_calls;
 
-fn call(id: &str, name: &str, args: serde_json::Value) -> crate::history::ToolCall {
-    crate::history::ToolCall {
+fn call(id: &str, name: &str, args: serde_json::Value) -> ContentBlock {
+    ContentBlock::ToolUse {
         id: id.into(),
-        function: crate::history::ToolFunction {
-            name: name.into(),
-            arguments: args,
-        },
+        name: name.into(),
+        input: args,
+        thought_signature: None,
     }
 }
 
@@ -520,12 +491,8 @@ fn tool(name: &str, run: impl Fn() + Send + Sync + Clone + 'static) -> DynamicTo
 
 async fn dispatch(
     tools: &ToolDispatch,
-    calls: Vec<crate::history::ToolCall>,
-) -> (
-    Option<RunOutcome>,
-    Vec<Message>,
-    Vec<crate::history::ToolResult>,
-) {
+    calls: Vec<ContentBlock>,
+) -> (Option<RunOutcome>, Vec<StoredMessage>, Vec<ContentBlock>) {
     let (_, cancel) = cancel_channel();
     let mut turn = Vec::new();
     let done = std::sync::Arc::new(StdMutex::new(Vec::new()));
@@ -546,16 +513,42 @@ async fn dispatch(
     (outcome.0, turn, done.lock().unwrap().clone())
 }
 
-fn results_in_call_order(turn: &[Message]) -> Vec<crate::history::ToolResult> {
+/// The committed result blocks of a dispatched turn, in call order.
+fn results_in_call_order(turn: &[StoredMessage]) -> Vec<ContentBlock> {
     turn.iter()
-        .filter_map(|m| match m {
-            Message::User { content } => match &content[0] {
-                UserContent::ToolResult(r) => Some(r.clone()),
-                _ => None,
-            },
-            _ => None,
+        .filter_map(|stored| {
+            let message = stored.message();
+            if message.role == Role::User {
+                message.content.first().cloned()
+            } else {
+                None
+            }
         })
         .collect()
+}
+
+/// The result block's call id.
+fn result_id(result: &ContentBlock) -> &str {
+    let ContentBlock::ToolResult { tool_use_id, .. } = result else {
+        panic!("tool result block");
+    };
+    tool_use_id
+}
+
+/// Whether the result block reports an error.
+fn result_is_error(result: &ContentBlock) -> bool {
+    let ContentBlock::ToolResult { is_error, .. } = result else {
+        panic!("tool result block");
+    };
+    *is_error
+}
+
+/// The result block's model-visible text.
+fn result_text(result: &ContentBlock) -> String {
+    let ContentBlock::ToolResult { content, .. } = result else {
+        panic!("tool result block");
+    };
+    ext::tool_content_text(content)
 }
 
 /// Two independent read-only calls that each wait for the other to start:
@@ -595,8 +588,8 @@ async fn independent_calls_run_concurrently() {
     assert!(outcome.is_none());
     assert_eq!(done.len(), 2);
     let results = results_in_call_order(&turn);
-    assert_eq!(results[0].call, "t1");
-    assert_eq!(results[1].call, "t2");
+    assert_eq!(result_id(&results[0]), "t1");
+    assert_eq!(result_id(&results[1]), "t2");
 }
 
 /// Three identical calls in a row: the first two execute, the third is
@@ -637,11 +630,22 @@ async fn identical_calls_blocked_as_doom_loop() {
     assert_eq!(results.len(), 4);
     // The blocked call's result is committed immediately, ahead of the
     // wave's results; the other three ran.
-    let blocked = results.iter().filter(|r| r.is_error).collect::<Vec<_>>();
+    let blocked = results
+        .iter()
+        .filter(|r| result_is_error(r))
+        .collect::<Vec<_>>();
     assert_eq!(blocked.len(), 1);
-    assert!(blocked[0].content[0].to_text().contains("stuck in a loop"));
-    assert!(results.iter().any(|r| !r.is_error && r.call == "t1"));
-    assert!(results.iter().any(|r| !r.is_error && r.call == "t4"));
+    assert!(result_text(blocked[0]).contains("stuck in a loop"));
+    assert!(
+        results
+            .iter()
+            .any(|r| !result_is_error(r) && result_id(r) == "t1")
+    );
+    assert!(
+        results
+            .iter()
+            .any(|r| !result_is_error(r) && result_id(r) == "t4")
+    );
     assert_eq!(done.len(), 4);
 }
 
@@ -677,7 +681,7 @@ async fn same_path_writes_serialize() {
     .await;
     assert!(outcome.is_none());
     assert_eq!(*log.lock().unwrap(), vec!["start", "end", "start", "end"]);
-    assert_eq!(results_in_call_order(&turn)[1].call, "t2");
+    assert_eq!(result_id(&results_in_call_order(&turn)[1]), "t2");
 }
 
 /// A never-parallel tool joins the wave barrier: everything spawned before
@@ -735,11 +739,11 @@ async fn panicking_tool_becomes_error_result() {
     .await;
     assert!(outcome.is_none(), "panic must not fail the run");
     let results = results_in_call_order(&turn);
-    assert!(results[0].is_error);
-    let text = results[0].content[0].to_text();
+    assert!(result_is_error(&results[0]));
+    let text = result_text(&results[0]);
     assert!(text.contains("tool panicked"), "got: {text}");
     assert!(text.contains("kaboom"), "got: {text}");
-    assert!(!results[1].is_error);
+    assert!(!result_is_error(&results[1]));
 }
 
 /// An unknown tool becomes a per-call error result; the run continues.
@@ -754,8 +758,8 @@ async fn unknown_tool_becomes_recoverable_error_result() {
     assert!(outcome.is_none(), "an unknown tool must not stop the run");
     let results = results_in_call_order(&turn);
     assert_eq!(results.len(), 1);
-    assert!(results[0].is_error);
-    let text = results[0].content[0].to_text();
+    assert!(result_is_error(&results[0]));
+    let text = result_text(&results[0]);
     assert!(text.contains("unknown tool: nonexistent"), "got: {text}");
 }
 

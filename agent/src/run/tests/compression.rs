@@ -2,7 +2,7 @@
 //! skips and the opt-out.
 
 use super::*;
-use crate::history::UserContent;
+use crate::history::{ContentBlock, Role, ext};
 use crate::run::*;
 
 #[tokio::test]
@@ -34,13 +34,13 @@ async fn recency_tail_rides_the_request_but_not_history() {
     .await;
     assert!(matches!(outcome, RunOutcome::Done { .. }));
     let requests = provider.requests();
-    let sent = crate::testing::replay_history(&requests[0].messages);
+    let sent = &requests[0].messages;
     assert!(
-        sent[0].text().contains("<turn-context>\n\nturn 0"),
+        ext::text(&sent[0]).contains("<turn-context>\n\nturn 0"),
         "tail must ride the request"
     );
     assert!(
-        !history[0].text().contains("turn-context"),
+        !ext::message_text(&history[0]).contains("turn-context"),
         "tail must not be committed to history"
     );
 }
@@ -105,23 +105,32 @@ async fn read_lifecycle_marks_request_view_only() {
     .await;
     assert!(matches!(outcome, RunOutcome::Done { .. }));
     // Committed history keeps the raw read.
-    let Message::User { content } = &history[2] else {
-        panic!("first read result message");
-    };
-    let UserContent::ToolResult(raw) = &content[0] else {
+    let raw_message = history[2].message();
+    assert_eq!(raw_message.role, Role::User, "first read result message");
+    let ContentBlock::ToolResult {
+        content: raw_content,
+        ..
+    } = &raw_message.content[0]
+    else {
         panic!("tool result block");
     };
-    assert!(raw.content[0].to_text().contains("40: original line 40"));
+    assert!(ext::tool_content_text(raw_content).contains("40: original line 40"));
     // The model's last request carried the stale marker for that read.
     let requests = provider.requests();
-    let sent = crate::testing::replay_history(&requests.last().unwrap().messages);
-    let Message::User { content } = &sent[2] else {
-        panic!("tool result message on the wire");
-    };
-    let UserContent::ToolResult(result) = &content[0] else {
+    let sent = &requests.last().unwrap().messages;
+    let wire_message = &sent[2];
+    assert_eq!(
+        wire_message.role,
+        Role::User,
+        "tool result message on the wire"
+    );
+    let ContentBlock::ToolResult {
+        content: result, ..
+    } = &wire_message.content[0]
+    else {
         panic!("tool result block on the wire");
     };
-    let wire_text = result.content[0].to_text();
+    let wire_text = ext::tool_content_text(result);
     assert!(
         wire_text.starts_with("[Stale read: "),
         "expected a stale marker, got: {wire_text}"
@@ -160,32 +169,45 @@ async fn read_output_stays_verbatim_on_wire() {
     .await;
     assert!(matches!(outcome, RunOutcome::Done { .. }));
     // Committed history and the ToolDone event keep the raw result.
-    let Message::User { content } = &history[2] else {
-        panic!("tool result message");
-    };
-    let UserContent::ToolResult(raw) = &content[0] else {
+    let raw_message = history[2].message();
+    assert_eq!(raw_message.role, Role::User, "tool result message");
+    let ContentBlock::ToolResult {
+        content: raw_content,
+        ..
+    } = &raw_message.content[0]
+    else {
         panic!("tool result block");
     };
-    let raw_text = raw.content[0].to_text();
+    let raw_text = ext::tool_content_text(raw_content);
     assert!(raw_text.len() >= crate::compression::MIN_COMPRESS_LEN);
     assert!(!raw_text.contains("lines omitted"));
-    assert!(events.lock().unwrap().iter().any(
-        |e| matches!(e, Event::ToolDone { result, .. } if !result.content[0]
-            .to_text()
-            .contains("lines omitted"))
-    ));
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::ToolDone {
+            result: ContentBlock::ToolResult { content, .. }, ..
+        } if !ext::tool_content_text(content).contains("lines omitted")))
+    );
     // `read` output is caller-selected and must reach the model verbatim,
     // even though its `N: ` numbering looks like code to the detector.
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    let sent = crate::testing::replay_history(&requests[1].messages);
-    let Message::User { content } = &sent[2] else {
-        panic!("tool result message on the wire");
-    };
-    let UserContent::ToolResult(result) = &content[0] else {
+    let sent = &requests[1].messages;
+    let wire_message = &sent[2];
+    assert_eq!(
+        wire_message.role,
+        Role::User,
+        "tool result message on the wire"
+    );
+    let ContentBlock::ToolResult {
+        content: result, ..
+    } = &wire_message.content[0]
+    else {
         panic!("tool result block on the wire");
     };
-    let wire_text = result.content[0].to_text();
+    let wire_text = ext::tool_content_text(result);
     assert!(
         !wire_text.contains("lines omitted"),
         "read output must not be pre-compressed"
@@ -204,39 +226,19 @@ fn compress_request_view_skips_verbatim_tools_but_compresses_the_rest() {
     let raw_grep = numbered(60);
     let raw_retrieve = numbered(60);
     let raw_bash = numbered(60);
-    let mut full = vec![Message::User {
-        content: vec![
-            UserContent::ToolResult(crate::history::ToolResult::text(
-                "c1",
-                "read",
-                raw_read.clone(),
-            )),
-            UserContent::ToolResult(crate::history::ToolResult::text(
-                "c2",
-                "grep",
-                raw_grep.clone(),
-            )),
-            UserContent::ToolResult(crate::history::ToolResult::text(
-                "c3",
-                "retrieve",
-                raw_retrieve.clone(),
-            )),
-            UserContent::ToolResult(crate::history::ToolResult::text(
-                "c4",
-                "bash",
-                raw_bash.clone(),
-            )),
-        ],
-    }];
+    let mut full = vec![ext::observation(vec![
+        ext::tool_result("c1", Some("read"), raw_read.clone(), false),
+        ext::tool_result("c2", Some("grep"), raw_grep.clone(), false),
+        ext::tool_result("c3", Some("retrieve"), raw_retrieve.clone(), false),
+        ext::tool_result("c4", Some("bash"), raw_bash.clone(), false),
+    ])];
     compress_request_view(&mut full, &CompressionConfig::default());
-    let Message::User { content } = &full[0] else {
-        panic!("user message");
-    };
+    let content = &full[0].content;
     let text = |i: usize| {
-        let UserContent::ToolResult(result) = &content[i] else {
+        let ContentBlock::ToolResult { content, .. } = &content[i] else {
             panic!("tool result {i}");
         };
-        result.content[0].to_text()
+        ext::tool_content_text(content)
     };
     assert_eq!(text(0), raw_read, "read stays verbatim");
     assert_eq!(text(1), raw_grep, "grep stays verbatim");
@@ -282,19 +284,31 @@ async fn compression_disabled_sends_raw_output() {
         &|_| {},
     )
     .await;
-    let Message::User { content } = &history[2] else {
-        panic!("tool result message");
-    };
-    let UserContent::ToolResult(raw) = &content[0] else {
+    let raw_message = history[2].message();
+    assert_eq!(raw_message.role, Role::User, "tool result message");
+    let ContentBlock::ToolResult {
+        content: raw_content,
+        ..
+    } = &raw_message.content[0]
+    else {
         panic!("tool result block");
     };
     let requests = provider.requests();
-    let sent = crate::testing::replay_history(&requests[1].messages);
-    let Message::User { content } = &sent[2] else {
-        panic!("tool result message on the wire");
-    };
-    let UserContent::ToolResult(result) = &content[0] else {
+    let sent = &requests[1].messages;
+    let wire_message = &sent[2];
+    assert_eq!(
+        wire_message.role,
+        Role::User,
+        "tool result message on the wire"
+    );
+    let ContentBlock::ToolResult {
+        content: result, ..
+    } = &wire_message.content[0]
+    else {
         panic!("tool result block on the wire");
     };
-    assert_eq!(result.content[0].to_text(), raw.content[0].to_text());
+    assert_eq!(
+        ext::tool_content_text(result),
+        ext::tool_content_text(raw_content)
+    );
 }

@@ -296,9 +296,15 @@ async fn dispatch_loop_preserves_permission_refusals() {
             _ => None,
         })
         .expect("a tool result event");
-    assert!(refused.is_error);
-    assert!(refused.content.iter().any(|item| {
-        item.to_text()
+    let crate::history::ContentBlock::ToolResult {
+        content, is_error, ..
+    } = refused
+    else {
+        panic!("tool result");
+    };
+    assert!(*is_error);
+    assert!(
+        crate::history::ext::tool_content_text(content)
             .contains("paths must remain inside the workspace")
-    }));
+    );
 }

@@ -21,7 +21,7 @@ pub enum Command {
     SetThinking(crate::thinking::ThinkingConfig),
     /// User submitted a message in the composer, in the given mode.
     /// Submit the composer text, with any image attachments (F.6).
-    SendMessage(String, AgentMode, Vec<crate::history::ImageBlock>),
+    SendMessage(String, AgentMode, Vec<crate::history::ContentBlock>),
     /// Bang-mode (`!` / `!!`): run a shell command directly, outside the
     /// model loop. `visible` runs enter history as an `I ran: …` user
     /// message; hidden runs never reach the model.

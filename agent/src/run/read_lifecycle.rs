@@ -18,8 +18,10 @@ use std::collections::{HashMap, HashSet};
 
 use std::ops::Range;
 
+use animist::history::{ContentBlock, ToolContents};
+
 use crate::compression::store::SharedCompressionStore;
-use crate::history::{AssistantContent, Message, ToolResultContent, UserContent};
+use crate::history::{Message, ext};
 
 const STALE_MARKER_PREFIX: &str = "[Stale read: ";
 const SUPERSEDED_MARKER_PREFIX: &str = "[Superseded read: ";
@@ -101,23 +103,26 @@ pub fn classify_reads(history: &[Message], root: Option<&str>) -> Vec<ReadClassi
 fn collect_move_rewrites(history: &[Message]) -> HashMap<&str, Vec<String>> {
     history
         .iter()
-        .filter_map(|msg| match msg {
-            Message::User { content } => Some(content),
-            _ => None,
-        })
-        .flatten()
-        .filter_map(|block| match block {
-            UserContent::ToolResult(result) if result.name == "move" && !result.is_error => {
-                let text = result
-                    .content
-                    .iter()
-                    .map(ToolResultContent::to_text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let files = crate::tools::move_file::rewritten_files(&text);
-                (!files.is_empty()).then_some((result.call.as_str(), files))
+        .filter(|msg| ext::is_user(msg))
+        .flat_map(|msg| msg.content.iter())
+        .filter_map(|block| {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                content,
+                ..
+            } = block
+            else {
+                return None;
+            };
+            // The name comes from the result when the agent wrote it, and
+            // from the matching call for legacy results.
+            if ext::tool_name(block, history) != "move" || *is_error {
+                return None;
             }
-            _ => None,
+            let text = ext::tool_content_text(content);
+            let files = crate::tools::move_file::rewritten_files(&text);
+            (!files.is_empty()).then_some((tool_use_id.as_str(), files))
         })
         .collect()
 }
@@ -135,42 +140,38 @@ fn collect_file_operations(
     let mut operations: Vec<FileOperation> = Vec::new();
 
     for (msg_index, msg) in history.iter().enumerate() {
-        let Message::Assistant { content } = msg else {
+        if !matches!(msg.role, crate::history::Role::Assistant) {
             continue;
-        };
-        for block in content {
-            let AssistantContent::ToolCall(call) = block else {
+        }
+        for block in &msg.content {
+            let ContentBlock::ToolUse {
+                id, name, input, ..
+            } = block
+            else {
                 continue;
             };
-            let (op_kind, file_path) = match call.function.name.as_str() {
-                "read" | "edit" | "multiedit" | "write" => {
-                    match extract_path(&call.function.arguments) {
-                        Some(p) => (
-                            match call.function.name.as_str() {
-                                "read" => OpKind::Read,
-                                "write" => OpKind::Write,
-                                _ => OpKind::Edit,
-                            },
-                            p,
-                        ),
-                        None => continue,
-                    }
-                }
+            let (op_kind, file_path) = match name.as_str() {
+                "read" | "edit" | "multiedit" | "write" => match extract_path(input) {
+                    Some(p) => (
+                        match name.as_str() {
+                            "read" => OpKind::Read,
+                            "write" => OpKind::Write,
+                            _ => OpKind::Edit,
+                        },
+                        p,
+                    ),
+                    None => continue,
+                },
                 // Every file a patch touches counts as an edit of that file.
                 "apply_patch" => {
-                    let Some(patch) = call
-                        .function
-                        .arguments
-                        .get("patch_text")
-                        .and_then(|v| v.as_str())
-                    else {
+                    let Some(patch) = input.get("patch_text").and_then(|v| v.as_str()) else {
                         continue;
                     };
                     let paths = crate::tools::patch_paths(patch);
                     for file_path in paths {
                         operations.push(FileOperation {
                             msg_index,
-                            tool_call_id: call.id.clone(),
+                            tool_call_id: id.clone(),
                             file_key: normalizer.normalize(&file_path),
                             file_path,
                             op_kind: OpKind::Edit,
@@ -184,13 +185,13 @@ fn collect_file_operations(
                 "move" => {
                     let mut paths: Vec<String> = ["source", "destination"]
                         .iter()
-                        .filter_map(|key| call.function.arguments.get(*key))
+                        .filter_map(|key| input.get(*key))
                         .filter_map(|v| v.as_str())
                         .map(String::from)
                         .collect();
                     paths.extend(
                         move_rewrites
-                            .get(call.id.as_str())
+                            .get(id.as_str())
                             .map(|files| files.as_slice())
                             .unwrap_or_default()
                             .iter()
@@ -199,7 +200,7 @@ fn collect_file_operations(
                     for file_path in paths {
                         operations.push(FileOperation {
                             msg_index,
-                            tool_call_id: call.id.clone(),
+                            tool_call_id: id.clone(),
                             file_key: normalizer.normalize(&file_path),
                             file_path,
                             op_kind: OpKind::Edit,
@@ -211,13 +212,13 @@ fn collect_file_operations(
                 _ => continue,
             };
             let line_range = if matches!(op_kind, OpKind::Read) {
-                extract_line_range(&call.function.arguments)
+                extract_line_range(input)
             } else {
                 None
             };
             operations.push(FileOperation {
                 msg_index,
-                tool_call_id: call.id.clone(),
+                tool_call_id: id.clone(),
                 file_key: normalizer.normalize(&file_path),
                 file_path,
                 op_kind,
@@ -332,20 +333,26 @@ fn apply_lifecycle(
 
     let mut total_removed = 0;
     for msg in history.iter_mut() {
-        let Message::User { content } = msg else {
+        if !ext::is_user(msg) {
             continue;
-        };
-        for block in content.iter_mut() {
-            let UserContent::ToolResult(result) = block else {
+        }
+        for block in msg.content.iter_mut() {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                content,
+                ..
+            } = block
+            else {
                 continue;
             };
-            if result.is_error {
+            if *is_error {
                 continue;
             }
-            let Some(&(state, file_path)) = stale_ids.get(result.call.as_str()) else {
+            let Some(&(state, file_path)) = stale_ids.get(tool_use_id.as_str()) else {
                 continue;
             };
-            let original: String = result.content.iter().map(|c| c.to_text()).collect();
+            let original = ext::tool_content_text(content);
             let old_len = original.len();
             let original_lines = original.lines().count();
             let hash =
@@ -388,7 +395,7 @@ fn apply_lifecycle(
                 ));
             }
             total_removed += old_len.saturating_sub(marker.len());
-            result.content = vec![ToolResultContent::text(marker)];
+            *content = ToolContents::from(marker);
         }
     }
 
@@ -440,12 +447,20 @@ fn range_contains(outer: Option<&Range<usize>>, inner: Option<&Range<usize>>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::{AssistantContent, ToolCall, ToolResult};
+    use crate::history::ext;
     use serde_json::json;
 
     fn tool_use_msg(id: &str, name: &str, input: serde_json::Value) -> Message {
-        Message::Assistant {
-            content: vec![AssistantContent::ToolCall(ToolCall::new(id, name, input))],
+        Message {
+            role: crate::history::Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input,
+                thought_signature: None,
+            }],
+            display_text: None,
+            kind: crate::history::MessageKind::Turn,
         }
     }
 
@@ -454,13 +469,11 @@ mod tests {
     }
 
     fn tool_result_of_msg(id: &str, name: &str, content: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::ToolResult(ToolResult::text(id, name, content))],
-        }
+        ext::observation(vec![ext::tool_result(id, Some(name), content, false)])
     }
 
     fn user_msg(text: &str) -> Message {
-        Message::user(text)
+        ext::user_text(text)
     }
 
     /// Generate gap assistant turns (reads of unrelated files) to push earlier
@@ -673,13 +686,13 @@ mod tests {
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
         let removed = apply_to_request(&mut messages, None, None);
         assert!(removed > 0);
-        let Message::User { content } = &messages[2] else {
-            panic!("tool result message");
-        };
-        let UserContent::ToolResult(result) = &content[0] else {
+        let ContentBlock::ToolResult {
+            content: result, ..
+        } = &messages[2].content[0]
+        else {
             panic!("tool result block");
         };
-        let text = result.content[0].to_text();
+        let text = ext::tool_content_text(result);
         assert!(text.starts_with(STALE_MARKER_PREFIX));
         assert!(text.contains("/src/main.rs"));
         assert!(text.contains("was modified after this read"));
@@ -695,13 +708,13 @@ mod tests {
         ];
         let removed = apply_to_request(&mut messages, None, None);
         assert_eq!(removed, 0);
-        let Message::User { content } = &messages[2] else {
-            panic!("tool result message");
-        };
-        let UserContent::ToolResult(result) = &content[0] else {
+        let ContentBlock::ToolResult {
+            content: result, ..
+        } = &messages[2].content[0]
+        else {
             panic!("tool result block");
         };
-        assert_eq!(result.content[0].to_text(), "fresh content");
+        assert_eq!(ext::tool_content_text(result), "fresh content");
     }
 
     #[test]
@@ -720,13 +733,13 @@ mod tests {
         let store = crate::compression::store::shared_store();
         let removed = apply_to_request(&mut messages, Some(&store), None);
         assert!(removed > 0);
-        let Message::User { content } = &messages[2] else {
-            panic!("tool result message");
-        };
-        let UserContent::ToolResult(result) = &content[0] else {
+        let ContentBlock::ToolResult {
+            content: result, ..
+        } = &messages[2].content[0]
+        else {
             panic!("tool result block");
         };
-        let text = result.content[0].to_text();
+        let text = ext::tool_content_text(result);
         assert!(text.starts_with(SUPERSEDED_MARKER_PREFIX));
         let hash_start = text
             .find("Retrieve original: hash=")
@@ -764,13 +777,13 @@ mod tests {
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
         let store = crate::compression::store::shared_store();
         apply_to_request(&mut messages, Some(&store), None);
-        let Message::User { content } = &messages[2] else {
-            panic!("tool result message");
-        };
-        let UserContent::ToolResult(result) = &content[0] else {
+        let ContentBlock::ToolResult {
+            content: result, ..
+        } = &messages[2].content[0]
+        else {
             panic!("tool result block");
         };
-        let text = result.content[0].to_text();
+        let text = ext::tool_content_text(result);
         assert!(text.starts_with(STALE_MARKER_PREFIX));
         assert!(
             !text.contains("Retrieve original"),
@@ -943,16 +956,12 @@ mod tests {
         let mut messages = vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
-            Message::User {
-                content: vec![UserContent::ToolResult(crate::history::ToolResult {
-                    call: "t1".into(),
-                    name: "read".into(),
-                    content: vec![crate::history::ToolResultContent::text(
-                        "a long failing read result that would otherwise be long enough for the marker path to trigger replacement here",
-                    )],
-                    is_error: true,
-                })],
-            },
+            ext::observation(vec![ext::tool_result(
+                "t1",
+                Some("read"),
+                "a long failing read result that would otherwise be long enough for the marker path to trigger replacement here",
+                true,
+            )]),
             user_msg("edit"),
             tool_use_msg(
                 "t2",
@@ -968,7 +977,7 @@ mod tests {
 
     #[test]
     fn no_reads_produces_empty_classifications() {
-        let messages = vec![user_msg("hello"), Message::assistant("hi")];
+        let messages = vec![user_msg("hello"), ext::assistant_text("hi")];
         assert!(classify_reads(&messages, None).is_empty());
     }
 
@@ -1040,13 +1049,13 @@ mod tests {
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
         apply_to_request(&mut messages, None, None);
-        let Message::User { content } = &messages[2] else {
-            panic!("tool result message");
-        };
-        let UserContent::ToolResult(result) = &content[0] else {
+        let ContentBlock::ToolResult {
+            content: result, ..
+        } = &messages[2].content[0]
+        else {
             panic!("tool result block");
         };
-        let text = result.content[0].to_text();
+        let text = ext::tool_content_text(result);
         assert!(text.starts_with(STALE_MARKER_PREFIX), "{text}");
         assert!(
             text.contains("./src/a.rs"),

@@ -1,30 +1,20 @@
-//! The append-only JSONL log: record types, [`SessionLog`], parsing, and
-//! full-file writes.
+//! The append-only JSONL log: [`SessionLog`], parsing, and full-file writes.
 //!
-//! Load-time corruption policy: every record that fails to parse is
-//! skipped with a stderr warning, wherever it sits in the file — trailing
-//! or not. The two exceptions are a header with an unparseable id
-//! ([`SessionError::CorruptHeaderId`]) and a file with no valid header at
-//! all (surfaced as `NotFound`).
+//! The written format is defined by [`records::Record`]; this module owns
+//! the cursor state that makes incremental appends safe. Load-time
+//! corruption policy lives in [`records`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-
-use super::Session;
 use super::archive::archive_if_shrinking;
 use super::index::update_cwd_index;
 use super::legacy::remove_legacy_files;
-use super::{
-    DEFAULT_TITLE, LOG_FORMAT_VERSION, SESSION_VERSION, SessionError, SessionMeta, StoredSubagent,
-    StoredTokenUsage, jsonl_path, normalize_title,
-};
-use crate::id::{CraftId, SessionRef};
+use super::records::Record;
+use super::{LOG_FORMAT_VERSION, SessionError, StoredSession, jsonl_path};
 use crate::storage::StorageError;
 use crate::storage::atomic::sync_parent_dir;
 
@@ -36,44 +26,10 @@ pub(super) const LOG_BLOATED: &str = "too many stale meta records";
 /// read. Past this many, the log is rewritten and they all go away at once.
 pub(super) const MAX_APPENDS: usize = 512;
 
-// -- JSONL record types --
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "t")]
-#[allow(clippy::large_enum_variant)]
-enum LogRecord<M, U, T> {
-    #[serde(rename = "header")]
-    Header {
-        v: u32,
-        id: SessionRef,
-        model: String,
-        cwd: String,
-        created_at: u64,
-    },
-    #[serde(rename = "msg")]
-    Msg { d: M },
-    #[serde(rename = "out")]
-    Out { id: String, d: T },
-    #[serde(rename = "sub_msg")]
-    SubMsg { sub: String, d: M },
-    #[serde(rename = "meta")]
-    Meta {
-        title: String,
-        token_usage: U,
-        updated_at: u64,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        subagents: Vec<StoredSubagent>,
-        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        usage_by_model: HashMap<String, StoredTokenUsage>,
-        #[serde(flatten)]
-        meta: SessionMeta,
-    },
-}
-
 // -- SessionLog: append-only persistence --
 
 pub struct SessionLog {
-    session_id: CraftId,
+    session_id: crate::id::CraftId,
     file: File,
     /// The session's `(epoch, rewrites)` at the last write. Appending is
     /// sound only while both stay the same.
@@ -84,14 +40,15 @@ pub struct SessionLog {
     saved_len: u64,
     saved_msg_count: usize,
     appends: usize,
-    saved_tool_ids: HashSet<String>,
     saved_sub_msg_counts: HashMap<String, usize>,
     /// Serialized trailing meta record; lets `append` persist meta-only
     /// changes without rewriting anything else.
     saved_meta: Vec<u8>,
 }
 
-fn sub_msg_snapshot<M>(map: &HashMap<String, Arc<Vec<M>>>) -> HashMap<String, usize> {
+fn sub_msg_snapshot(
+    map: &HashMap<String, Arc<Vec<animist::history::HistoryEntry>>>,
+) -> HashMap<String, usize> {
     map.iter().map(|(k, v)| (k.clone(), v.len())).collect()
 }
 
@@ -102,12 +59,7 @@ impl SessionLog {
     /// rewind) parks the previous file under `archive/<id>/` first, keeping the
     /// newest [`ARCHIVE_KEEP`](super::archive::ARCHIVE_KEEP) of them within
     /// [`ARCHIVE_MAX_BYTES`](super::archive::ARCHIVE_MAX_BYTES).
-    pub fn rewrite<M, U, T>(dir: &Path, session: &Session<M, U, T>) -> Result<Self, SessionError>
-    where
-        M: Serialize,
-        U: Serialize,
-        T: Serialize,
-    {
+    pub fn rewrite(dir: &Path, session: &StoredSession) -> Result<Self, SessionError> {
         let log = Self::write_canonical(dir, session)?;
         update_cwd_index(dir, &session.cwd, session.id.id())?;
         Ok(log)
@@ -115,15 +67,10 @@ impl SessionLog {
 
     /// [`Self::rewrite`] without claiming the cwd index: migrating a legacy
     /// file on load must not make that session the cwd's latest.
-    pub(super) fn write_canonical<M, U, T>(
+    pub(super) fn write_canonical(
         dir: &Path,
-        session: &Session<M, U, T>,
-    ) -> Result<Self, SessionError>
-    where
-        M: Serialize,
-        U: Serialize,
-        T: Serialize,
-    {
+        session: &StoredSession,
+    ) -> Result<Self, SessionError> {
         fs::create_dir_all(dir).map_err(StorageError::from)?;
         let path = jsonl_path(dir, session.id.id());
         let tmp = path.with_extension("jsonl.tmp");
@@ -147,50 +94,37 @@ impl SessionLog {
         Ok(Self::cursor_from(session, file))
     }
 
-    pub fn session_id(&self) -> CraftId {
+    pub fn session_id(&self) -> crate::id::CraftId {
         self.session_id
     }
 
-    pub fn append<M, U, T>(&mut self, session: &Session<M, U, T>) -> Result<(), SessionError>
-    where
-        M: Serialize,
-        U: Serialize,
-        T: Serialize,
-    {
+    pub fn append(&mut self, session: &StoredSession) -> Result<(), SessionError> {
         self.require_same_id(session)?;
         self.ensure_appendable(session)?;
 
         let mut buf = Vec::new();
         let mut new_msg_count = self.saved_msg_count;
-        let mut new_tool_ids = Vec::new();
 
-        for msg in &session.messages[self.saved_msg_count..] {
-            append_record(&mut buf, &LogRecord::<&M, &U, &T>::Msg { d: msg })?;
+        for entry in &session.messages[self.saved_msg_count..] {
+            // Each saved message is a source-only entry record.
+            append_record(
+                &mut buf,
+                &Record::Entry {
+                    entry: entry.clone(),
+                },
+            )?;
             new_msg_count += 1;
-        }
-
-        for (id, output) in &session.tool_outputs {
-            if !self.saved_tool_ids.contains(id) {
-                append_record(
-                    &mut buf,
-                    &LogRecord::<&M, &U, &T>::Out {
-                        id: id.clone(),
-                        d: output,
-                    },
-                )?;
-                new_tool_ids.push(id.clone());
-            }
         }
 
         let mut new_sub_counts: Vec<(String, usize)> = Vec::new();
         for (sub_id, msgs) in &session.subagent_messages {
             let saved = self.saved_sub_msg_counts.get(sub_id).copied().unwrap_or(0);
-            for msg in &msgs[saved..] {
+            for entry in &msgs[saved..] {
                 append_record(
                     &mut buf,
-                    &LogRecord::<&M, &U, &T>::SubMsg {
+                    &Record::SubEntry {
                         sub: sub_id.clone(),
-                        d: msg,
+                        entry: entry.clone(),
                     },
                 )?;
             }
@@ -220,7 +154,6 @@ impl SessionLog {
         self.saved_len += buf.len() as u64;
         self.appends += 1;
         self.saved_msg_count = new_msg_count;
-        self.saved_tool_ids.extend(new_tool_ids);
         for (sub_id, count) in new_sub_counts {
             self.saved_sub_msg_counts.insert(sub_id, count);
         }
@@ -229,12 +162,7 @@ impl SessionLog {
         Ok(())
     }
 
-    fn cursor_from<M, U, T>(session: &Session<M, U, T>, file: File) -> Self
-    where
-        M: Serialize,
-        U: Serialize,
-        T: Serialize,
-    {
+    fn cursor_from(session: &StoredSession, file: File) -> Self {
         let saved_len = file.metadata().map(|m| m.len()).unwrap_or_default();
         Self {
             session_id: session.id.id(),
@@ -244,13 +172,12 @@ impl SessionLog {
             saved_len,
             saved_msg_count: session.messages.len(),
             appends: 0,
-            saved_tool_ids: session.tool_outputs.keys().cloned().collect(),
             saved_sub_msg_counts: sub_msg_snapshot(&session.subagent_messages),
             saved_meta: meta_record(session).unwrap_or_default(),
         }
     }
 
-    fn require_same_id<M, U, T>(&self, session: &Session<M, U, T>) -> Result<(), SessionError> {
+    fn require_same_id(&self, session: &StoredSession) -> Result<(), SessionError> {
         if session.id.id() != self.session_id {
             return Err(SessionError::IdMismatch {
                 log_id: self.session_id,
@@ -263,7 +190,7 @@ impl SessionLog {
     /// Ok only while every cursor still describes the file, which is what makes
     /// `saved_len` the file length and the rest of the cursors its content, and
     /// while appending is still cheaper than starting the file over.
-    fn ensure_appendable<M, U, T>(&self, session: &Session<M, U, T>) -> Result<(), SessionError> {
+    fn ensure_appendable(&self, session: &StoredSession) -> Result<(), SessionError> {
         let reason = if session.epoch != self.saved_epoch || session.rewrites != self.saved_rewrites
         {
             EPOCH_CHANGED
@@ -282,12 +209,8 @@ impl SessionLog {
         Err(SessionError::LogDiverged { reason })
     }
 
-    fn cursor_ahead<M, U, T>(&self, session: &Session<M, U, T>) -> bool {
+    fn cursor_ahead(&self, session: &StoredSession) -> bool {
         self.saved_msg_count > session.messages.len()
-            || self
-                .saved_tool_ids
-                .iter()
-                .any(|id| !session.tool_outputs.contains_key(id))
             || self.saved_sub_msg_counts.iter().any(|(sub, &count)| {
                 session
                     .subagent_messages
@@ -301,15 +224,10 @@ impl SessionLog {
 
 /// The meta section is written whole on every append, so its construction is
 /// shared between the incremental append and the canonical rewrite.
-fn meta_log_record<M, U, T>(session: &Session<M, U, T>) -> LogRecord<&M, &U, &T>
-where
-    M: Serialize,
-    U: Serialize,
-    T: Serialize,
-{
-    LogRecord::Meta {
+fn meta_log_record(session: &StoredSession) -> Record {
+    Record::Meta {
         title: session.title.clone(),
-        token_usage: &session.token_usage,
+        token_usage: session.token_usage,
         updated_at: session.updated_at,
         subagents: session.subagents.clone(),
         usage_by_model: session.usage_by_model.clone(),
@@ -317,308 +235,63 @@ where
     }
 }
 
-fn meta_record<M, U, T>(session: &Session<M, U, T>) -> Result<Vec<u8>, SessionError>
-where
-    M: Serialize,
-    U: Serialize,
-    T: Serialize,
-{
+fn meta_record(session: &StoredSession) -> Result<Vec<u8>, SessionError> {
     let mut buf = Vec::new();
     append_record(&mut buf, &meta_log_record(session))?;
     Ok(buf)
 }
 
-pub(super) fn write_full_session<M, U, T>(
+pub(super) fn write_full_session(
     file: &mut File,
-    session: &Session<M, U, T>,
-) -> Result<(), SessionError>
-where
-    M: Serialize,
-    U: Serialize,
-    T: Serialize,
-{
+    session: &StoredSession,
+) -> Result<(), SessionError> {
     let mut buf = Vec::new();
-    write_header_record(file, &mut buf, session)?;
-    write_message_records(file, &mut buf, session)?;
-    write_tool_output_records(file, &mut buf, session)?;
-    write_subagent_records(file, &mut buf, session)?;
-    write_meta_record(file, &mut buf, session)
-}
-
-fn write_header_record<M, U, T>(
-    file: &mut File,
-    buf: &mut Vec<u8>,
-    session: &Session<M, U, T>,
-) -> Result<(), SessionError>
-where
-    M: Serialize,
-    U: Serialize,
-    T: Serialize,
-{
     write_record(
         file,
-        buf,
-        &LogRecord::<&M, &U, &T>::Header {
+        &mut buf,
+        &Record::Header {
             v: LOG_FORMAT_VERSION,
             id: session.id.clone(),
             model: session.model.clone(),
             cwd: session.cwd.clone(),
             created_at: session.created_at,
         },
-    )
-}
-
-fn write_message_records<M, U, T>(
-    file: &mut File,
-    buf: &mut Vec<u8>,
-    session: &Session<M, U, T>,
-) -> Result<(), SessionError>
-where
-    M: Serialize,
-    U: Serialize,
-    T: Serialize,
-{
-    for msg in session.messages.iter() {
-        write_record(file, buf, &LogRecord::<&M, &U, &T>::Msg { d: msg })?;
-    }
-    Ok(())
-}
-
-fn write_tool_output_records<M, U, T>(
-    file: &mut File,
-    buf: &mut Vec<u8>,
-    session: &Session<M, U, T>,
-) -> Result<(), SessionError>
-where
-    M: Serialize,
-    U: Serialize,
-    T: Serialize,
-{
-    for (id, output) in &session.tool_outputs {
+    )?;
+    for entry in session.messages.iter() {
         write_record(
             file,
-            buf,
-            &LogRecord::<&M, &U, &T>::Out {
-                id: id.clone(),
-                d: output,
+            &mut buf,
+            &Record::Entry {
+                entry: entry.clone(),
             },
         )?;
     }
-    Ok(())
-}
-
-fn write_subagent_records<M, U, T>(
-    file: &mut File,
-    buf: &mut Vec<u8>,
-    session: &Session<M, U, T>,
-) -> Result<(), SessionError>
-where
-    M: Serialize,
-    U: Serialize,
-    T: Serialize,
-{
+    // `tool_outputs` is not written; records already on disk stay
+    // readable through the loader.
     for (sub_id, msgs) in &session.subagent_messages {
-        for msg in msgs.iter() {
+        for entry in msgs.iter() {
             write_record(
                 file,
-                buf,
-                &LogRecord::<&M, &U, &T>::SubMsg {
+                &mut buf,
+                &Record::SubEntry {
                     sub: sub_id.clone(),
-                    d: msg,
+                    entry: entry.clone(),
                 },
             )?;
         }
     }
-    Ok(())
+    write_record(file, &mut buf, &meta_log_record(session))
 }
 
-fn write_meta_record<M, U, T>(
-    file: &mut File,
-    buf: &mut Vec<u8>,
-    session: &Session<M, U, T>,
-) -> Result<(), SessionError>
-where
-    M: Serialize,
-    U: Serialize,
-    T: Serialize,
-{
-    write_record(file, buf, &meta_log_record(session))
-}
-
-fn write_record<R: Serialize>(
-    file: &mut File,
-    buf: &mut Vec<u8>,
-    record: &R,
-) -> Result<(), SessionError> {
+fn write_record(file: &mut File, buf: &mut Vec<u8>, record: &Record) -> Result<(), SessionError> {
     buf.clear();
     append_record(buf, record)?;
     file.write_all(buf).map_err(StorageError::from)?;
     Ok(())
 }
 
-fn append_record<R: Serialize>(buf: &mut Vec<u8>, record: &R) -> Result<(), SessionError> {
+fn append_record(buf: &mut Vec<u8>, record: &Record) -> Result<(), SessionError> {
     serde_json::to_writer(&mut *buf, record).map_err(StorageError::from)?;
     buf.push(b'\n');
     Ok(())
-}
-
-// -- Parsing --
-
-/// Tag-only probe used to classify a line that failed the strict `LogRecord`
-/// parse: distinguishes a header with a bad id from a genuinely unknown record.
-#[derive(Deserialize)]
-#[serde(tag = "t", rename_all = "lowercase")]
-enum RawTag {
-    Header {
-        id: String,
-    },
-    #[serde(other)]
-    Other,
-}
-
-fn load_jsonl<M, U, T>(data: &[u8], display_path: &str) -> Result<Session<M, U, T>, SessionError>
-where
-    M: DeserializeOwned,
-    U: DeserializeOwned + Default,
-    T: DeserializeOwned,
-{
-    let mut line_count = 0usize;
-
-    let mut id: Option<SessionRef> = None;
-    let mut model = String::new();
-    let mut cwd = String::new();
-    let mut created_at = 0u64;
-    let mut messages = Vec::new();
-    let mut tool_outputs = HashMap::new();
-    let mut subagent_messages: HashMap<String, Vec<M>> = HashMap::new();
-    let mut title = DEFAULT_TITLE.to_string();
-    let mut token_usage = U::default();
-    let mut updated_at = 0u64;
-    let mut subagents = Vec::new();
-    let mut usage_by_model = HashMap::new();
-    let mut meta = SessionMeta::default();
-    let mut got_header = false;
-
-    for line in data.split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        line_count += 1;
-        let record: LogRecord<M, U, T> = match serde_json::from_slice(line) {
-            Ok(r) => r,
-            Err(e) => {
-                // A header whose only defect is an unparseable id fails the
-                // strict LogRecord parse; surface that precisely instead of
-                // silently skipping to a misleading NotFound.
-                if !got_header
-                    && let Ok(RawTag::Header { id: raw_id }) =
-                        serde_json::from_slice::<RawTag>(line)
-                    && let Err(source) = raw_id.parse::<CraftId>()
-                {
-                    return Err(SessionError::CorruptHeaderId {
-                        path: display_path.to_string(),
-                        raw_id,
-                        source,
-                    });
-                }
-                eprintln!("skipping unrecognized JSONL record at {display_path}:{line_count}: {e}");
-                continue;
-            }
-        };
-        match record {
-            LogRecord::Header {
-                v,
-                id: h_id,
-                model: h_model,
-                cwd: h_cwd,
-                created_at: h_created,
-            } => {
-                if v > LOG_FORMAT_VERSION {
-                    return Err(SessionError::VersionMismatch {
-                        found: v,
-                        expected: LOG_FORMAT_VERSION,
-                    });
-                }
-                id = Some(h_id);
-                model = h_model;
-                cwd = h_cwd;
-                created_at = h_created;
-                got_header = true;
-            }
-            LogRecord::Msg { d } => messages.push(d),
-            LogRecord::Out { id: out_id, d } => {
-                tool_outputs.insert(out_id, Arc::new(d));
-            }
-            LogRecord::SubMsg { sub, d } => {
-                subagent_messages.entry(sub).or_default().push(d);
-            }
-            LogRecord::Meta {
-                title: m_title,
-                token_usage: m_usage,
-                updated_at: m_updated,
-                subagents: m_subagents,
-                usage_by_model: m_usage_by_model,
-                meta: m_meta,
-            } => {
-                title = m_title;
-                token_usage = m_usage;
-                updated_at = m_updated;
-                subagents = m_subagents;
-                usage_by_model = m_usage_by_model;
-                meta = m_meta;
-            }
-        }
-    }
-
-    let id = id.ok_or(StorageError::NotFound {
-        path: display_path.to_string(),
-    })?;
-
-    Ok(Session {
-        version: SESSION_VERSION,
-        id,
-        title,
-        cwd,
-        model,
-        messages: Arc::new(messages),
-        token_usage,
-        tool_outputs,
-        subagent_messages: subagent_messages
-            .into_iter()
-            .map(|(id, msgs)| (id, Arc::new(msgs)))
-            .collect(),
-        subagents,
-        usage_by_model,
-        meta,
-        created_at,
-        updated_at,
-        revision: 0,
-        content_revision: 0,
-        epoch: super::next_epoch(),
-        rewrites: 0,
-    })
-}
-
-pub(super) fn load_session_at<M, U, T>(path: &Path) -> Result<Session<M, U, T>, SessionError>
-where
-    M: DeserializeOwned,
-    U: DeserializeOwned + Default,
-    T: DeserializeOwned,
-{
-    let data = fs::read(path).map_err(StorageError::from)?;
-    let mut session: Session<M, U, T> = if path.extension().is_some_and(|e| e == "jsonl") {
-        load_jsonl(&data, &path.display().to_string())?
-    } else {
-        let session: Session<M, U, T> =
-            serde_json::from_slice(&data).map_err(StorageError::from)?;
-        if session.version != SESSION_VERSION {
-            return Err(SessionError::VersionMismatch {
-                found: session.version,
-                expected: SESSION_VERSION,
-            });
-        }
-        session
-    };
-    session.title = normalize_title(&session.title);
-    Ok(session)
 }

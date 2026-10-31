@@ -5,7 +5,7 @@ use rig_core::tool::IntoToolOutput;
 use serde_json::json;
 
 use super::{invoke, workspace};
-use crate::history::ImageMedia;
+use crate::history::ext::ImageMedia;
 use crate::tools::*;
 
 // ---------- view_image ----------

@@ -63,7 +63,7 @@ struct Session {
     workspace: Workspace,
     /// Instruction files (AGENTS.md and friends) discovered at session open.
     instructions: crate::instructions::Instructions,
-    history: Vec<history::Message>,
+    history: Vec<history::StoredMessage>,
     provider_name: String,
     models: Vec<animist::provider::ModelInfo>,
     model: String,
@@ -290,7 +290,7 @@ impl AppState {
             workspace,
             instructions,
             permissions,
-            stored.messages().to_vec(),
+            crate::history::ext::stored_of_entries(stored.messages()),
             provider_name,
             models,
             model,
@@ -349,7 +349,7 @@ impl AppState {
         workspace: Workspace,
         instructions: crate::instructions::Instructions,
         permissions: Arc<PermissionManager>,
-        history: Vec<history::Message>,
+        history: Vec<history::StoredMessage>,
         provider_name: String,
         models: Vec<animist::provider::ModelInfo>,
         model: String,
@@ -678,7 +678,7 @@ async fn commit_turn(
     sessions: &Mutex<BTreeMap<String, Session>>,
     session_id: &SessionId,
     turn_id: u64,
-    history: Vec<history::Message>,
+    history: Vec<history::StoredMessage>,
 ) {
     let mut sessions = sessions.lock().await;
     if let Some(session) = sessions.get_mut(session_id.0.as_ref())

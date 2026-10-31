@@ -12,7 +12,7 @@
 
 use serde::Deserialize;
 
-use crate::history::Message;
+use crate::history::{Message, Role, ext};
 
 /// Cue words that make a turn eligible for extraction. Cheap and
 /// conservative: no cue, no model call.
@@ -59,28 +59,9 @@ pub struct Fact {
 
 /// Plain text of a message, when it carries any.
 fn message_text(message: &Message) -> Option<String> {
-    match message {
-        Message::User { content } => Some(
-            content
-                .iter()
-                .filter_map(|part| match part {
-                    crate::history::UserContent::Text(text) => Some(text.text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
-        Message::Assistant { content } => Some(
-            content
-                .iter()
-                .filter_map(|part| match part {
-                    crate::history::AssistantContent::Text(text) => Some(text.text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
-        _ => None,
+    match message.role {
+        Role::User | Role::Assistant => Some(ext::text(message)),
+        Role::System => None,
     }
 }
 
@@ -179,7 +160,7 @@ async fn extract_facts(
     let mut transcript = String::new();
     for message in history.iter().rev().take(12).rev() {
         if let Some(text) = message_text(message) {
-            transcript.push_str(if matches!(message, Message::User { .. }) {
+            transcript.push_str(if matches!(message.role, Role::User) {
                 "User: "
             } else {
                 "Assistant: "
@@ -188,9 +169,7 @@ async fn extract_facts(
             transcript.push_str("\n\n");
         }
     }
-    let messages = vec![Message::User {
-        content: vec![crate::history::UserContent::text(transcript)],
-    }];
+    let messages = vec![ext::user_text(transcript)];
     let text = crate::provider::complete_text(model, &messages, &extraction_prompt())
         .await
         .map_err(|e| format!("extraction call failed: {e}"))?;
@@ -271,13 +250,9 @@ mod tests {
 
     #[test]
     fn cue_gate_matches_keywords() {
-        assert!(has_cue(&[Message::User {
-            content: vec![crate::history::UserContent::text(
-                "we learned the api retries",
-            )],
-        }]));
-        assert!(has_cue(&[Message::assistant("Remember this gotcha")]));
-        assert!(!has_cue(&[Message::assistant("hello world")]));
+        assert!(has_cue(&[ext::user_text("we learned the api retries")]));
+        assert!(has_cue(&[ext::assistant_text("Remember this gotcha")]));
+        assert!(!has_cue(&[ext::assistant_text("hello world")]));
         assert!(!has_cue(&[] as &[Message]));
     }
 

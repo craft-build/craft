@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use super::RunOutcome;
-use crate::history::{self, Message};
+use crate::history::{ContentBlock, Message};
+use crate::usage::TokenUsage;
 
 /// Events emitted as the run progresses; consumed by the TUI and ACP
 /// surfaces. Ported from the reference's `AgentEvent` taxonomy
@@ -37,12 +38,14 @@ pub enum Event {
     },
     /// `content` is the full accumulated output so far, not a delta.
     ToolOutput { id: String, content: String },
-    /// A tool call finished (ran, failed, or was skipped).
+    /// A tool call finished (ran, failed, or was skipped). `result` is the
+    /// tool-result content block, self-describing: it carries the tool's
+    /// name.
     ToolDone {
         id: String,
         name: String,
         arguments: serde_json::Value,
-        result: history::ToolResult,
+        result: ContentBlock,
     },
     /// A wave of tool results was appended to the turn; `message` carries
     /// every result of the wave in call order.
@@ -50,13 +53,13 @@ pub enum Event {
     /// One model call completed: its usage report and the estimated size of
     /// the context the model just saw.
     TurnComplete {
-        usage: history::Usage,
+        usage: TokenUsage,
         context_size: u64,
     },
     /// The run ended. `context_window` is a `0` sentinel until window sizes
     /// reach the run seam (model-registry work).
     Done {
-        usage: history::Usage,
+        usage: TokenUsage,
         context_size: u64,
         context_window: u64,
         num_turns: u32,
