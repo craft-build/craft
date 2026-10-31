@@ -41,6 +41,27 @@ impl super::error::IntoToolResult for DeleteOutput {
 pub struct Delete(pub Workspace);
 
 impl Delete {
+    /// Whether any target is (or may be) a directory: a recursive delete
+    /// removes files whose individual keys no file-level claim covers, so
+    /// it must run exclusively. Missing paths are no-ops, not trees;
+    /// unreadable ones fail closed.
+    fn has_directory_target(workspace: &Workspace, files: &[String]) -> bool {
+        files.iter().any(|file| match workspace.resolve(file) {
+            Ok(path) => match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata.is_dir(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            },
+            // Missing paths resolve to NotFound: the entry is a skip.
+            Err(Error::Io {
+                kind: std::io::ErrorKind::NotFound,
+                ..
+            }) => false,
+            // Any other resolution failure fails closed.
+            Err(_) => true,
+        })
+    }
+
     async fn execute(
         workspace: &Workspace,
         args: DeleteArgs,
@@ -50,8 +71,19 @@ impl Delete {
         let mut deleted = Vec::new();
         let mut skipped = Vec::new();
         // Cross-agent: one guard spans every entry, so the batch deletes as
-        // a set against other sessions' writers.
-        let _guard = workspace.write_guard(&args.files, cancel).await?;
+        // a set against other sessions' writers. A directory target removes
+        // files beneath it, so it takes the workspace-wide guard (matching
+        // its exclusive scheduling claim).
+        let tree_target = Self::has_directory_target(workspace, &args.files);
+        // A tree delete claims the root key exclusively: that excludes every
+        // reader and writer keyed under the workspace, matching the
+        // exclusive scheduling claim.
+        let keys = if tree_target {
+            vec![workspace.normalized_root()]
+        } else {
+            claims::write_keys(workspace.root_key().as_deref(), &args.files)
+        };
+        let _guard = workspace.locks().write(&keys, cancel).await?;
 
         for file in &args.files {
             // Our guard set stays: resolve rejects `..`, outside paths, Git
@@ -158,10 +190,14 @@ impl ToolImpl for Delete {
     }
 
     fn scheduling(&self, input: &Value) -> ToolScheduling {
-        claims::writes(
-            self.0.root_key().as_deref(),
-            &dedup::extract_write_paths("delete", input),
-        )
+        let paths = dedup::extract_write_paths("delete", input);
+        // A directory target (or an unresolvable one, read as a tree) makes
+        // the delete exclusive: file-level claims cannot cover the files a
+        // recursive removal takes with it.
+        if Self::has_directory_target(&self.0, &paths) {
+            return ToolScheduling::Exclusive;
+        }
+        claims::writes(self.0.root_key().as_deref(), &paths)
     }
 
     async fn call(&self, context: &ToolContext<'_>, args: DeleteArgs) -> Result<ToolOutput> {

@@ -71,8 +71,8 @@ impl Glob {
         let includes = overrides
             .build()
             .map_err(|error| invalid(error.to_string()))?;
-        // The ignore walker is sync-only; run the whole bounded scan as one
-        // blocking unit, exactly as it ran under the workspace lock.
+        // The ignore walker is sync-only; the whole bounded scan runs as
+        // one blocking unit.
         let walker = workspace.clone();
         let search_root = root.clone();
         let mut found: Vec<(SystemTime, String)> = tokio::task::spawn_blocking(move || {

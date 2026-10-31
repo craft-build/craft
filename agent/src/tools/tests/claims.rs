@@ -138,6 +138,17 @@ fn claim_table_matches_the_documented_scheme() {
     assert!(writes_of(&patch).contains(&normalize(&workspace, "src/a.rs")));
     assert!(writes_of(&patch).contains(&normalize(&workspace, "new.rs")));
 
+    // A directory delete runs exclusive: file-level claims cannot cover the
+    // files a recursive removal takes with it.
+    std::fs::create_dir_all(workspace.root().join("tree")).unwrap();
+    let dir_delete = claim(
+        &Delete(workspace.clone()),
+        json!({"files": ["tree"], "recursive": true}),
+    );
+    assert!(matches!(dir_delete, ToolScheduling::Exclusive));
+    let file_delete = claim(&Delete(workspace.clone()), json!({"files": ["tree/a.rs"]}));
+    assert!(!matches!(file_delete, ToolScheduling::Exclusive));
+
     // Exclusive by policy.
     for tool in [
         claim(&Bash::new(workspace.clone()), json!({"command": "ls"})),

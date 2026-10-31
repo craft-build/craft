@@ -210,7 +210,7 @@ mod tests {
         let (_dir, workspace) = crate::tools::tests::workspace();
         let output = invoke(&workspace, BatchArgs { tool_calls: vec![] }).await;
         assert!(output.is_error);
-        assert!(invoke_text(output).contains("at least one"));
+        assert!(invoke_text(&output).contains("at least one"));
     }
 
     #[tokio::test]
@@ -224,10 +224,10 @@ mod tests {
         )
         .await;
         assert!(output.is_error);
-        assert!(invoke_text(output).contains("nest"));
+        assert!(invoke_text(&output).contains("nest"));
     }
 
-    fn invoke_text(output: animist::agent::tool::ToolOutput) -> String {
+    fn invoke_text(output: &animist::agent::tool::ToolOutput) -> String {
         crate::history::ext::tool_content_text(&output.content)
     }
 
@@ -271,6 +271,60 @@ mod tests {
         assert!(error.to_string().contains("duplicate"));
     }
 
+    /// The repeat-failure/no-progress guardrail counters must see batch
+    /// children. The counters move into the GuardrailLayer's post-hook in
+    /// 07; until then the seam cannot observe children, so the test waits.
+    #[tokio::test]
+    #[ignore = "restored in 07"]
+    async fn children_feed_guardrail_counters() {
+        let (_dir, workspace) = crate::tools::tests::workspace();
+        std::fs::write(workspace.root().join("f"), "same\n").unwrap();
+        let read = || entry(json!({"tool": "read", "parameters": {"path": "f"}}));
+        // Three identical reads: the third result trips the no-progress warning.
+        let output = invoke(
+            &workspace,
+            BatchArgs {
+                tool_calls: vec![read(), read(), read()],
+            },
+        )
+        .await;
+        assert!(
+            invoke_text(&output).contains("guardrail"),
+            "guardrail counters must see batch children"
+        );
+    }
+
+    /// A dispatch failure (budget, cancellation, a layer stop) reports as
+    /// the batch's own error result with craft's wording.
+    #[tokio::test]
+    async fn dispatch_failure_is_reported_with_our_wording() {
+        let (_dir, workspace) = crate::tools::tests::workspace();
+        // The batch reserves every entry against the child budget upfront;
+        // a budget of 2 cannot admit even the capped set of 25.
+        let calls: Vec<_> = (0..MAX_BATCH_SIZE)
+            .map(|_| entry(json!({"tool": "list", "parameters": {"path": "."}})))
+            .collect();
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .tools(workspace.registry().expect("registry"))
+            .config(
+                animist::agent::AgentConfig::builder()
+                    .max_child_calls(2_u64)
+                    .build(),
+            )
+            .build()
+            .expect("harness");
+        let output = harness
+            .call(Batch, serde_json::json!({ "tool_calls": calls }))
+            .await
+            .expect("batch outcome");
+        let text = invoke_text(&output);
+        assert!(
+            output.is_error,
+            "the dispatch failure is the batch's result, got: {text}"
+        );
+        assert!(text.starts_with("batch dispatch failed: "), "got: {text}");
+    }
+
     #[test]
     fn missing_tool_or_params_is_rejected() {
         assert!(normalize_entry(&entry(json!({"parameters": {"path": "/tmp"}}))).is_err());
@@ -291,7 +345,7 @@ mod tests {
             },
         )
         .await;
-        let text = invoke_text(output);
+        let text = invoke_text(&output);
         assert!(text.contains("## read"), "{text}");
         assert!(text.contains("content"), "{text}");
         assert!(text.contains("[ERROR]"), "{text}");
@@ -308,7 +362,7 @@ mod tests {
             .map(|_| entry(json!({"tool": "list", "parameters": {"path": "."}})))
             .collect();
         let output = invoke(&workspace, BatchArgs { tool_calls: calls }).await;
-        let text = invoke_text(output);
+        let text = invoke_text(&output);
         assert_eq!(
             text.matches("maximum of").count(),
             2,
@@ -334,7 +388,7 @@ mod tests {
             },
         )
         .await;
-        let text = invoke_text(output);
+        let text = invoke_text(&output);
         assert!(
             text.contains("All 2 tools executed successfully."),
             "{text}"

@@ -26,12 +26,12 @@ pub enum Error {
     Tool { message: String },
 
     /// A filesystem failure the model may correct (missing file, denied
-    /// access); `message` is the io error's display, `kind` keeps the
-    /// classification callers branch on.
-    #[snafu(display("{message}"))]
+    /// access); the display stays the io error's own text, `kind` keeps
+    /// the classification callers branch on.
+    #[snafu(display("{source}"))]
     Io {
         kind: std::io::ErrorKind,
-        message: String,
+        source: std::io::Error,
     },
 
     #[snafu(display("blocking worker failed"))]
@@ -90,7 +90,7 @@ pub(crate) fn not_found(message: impl Into<String>) -> Error {
 pub(crate) fn io_error(error: std::io::Error) -> Error {
     Error::Io {
         kind: error.kind(),
-        message: error.to_string(),
+        source: error,
     }
 }
 
@@ -111,7 +111,7 @@ impl IntoToolResult for ToolOutput {
 pub(crate) fn finish<T: IntoToolResult>(outcome: Result<T>) -> Result<ToolOutput> {
     Ok(match outcome {
         Ok(output) => output.into_tool_result(),
-        Err(Error::Tool { message }) | Err(Error::Io { message, .. }) => error_result(message),
+        Err(error @ (Error::Tool { .. } | Error::Io { .. })) => error_result(error.to_string()),
         Err(error) => return Err(error),
     })
 }

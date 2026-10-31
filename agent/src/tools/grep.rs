@@ -141,8 +141,7 @@ impl Grep {
             None
         };
         // The ignore walker and the per-file regex scan are one bounded
-        // sync unit; run it off the executor, exactly as it ran under the
-        // workspace lock.
+        // sync-only unit, so the whole scan runs off the executor.
         let walker = workspace.clone();
         let search_root = root.clone();
         let max_matches = args.max_matches;
