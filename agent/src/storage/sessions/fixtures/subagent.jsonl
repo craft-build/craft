@@ -1,0 +1,7 @@
+{"t":"header","v":3,"id":"CgZWfP3hyy8JwgjvhdCMA","model":"openai/gpt","cwd":"/w","created_at":1793413072}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"spawn a helper"}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"ToolCall":{"id":"call-7","function":{"name":"task","arguments":{"description":"helper","prompt":"do things"}}}}]}}}
+{"t":"msg","d":{"User":{"content":[{"ToolResult":{"call":"call-7","name":"task","content":[{"Text":{"text":"child reply"}}],"is_error":false}}]}}}
+{"t":"sub_msg","sub":"call-7","d":{"User":{"content":[{"Text":{"text":"do things"}}]}}}
+{"t":"sub_msg","sub":"call-7","d":{"Assistant":{"content":[{"Text":{"text":"child reply"}}]}}}
+{"t":"meta","title":"New session","token_usage":{"input":0,"output":0,"cache_creation":0,"cache_read":0},"updated_at":1793413072,"schema_version":0,"session_rules":[],"context_size":0}

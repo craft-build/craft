@@ -1,0 +1,4 @@
+{"t":"header","v":3,"id":"CgZWfP3TMwrJex5MtaZKk","model":"anthropic/claude","cwd":"/w","created_at":1793413072}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"think"}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"Reasoning":{"content":[{"Text":{"text":"weighing options","signature":"sig-abc"}}]}},{"Text":{"text":"answer"}}]}}}
+{"t":"meta","title":"New session","token_usage":{"input":0,"output":0,"cache_creation":0,"cache_read":0},"updated_at":1793413072,"schema_version":0,"session_rules":[],"context_size":0}

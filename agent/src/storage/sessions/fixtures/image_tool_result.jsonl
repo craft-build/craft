@@ -1,0 +1,6 @@
+{"t":"header","v":3,"id":"CgZWfP3TMwrJex5dbrGUC","model":"anthropic/claude","cwd":"/w","created_at":1793413072}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"view"}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"ToolCall":{"id":"call-1","function":{"name":"view_image","arguments":{"path":"shot.png"}}}}]}}}
+{"t":"msg","d":{"User":{"content":[{"ToolResult":{"call":"call-1","name":"view_image","content":[{"Image":{"media_type":"png","data":"aGk=","caption":"shot.png 64x64 (2.1 KB)"}}],"is_error":false}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"Text":{"text":"seen"}}]}}}
+{"t":"meta","title":"New session","token_usage":{"input":0,"output":0,"cache_creation":0,"cache_read":0},"updated_at":1793413072,"schema_version":0,"session_rules":[],"context_size":0}

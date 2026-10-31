@@ -1,0 +1,7 @@
+{"t":"header","v":3,"id":"CgZWfP3TMwrJex5WxCDMV","model":"openai/gpt","cwd":"/w","created_at":1793413072}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"list files"}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"Text":{"text":"running"}},{"ToolCall":{"id":"call-1","function":{"name":"bash","arguments":{"command":"ls"}}}},{"ToolCall":{"id":"call-2","function":{"name":"read","arguments":{"path":"a.rs"}}}}]}}}
+{"t":"msg","d":{"User":{"content":[{"ToolResult":{"call":"call-1","name":"bash","content":[{"Text":{"text":"a.rs\nb.rs"}}],"is_error":false}}]}}}
+{"t":"msg","d":{"User":{"content":[{"ToolResult":{"call":"call-2","name":"read","content":[{"Text":{"text":"fn main() {}"}}],"is_error":false}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"Text":{"text":"listed"}}]}}}
+{"t":"meta","title":"New session","token_usage":{"input":0,"output":0,"cache_creation":0,"cache_read":0},"updated_at":1793413072,"schema_version":0,"session_rules":[],"context_size":0}

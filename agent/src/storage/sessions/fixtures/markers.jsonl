@@ -1,0 +1,8 @@
+{"t":"header","v":3,"id":"CgZWfP3hyy8JwgjpqdxPG","model":"openai/gpt","cwd":"/w","created_at":1793413072}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"work"}}]}}}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"[Cancelled by user]"}}]}}}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"[Run failed: provider exploded]"}}]}}}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"[The turn ended here; the run was cut short.]"}}]}}}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"Your recent actions look like a doom-loop (repeated calls, errors, or stagnation). Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools."}}]}}}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task."}}]}}}
+{"t":"meta","title":"New session","token_usage":{"input":0,"output":0,"cache_creation":0,"cache_read":0},"updated_at":1793413072,"schema_version":0,"session_rules":[],"context_size":0}

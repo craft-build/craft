@@ -1,0 +1,5 @@
+{"t":"header","v":3,"id":"CgZWfP2TonHmx9H4tW311","model":"openai/gpt","cwd":"/w","created_at":1793413072}
+{"t":"msg","d":{"System":{"content":"You are craft."}}}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"hello"}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"Text":{"text":"hi there"}}]}}}
+{"t":"meta","title":"New session","token_usage":{"input":0,"output":0,"cache_creation":0,"cache_read":0},"updated_at":1793413072,"schema_version":0,"session_rules":[],"context_size":0}

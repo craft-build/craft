@@ -1,0 +1,6 @@
+{"t":"header","v":3,"id":"CgZWfP3hyy8JwgjjrQLMw","model":"openai/gpt","cwd":"/w","created_at":1793413072}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"gimme json"}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"ToolCall":{"id":"call-1","function":{"name":"grep","arguments":{"pattern":"fn "}}}}]}}}
+{"t":"msg","d":{"User":{"content":[{"ToolResult":{"call":"call-1","name":"grep","content":[{"Json":{"value":{"matches":3,"files":["a.rs"]}}}],"is_error":false}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"Text":{"text":"got it"}}]}}}
+{"t":"meta","title":"New session","token_usage":{"input":0,"output":0,"cache_creation":0,"cache_read":0},"updated_at":1793413072,"schema_version":0,"session_rules":[],"context_size":0}

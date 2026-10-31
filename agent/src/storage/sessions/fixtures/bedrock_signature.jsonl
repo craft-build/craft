@@ -1,0 +1,4 @@
+{"t":"header","v":3,"id":"CgZWfP3TMwrJex5Rzjf5n","model":"amazon-bedrock/anthropic.claude","cwd":"/w","created_at":1793413072}
+{"t":"msg","d":{"User":{"content":[{"Text":{"text":"think"}}]}}}
+{"t":"msg","d":{"Assistant":{"content":[{"Reasoning":{"content":[{"Text":{"text":"signed","signature":"bmF0aXZl","native":{"reasoningContent":{"reasoningText":{"text":"signed","signature":"bmF0aXZl"}}}}},{"Redacted":{"data":"cmVkYWN0ZWQ=","native":{"reasoningContent":{"redactedContent":"cmVkYWN0ZWQ="}}}}]}},{"Text":{"text":"done"}}]}}}
+{"t":"meta","title":"New session","token_usage":{"input":0,"output":0,"cache_creation":0,"cache_read":0},"updated_at":1793413072,"schema_version":0,"session_rules":[],"context_size":0}
