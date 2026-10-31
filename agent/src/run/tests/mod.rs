@@ -9,9 +9,18 @@ mod overflow;
 mod spec;
 mod turns;
 
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+
 use animist::agent::Cancellation;
-use animist::agent::tool::ToolRegistry;
+use animist::agent::tool::{
+    ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolRegistry, ToolScheduling,
+};
 use animist::history::{ContentBlock, History, HistoryEntry, StoredMessage};
+use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::config::Config;
 use crate::harness::{
@@ -163,6 +172,139 @@ fn result_text(block: &ContentBlock) -> String {
     } else {
         text
     }
+}
+
+/// A native probe tool: sleeps `delay`, appends markers to the shared log,
+/// optionally panics, and answers "ok". Claims come from `claim`.
+#[derive(Clone)]
+struct Probe {
+    name: &'static str,
+    delay: Duration,
+    panic: Option<&'static str>,
+    /// `start`/`end` markers appended to the shared log, when set.
+    log: Option<Arc<StdMutex<Vec<&'static str>>>>,
+    /// Runs at call start (after the delay, before `end`).
+    on_run: Option<Arc<dyn Fn() + Send + Sync>>,
+    claim: ProbeClaim,
+}
+
+#[derive(Clone, Copy)]
+enum ProbeClaim {
+    Exclusive,
+    Independent,
+    /// Claim reads of one opaque key.
+    Reads(&'static str),
+    /// Claim writes of explicit keys.
+    Writes(&'static [&'static str]),
+}
+
+impl Probe {
+    fn simple(name: &'static str) -> Self {
+        Self {
+            name,
+            delay: Duration::ZERO,
+            panic: None,
+            log: None,
+            on_run: None,
+            claim: ProbeClaim::Exclusive,
+        }
+    }
+
+    fn independent(name: &'static str) -> Self {
+        Self {
+            claim: ProbeClaim::Independent,
+            ..Self::simple(name)
+        }
+    }
+
+    fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
+
+    fn panicking(mut self, message: &'static str) -> Self {
+        self.panic = Some(message);
+        self
+    }
+
+    fn logging(mut self, log: &Arc<StdMutex<Vec<&'static str>>>) -> Self {
+        self.log = Some(Arc::clone(log));
+        self
+    }
+
+    fn on_run(mut self, on_run: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_run = Some(Arc::new(on_run));
+        self
+    }
+
+    fn claiming(mut self, claim: ProbeClaim) -> Self {
+        self.claim = claim;
+        self
+    }
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct ProbeArgs {
+    #[allow(dead_code)]
+    _unused: Option<Value>,
+}
+
+#[async_trait]
+impl ToolImpl for Probe {
+    type Args = ProbeArgs;
+    type Output = ToolOutput;
+    type Error = crate::tools::error::Error;
+
+    fn definition(&self) -> ToolDefinition {
+        crate::tools::error::definition::<ProbeArgs>(self.name, "test probe")
+    }
+
+    fn scheduling(&self, _input: &Value) -> ToolScheduling {
+        match self.claim {
+            ProbeClaim::Exclusive => ToolScheduling::Exclusive,
+            ProbeClaim::Independent => ToolScheduling::Resources {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            ProbeClaim::Reads(key) => ToolScheduling::Resources {
+                reads: vec![key.to_owned()],
+                writes: Vec::new(),
+            },
+            ProbeClaim::Writes(keys) => ToolScheduling::Resources {
+                reads: Vec::new(),
+                writes: keys.iter().map(|key| (*key).to_owned()).collect(),
+            },
+        }
+    }
+
+    async fn call(
+        &self,
+        _context: &ToolContext<'_>,
+        _args: ProbeArgs,
+    ) -> Result<ToolOutput, crate::tools::error::Error> {
+        if let Some(log) = &self.log {
+            log.lock().unwrap().push("start");
+        }
+        tokio::time::sleep(self.delay).await;
+        if let Some(on_run) = &self.on_run {
+            on_run();
+        }
+        if let Some(message) = self.panic {
+            panic!("{message}");
+        }
+        if let Some(log) = &self.log {
+            log.lock().unwrap().push("end");
+        }
+        Ok(crate::tools::error::text_output("ok"))
+    }
+}
+
+fn registry(tools: impl IntoIterator<Item = Probe>) -> ToolRegistry {
+    let mut registry = ToolRegistry::default();
+    for tool in tools {
+        registry.register(tool).expect("probe registers");
+    }
+    registry
 }
 
 /// Drive one turn on a fresh cancellation.

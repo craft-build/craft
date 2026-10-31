@@ -7,13 +7,8 @@
 //! [`SessionStore`]. MCP handles, Flow attachments, and plugin rule stores
 //! from the reference have no counterpart here (yet).
 
-use std::sync::Arc;
-
-use crate::history::{self, ContentBlock};
-use crate::permissions::{
-    PermissionCheck, PermissionError, PermissionManager, ToolKey, scope_for_call,
-};
-use crate::run::BeforeExecute;
+use crate::permissions::{PermissionError, ToolKey};
+use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 /// The session store every surface shares; moved to the storage layer in 05.
 pub use crate::storage::sessions::SessionStore;
@@ -21,48 +16,29 @@ pub use crate::storage::sessions::SessionStore;
 /// domain types.
 pub use crate::storage::sessions::StoredSession;
 
-/// The headless permission gate (`--print`, `craft term run`,
-/// `craft recipe run`): the permission engine decides every tool call, and
-/// where an interactive surface would prompt, headless fails closed — the
-/// auto-review reviewer answers when the session started with `-A`,
-/// otherwise the call is skipped with guidance naming the deliberate
-/// opt-outs. Installing it on the dispatch table covers batch children and
-/// subagent dispatch through the shared `before` hook; the `question` tool
+/// The headless approval responder (`--print`, `craft term run`,
+/// `craft recipe run`): where an interactive surface would prompt, headless
+/// has no one to ask, so every ask fails closed with guidance naming the
+/// deliberate opt-outs instead of hanging or allowing. The permission rules
+/// and the auto-review reviewer live in the policy layer (07), which hands
+/// this responder only the asks that reached it; the `question` tool
 /// degrades to `DismissAsk` headlessly, so nothing can park on a user.
-pub struct HeadlessGate {
-    permissions: Arc<PermissionManager>,
-    /// One reviewer call per `NeedsPrompt` decision; `None` when the run
-    /// did not start with auto-review on.
-    reviewer: Option<crate::auto_review::Reviewer>,
-}
+pub struct HeadlessGate;
 
-impl HeadlessGate {
-    pub fn new(
-        permissions: Arc<PermissionManager>,
-        reviewer: Option<crate::auto_review::Reviewer>,
-    ) -> Self {
-        Self {
-            permissions,
-            reviewer,
-        }
+impl ApprovalResponder for HeadlessGate {
+    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+        let tool = ToolKey::parse(ask.name);
+        let message = headless_deny_message(&tool, ask.scopes);
+        Box::pin(async move {
+            Approval::Deny {
+                message,
+                remember: None,
+            }
+        })
     }
 }
 
-impl BeforeExecute for HeadlessGate {
-    fn decide(&self, call: ContentBlock) -> crate::run::BoxFuture<crate::run::Decision> {
-        let gate = Self {
-            permissions: Arc::clone(&self.permissions),
-            reviewer: self.reviewer.clone(),
-        };
-        Box::pin(async move { gate_decide(gate, call).await })
-    }
-}
-
-fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
-    PermissionError::new(&tool.to_string(), scopes).to_string()
-}
-
-/// What an unresolved ask becomes headlessly: a skip whose guidance says
+/// What an unresolved ask becomes headlessly: a denial whose guidance says
 /// why and lists every deliberate opt-out, instead of hanging or allowing.
 fn headless_deny_message(tool: &ToolKey, scopes: &[String]) -> String {
     PermissionError::with_guidance(
@@ -74,84 +50,6 @@ fn headless_deny_message(tool: &ToolKey, scopes: &[String]) -> String {
             .to_string(),
     )
     .to_string()
-}
-
-async fn gate_decide(gate: HeadlessGate, call: ContentBlock) -> crate::run::Decision {
-    let history::ContentBlock::ToolUse {
-        name,
-        input: arguments,
-        ..
-    } = call
-    else {
-        return crate::run::Decision::Skip("not a tool call".into());
-    };
-    let HeadlessGate {
-        permissions,
-        reviewer,
-    } = gate;
-    let name = name.as_str();
-    let tool = ToolKey::parse(name);
-    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &arguments);
-    match permissions.check_multi(&tool, &scopes, force_prompt) {
-        PermissionCheck::Allowed => crate::run::Decision::Run,
-        PermissionCheck::Denied => crate::run::Decision::Skip(denied_message(&tool, &scopes)),
-        PermissionCheck::NeedsPrompt { .. } => {
-            if permissions.is_auto_review()
-                && let Some(reviewer) = reviewer.as_ref()
-            {
-                auto_review_decide(reviewer, &permissions, &tool, &scopes).await
-            } else {
-                crate::run::Decision::Skip(headless_deny_message(&tool, &scopes))
-            }
-        }
-    }
-}
-
-/// Auto-review path for a `NeedsPrompt` decision: one reviewer call answers
-/// the prompt, its verdict is recorded as a session rule, and the outcome
-/// is reported back to the model. Reviewer failures (timeout, provider
-/// error, unparseable output) deny without recording a rule — the reviewer
-/// never actually decided. Mirrors the TUI gate minus the overlay events.
-async fn auto_review_decide(
-    reviewer: &crate::auto_review::Reviewer,
-    permissions: &Arc<PermissionManager>,
-    tool: &ToolKey,
-    scopes: &[String],
-) -> crate::run::Decision {
-    match reviewer(tool.to_string(), scopes.to_vec()).await {
-        Ok(decision) => {
-            let allow = decision.verdict == crate::auto_review::Verdict::Allow;
-            permissions.apply_auto_review(tool, scopes, allow);
-            eprintln!(
-                "auto-review {}: {} — {}",
-                decision.verdict.as_str(),
-                decision.risk.as_str(),
-                decision.rationale
-            );
-            if allow {
-                return crate::run::Decision::Run;
-            }
-            crate::run::Decision::Skip(
-                PermissionError::with_guidance(
-                    &tool.to_string(),
-                    scopes,
-                    format!("auto-review: {}", decision.rationale),
-                )
-                .to_string(),
-            )
-        }
-        Err(err) => {
-            eprintln!("auto-review failed closed: {err}");
-            crate::run::Decision::Skip(
-                PermissionError::with_guidance(
-                    &tool.to_string(),
-                    scopes,
-                    format!("auto-review denied this action: {err}"),
-                )
-                .to_string(),
-            )
-        }
-    }
 }
 
 #[cfg(test)]
@@ -322,7 +220,8 @@ mod tests {
 
     // --- HeadlessGate --------------------------------------------------------
 
-    use crate::permissions::{Effect, PermissionRule, PermissionsConfig, READ_ONLY_TOOLS};
+    use crate::permissions::{Effect, PermissionManager, PermissionRule, PermissionsConfig};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn manager(root: &std::path::Path) -> Arc<PermissionManager> {
@@ -340,20 +239,6 @@ mod tests {
         });
     }
 
-    async fn decide(
-        gate: &HeadlessGate,
-        name: &str,
-        args: serde_json::Value,
-    ) -> crate::run::Decision {
-        let call = history::ContentBlock::ToolUse {
-            id: "t1".into(),
-            name: name.into(),
-            input: args,
-            thought_signature: None,
-        };
-        gate.decide(call).await
-    }
-
     fn allow_reviewer() -> (crate::auto_review::Reviewer, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = Arc::clone(&calls);
@@ -369,203 +254,25 @@ mod tests {
         (reviewer, calls)
     }
 
-    #[tokio::test]
-    async fn read_only_tools_pass_the_gate() {
-        let tmp = tempfile::tempdir().unwrap();
-        let gate = HeadlessGate::new(manager(tmp.path()), None);
-        for name in READ_ONLY_TOOLS {
-            assert!(
-                matches!(
-                    decide(&gate, name, serde_json::json!({})).await,
-                    crate::run::Decision::Run
-                ),
-                "{name} should run without a decision"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn deny_rules_block_bash_mutations_and_mcp_keys() {
-        let tmp = tempfile::tempdir().unwrap();
-        let permissions = manager(tmp.path());
-        deny(&permissions, ToolKey::native("bash"));
-        deny(&permissions, ToolKey::native("write"));
-        deny(&permissions, ToolKey::parse("github__create_issue"));
-        let gate = HeadlessGate::new(permissions, None);
-        for (name, args) in [
-            ("bash", serde_json::json!({"command": "rm -rf /"})),
-            (
-                "write",
-                serde_json::json!({"path": "out.rs", "content": "x"}),
-            ),
-            ("github__create_issue", serde_json::json!({"title": "x"})),
-        ] {
-            match decide(&gate, name, args).await {
-                crate::run::Decision::Skip(reason) => assert!(
-                    reason.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
-                    "{name}: {reason}"
-                ),
-                other => panic!("{name} must be denied, got {other:?}"),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn unresolved_asks_fail_closed_with_headless_guidance() {
-        let tmp = tempfile::tempdir().unwrap();
-        let gate = HeadlessGate::new(manager(tmp.path()), None);
-        // `bash` defaults to an ask; headless has no approver to answer it.
-        match decide(&gate, "bash", serde_json::json!({"command": "cargo build"})).await {
-            crate::run::Decision::Skip(reason) => {
-                assert!(
-                    reason.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
-                    "{reason}"
-                );
-                for opt in ["--yolo", "--auto-review", "permissions.bml"] {
-                    assert!(reason.contains(opt), "guidance must name {opt}: {reason}");
-                }
-            }
-            other => panic!("an unresolved ask must skip, not {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn destructive_mcp_hints_fail_closed_despite_allow_rules() {
-        let tmp = tempfile::tempdir().unwrap();
-        let permissions = manager(tmp.path());
-        permissions.add_session_rule(PermissionRule {
-            tool: ToolKey::parse("db__drop_table"),
-            scope: None,
-            effect: Effect::Allow,
-        });
-        permissions.register_mcp_annotations("db", "drop_table", Some(false), Some(true));
-        let gate = HeadlessGate::new(permissions, None);
-        match decide(
-            &gate,
-            "db__drop_table",
-            serde_json::json!({"table": "users"}),
-        )
-        .await
-        {
-            crate::run::Decision::Skip(reason) => {
-                assert!(
-                    reason.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
-                    "{reason}"
-                );
-                assert!(
-                    reason.contains("--yolo"),
-                    "guidance must name the opt-outs: {reason}"
-                );
-            }
-            other => panic!("a destructive hint must force a decision, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn yolo_runs_even_under_explicit_denies() {
-        let tmp = tempfile::tempdir().unwrap();
-        let permissions = manager(tmp.path());
-        deny(&permissions, ToolKey::native("bash"));
-        permissions.set_yolo(true);
-        let gate = HeadlessGate::new(permissions, None);
-        assert!(matches!(
-            decide(&gate, "bash", serde_json::json!({"command": "rm -rf /"})).await,
-            crate::run::Decision::Run
-        ));
-    }
-
-    #[tokio::test]
-    async fn auto_review_allow_runs_and_records_a_session_rule() {
-        let tmp = tempfile::tempdir().unwrap();
-        let permissions = manager(tmp.path());
-        permissions.set_auto_review(true);
-        let (reviewer, calls) = allow_reviewer();
-        let gate = HeadlessGate::new(Arc::clone(&permissions), Some(reviewer));
-        let args = serde_json::json!({"command": "cargo build"});
-        for _ in 0..2 {
-            assert!(matches!(
-                decide(&gate, "bash", args.clone()).await,
-                crate::run::Decision::Run
-            ));
-        }
-        // The recorded session rule answers the second call; one review.
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn auto_review_deny_skips_with_rationale_and_sticks() {
-        let tmp = tempfile::tempdir().unwrap();
-        let permissions = manager(tmp.path());
-        permissions.set_auto_review(true);
-        let reviewer: crate::auto_review::Reviewer = Arc::new(move |_tool, _scopes| {
-            let decision = crate::auto_review::Decision {
-                verdict: crate::auto_review::Verdict::Deny,
-                risk: crate::auto_review::Risk::High,
-                rationale: "destructive glob".into(),
-            };
-            Box::pin(async move { Ok(decision) })
-        });
-        let gate = HeadlessGate::new(Arc::clone(&permissions), Some(reviewer));
-        let args = serde_json::json!({"command": "rm -rf /"});
-        match decide(&gate, "bash", args.clone()).await {
-            crate::run::Decision::Skip(reason) => {
-                assert!(reason.contains("auto-review: destructive glob"), "{reason}");
-            }
-            other => panic!("a deny verdict must skip, not {other:?}"),
-        }
-        // The verdict became a session rule: the sibling call is denied
-        // outright, never reaching a reviewer.
-        let reason = match decide(&gate, "bash", args).await {
-            crate::run::Decision::Skip(reason) => reason,
-            other => panic!("expected the recorded deny, got {other:?}"),
-        };
-        assert!(!reason.contains("auto-review"), "{reason}");
-    }
-
-    #[tokio::test]
-    async fn auto_review_failure_fails_closed_without_recording() {
-        let tmp = tempfile::tempdir().unwrap();
-        let permissions = manager(tmp.path());
-        permissions.set_auto_review(true);
-        let reviewer: crate::auto_review::Reviewer = Arc::new(move |_tool, _scopes| {
-            let error = crate::auto_review::ReviewError::Timeout {
-                deadline: std::time::Duration::from_secs(30),
-            };
-            Box::pin(async move { Err(error) })
-        });
-        let gate = HeadlessGate::new(Arc::clone(&permissions), Some(reviewer));
-        match decide(&gate, "bash", serde_json::json!({"command": "cargo build"})).await {
-            crate::run::Decision::Skip(reason) => {
-                assert!(reason.contains("auto-review denied"), "{reason}");
-            }
-            other => panic!("a failed review must deny, not {other:?}"),
-        }
-        // Nothing was decided, so nothing was recorded.
-        assert!(!matches!(
-            permissions.check(&ToolKey::native("bash"), &["cargo build".to_string()]),
-            PermissionCheck::Denied
-        ));
-        // And a session that somehow lost its reviewer still fails closed.
-        let gate = HeadlessGate::new(permissions, None);
-        assert!(matches!(
-            decide(&gate, "bash", serde_json::json!({"command": "cargo build"})).await,
-            crate::run::Decision::Skip(_)
-        ));
-    }
-
     // --- Gate-wired execution -------------------------------------------------
 
     /// One gated turn over the real workspace, driven through the
-    /// conversation: the gate rides the policy layer for model calls and
-    /// the workspace's before hook for batch children.
+    /// conversation: the policy layer enforces the rules and asks the
+    /// fail-closed headless responder, for model calls and batch children
+    /// alike.
     async fn gated_turn(
         model: crate::provider::ModelHandle,
         tmp: &tempfile::TempDir,
         permissions: Arc<PermissionManager>,
         reviewer: Option<crate::auto_review::Reviewer>,
     ) -> (Vec<crate::harness::Event>, crate::harness::TurnOutcome) {
-        let gate: Arc<dyn BeforeExecute> =
-            Arc::new(HeadlessGate::new(Arc::clone(&permissions), reviewer));
+        let mut policy = crate::harness::PolicyLayerInputs::new(
+            Arc::clone(&permissions),
+            Arc::new(HeadlessGate),
+        );
+        if let Some(reviewer) = reviewer {
+            policy = policy.reviewer(reviewer);
+        }
         let workspace = Workspace::new(tmp.path()).unwrap();
         let (sink, stream) = crate::harness::EventSink::new();
         let conversation = crate::harness::ConversationBuilder::new(
@@ -576,7 +283,7 @@ mod tests {
             workspace.registry().unwrap(),
             sink,
         )
-        .approval(gate)
+        .policy(policy)
         .build()
         .unwrap();
         let outcome = crate::harness::run_turn(

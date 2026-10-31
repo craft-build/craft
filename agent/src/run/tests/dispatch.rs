@@ -10,146 +10,11 @@ use animist::agent::tool::{
     ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolRegistry, ToolScheduling,
 };
 use async_trait::async_trait;
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::*;
 use crate::history::{ContentBlock, Role, ext};
-use crate::run::{BeforeExecute, BoxFuture, Decision};
-
-/// A native probe tool: sleeps `delay`, appends markers to the shared log,
-/// optionally panics, and answers "ok". Claims come from `claim`.
-#[derive(Clone)]
-struct Probe {
-    name: &'static str,
-    delay: Duration,
-    panic: Option<&'static str>,
-    /// `start`/`end` markers appended to the shared log, when set.
-    log: Option<Arc<StdMutex<Vec<&'static str>>>>,
-    /// Runs at call start (after the delay, before `end`).
-    on_run: Option<Arc<dyn Fn() + Send + Sync>>,
-    claim: ProbeClaim,
-}
-
-#[derive(Clone, Copy)]
-enum ProbeClaim {
-    Exclusive,
-    Independent,
-    /// Claim reads of one opaque key.
-    Reads(&'static str),
-    /// Claim writes of explicit keys.
-    Writes(&'static [&'static str]),
-}
-
-impl Probe {
-    fn simple(name: &'static str) -> Self {
-        Self {
-            name,
-            delay: Duration::ZERO,
-            panic: None,
-            log: None,
-            on_run: None,
-            claim: ProbeClaim::Exclusive,
-        }
-    }
-
-    fn independent(name: &'static str) -> Self {
-        Self {
-            claim: ProbeClaim::Independent,
-            ..Self::simple(name)
-        }
-    }
-
-    fn with_delay(mut self, delay: Duration) -> Self {
-        self.delay = delay;
-        self
-    }
-
-    fn panicking(mut self, message: &'static str) -> Self {
-        self.panic = Some(message);
-        self
-    }
-
-    fn logging(mut self, log: &Arc<StdMutex<Vec<&'static str>>>) -> Self {
-        self.log = Some(Arc::clone(log));
-        self
-    }
-
-    fn on_run(mut self, on_run: impl Fn() + Send + Sync + 'static) -> Self {
-        self.on_run = Some(Arc::new(on_run));
-        self
-    }
-
-    fn claiming(mut self, claim: ProbeClaim) -> Self {
-        self.claim = claim;
-        self
-    }
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-struct ProbeArgs {
-    #[allow(dead_code)]
-    _unused: Option<Value>,
-}
-
-#[async_trait]
-impl ToolImpl for Probe {
-    type Args = ProbeArgs;
-    type Output = ToolOutput;
-    type Error = crate::tools::error::Error;
-
-    fn definition(&self) -> ToolDefinition {
-        crate::tools::error::definition::<ProbeArgs>(self.name, "test probe")
-    }
-
-    fn scheduling(&self, _input: &Value) -> ToolScheduling {
-        match self.claim {
-            ProbeClaim::Exclusive => ToolScheduling::Exclusive,
-            ProbeClaim::Independent => ToolScheduling::Resources {
-                reads: Vec::new(),
-                writes: Vec::new(),
-            },
-            ProbeClaim::Reads(key) => ToolScheduling::Resources {
-                reads: vec![key.to_owned()],
-                writes: Vec::new(),
-            },
-            ProbeClaim::Writes(keys) => ToolScheduling::Resources {
-                reads: Vec::new(),
-                writes: keys.iter().map(|key| (*key).to_owned()).collect(),
-            },
-        }
-    }
-
-    async fn call(
-        &self,
-        _context: &ToolContext<'_>,
-        _args: ProbeArgs,
-    ) -> Result<ToolOutput, crate::tools::error::Error> {
-        if let Some(log) = &self.log {
-            log.lock().unwrap().push("start");
-        }
-        tokio::time::sleep(self.delay).await;
-        if let Some(on_run) = &self.on_run {
-            on_run();
-        }
-        if let Some(message) = self.panic {
-            panic!("{message}");
-        }
-        if let Some(log) = &self.log {
-            log.lock().unwrap().push("end");
-        }
-        Ok(crate::tools::error::text_output("ok"))
-    }
-}
-
-fn registry(tools: impl IntoIterator<Item = Probe>) -> ToolRegistry {
-    let mut registry = ToolRegistry::default();
-    for tool in tools {
-        registry.register(tool).expect("probe registers");
-    }
-    registry
-}
+use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 /// Whether a result block reports an error.
 fn result_is_error(result: &ContentBlock) -> bool {
@@ -201,18 +66,24 @@ async fn unknown_tool_surfaces_error_and_run_continues() {
 }
 
 #[tokio::test]
-async fn skip_decision_reports_reason_to_model() {
+async fn responder_denial_reports_reason_to_model() {
     struct Deny;
-    impl BeforeExecute for Deny {
-        fn decide(&self, _call: ContentBlock) -> BoxFuture<Decision> {
-            Box::pin(async { Decision::Skip("not allowed".into()) })
+    impl ApprovalResponder for Deny {
+        fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+            Box::pin(async {
+                Approval::Deny {
+                    message: "not allowed".into(),
+                    remember: None,
+                }
+            })
         }
     }
+    // `bash` prompts under the default rules, so the responder decides it.
     let provider = script(vec![
         crate::testing::tool_turn(vec![tool_event(
             "t1",
-            "read",
-            serde_json::json!({"path":"f"}),
+            "bash",
+            serde_json::json!({"command": "echo hi"}),
         )]),
         crate::testing::text_turn("okay"),
     ]);
@@ -227,7 +98,13 @@ async fn skip_decision_reports_reason_to_model() {
         workspace.registry().unwrap(),
         sink,
     )
-    .approval(Arc::new(Deny))
+    .policy(crate::harness::PolicyLayerInputs::new(
+        Arc::new(crate::permissions::PermissionManager::new(
+            crate::permissions::PermissionsConfig::default(),
+            dir.path().to_path_buf(),
+        )),
+        Arc::new(Deny),
+    ))
     .workspace(workspace)
     .build()
     .unwrap();
@@ -295,23 +172,27 @@ async fn post_exec_layer_transforms_results() {
     assert!(!text.contains("1: body"), "{text}");
 }
 
-/// An approval gate reaches batch children: the fan-out dispatches through
-/// the same pipeline as top-level calls, so the gate's skip answers each
-/// child. (Named replacement for the dispatch-table hook test.)
+/// The policy layer reaches batch children: the fan-out dispatches through
+/// the same pipeline as top-level calls, so the rules decide each child.
+/// (Named replacement for the dispatch-table hook test.)
 #[tokio::test]
-async fn approval_gate_reaches_batch_children() {
-    struct DenyReads;
-    impl BeforeExecute for DenyReads {
-        fn decide(&self, call: ContentBlock) -> BoxFuture<Decision> {
-            // Allow the outer batch so the test reaches the children.
-            let decision = match &call {
-                ContentBlock::ToolUse { name, .. } if name == "batch" => Decision::Run,
-                ContentBlock::ToolUse { name, .. } => Decision::Skip(format!("denied: {name}")),
-                _ => Decision::Run,
-            };
-            Box::pin(std::future::ready(decision))
-        }
-    }
+async fn policy_reaches_batch_children() {
+    // The outer `batch` is allowed by rule so the test reaches the
+    // children, whose `list` call is denied by another rule.
+    let permissions = Arc::new(crate::permissions::PermissionManager::new(
+        crate::permissions::PermissionsConfig::default(),
+        std::env::temp_dir(),
+    ));
+    permissions.add_session_rule(crate::permissions::PermissionRule {
+        tool: crate::permissions::ToolKey::native("batch"),
+        scope: None,
+        effect: crate::permissions::Effect::Allow,
+    });
+    permissions.add_session_rule(crate::permissions::PermissionRule {
+        tool: crate::permissions::ToolKey::native("list"),
+        scope: None,
+        effect: crate::permissions::Effect::Deny,
+    });
     let provider = script(vec![
         crate::testing::tool_turn(vec![tool_event(
             "t1",
@@ -331,7 +212,10 @@ async fn approval_gate_reaches_batch_children() {
         workspace.registry().unwrap(),
         sink,
     )
-    .approval(Arc::new(DenyReads))
+    .policy(crate::harness::PolicyLayerInputs::new(
+        permissions,
+        Arc::new(crate::headless::HeadlessGate),
+    ))
     .workspace(workspace)
     .build()
     .unwrap();
@@ -340,8 +224,8 @@ async fn approval_gate_reaches_batch_children() {
     let results = tool_results(&conversation).await;
     assert_eq!(results.len(), 1);
     assert!(
-        result_text(&results[0]).contains("denied: list"),
-        "the gate must reach batch children: {}",
+        result_text(&results[0]).contains("Permission denied for `list`"),
+        "the policy must reach batch children: {}",
         result_text(&results[0])
     );
 }
@@ -878,7 +762,6 @@ async fn directory_list_conflicts_with_a_write_beneath_it() {
 /// blocked as a doom loop, and the cleared window lets an immediate
 /// identical retry through.
 #[tokio::test]
-#[ignore = "restored in 07"]
 async fn identical_calls_blocked_as_doom_loop() {
     let runs = Arc::new(AtomicUsize::new(0));
     let probe = {
@@ -911,6 +794,13 @@ async fn identical_calls_blocked_as_doom_loop() {
     let outcome = run_turn(&conversation, "go").await;
     assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
     assert_eq!(runs.load(Ordering::SeqCst), 3, "t3 is blocked, not run");
+    // The cleared window lets t4 through, whose success decays the score to
+    // 14 — under a block worth 16 the grace prompt would fire here. This is
+    // the executable pin for the block's exact score contribution.
+    assert!(
+        !matches!(outcome, TurnOutcome::MaxTurns | TurnOutcome::DoomStop),
+        "the run settles without grace or a hard stop: {outcome:?}"
+    );
     let results = tool_results(&conversation).await;
     assert_eq!(results.len(), 4);
     let blocked: Vec<&ContentBlock> = results.iter().filter(|r| result_is_error(r)).collect();
@@ -966,5 +856,624 @@ async fn panicking_tool_becomes_error_result() {
             .iter()
             .any(|event| matches!(event, Event::Agent(AgentEvent::ToolFailed { .. }))),
         "the structured failure is reported"
+    );
+}
+
+// --- 07: the policy and guardrail layers in the chain ---
+
+/// An always-allowing responder that counts its asks: the policy layer
+/// consults it only where the rules cannot decide.
+#[derive(Clone, Default)]
+struct AllowAll {
+    asks: Arc<StdMutex<usize>>,
+}
+
+impl crate::run::ApprovalResponder for AllowAll {
+    fn ask(
+        &self,
+        _ask: crate::run::ApprovalAsk<'_>,
+    ) -> crate::run::BoxFuture<crate::run::Approval> {
+        *self.asks.lock().unwrap() += 1;
+        Box::pin(std::future::ready(crate::run::Approval::Allow {
+            remember: None,
+        }))
+    }
+}
+
+/// A conversation over the workspace with the full policy seam wired:
+/// rules from `permissions`, an always-allowing responder that counts.
+async fn policy_conversation(
+    dir: &tempfile::TempDir,
+    permissions: Arc<crate::permissions::PermissionManager>,
+    provider: &ScriptedProvider,
+) -> (Conversation, Arc<AllowAll>) {
+    let responder = Arc::new(AllowAll::default());
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let (sink, _stream) = EventSink::new();
+    let conversation = ConversationBuilder::new(
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        "",
+        model(provider),
+        workspace.registry().unwrap(),
+        sink,
+    )
+    .policy(crate::harness::PolicyLayerInputs::new(
+        permissions,
+        responder.clone(),
+    ))
+    .workspace(workspace)
+    .build()
+    .unwrap();
+    (conversation, responder)
+}
+
+/// The layer order from the builder: a rules denial short-circuits the
+/// chain, so the doom window never even sees the repeated call — the third
+/// identical call reports the permission denial, not the doom-loop message.
+#[tokio::test]
+async fn policy_denials_precede_the_doom_window() {
+    let permissions = Arc::new(crate::permissions::PermissionManager::new(
+        crate::permissions::PermissionsConfig::default(),
+        std::env::temp_dir(),
+    ));
+    permissions.add_session_rule(crate::permissions::PermissionRule {
+        tool: crate::permissions::ToolKey::native("read"),
+        scope: None,
+        effect: crate::permissions::Effect::Deny,
+    });
+    let input = serde_json::json!({"path": "f"});
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event("t1", "read", input.clone()),
+            tool_event("t2", "read", input.clone()),
+            tool_event("t3", "read", input.clone()),
+        ]),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, responder) = policy_conversation(&dir, permissions, &provider).await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let texts: Vec<String> = tool_results(&conversation)
+        .await
+        .iter()
+        .map(result_text)
+        .collect();
+    assert_eq!(texts.len(), 3);
+    for text in &texts {
+        assert!(
+            text.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+            "the rules denial must win over every later layer: {text}"
+        );
+    }
+    assert_eq!(
+        *responder.asks.lock().unwrap(),
+        0,
+        "a rules denial never reaches the responder"
+    );
+}
+
+/// The plan gate runs after the responder: an interaction that allows the
+/// call still cannot write outside the plan file in plan mode.
+#[tokio::test]
+async fn plan_mode_blocks_a_responder_allowed_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    // Rules anchor at the workspace dir, so the sibling tempdir's file is
+    // out-of-project: the write prompts (and the responder allows) before
+    // the plan gate denies it.
+    let permissions = Arc::new(crate::permissions::PermissionManager::new(
+        crate::permissions::PermissionsConfig::default(),
+        dir.path().to_path_buf(),
+    ));
+    let target = outside.path().join("src/main.rs");
+    let root = dir.path().canonicalize().unwrap();
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "write",
+            serde_json::json!({"path": target.display().to_string(), "content": "hi\n"}),
+        )]),
+        crate::testing::text_turn("done"),
+    ]);
+    let provider = &provider;
+    let (conversation, responder) = policy_conversation(&dir, permissions, provider).await;
+    conversation.update_settings(|settings| {
+        settings.mode = crate::run::AgentMode::Plan(root.join("plans/alpha.md"));
+    });
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    assert!(!target.exists(), "the denied write must not touch disk");
+    let results = tool_results(&conversation).await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        result_text(&results[0]),
+        format!("[error] {}", crate::run::PLAN_WRITE_RESTRICTED),
+        "the plan gate has the final word after the responder allows"
+    );
+    assert!(
+        *responder.asks.lock().unwrap() >= 1,
+        "the write is an off-project ask, so the responder allowed it first"
+    );
+}
+
+/// A guardrail block lands after the policy pass: a call the responder
+/// allowed is still denied once its failure counters trip the block.
+#[tokio::test]
+async fn guardrail_block_survives_an_allowed_call() {
+    let permissions = Arc::new(crate::permissions::PermissionManager::new(
+        crate::permissions::PermissionsConfig::default(),
+        std::env::temp_dir(),
+    ));
+    // Six distinct failing inputs trip the same-tool block; the seventh
+    // call is denied before execution.
+    let mut turns = Vec::new();
+    for i in 0..7 {
+        turns.push(crate::testing::tool_turn(vec![tool_event(
+            &format!("t{i}"),
+            "probe",
+            serde_json::json!({ "n": i }),
+        )]));
+    }
+    turns.push(crate::testing::text_turn("done"));
+    let provider = script(turns);
+    let dir = tempfile::tempdir().unwrap();
+    let failing = || Probe::simple("probe").panicking("nope");
+    let responder = Arc::new(AllowAll::default());
+    let (sink, mut stream) = EventSink::new();
+    let conversation = ConversationBuilder::new(
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        "",
+        model(&provider),
+        {
+            let mut registry = ToolRegistry::default();
+            registry.register(failing()).unwrap();
+            registry
+        },
+        sink,
+    )
+    .policy(crate::harness::PolicyLayerInputs::new(
+        permissions,
+        responder.clone(),
+    ))
+    .build()
+    .unwrap();
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let texts: Vec<String> = tool_results(&conversation)
+        .await
+        .iter()
+        .map(result_text)
+        .collect();
+    assert_eq!(texts.len(), 7);
+    assert!(
+        result_is_error(&tool_results(&conversation).await[6]),
+        "the seventh call is the guardrail block"
+    );
+    assert!(
+        texts[6].contains("blocked by guardrails"),
+        "got: {}",
+        texts[6]
+    );
+    assert!(
+        *responder.asks.lock().unwrap() >= 7,
+        "every call was allowed by the responder first"
+    );
+    assert!(
+        events_until_done(&mut stream)
+            .await
+            .iter()
+            .any(|event| matches!(event,
+                Event::Craft(crate::harness::CraftEvent::Info(text))
+                    if text.starts_with("guardrail blocked probe:"))),
+        "the block rides an Info event"
+    );
+}
+
+/// A repeated identical failure carries the guardrail warning prefix on its
+/// result and the matching `Info` event, byte-identical to the old
+/// `commit_wave` texts.
+#[tokio::test]
+async fn guardrail_warning_prefixes_the_second_identical_failure() {
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "probe",
+            serde_json::json!({ "n": 1 }),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t2",
+            "probe",
+            serde_json::json!({ "n": 1 }),
+        )]),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, mut stream) = conversation_over(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        registry([Probe::simple("probe").panicking("nope")]),
+        None,
+    )
+    .await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let texts: Vec<String> = tool_results(&conversation)
+        .await
+        .iter()
+        .map(result_text)
+        .collect();
+    assert_eq!(texts.len(), 2);
+    assert!(
+        texts[1].contains("[guardrail] same tool+input failed 2 times"),
+        "the warning rides the model-visible result: {}",
+        texts[1]
+    );
+    assert!(
+        events_until_done(&mut stream).await.iter().any(|event| matches!(
+            event,
+            Event::Craft(crate::harness::CraftEvent::Info(text))
+                if text == "guardrail warning on probe: same tool+input failed 2 times, consider a different approach"
+        )),
+        "the Info event matches the old commit_wave wording"
+    );
+}
+
+/// A dedup hit inside the chain is served through `Respond` after the
+/// policy and guardrail passes and never reaches the executor.
+#[tokio::test]
+async fn dedup_hit_serves_after_the_policy_pass_without_executing() {
+    let permissions = Arc::new(crate::permissions::PermissionManager::new(
+        crate::permissions::PermissionsConfig::default(),
+        std::env::temp_dir(),
+    ));
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path": "f"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t2",
+            "read",
+            serde_json::json!({"path": "f"}),
+        )]),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "body\n").unwrap();
+    let (conversation, responder) = policy_conversation(&dir, permissions, &provider).await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let results = tool_results(&conversation).await;
+    assert_eq!(result_text(&results[0]), "1: body");
+    assert_eq!(result_text(&results[1]), "1: body");
+    assert_eq!(
+        *responder.asks.lock().unwrap(),
+        0,
+        "reads are rule-allowed; the hit only proves dedup sits in the chain"
+    );
+}
+
+/// The doom hard stop: two doom blocks push the score past the hard-stop
+/// threshold, so the next call stops the run — `DoomStop` with an end
+/// marker, partial history committed, and the next turn replays cleanly.
+#[tokio::test]
+async fn doom_hard_stop_ends_the_run_with_an_end_marker() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let probe = {
+        let runs = Arc::clone(&runs);
+        Probe::simple("probe").on_run(move || {
+            runs.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let input = serde_json::json!({});
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event("t1", "probe", input.clone()),
+            tool_event("t2", "probe", input.clone()),
+            tool_event("t3", "probe", input.clone()),
+            tool_event("t4", "probe", input.clone()),
+            tool_event("t5", "probe", input.clone()),
+        ]),
+        crate::testing::tool_turn(vec![tool_event("t6", "probe", input.clone())]),
+        // The replay turn after the stopped run.
+        crate::testing::text_turn("after"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, mut stream) = conversation_over(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        registry([probe]),
+        None,
+    )
+    .await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::DoomStop), "{outcome:?}");
+    let messages = stored(&conversation).await;
+    let last = messages.last().expect("entries");
+    assert!(
+        crate::history::marker::is(last, crate::history::marker::END),
+        "the doom stop ends with the end marker: {}",
+        crate::history::ext::message_text(last)
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| !crate::history::ext::message_text(message).contains("Run failed")),
+        "a doom stop is a controlled end, not a failure"
+    );
+    assert!(
+        events_until_done(&mut stream)
+            .await
+            .iter()
+            .any(|event| matches!(
+                event,
+                Event::Craft(crate::harness::CraftEvent::Done {
+                    reason: crate::harness::DoneReason::DoomStop,
+                    ..
+                })
+            )),
+        "the terminal Done reports the doom stop"
+    );
+
+    // History replays: the next turn runs to completion.
+    let outcome = run_turn(&conversation, "again").await;
+    assert!(
+        matches!(&outcome, TurnOutcome::Done { reply } if reply == "after"),
+        "{outcome:?}"
+    );
+}
+
+/// The doom grace: one doom block reaches the grace threshold, so the
+/// step's boundary appends the grace prompt as a durable observation —
+/// once, tagged, carried into the next request, and surfaced as a
+/// `StagnationDetected` plus a `MessagesAppended` event.
+#[tokio::test]
+async fn grace_prompt_fires_once_and_rides_the_next_request() {
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event("t1", "probe", serde_json::json!({})),
+            tool_event("t2", "probe", serde_json::json!({})),
+            tool_event("t3", "probe", serde_json::json!({})),
+        ]),
+        crate::testing::text_turn("summarized"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, mut stream) = conversation_over(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        registry([Probe::simple("probe")]),
+        None,
+    )
+    .await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(
+        matches!(&outcome, TurnOutcome::Done { reply } if reply == "summarized"),
+        "{outcome:?}"
+    );
+    let events = events_until_done(&mut stream).await;
+    let stagnation = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Craft(crate::harness::CraftEvent::StagnationDetected { .. })
+            )
+        })
+        .count();
+    assert_eq!(stagnation, 1, "grace fires exactly once");
+    let appended = events
+        .iter()
+        .filter(|event| matches!(event, Event::Agent(AgentEvent::MessagesAppended { .. })))
+        .count();
+    assert_eq!(
+        appended, 1,
+        "the grace append rides a MessagesAppended event"
+    );
+    // The grace prompt is durable history: a tagged observation after the
+    // step's results, before the model's summary reply.
+    let messages = stored(&conversation).await;
+    let grace_index = messages
+        .iter()
+        .position(|message| crate::history::marker::is(message, crate::history::marker::GRACE))
+        .expect("the grace observation is committed");
+    assert_eq!(
+        crate::history::ext::message_text(&messages[grace_index]),
+        crate::run::doom::GRACE_CALL_PROMPT
+    );
+    assert!(
+        messages[grace_index].message().role == Role::User,
+        "the model must see it"
+    );
+    let summary_index = messages
+        .iter()
+        .position(|message| crate::history::ext::message_text(message) == "summarized")
+        .expect("the summary reply");
+    assert!(grace_index < summary_index);
+    let last_result = messages
+        .iter()
+        .rposition(|message| {
+            crate::history::ext::tool_results(message.message())
+                .next()
+                .is_some()
+        })
+        .expect("a tool-result message");
+    assert!(
+        grace_index > last_result,
+        "the grace lands after the step's committed results"
+    );
+    // Step 2's request carried the grace prompt.
+    let requests = provider.requests();
+    assert!(requests.len() >= 2, "the run continued after the grace");
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.role == Role::User
+                && message.content.iter().any(|block| matches!(block,
+                    ContentBlock::Text { text } if text == crate::run::doom::GRACE_CALL_PROMPT))),
+        "the next request carries the grace prompt"
+    );
+}
+
+/// One conversation from the real builder, three turns, one ordering claim:
+/// the chain the builder assembles runs the policy layer before the
+/// guardrail layer before the dedup cache — a denial from an earlier link
+/// decides the call, and only calls every earlier link allowed reach the
+/// cache (and the executor).
+#[tokio::test]
+async fn the_assembled_chain_orders_policy_guardrail_and_dedup() {
+    let permissions = Arc::new(crate::permissions::PermissionManager::new(
+        crate::permissions::PermissionsConfig::default(),
+        std::env::temp_dir(),
+    ));
+    permissions.add_session_rule(crate::permissions::PermissionRule {
+        tool: crate::permissions::ToolKey::native("read"),
+        scope: Some("*".to_owned()),
+        effect: crate::permissions::Effect::Deny,
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "body\n").unwrap();
+
+    // Turn 1: two identical `list` calls — the second is served from the
+    // dedup cache, at the chain's tail.
+    let dedup_script = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event("d1", "list", serde_json::json!({"path": "."})),
+            tool_event("d2", "list", serde_json::json!({"path": "."})),
+        ]),
+        crate::testing::text_turn("dedup done"),
+    ]);
+    let (dedup_conversation, _stream) =
+        policy_conversation(&dir, Arc::clone(&permissions), &dedup_script).await;
+    let outcome = run_turn(&dedup_conversation, "dedup").await;
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let dedup_results = tool_results(&dedup_conversation).await;
+    assert_eq!(dedup_results.len(), 2, "both calls close");
+    assert_eq!(
+        result_text(&dedup_results[0]),
+        result_text(&dedup_results[1])
+    );
+
+    // Turn 2 (same conversation): `read` is rule-denied, so three identical
+    // calls report the permission denial — the doom window behind the
+    // policy layer never sees them.
+    let provider = crate::testing::ScriptedProvider::new(Vec::new());
+    for turns in [
+        vec![
+            crate::testing::tool_turn(vec![
+                tool_event("t1", "read", serde_json::json!({"path": "f"})),
+                tool_event("t2", "read", serde_json::json!({"path": "f"})),
+                tool_event("t3", "read", serde_json::json!({"path": "f"})),
+            ]),
+            crate::testing::text_turn("policy done"),
+        ],
+        vec![
+            crate::testing::text_turn("never reached"),
+            crate::testing::text_turn("never reached"),
+        ],
+    ] {
+        for turn in turns {
+            provider.push(turn);
+        }
+    }
+    let (conversation, _stream) = policy_conversation(&dir, permissions, &provider).await;
+    let outcome = run_turn(&conversation, "policy").await;
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let texts: Vec<String> = tool_results(&conversation)
+        .await
+        .iter()
+        .map(result_text)
+        .collect();
+    assert_eq!(texts.len(), 3);
+    for text in &texts {
+        assert!(
+            text.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+            "the rules denial must win over the doom window behind it: {text}"
+        );
+    }
+}
+
+/// A permission denial is a closed result like any other, so it decays the
+/// doom score by one (the old wave commit counted skips as successes).
+/// Discriminating pin: two rule-denied calls pull 2 errors + one doom block
+/// (17) down to exactly the grace threshold — 15, not 17 — and the grace
+/// event carries the difference in its similarity.
+#[tokio::test]
+async fn permission_denials_decay_the_doom_score() {
+    let permissions = Arc::new(crate::permissions::PermissionManager::new(
+        crate::permissions::PermissionsConfig::default(),
+        std::env::temp_dir(),
+    ));
+    permissions.add_session_rule(crate::permissions::PermissionRule {
+        tool: crate::permissions::ToolKey::native("other"),
+        scope: None,
+        effect: crate::permissions::Effect::Deny,
+    });
+    let input = serde_json::json!({"path": "missing"});
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event("t1", "probe", input.clone()),
+            tool_event("t2", "probe", input.clone()),
+            tool_event("t3", "probe", input.clone()),
+            tool_event("t4", "other", serde_json::json!({})),
+            tool_event("t5", "other", serde_json::json!({})),
+        ]),
+        crate::testing::text_turn("ok"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let (sink, mut stream) = EventSink::new();
+    let conversation = ConversationBuilder::new(
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        "",
+        model(&provider),
+        {
+            let mut registry = ToolRegistry::default();
+            registry
+                .register(Probe::simple("probe").panicking("nope"))
+                .unwrap();
+            registry.register(Probe::simple("other")).unwrap();
+            registry
+        },
+        sink,
+    )
+    .policy(crate::harness::PolicyLayerInputs::new(
+        permissions,
+        // The responder allows the probes; only  is rule-denied.
+        Arc::new(AllowAll::default()),
+    ))
+    .build()
+    .unwrap();
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let events = events_until_done(&mut stream).await;
+    assert!(
+        events.iter().any(|event| matches!(event,
+            Event::Craft(crate::harness::CraftEvent::StagnationDetected { similarity })
+                if (similarity - 0.6).abs() < f32::EPSILON)),
+        "grace fires at exactly 15 (0.6); without the denial decay it would be 17 (0.68)"
     );
 }

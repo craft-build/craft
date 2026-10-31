@@ -82,6 +82,7 @@ fn stop_reason(reason: DoneReason) -> &'static str {
         DoneReason::MaxTurns => "max_turns",
         DoneReason::MaxTokens => "max_tokens",
         DoneReason::Cancelled => "cancelled",
+        DoneReason::DoomStop => "doom_stop",
         DoneReason::Error => "error",
     }
 }
@@ -370,6 +371,20 @@ impl PrintState {
                     message: &message,
                     session_id: &self.session_id,
                 })?;
+            }
+            // Auto-review verdicts ride stderr (the pre-07 headless gate
+            // printed them there); a failed review is its own line.
+            Event::Craft(CraftEvent::AutoReviewDecision {
+                verdict,
+                risk,
+                rationale,
+                ..
+            }) => {
+                if verdict == "failed" {
+                    eprintln!("auto-review failed closed: {rationale}");
+                } else {
+                    eprintln!("auto-review {verdict}: {risk} — {rationale}");
+                }
             }
             _ => {}
         }

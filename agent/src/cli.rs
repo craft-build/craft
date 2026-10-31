@@ -13,7 +13,6 @@ use crate::id::SessionRef;
 use crate::permissions::{
     Effect, PermissionRule, ToolKey, is_valid_server_name, is_valid_wire_name,
 };
-use crate::run::BeforeExecute;
 use crate::storage::StateDir;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -2311,10 +2310,13 @@ async fn run_headless_query_with(
     }
     let reviewer = (q.policy == PermissionPolicy::AutoReview)
         .then(|| crate::auto_review::reviewer_for(model.clone()));
-    let before = Some(Arc::new(crate::headless::HeadlessGate::new(
+    let mut policy = crate::harness::PolicyLayerInputs::new(
         Arc::clone(&env.permissions),
-        reviewer,
-    )) as Arc<dyn BeforeExecute>);
+        Arc::new(crate::headless::HeadlessGate),
+    );
+    if let Some(reviewer) = reviewer {
+        policy = policy.reviewer(reviewer);
+    }
     let workspace = env.workspace;
 
     let mode = match q.mode {
@@ -2373,7 +2375,7 @@ async fn run_headless_query_with(
     )
     .history(history)
     .mode(mode)
-    .approval(Arc::clone(before.as_ref().expect("headless always gates")))
+    .policy(policy.clone())
     .workspace(workspace.clone())
     .build()?;
     // Arm the subagent seam on the conversation (one registry rebuild at
@@ -2395,7 +2397,7 @@ async fn run_headless_query_with(
         cancel: cancel_cell.clone(),
         cancels: Arc::new(crate::run::cancel::CancelMap::new()),
         sink: conversation.sink(),
-        before: before.clone(),
+        policy,
         cwd: cwd_str.clone(),
     });
     let armed = workspace

@@ -4,8 +4,8 @@
 //! children (the workspace's shared `before` hook), and MCP wire tools.
 
 use super::*;
+use crate::harness::PolicyLayerInputs;
 use crate::permissions::PERMISSION_DENIED_PREFIX;
-use crate::run::BeforeExecute;
 use std::sync::Arc;
 
 /// Resolve the flags exactly as `craft --print` would: parse, then map.
@@ -29,8 +29,7 @@ async fn gated_conversation(
         dir.to_path_buf(),
     ));
     permissions.add_cli_rules(cli_tool_policy(flags));
-    let gate =
-        Arc::new(crate::headless::HeadlessGate::new(permissions, None)) as Arc<dyn BeforeExecute>;
+    let policy = PolicyLayerInputs::new(permissions, Arc::new(crate::headless::HeadlessGate));
     let workspace = Workspace::new(dir).unwrap();
     let (sink, stream) = EventSink::new();
     let conversation = ConversationBuilder::new(
@@ -41,7 +40,7 @@ async fn gated_conversation(
         workspace.registry().unwrap(),
         sink,
     )
-    .approval(gate)
+    .policy(policy)
     .build()
     .unwrap();
     (conversation, stream)
@@ -166,8 +165,7 @@ async fn mcp_server_rule_denies_wire_tool_calls() {
         dir.path().to_path_buf(),
     ));
     permissions.add_cli_rules(cli_tool_policy(&["--disallowed-tools", "mcp__srv"]));
-    let gate =
-        Arc::new(crate::headless::HeadlessGate::new(permissions, None)) as Arc<dyn BeforeExecute>;
+    let policy = PolicyLayerInputs::new(permissions, Arc::new(crate::headless::HeadlessGate));
     let workspace = Workspace::new(dir.path()).unwrap();
     workspace.set_mcp(Some(crate::mcp::test_support::stub_handle(&[(
         "srv.echo",
@@ -182,7 +180,7 @@ async fn mcp_server_rule_denies_wire_tool_calls() {
         workspace.registry().unwrap(),
         sink,
     )
-    .approval(gate)
+    .policy(policy)
     .build()
     .unwrap();
 

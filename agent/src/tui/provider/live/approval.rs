@@ -1,37 +1,33 @@
-//! The approval gate: tool calls gated behind the permission engine and,
-//! when it asks, the UI's approve/reject seam.
+//! The approval responder: the TUI's half of the approval interaction.
+//! Permission rules and auto-review live in the harness policy layer (07);
+//! what remains here is the overlay — park the ask on the shared slots,
+//! render the permission request, and deliver the user's answer.
 
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::history;
-use crate::permissions::{
-    ASK_TIMEOUT, FILE_WRITE_TOOLS, PermissionAnswer, PermissionCheck, PermissionError,
-    PermissionManager, ToolKey, append_permission_rule, scope_for_call,
-};
-use crate::run::Decision;
+use crate::permissions::{ASK_TIMEOUT, FILE_WRITE_TOOLS, PermissionAnswer};
+use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
-use super::{ParkSlots, SharedPark};
+use super::SharedPark;
 use crate::tui::provider::cards;
 use crate::tui::provider::{AgentEvent, Status, Tone, ToolCallData};
 
-/// Gates tool calls behind the permission engine and, when it asks, the
-/// UI's approve/reject seam: no workspace mutation runs without an explicit
-/// user decision. Approval runs the tool and grants the session; rejection
-/// skips it and reports the denial back to the model. With auto-review on,
-/// the prompt is answered by a locked-down reviewer model call (E.7)
-/// instead of the user; the reviewer fails closed.
+/// The TUI approval responder: a `NeedsPrompt` decision from the policy
+/// layer parks here until the user answers the permission form (or the
+/// turn is cancelled). Approval runs the tool; rejection reports the
+/// denial back to the model — the layer derives both from the answer.
 pub(super) struct ApprovalGate {
     park: SharedPark,
     tx: mpsc::UnboundedSender<AgentEvent>,
     /// The session's per-turn cancellation cell; each ask races whatever
     /// turn is current.
     cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
-    permissions: Arc<PermissionManager>,
-    /// One-shot reviewer model call; `None` in tests that drive the gate
-    /// without a provider.
-    reviewer: Option<Reviewer>,
+    /// Serializes asks: the overlay is one modal with one pending slot, so
+    /// two concurrently gated calls must queue rather than clobber each
+    /// other's parked oneshot.
+    ask_lock: Arc<Mutex<()>>,
 }
 
 impl ApprovalGate {
@@ -39,129 +35,112 @@ impl ApprovalGate {
         park: SharedPark,
         tx: mpsc::UnboundedSender<AgentEvent>,
         cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
-        permissions: Arc<PermissionManager>,
-        reviewer: Option<Reviewer>,
     ) -> Self {
         Self {
             park,
             tx,
             cancel,
-            permissions,
-            reviewer,
+            ask_lock: Arc::new(Mutex::new(())),
         }
     }
 }
 
-/// Injectable reviewer so gate tests run without a live provider.
-pub(super) use crate::auto_review::Reviewer;
-
-fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
-    PermissionError::new(&tool.to_string(), scopes).to_string()
-}
-
-/// Record a user answer, persisting "always" answers to permissions.bml
-/// (project-local for `*AlwaysLocal`). Write failures degrade to the session
-/// grant — the answer still applies now, it just may be asked again later.
-pub(super) fn record_answer(
-    permissions: &PermissionManager,
-    tool: &ToolKey,
-    scopes: &[String],
-    answer: &PermissionAnswer,
-) -> bool {
-    let allow = answer.is_allow();
-    for (tool, scope, effect, target) in permissions.apply_decision(tool, scopes, answer) {
-        if let Err(err) = append_permission_rule(&tool, scope.as_deref(), effect, &target) {
-            eprintln!("permissions: could not persist always-rule: {err}");
-        }
-    }
-    allow
-}
-
-/// Auto-review path for a `NeedsPrompt` decision (E.7): one locked-down
-/// reviewer call answers the prompt, its verdict is recorded as a session
-/// rule, and the outcome is reported back to the model. Reviewer failures
-/// (timeout, provider error, unparseable output) deny without recording a
-/// rule — the reviewer never actually decided.
-async fn auto_review_decide(
-    tx: mpsc::UnboundedSender<AgentEvent>,
-    reviewer: &Reviewer,
-    permissions: &Arc<PermissionManager>,
-    tool: &ToolKey,
-    scopes: &[String],
-    id: String,
-) -> Decision {
-    // In-progress marker carrying the call's id: it renders as a line under
-    // the tool card (not inside it), and the verdict below replaces it in
-    // place, so the card stays focused on the tool's own output.
-    let _ = tx.send(AgentEvent::AutoReview {
-        id: id.clone(),
-        tone: Tone::Neutral,
-        text: "auto-review: reviewing…".into(),
-    });
-    let review = reviewer(tool.to_string(), scopes.to_vec());
-    let outcome = match review.await {
-        Ok(decision) => {
-            let allow = decision.verdict == crate::auto_review::Verdict::Allow;
-            permissions.apply_auto_review(tool, scopes, allow);
-            let _ = tx.send(AgentEvent::AutoReview {
-                id,
-                tone: if allow { Tone::Success } else { Tone::Warning },
-                text: format!(
-                    "auto-review {}: {} — {}",
-                    decision.verdict.as_str(),
-                    decision.risk.as_str(),
-                    decision.rationale
-                ),
-            });
-            if allow {
-                return Decision::Run;
+impl ApprovalResponder for ApprovalGate {
+    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+        // Owned copies: the boxed future outlives the borrowed ask.
+        let id = ask.id.to_owned();
+        let name = ask.name.to_owned();
+        let arguments = ask.input.clone();
+        let scopes = ask.scopes.to_vec();
+        let low_risk = ask.low_risk;
+        let park = self.park.clone();
+        let tx = self.tx.clone();
+        let cancel = self.cancel.clone();
+        let ask_lock = self.ask_lock.clone();
+        Box::pin(async move {
+            // Held across the whole ask: the overlay shows one permission
+            // form at a time, so a second gated call waits for this one.
+            let _serial = ask_lock.lock().await;
+            let turn_cancel = (*cancel.load_full()).clone();
+            if turn_cancel.is_cancelled() {
+                return Approval::Stop {
+                    reason: "cancelled by client".into(),
+                };
             }
-            PermissionError::with_guidance(
-                &tool.to_string(),
-                scopes,
-                format!("auto-review: {}", decision.rationale),
-            )
-            .to_string()
-        }
-        Err(err) => {
-            let _ = tx.send(AgentEvent::AutoReview {
-                id,
-                tone: Tone::Danger,
-                text: format!("auto-review failed closed: {err}"),
+            // Phase 3: a server-declared read-only tool still prompts, but
+            // the card can phrase it in a neutral, low-risk tone.
+            if low_risk {
+                let _ = tx.send(AgentEvent::Notice {
+                    tone: Tone::Neutral,
+                    text: "server declares this tool read-only (low risk)".into(),
+                });
+            }
+            let _ = tx.send(AgentEvent::AssistantEnd);
+            let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+                id: id.clone(),
+                kind: cards::tool_head(&name, &arguments),
+                lines: Vec::new(),
+                awaiting_approval: true,
+                image: None,
+            }));
+            let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
+            let (files, commands) = display_context(&name, &arguments, &scopes);
+            // Register before emitting: an answer racing in on event receipt
+            // must find the oneshot already parked.
+            let (decision_tx, mut decision_rx) = oneshot::channel();
+            park.lock().await.pending_approval = Some((id.clone(), decision_tx));
+            let _ = tx.send(AgentEvent::PermissionRequest {
+                id: id.clone(),
+                tool: name.clone(),
+                scopes: scopes.clone(),
+                files,
+                commands,
             });
-            PermissionError::with_guidance(
-                &tool.to_string(),
-                scopes,
-                format!("auto-review denied this action: {err}"),
-            )
-            .to_string()
-        }
-    };
-    Decision::Skip(outcome)
-}
 
-impl crate::run::BeforeExecute for ApprovalGate {
-    fn decide(&self, call: history::ContentBlock) -> crate::run::BoxFuture<Decision> {
-        let ApprovalGate {
-            park,
-            tx,
-            cancel,
-            permissions,
-            reviewer,
-        } = self.clone_for_call();
-        Box::pin(async move { gate_decide(park, tx, cancel, permissions, reviewer, call).await })
+            let answer = tokio::select! {
+                biased;
+                () = turn_cancel.cancelled() => {
+                    park.lock().await.pending_approval = None;
+                    let _ = tx.send(AgentEvent::PermissionResolved { id });
+                    return Approval::Stop {
+                        reason: "cancelled by client".into(),
+                    };
+                }
+                decision = tokio::time::timeout(ASK_TIMEOUT, &mut decision_rx) => {
+                    park.lock().await.pending_approval = None;
+                    let _ = tx.send(AgentEvent::PermissionResolved { id });
+                    decision
+                        .unwrap_or(Ok(PermissionAnswer::Deny))
+                        .unwrap_or(PermissionAnswer::Deny)
+                }
+            };
+            let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
+            if answer.is_allow() {
+                Approval::Allow {
+                    remember: Some(answer),
+                }
+            } else {
+                Approval::Deny {
+                    message: denied_message(&name, &scopes, answer.guidance()),
+                    remember: Some(answer),
+                }
+            }
+        })
     }
 }
 
-impl ApprovalGate {
-    fn clone_for_call(&self) -> Self {
-        Self {
-            park: self.park.clone(),
-            tx: self.tx.clone(),
-            cancel: self.cancel.clone(),
-            permissions: self.permissions.clone(),
-            reviewer: self.reviewer.clone(),
-        }
+/// The model-visible denial text: the guidance the answer carried, else the
+/// engine's standard denial. Identical bytes to the pre-07 gate.
+fn denied_message(name: &str, scopes: &[String], guidance: Option<&str>) -> String {
+    let tool = crate::permissions::ToolKey::parse(name);
+    match guidance {
+        Some(guidance) => crate::permissions::PermissionError::with_guidance(
+            &tool.to_string(),
+            scopes,
+            guidance.to_string(),
+        )
+        .to_string(),
+        None => crate::permissions::PermissionError::new(&tool.to_string(), scopes).to_string(),
     }
 }
 
@@ -188,104 +167,6 @@ fn display_context(
     (files, commands)
 }
 
-async fn gate_decide(
-    park: Arc<Mutex<ParkSlots>>,
-    tx: mpsc::UnboundedSender<AgentEvent>,
-    // The session's per-turn cancellation cell; each ask races whatever
-    // turn is current.
-    cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
-    permissions: Arc<PermissionManager>,
-    reviewer: Option<Reviewer>,
-    call: history::ContentBlock,
-) -> Decision {
-    let turn_cancel = (*cancel.load_full()).clone();
-    if turn_cancel.is_cancelled() {
-        return Decision::Stop("cancelled by client".into());
-    }
-    let history::ContentBlock::ToolUse {
-        id: call_id,
-        name,
-        input: arguments,
-        ..
-    } = call
-    else {
-        return Decision::Skip("not a tool call".into());
-    };
-    let name = name.as_str();
-    let tool = ToolKey::parse(name);
-    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &arguments);
-    match permissions.check_multi(&tool, &scopes, force_prompt) {
-        PermissionCheck::Allowed => return Decision::Run,
-        PermissionCheck::Denied => {
-            return Decision::Skip(denied_message(&tool, &scopes));
-        }
-        PermissionCheck::NeedsPrompt { low_risk, .. } => {
-            // Phase 3: a server-declared read-only tool still prompts, but the
-            // card can phrase it in a neutral, low-risk tone.
-            if low_risk {
-                let _ = tx.send(AgentEvent::Notice {
-                    tone: Tone::Neutral,
-                    text: "server declares this tool read-only (low risk)".into(),
-                });
-            }
-        }
-    }
-    let id = call_id.clone();
-    if permissions.is_auto_review()
-        && let Some(reviewer) = reviewer.as_ref()
-    {
-        return auto_review_decide(tx.clone(), reviewer, &permissions, &tool, &scopes, id).await;
-    }
-    let _ = tx.send(AgentEvent::AssistantEnd);
-    let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
-        id: id.clone(),
-        kind: cards::tool_head(name, &arguments),
-        lines: Vec::new(),
-        awaiting_approval: true,
-        image: None,
-    }));
-    let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
-    let (files, commands) = display_context(name, &arguments, &scopes);
-    // Register before emitting: an answer racing in on event receipt
-    // must find the oneshot already parked.
-    let (decision_tx, mut decision_rx) = oneshot::channel();
-    park.lock().await.pending_approval = Some((id.clone(), decision_tx));
-    let _ = tx.send(AgentEvent::PermissionRequest {
-        id: id.clone(),
-        tool: name.to_string(),
-        scopes: scopes.clone(),
-        files,
-        commands,
-    });
-
-    let answer = tokio::select! {
-        biased;
-        () = turn_cancel.cancelled() => {
-            park.lock().await.pending_approval = None;
-            let _ = tx.send(AgentEvent::PermissionResolved { id });
-            return Decision::Stop("cancelled by client".into());
-        }
-        decision = tokio::time::timeout(ASK_TIMEOUT, &mut decision_rx) => {
-            park.lock().await.pending_approval = None;
-            let _ = tx.send(AgentEvent::PermissionResolved { id });
-            decision
-                .unwrap_or(Ok(PermissionAnswer::Deny))
-                .unwrap_or(PermissionAnswer::Deny)
-        }
-    };
-    let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
-    if record_answer(&permissions, &tool, &scopes, &answer) {
-        Decision::Run
-    } else if let Some(guidance) = answer.guidance() {
-        Decision::Skip(
-            PermissionError::with_guidance(&tool.to_string(), &scopes, guidance.to_string())
-                .to_string(),
-        )
-    } else {
-        Decision::Skip(denied_message(&tool, &scopes))
-    }
-}
-
 /// Deliver the user's decision to a tool call waiting on it, if the id
 /// matches the currently pending one.
 pub(super) async fn decide(park: &SharedPark, id: String, answer: PermissionAnswer) {
@@ -299,25 +180,9 @@ pub(super) async fn decide(park: &SharedPark, id: String, answer: PermissionAnsw
 
 #[cfg(test)]
 mod tests {
+    use super::super::ParkSlots;
     use super::*;
-    use crate::permissions::PermissionsConfig;
-    use crate::run::BeforeExecute;
-
-    fn tool_call(id: &str, name: &str) -> history::ContentBlock {
-        history::ContentBlock::ToolUse {
-            id: id.into(),
-            name: name.into(),
-            input: serde_json::json!({}),
-            thought_signature: None,
-        }
-    }
-
-    fn set_input(call: &mut history::ContentBlock, input: serde_json::Value) {
-        let history::ContentBlock::ToolUse { input: slot, .. } = call else {
-            panic!("tool call");
-        };
-        *slot = input;
-    }
+    use crate::run::approval::ApprovalResponder;
 
     type Cell = std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>;
 
@@ -327,560 +192,284 @@ mod tests {
         ))
     }
 
-    fn gate(state: &Arc<Mutex<ParkSlots>>) -> ApprovalGate {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        ApprovalGate::new(
-            state.clone(),
-            tx,
-            cell(),
-            Arc::new(PermissionManager::new(
-                PermissionsConfig::default(),
-                std::env::temp_dir(),
-            )),
-            None,
+    /// A responder over a fresh park and channel; the cell lets a test fire
+    /// the current turn's cancellation.
+    fn gate() -> (
+        ApprovalGate,
+        Arc<Mutex<ParkSlots>>,
+        mpsc::UnboundedReceiver<AgentEvent>,
+        Cell,
+    ) {
+        let park = Arc::new(Mutex::new(ParkSlots::default()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = cell();
+        (
+            ApprovalGate::new(park.clone(), tx, cancel.clone()),
+            park,
+            rx,
+            cancel,
         )
     }
 
-    #[test]
-    fn apply_patch_scope_covers_every_patched_file() {
-        let root = std::path::Path::new("/repo");
-        let (scopes, force) = scope_for_call(
-            root,
-            "apply_patch",
-            &serde_json::json!({"patch_text": "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** Delete File: sub/b.rs\n*** End Patch"}),
-        );
-        assert!(!force);
-        assert_eq!(
+    fn bash_ask<'a>(
+        id: &'a str,
+        input: &'a serde_json::Value,
+        scopes: &'a [String],
+    ) -> ApprovalAsk<'a> {
+        ApprovalAsk {
+            id,
+            name: "bash",
+            input,
             scopes,
-            vec!["/repo/a.rs".to_string(), "/repo/sub/b.rs".to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn read_only_tools_run_without_approval() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        for name in crate::permissions::READ_ONLY_TOOLS {
-            let gate = gate(&state);
-            let decision = gate.decide(tool_call("t1", name)).await;
-            assert!(matches!(decision, Decision::Run), "{name}");
-        }
-        assert!(state.lock().await.pending_approval.is_none());
-    }
-
-    /// `task` is a builtin allow (not in `READ_ONLY_TOOLS`) and so runs
-    /// without an approval prompt.
-    #[tokio::test]
-    async fn task_runs_without_approval() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let gate = gate(&state);
-        let mut call = tool_call("t1", "task");
-        set_input(&mut call, serde_json::json!({"description": "research"}));
-        let decision = gate.decide(call).await;
-        assert!(matches!(decision, Decision::Run));
-        assert!(state.lock().await.pending_approval.is_none());
-    }
-
-    /// Reference parity: an in-project file write is a builtin allow, so it
-    /// runs without a prompt; the same write outside the project still parks.
-    #[tokio::test]
-    async fn in_project_write_runs_without_approval() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let gate = gate(&state);
-        let inside = std::env::temp_dir().join("craft_builtin_allow_test.rs");
-        let mut call = tool_call("t1", "write");
-        set_input(
-            &mut call,
-            serde_json::json!({ "path": inside.display().to_string() }),
-        );
-        assert!(matches!(gate.decide(call).await, Decision::Run));
-        assert!(state.lock().await.pending_approval.is_none());
-    }
-
-    /// Phase 1 of the argosy integration: the auto-allowed argosy tools
-    /// run without a prompt, main agent and subagent alike.
-    #[tokio::test]
-    async fn argosy_tools_run_without_approval() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        for name in crate::permissions::ARGOSY_ALLOW_TOOLS {
-            let gate = gate(&state);
-            assert!(
-                matches!(gate.decide(tool_call("t1", name)).await, Decision::Run),
-                "{name}"
-            );
-        }
-        assert!(state.lock().await.pending_approval.is_none());
-    }
-
-    /// The repo-mutating argosy code tools are deliberately not in the
-    /// allow list, so they park on the approval seam like any other write.
-    #[tokio::test]
-    async fn argosy_code_tools_require_approval() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        for name in ["astgrep", "conflicts"] {
-            let gate = gate(&state);
-            let call = tool_call("t1", name);
-            let pending = tokio::spawn(async move { gate.decide(call).await });
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while state.lock().await.pending_approval.is_none() {
-                if std::time::Instant::now() > deadline {
-                    panic!("{name} ran without approval");
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            pending.abort();
+            low_risk: false,
         }
     }
 
-    #[tokio::test]
-    async fn unknown_and_mutating_tools_require_approval() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        for name in ["write", "delete", "some_future_bash_tool"] {
-            let gate = gate(&state);
-            let call = tool_call("t1", name);
-            let pending = tokio::spawn(async move { gate.decide(call).await });
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while state.lock().await.pending_approval.is_none() {
-                assert!(std::time::Instant::now() < deadline, "{name} never parked");
-                tokio::task::yield_now().await;
-            }
-            decide(&state, "t1".into(), PermissionAnswer::Deny).await;
-            let decision = pending.await.unwrap();
-            assert!(matches!(decision, Decision::Skip(_)), "{name}");
-        }
+    fn bash_input() -> serde_json::Value {
+        serde_json::json!({ "command": "echo hi" })
     }
 
-    /// B.11: an MCP wire-name tool call parks on the approval seam under the
-    /// default config — it is promptable, never a hard deny — and an
-    /// allow-session answer keys the rule as `McpTool`.
-    #[tokio::test]
-    async fn mcp_wire_tool_prompts_and_grants_as_mcp_key() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::env::temp_dir(),
-        ));
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let gate = ApprovalGate::new(state.clone(), tx, cell(), permissions.clone(), None);
-        let pending =
-            tokio::spawn(async move { gate.decide(tool_call("t1", "github__create_issue")).await });
+    fn bash_scopes() -> Vec<String> {
+        vec!["echo hi".to_string()]
+    }
+
+    /// Wait until an ask parks on the shared slots.
+    async fn wait_parked(park: &Arc<Mutex<ParkSlots>>) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while state.lock().await.pending_approval.is_none() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "mcp tool never parked"
-            );
+        while park.lock().await.pending_approval.is_none() {
+            assert!(std::time::Instant::now() < deadline, "the ask never parked");
             tokio::task::yield_now().await;
         }
-        decide(&state, "t1".into(), PermissionAnswer::AllowSession).await;
-        assert!(matches!(pending.await.unwrap(), Decision::Run));
-
-        let tool = ToolKey::parse("github__create_issue");
-        assert!(
-            permissions
-                .session_rules_snapshot()
-                .iter()
-                .any(|r| r.tool == tool && r.effect == crate::permissions::Effect::Allow),
-            "session grant not keyed as an MCP tool"
-        );
     }
 
     #[tokio::test]
-    async fn decide_ignores_stale_ids_and_delivers_current_one() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let (tx, mut rx) = oneshot::channel();
-        state.lock().await.pending_approval = Some(("current".into(), tx));
-
-        decide(&state, "stale".into(), PermissionAnswer::AllowSession).await;
-        assert!(matches!(&state.lock().await.pending_approval, Some((id, _)) if id == "current"));
-        assert!(
-            rx.try_recv().is_err(),
-            "stale id must not consume a decision"
-        );
-
-        decide(&state, "current".into(), PermissionAnswer::Deny).await;
-        assert!(state.lock().await.pending_approval.is_none());
-        assert_eq!(rx.await.unwrap(), PermissionAnswer::Deny);
-    }
-
-    #[tokio::test]
-    async fn approval_grants_the_session_scope() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::env::temp_dir(),
-        ));
-        let make_gate = |permissions: Arc<PermissionManager>| {
-            let (tx, _rx) = mpsc::unbounded_channel();
-            ApprovalGate::new(state.clone(), tx, cell(), permissions, None)
+    async fn an_ask_parks_and_the_answer_allows() {
+        let (gate, park, _rx, _cell) = gate();
+        let pending = {
+            let input = bash_input();
+            let scopes = bash_scopes();
+            tokio::spawn(async move { gate.ask(bash_ask("t1", &input, &scopes)).await })
         };
-        let gate = make_gate(permissions.clone());
-
-        let mut call = tool_call("t1", "write");
-        // Out-of-project: an in-project write is now a builtin allow and would
-        // run without a prompt, so the approval flow is exercised off-project.
-        set_input(&mut call, serde_json::json!({ "path": "/proj/src/lib.rs" }));
-        let pending = tokio::spawn(async move { gate.decide(call).await });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while state.lock().await.pending_approval.is_none() {
-            assert!(std::time::Instant::now() < deadline, "write never parked");
-            tokio::task::yield_now().await;
+        wait_parked(&park).await;
+        decide(&park, "t1".into(), PermissionAnswer::AllowSession).await;
+        match pending.await.unwrap() {
+            Approval::Allow { remember } => {
+                assert_eq!(remember, Some(PermissionAnswer::AllowSession))
+            }
+            other => panic!("expected Allow, got {other:?}"),
         }
-        decide(&state, "t1".into(), PermissionAnswer::AllowSession).await;
-        assert!(matches!(pending.await.unwrap(), Decision::Run));
-
-        // The grant generalized to the parent dir and lives in the session:
-        // a sibling write now runs without asking again.
-        let gate = make_gate(permissions);
-        let mut sibling = tool_call("t2", "write");
-        set_input(
-            &mut sibling,
-            serde_json::json!({ "path": "/proj/src/other.rs" }),
-        );
-        assert!(matches!(gate.decide(sibling).await, Decision::Run));
-        assert!(state.lock().await.pending_approval.is_none());
     }
 
     #[tokio::test]
-    async fn deny_with_guidance_reaches_the_model() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::env::temp_dir(),
-        ));
-        let gate = ApprovalGate::new(state.clone(), tx, cell(), permissions, None);
-
-        let call = tool_call("t1", "write");
-        let pending = tokio::spawn(async move { gate.decide(call).await });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while state.lock().await.pending_approval.is_none() {
-            assert!(std::time::Instant::now() < deadline, "write never parked");
-            tokio::task::yield_now().await;
-        }
+    async fn a_rejection_carries_the_denial_message_and_remember_scope() {
+        let (gate, park, _rx, _cell) = gate();
+        let pending = {
+            let input = bash_input();
+            let scopes = bash_scopes();
+            tokio::spawn(async move { gate.ask(bash_ask("t1", &input, &scopes)).await })
+        };
+        wait_parked(&park).await;
         decide(
-            &state,
+            &park,
             "t1".into(),
             PermissionAnswer::DenyWithGuidance("use read instead".into()),
         )
         .await;
         match pending.await.unwrap() {
-            Decision::Skip(msg) => assert!(
-                msg.contains("use read instead"),
-                "guidance missing from: {msg}"
-            ),
-            other => panic!("expected Skip, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn allow_once_grants_nothing_persistent() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::env::temp_dir(),
-        ));
-        let make_gate = |permissions: Arc<PermissionManager>| {
-            let (tx, _rx) = mpsc::unbounded_channel();
-            ApprovalGate::new(state.clone(), tx, cell(), permissions, None)
-        };
-
-        for i in 0..2 {
-            let id = format!("t{i}");
-            let gate = make_gate(permissions.clone());
-            let mut call = tool_call(&id, "write");
-            // Off-project so it still prompts (in-project writes auto-allow).
-            set_input(&mut call, serde_json::json!({ "path": "/proj/src/lib.rs" }));
-            let pending = tokio::spawn(async move { gate.decide(call).await });
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while state.lock().await.pending_approval.is_none() {
-                assert!(std::time::Instant::now() < deadline, "write never parked");
-                tokio::task::yield_now().await;
-            }
-            decide(&state, id, PermissionAnswer::AllowOnce).await;
-            assert!(matches!(pending.await.unwrap(), Decision::Run));
-            // The next identical call must ask again: nothing persisted.
-            if i == 0 {
+            Approval::Deny { message, remember } => {
                 assert!(
-                    state.lock().await.pending_approval.is_none(),
-                    "allow-once leaked a pending approval"
+                    message.contains("use read instead"),
+                    "guidance missing from: {message}"
+                );
+                assert_eq!(
+                    remember,
+                    Some(PermissionAnswer::DenyWithGuidance(
+                        "use read instead".into()
+                    ))
                 );
             }
+            other => panic!("expected Deny, got {other:?}"),
         }
-        // The second iteration parked again (the loop's wait would have
-        // timed out otherwise), proving allow-once granted no rule.
     }
 
+    /// A cancellation arriving while the ask is parked stops the run — the
+    /// responder's answer to a client that went away.
+    #[tokio::test]
+    async fn a_cancelled_turn_stops_the_parked_ask() {
+        let (gate, park, _rx, cancel) = gate();
+        let pending = {
+            let input = bash_input();
+            let scopes = bash_scopes();
+            tokio::spawn(async move { gate.ask(bash_ask("t1", &input, &scopes)).await })
+        };
+        wait_parked(&park).await;
+        let parked = cancel.load_full();
+        parked.cancel();
+        match pending.await.unwrap() {
+            Approval::Stop { reason } => assert_eq!(reason, "cancelled by client"),
+            other => panic!("expected Stop, got {other:?}"),
+        }
+        assert!(park.lock().await.pending_approval.is_none());
+    }
+
+    /// The permission-request event carries the display context (files vs
+    /// commands), and the resolution event closes the form.
     #[tokio::test]
     async fn permission_request_event_carries_display_context() {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::env::temp_dir(),
-        ));
-        let gate = ApprovalGate::new(state.clone(), tx.clone(), cell(), permissions, None);
-
-        let mut call = tool_call("t1", "bash");
-        set_input(&mut call, serde_json::json!({ "command": "echo hi" }));
-        let pending = tokio::spawn(async move { gate.decide(call).await });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while state.lock().await.pending_approval.is_none() {
-            assert!(std::time::Instant::now() < deadline, "bash never parked");
-            tokio::task::yield_now().await;
-        }
+        let (gate, park, mut rx, _cell) = gate();
+        let pending = {
+            let input = bash_input();
+            let scopes = bash_scopes();
+            tokio::spawn(async move { gate.ask(bash_ask("t1", &input, &scopes)).await })
+        };
+        wait_parked(&park).await;
         let mut request = None;
-        while let Ok(ev) = rx.try_recv() {
-            if let AgentEvent::PermissionRequest {
-                id,
-                tool,
-                scopes,
-                files,
-                commands,
-            } = ev
-            {
-                request = Some((id, tool, scopes, files, commands));
+        let mut resolved = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentEvent::PermissionRequest {
+                    id,
+                    tool,
+                    files,
+                    commands,
+                    ..
+                } => request = Some((id, tool, files, commands)),
+                AgentEvent::PermissionResolved { id } if id == "t1" => resolved = true,
+                _ => {}
             }
         }
-        let (id, tool, _scopes, files, commands) = request.expect("no PermissionRequest event");
+        let (id, tool, files, commands) = request.expect("no PermissionRequest event");
         assert_eq!(id, "t1");
         assert_eq!(tool, "bash");
         assert!(files.is_empty());
         assert_eq!(commands, vec!["echo hi".to_string()]);
-        decide(&state, "t1".into(), PermissionAnswer::Deny).await;
+        decide(&park, "t1".into(), PermissionAnswer::Deny).await;
         let _ = pending.await;
-        let mut resolved = false;
-        while let Ok(ev) = rx.try_recv() {
-            if matches!(ev, AgentEvent::PermissionResolved { id } if id == "t1") {
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AgentEvent::PermissionResolved { id } if id == "t1") {
                 resolved = true;
             }
         }
         assert!(resolved, "no PermissionResolved event");
     }
 
+    /// A re-arm (the next turn storing a fresh cancellation) must not
+    /// disturb a pending approval: the ask watches the cancellation it
+    /// captured, so only a real cancel ends it early.
     #[tokio::test]
     async fn a_new_turns_cancellation_does_not_cancel_a_parked_approval() {
-        // A re-arm (the next turn storing a fresh cancellation) must not
-        // disturb a pending approval: the ask watches the cancellation it
-        // captured, so only a real cancel ends it early.
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let cell = cell();
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::env::temp_dir(),
-        ));
-        let gate = ApprovalGate::new(state.clone(), tx, cell.clone(), permissions, None);
-
-        let mut call = tool_call("t1", "bash");
-        set_input(&mut call, serde_json::json!({ "command": "echo hi" }));
-        let pending = tokio::spawn(async move { gate.decide(call).await });
-        while state.lock().await.pending_approval.is_none() {
-            tokio::task::yield_now().await;
-        }
-        // The next turn replaces the cell's cancellation; the parked ask
-        // keeps watching the one it captured (uncancelled).
-        cell.store(std::sync::Arc::new(animist::agent::Cancellation::default()));
+        let (gate, park, _rx, cancel) = gate();
+        let pending = {
+            let input = bash_input();
+            let scopes = bash_scopes();
+            tokio::spawn(async move { gate.ask(bash_ask("t1", &input, &scopes)).await })
+        };
+        wait_parked(&park).await;
+        cancel.store(std::sync::Arc::new(animist::agent::Cancellation::default()));
         tokio::task::yield_now().await;
-        decide(&state, "t1".into(), PermissionAnswer::AllowSession).await;
-        assert!(matches!(pending.await.unwrap(), Decision::Run));
+        decide(&park, "t1".into(), PermissionAnswer::AllowSession).await;
+        assert!(matches!(pending.await.unwrap(), Approval::Allow { .. }));
     }
 
-    fn scripted_reviewer(
-        result: Result<crate::auto_review::Decision, crate::auto_review::ReviewError>,
-    ) -> (Reviewer, Arc<std::sync::atomic::AtomicUsize>) {
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = calls.clone();
-        let reviewer: Reviewer = Arc::new(move |_tool, _scopes| {
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let result = result.clone();
-            Box::pin(async move { result })
-        });
-        (reviewer, calls)
-    }
-
-    fn auto_review_gate(
-        reviewer: Reviewer,
-    ) -> (ApprovalGate, Arc<Mutex<ParkSlots>>, Arc<PermissionManager>) {
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::env::temp_dir(),
-        ));
-        permissions.toggle_auto_review();
-        let gate = ApprovalGate::new(
-            state.clone(),
-            tx,
-            cell(),
-            permissions.clone(),
-            Some(reviewer),
-        );
-        (gate, state, permissions)
-    }
-
-    /// The in-progress status line precedes the verdict and shares the call's
-    /// id so the conversation view updates it in place under the tool card.
+    /// Two gated calls running concurrently (a parallel wave) must never
+    /// show two permission prompts at once: the overlay is one modal with
+    /// one pending slot, so asks serialize inside the responder. Pinned by
+    /// 07 (the pre-layer gate could clobber a parked oneshot under
+    /// concurrency).
     #[tokio::test]
-    async fn auto_review_posts_an_in_progress_line_before_the_verdict() {
-        // The reviewer parks until released.
-        let gate_open = Arc::new(tokio::sync::Notify::new());
-        let proceed = gate_open.clone();
-        let reviewer: Reviewer = Arc::new(move |_tool, _scopes| {
-            let proceed = proceed.clone();
-            Box::pin(async move {
-                proceed.notified().await;
-                Ok(crate::auto_review::Decision {
-                    verdict: crate::auto_review::Verdict::Allow,
-                    risk: crate::auto_review::Risk::Low,
-                    rationale: "in-project edit".into(),
-                })
-            })
-        });
-        let state = Arc::new(Mutex::new(ParkSlots::default()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::env::temp_dir(),
-        ));
-        permissions.toggle_auto_review();
-        let gate = ApprovalGate::new(state, tx, cell(), permissions, Some(reviewer));
-        let pending = tokio::spawn(async move { gate.decide(tool_call("t1", "write")).await });
-
-        let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out waiting for the in-progress line")
-            .expect("channel closed");
-        let AgentEvent::AutoReview { id, tone, text } = first else {
-            panic!("expected the in-progress AutoReview, got {first:?}");
+    async fn two_parallel_asks_never_show_two_prompts() {
+        let (gate, park, mut rx, _cell) = gate();
+        // Both asks go through the one shared responder, as the Arc'd
+        // trait object is shared across a turn's concurrent calls.
+        let gate = Arc::new(gate);
+        let second = {
+            let gate = Arc::clone(&gate);
+            let input = bash_input();
+            let scopes = bash_scopes();
+            tokio::spawn(async move { gate.ask(bash_ask("t2", &input, &scopes)).await })
         };
-        assert_eq!(id, "t1");
-        assert_eq!(tone, Tone::Neutral);
-        assert_eq!(text, "auto-review: reviewing…");
-
-        gate_open.notify_one();
-        assert!(matches!(pending.await.unwrap(), Decision::Run));
-
-        let second = rx.recv().await.expect("verdict line");
-        let AgentEvent::AutoReview { id, tone, text } = second else {
-            panic!("expected the verdict AutoReview, got {second:?}");
+        let first = {
+            let gate = Arc::clone(&gate);
+            let input = bash_input();
+            let scopes = bash_scopes();
+            tokio::spawn(async move { gate.ask(bash_ask("t1", &input, &scopes)).await })
         };
-        assert_eq!(id, "t1", "the verdict replaces the in-progress line");
-        assert_eq!(tone, Tone::Success, "an allow verdict reads as success");
-        assert!(text.starts_with("auto-review allow"));
-    }
-
-    #[tokio::test]
-    async fn auto_review_allow_runs_and_records_a_session_rule() {
-        let (reviewer, calls) = scripted_reviewer(Ok(crate::auto_review::Decision {
-            verdict: crate::auto_review::Verdict::Allow,
-            risk: crate::auto_review::Risk::Low,
-            rationale: "in-project edit".to_string(),
-        }));
-        let (gate, state, _permissions) = auto_review_gate(reviewer);
-        assert!(matches!(
-            gate.decide(tool_call("t1", "write")).await,
-            Decision::Run
-        ));
-        assert!(state.lock().await.pending_approval.is_none());
+        // The first ask's permission request is sent while it holds the
+        // serialization lock; wait for it (not just the park).
+        let parked_id = loop {
+            match next_event(&mut rx).await {
+                AgentEvent::PermissionRequest { id, .. } => break id,
+                _ => continue,
+            }
+        };
+        // While it is unanswered, the queued ask can neither take the slot
+        // nor show a second prompt: it is blocked on the lock, not timing.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut extra_requests = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AgentEvent::PermissionRequest { .. }) {
+                extra_requests += 1;
+            }
+        }
+        assert_eq!(extra_requests, 0, "one prompt at a time");
         assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the recorded rule answers the sibling call without the reviewer"
+            park.lock()
+                .await
+                .pending_approval
+                .as_ref()
+                .map(|(id, _)| id.clone()),
+            Some(parked_id.clone()),
+            "the pending slot holds the first ask"
         );
-        assert!(matches!(
-            gate.decide(tool_call("t2", "write")).await,
-            Decision::Run
-        ));
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn auto_review_deny_skips_with_rationale_and_records_a_deny_rule() {
-        let (reviewer, _calls) = scripted_reviewer(Ok(crate::auto_review::Decision {
-            verdict: crate::auto_review::Verdict::Deny,
-            risk: crate::auto_review::Risk::High,
-            rationale: "rm -rf outside the project".to_string(),
-        }));
-        let (gate, _state, permissions) = auto_review_gate(reviewer);
-        let mut call = tool_call("t1", "bash");
-        set_input(&mut call, serde_json::json!({ "command": "rm -rf /" }));
-        let decision = gate.decide(call).await;
-        let Decision::Skip(message) = decision else {
-            panic!("expected skip, got {decision:?}");
+        decide(&park, parked_id.clone(), PermissionAnswer::AllowOnce).await;
+        // Only now does the queued ask take the overlay.
+        let next_id = loop {
+            match next_event(&mut rx).await {
+                AgentEvent::PermissionRequest { id, .. } => break id,
+                _ => continue,
+            }
         };
-        assert!(message.contains("rm -rf outside the project"));
+        assert_ne!(parked_id, next_id, "the second ask parks after the first");
+        decide(&park, next_id, PermissionAnswer::Deny).await;
+        let (first, second) = tokio::join!(first, second);
+        let outcomes = [first.unwrap(), second.unwrap()];
         assert!(
-            message.contains("auto-review:"),
-            "the reviewer rationale replaces the generic guidance: {message}"
+            outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, Approval::Allow { .. })),
+            "the answered ask allows: {outcomes:?}"
         );
-        let mut sibling = tool_call("t2", "bash");
-        set_input(&mut sibling, serde_json::json!({ "command": "rm -rf /" }));
-        assert!(matches!(gate.decide(sibling).await, Decision::Skip(_)));
-        assert!(matches!(
-            permissions.check(&ToolKey::native("bash"), &["rm -rf /".to_string()]),
-            PermissionCheck::Denied
-        ));
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, Approval::Deny { .. })),
+            "the queued ask denies: {outcomes:?}"
+        );
     }
 
     #[tokio::test]
-    async fn auto_review_failure_fails_closed_without_recording_a_rule() {
-        let (reviewer, _calls) = scripted_reviewer(Err(crate::auto_review::ReviewError::Timeout {
-            deadline: std::time::Duration::from_secs(30),
-        }));
-        let (gate, _state, permissions) = auto_review_gate(reviewer);
-        let mut call = tool_call("t1", "write");
-        // Out-of-project: in-project writes are a builtin allow now, so this
-        // path is what still reaches the auto-reviewer.
-        set_input(
-            &mut call,
-            serde_json::json!({ "path": "/outside/src/a.rs" }),
+    async fn decide_ignores_stale_ids_and_delivers_current_one() {
+        let (_gate, park, _rx, _cell) = gate();
+        let (tx, mut rx) = oneshot::channel();
+        park.lock().await.pending_approval = Some(("current".into(), tx));
+
+        decide(&park, "stale".into(), PermissionAnswer::AllowSession).await;
+        assert!(matches!(&park.lock().await.pending_approval, Some((id, _)) if id == "current"));
+        assert!(
+            rx.try_recv().is_err(),
+            "a stale id must not consume a decision"
         );
-        let Decision::Skip(message) = gate.decide(call).await else {
-            panic!("expected skip");
-        };
-        assert!(message.contains("auto-review denied this action"));
-        // No reviewer decision happened, so nothing was recorded: a retry
-        // still falls through to the prompt (NeedsPrompt), not Denied.
-        let tool = ToolKey::native("write");
-        let scope = "/outside/src/a.rs".to_string();
-        assert!(matches!(
-            permissions.check(&tool, &[scope]),
-            PermissionCheck::NeedsPrompt { .. }
-        ));
+
+        decide(&park, "current".into(), PermissionAnswer::Deny).await;
+        assert!(park.lock().await.pending_approval.is_none());
+        assert_eq!(rx.await.unwrap(), PermissionAnswer::Deny);
     }
 
-    #[tokio::test]
-    async fn pre_decided_calls_never_reach_the_reviewer() {
-        let (reviewer, calls) = scripted_reviewer(Ok(crate::auto_review::Decision {
-            verdict: crate::auto_review::Verdict::Allow,
-            risk: crate::auto_review::Risk::Low,
-            rationale: String::new(),
-        }));
-        let (gate, _state, permissions) = auto_review_gate(reviewer);
-        // Read-only: allowed by defaults.
-        assert!(matches!(
-            gate.decide(tool_call("t1", "read")).await,
-            Decision::Run
-        ));
-        // Explicit deny rule: denied without review.
-        permissions.add_session_rule(crate::permissions::PermissionRule {
-            tool: ToolKey::native("write"),
-            scope: Some(
-                permissions
-                    .cwd()
-                    .join("src/blocked.rs")
-                    .display()
-                    .to_string(),
-            ),
-            effect: crate::permissions::Effect::Deny,
-        });
-        let mut call = tool_call("t2", "write");
-        set_input(&mut call, serde_json::json!({ "path": "src/blocked.rs" }));
-        assert!(matches!(gate.decide(call).await, Decision::Skip(_)));
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "Allowed and Denied must short-circuit before the reviewer"
-        );
+    /// The next TUI event, failing (not hanging) when none arrives.
+    async fn next_event(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> AgentEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("event before the deadline")
+            .expect("channel open")
     }
 }

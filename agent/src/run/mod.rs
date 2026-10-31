@@ -3,14 +3,14 @@
 //!
 //! The multi-turn loop itself moved to the animist `Agent` behind
 //! `harness::Conversation` (docs/animist/05); what remains here are the
-//! pieces every surface and layer still share. Recovery, doom-loop, and
-//! overflow handling return with their layers in 07–09.
+//! pieces every surface and layer still share. Recovery and overflow
+//! handling return with their layers in 09.
 
+pub mod approval;
 pub mod cancel;
 pub mod dedup;
-// The doom tracker and the retry classification are the recovery layers'
-// substrate, unwired until 07 (doom) and 09 (retry) land.
-#[allow(dead_code)]
+// The doom tracker lives in the guardrail state from 07 on; the retry
+// classification stays unwired until 09's recovery layer.
 pub(crate) mod doom;
 pub mod guardrails;
 pub mod mode;
@@ -20,9 +20,10 @@ pub mod recency;
 mod retry;
 pub mod view;
 
+pub use approval::{Approval, ApprovalAsk, ApprovalResponder};
 pub use cancel::{CancelFlag, CancelToken, cancel_channel};
-pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
-pub use guardrails::{SharedGuardrails, shared_guardrails};
+pub use dedup::ToolDedupCache;
+pub use guardrails::GuardrailState;
 pub use mode::{AgentMode, PLAN_WRITE_RESTRICTED};
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use retry::RetryCtx;
@@ -30,24 +31,6 @@ pub use retry::RetryCtx;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-
-/// What to do with a tool call before it executes.
-#[derive(Debug, Clone)]
-pub enum Decision {
-    /// Execute the tool as requested.
-    Run,
-    /// Do not execute; `reason` is reported to the model as the result.
-    Skip(String),
-    /// Abort the run (cancellation) with the given reason.
-    Stop(String),
-}
-
-/// The approval seam: consulted before every tool execution. The TUI's
-/// permission gate, the ACP permission gate, and the headless gate
-/// implement it; `harness::PolicyLayer` runs it for every surface.
-pub trait BeforeExecute: Send + Sync {
-    fn decide(&self, call: crate::history::ContentBlock) -> BoxFuture<Decision>;
-}
 
 /// Floor for the output-token clamp, never applied above the configured
 /// cap. Servers like vLLM reject `prompt + max_tokens > window` even when

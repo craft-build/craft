@@ -408,12 +408,15 @@ impl AppState {
         let cancel_cell = Arc::new(arc_swap::ArcSwap::from_pointee(
             animist::agent::Cancellation::default(),
         ));
-        let gate = Arc::new(crate::acp::permissions::AcpPermissionGate {
-            connection: connection.clone(),
-            session_id: session_id.clone(),
-            cancel: cancel_cell.clone(),
-            permissions: Arc::clone(&permissions),
-        });
+        let gate = Arc::new(crate::acp::permissions::AcpPermissionGate::new(
+            connection.clone(),
+            session_id.clone(),
+            cancel_cell.clone(),
+        ));
+        // No reviewer: ACP asks always went to the client, and the surface
+        // never toggles auto-review on, so the policy layer falls through
+        // to the responder exactly as before.
+        let policy = crate::harness::PolicyLayerInputs::new(Arc::clone(&permissions), gate.clone());
         let asker = Arc::new(crate::acp::elicitation::ElicitationAsker {
             connection: connection.clone(),
             session_id: session_id.clone(),
@@ -445,7 +448,7 @@ impl AppState {
         .history(history)
         .max_turns(crate::harness::MaxTurns::Unbounded)
         .thinking(thinking)
-        .approval(gate.clone())
+        .policy(policy.clone())
         .workspace(workspace.clone())
         .persist(persister.clone())
         .build()
@@ -465,7 +468,7 @@ impl AppState {
             cancel: cancel_cell.clone(),
             cancels: Arc::new(crate::run::cancel::CancelMap::new()),
             sink: conversation.sink(),
-            before: Some(gate),
+            policy,
             cwd: cwd.clone(),
         });
         let armed = workspace

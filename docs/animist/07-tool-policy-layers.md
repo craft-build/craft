@@ -159,4 +159,165 @@ policy, and it must read top to bottom in one place.
 
 ## Completion note
 
-_(fill in when done)_
+## Completion note
+
+**2026-10-31 · prompt 07 complete.** `cargo test -p craft`: 1906 passed,
+3 failed (the three recipe-render fixed points on main), 24 ignored
+(down from 29: every `restored in 07` tag cleared — `identical_calls_
+blocked_as_doom_loop`, `children_feed_guardrail_counters`,
+`guardrails_warn_then_block_repeated_failures`, `doom_loop_scores_
+reach_grace_then_summarize`, `doom_score_hard_stops_the_run`; the rest
+are `restored in 08/09` plus one env-dependent argosy test). fmt clean;
+clippy at exact parity with the pre-07 baseline (diff of the warning
+multiset is empty). Inventory 1923 → 1933 listed tests (27 removed, 37
+added; every removal mapped below).
+
+### The approval serialization
+
+`ApprovalResponder` (`run/approval.rs`) is the one interaction seam; the
+TUI and ACP implementations hold a `tokio::sync::Mutex` across the whole
+ask (the TUI overlay is one modal with one pending slot; ACP clients
+take one `session/request_permission` at a time), so two concurrently
+gated calls from a parallel wave queue instead of clobbering each other's
+parked oneshot — pinned by `two_parallel_asks_never_show_two_prompts`.
+Headless fail-closes instantly, so it never queues. The pre-07 TUI gate
+could clobber its `pending_approval` slot under the same concurrency;
+that latent bug dies with the seam.
+
+### The layer order and where dedup sits
+
+`PolicyLayer` (rules → auto-review → responder → plan gate) →
+`GuardrailLayer` (hard stop → doom repeat → guardrail warn/block → dedup)
+→ request → snapshot → persist, assembled once in `ConversationBuilder`.
+Dedup sits at the guardrail layer's tail, after the doom and guardrail
+checks, exactly where 05's interim layer sat relative to policy: a
+rules-allowed, guardrail-clean repeat call answers through
+`ToolDecision::Respond` and never reaches the executor. The plan gate
+runs whether or not the conversation wires the approval seam (plan mode
+is conversation state, not an approval choice). Order pins:
+`policy_denials_precede_the_doom_window` (a rules denial never feeds the
+doom window), `plan_mode_blocks_a_responder_allowed_write`,
+`guardrail_block_survives_an_allowed_call`,
+`the_assembled_chain_orders_policy_guardrail_and_dedup`.
+
+### Behaviour changes (each pinned, per the test-integrity rules)
+
+- **Doom hard stop now appends the END marker** and reports
+  `TurnOutcome::DoomStop` / `DoneReason::DoomStop` (the old loop's
+  `commit_partial` added no marker). The stop reason carries the
+  `doom-stop:` tag; every other layer stop keeps 05's failed-run
+  mapping. `doom_hard_stop_ends_the_run_with_an_end_marker`.
+- **Grace is a `step_end` append**, not a mid-run push: a durable
+  `craft.marker = grace` observation, surfaced once as
+  `StagnationDetected { similarity: score/25 }` plus
+  `MessagesAppended`; `continue_run` only when the step was terminal
+  `Completed`. `grace_prompt_fires_once_and_rides_the_next_request` and
+  the restored `doom_loop_scores_reach_grace_then_summarize` (which now
+  also pins `similarity == 17/25`, the executable form of the old
+  score-math comment).
+- **Batch children now hit the doom window and the guardrails' full
+  chain** (they ride the agent pipeline since 06); the restored
+  `children_feed_guardrail_counters` alternates identical-*result* reads
+  so the no-progress counter, not the doom window, speaks.
+- **Unknown tool names now ask before they error**: the runtime resolves
+  unknown tools at execution, so the policy chain sees them (the old
+  dispatch errored before any gate). Pinned by
+  `an_unknown_tool_name_still_asks_before_it_errors`.
+- **A report-less terminal `Done` carries the run's tallied
+  usage/steps** (from `StepFinished` events) instead of zeros — a doom
+  stop made real billed calls. `by_model` stays empty (events carry no
+  model identity) so `cost` is `None` rather than misattributed; the
+  report-bearing path is unchanged. Pinned in
+  `doom_hard_stop_ends_the_run_with_an_end_marker`.
+
+### Parity notes
+
+- Model-visible texts byte-identical: permission denials (non-error
+  `Respond`, is_error=false as before), plan gate and guardrail/doom
+  denials (error `Deny`), `GUARDRAIL_BLOCK_MESSAGE`, `DOOM_LOOP_MESSAGE`,
+  `GRACE_CALL_PROMPT`, the `[guardrail] ` prefix, the pre-warned
+  fallback ("{tool} is repeating unproductively; consider a different
+  approach or tool") and both `Event::Info` wordings ("guardrail blocked
+  {tool}: …", "guardrail warning on {tool}: …").
+- Doom accounting matches the old wave commit exactly: executed
+  error/success ±1, guardrail blocks and plan denials +1, permission
+  denials −1 (skips counted as successes), doom blocks exactly +15
+  (`doom_blocked` — the old loop never routed them through
+  `commit_wave`'s error count). Executable pins:
+  `permission_denials_decay_the_doom_score` (similarity 0.6, not 0.68)
+  and the no-grace assertion in `identical_calls_blocked_as_doom_loop`.
+  Depends on animist's contract that `post_tool_exec` sees denied and
+  responded results (docs/agents.md, Layers).
+- State reset reading: `GuardrailState::reset_for_turn` (turn_start)
+  resets the doom score and grace flag but keeps the recent-call window,
+  the guardrail counters and the dedup cache (conversation state, as
+  before); `reset()` (08's compaction handle) clears everything. The
+  old `reset_for_new_user_input` call sites are gone — the layer owns
+  the reset now.
+
+### Test-inventory diff (1923 → 1933)
+
+Moved to `harness::policy::tests` (the policy they test moved into the
+layer): the eight headless gate decide-level tests and the eleven
+rules-level TUI gate tests, each re-driven end-to-end through a
+conversation — `read_only_tools_pass_the_gate` → `read_only_tools_run_
+without_asking`, `deny_rules_block_bash_mutations_and_mcp_keys` →
+`deny_rules_block_mutations_and_mcp_keys`, the headless guidance/
+destructive-hint/yolo/auto-review tests under the same names,
+`pre_decided_calls_never_reach_the_reviewer` (same name),
+`apply_patch_scope_covers_every_patched_file` → `apply_patch_scopes_
+cover_every_patched_file`, `task_runs_without_approval` +
+`argosy_tools_run_without_approval` → `task_and_argosy_tools_run_
+without_asking`, `argosy_code_tools_require_approval` →
+`argosy_code_tools_still_ask`, `approval_grants_the_session_scope` →
+`an_allow_session_answer_covers_the_sibling_call`,
+`allow_once_grants_nothing_persistent` → `an_allow_once_answer_grants_
+nothing_persistent`, `mcp_wire_tool_prompts_and_grants_as_mcp_key` →
+`an_mcp_wire_tool_ask_grants_as_an_mcp_key`,
+`unknown_and_mutating_tools_require_approval` →
+`an_unknown_tool_name_still_asks_before_it_errors` (mutating half:
+`an_ask_parks_and_the_answer_allows`). TUI interaction tests rewritten
+against the responder: `a_rejection_carries_the_denial_message_and_
+remember_scope` (was `deny_with_guidance_reaches_the_model`),
+`decide_ignores_stale_ids_and_delivers_current_one` (same name),
+`a_cancelled_turn_stops_the_parked_ask`,
+`two_parallel_asks_never_show_two_prompts`; the auto-review overlay
+lines are pinned at the renderer (`auto_review_events_render_as_review_
+lines`). Renames: `approval_gate_reaches_batch_children` →
+`policy_reaches_batch_children`, `skip_decision_reports_reason_to_
+model` → `responder_denial_reports_reason_to_model`, `approval_gate_governs_
+child_tool_calls` → `approval_policy_governs_child_tool_calls` (now a
+deny-rule pin, the faithful shape of "children cannot bypass
+approvals"). Added beyond replacements: the GuardrailState unit tests
+(3), the order/doom/grace/guardrail-text pins listed above, and the
+`Probe` helpers moved to `run/tests/mod.rs` so turns.rs could share
+them. 5 ignored tests restored (see above); 24 remain, all tagged for
+08/09 or env-dependent.
+
+### Indirection rows closed
+
+`run::{BeforeExecute, Decision}` (the approval seam with three
+duplicate gates) · `SessionState.{dedup, guardrails}` handles →
+`run::GuardrailState` behind one `Arc`, shared by both layers and the
+conversation's typed handle · `run::dedup::{SharedDedupCache,
+shared_cache, shared_cache_with_root}` and `run::guardrails::
+{SharedGuardrails, shared_guardrails}` deleted · `CompactionState::
+{with_dedup, with_guardrails}` → `with_guardrail_state` (08 keeps one
+reset call). Surviving seams, on purpose: `ApprovalResponder` (three
+real implementations plus the test doubles), `Reviewer` (auto-review's
+injected model call).
+
+### Review
+
+Two review-agent passes over the full diff. First pass (request_changes,
+P1×2 P2×4 P3×3): the three still-ignored 07 tests in turns.rs (adapted
+to exclusive-claim probes for deterministic doom-window ordering under
+concurrency; the doom denial asserted as a block of the squashed results
+entry; distinct call ids because replay validation rejects duplicates),
+the apply_patch scope pin restored, the doom-block ±1 fixed
+(`doom_blocked`), report-less `Done` usage tallied from events, the
+unknown-tool/auto-review-ordering/fallback-wording pins added, the
+single chain-order test, the similarity pin, an engine doc nit. Second
+pass: **approve_with_nits** (P3×4 — the missing similarity pin it
+looked for was in the tree, the other three nits are the executable
+pins now landing in this final state).

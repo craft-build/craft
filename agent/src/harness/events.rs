@@ -21,7 +21,7 @@ pub enum Event {
 }
 
 /// Events only craft emits; the variants the animist taxonomy cannot express.
-#[allow(dead_code)] // forward substrate for 07–09 (guardrails, compaction, recovery)
+#[allow(dead_code)] // forward substrate for 08–09 (compaction, recovery)
 #[derive(Clone, Debug)]
 pub enum CraftEvent {
     /// Human-readable, non-fatal status text.
@@ -104,6 +104,9 @@ pub enum DoneReason {
     /// Generation hit the output token limit.
     MaxTokens,
     Cancelled,
+    /// The doom-loop hard stop ended the run (partial history committed,
+    /// end marker appended).
+    DoomStop,
     Error,
 }
 

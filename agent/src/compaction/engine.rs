@@ -12,7 +12,7 @@ use crate::config::{
     DEFAULT_COMPACTION_BUFFER as DEFAULT_ENGINE_BUFFER,
 };
 use crate::history::StoredMessage;
-use crate::run::SharedDedupCache;
+use crate::run::GuardrailState;
 
 use super::estimate::{TokenEstimator, estimate_tokens};
 use super::llm::llm_compact;
@@ -35,12 +35,10 @@ pub struct CompactionState {
     /// Calibrated token estimator: thresholds are checked against scaled
     /// estimates once the provider proves the raw ones too low.
     pub estimator: TokenEstimator,
-    /// Cleared before every compaction run: compacted history may describe a
-    /// different world than the one the dedup cache sampled.
-    dedup: Option<SharedDedupCache>,
-    /// Cleared with the dedup cache: the compacted conversation no longer
-    /// describes the calls that tripped the guardrail counters.
-    guardrails: Option<crate::run::SharedGuardrails>,
+    /// Reset when a run rewrites history: the compacted conversation no
+    /// longer describes the calls that tripped the counters or the cache.
+    /// A run that declines leaves it intact.
+    guardrails: Option<std::sync::Arc<GuardrailState>>,
     /// Where the unanswered input starts, as a history index: everything from
     /// here on is held out of the summary and re-appended verbatim, so input
     /// no turn has answered yet is never summarized away (Craft's
@@ -56,14 +54,9 @@ pub struct CompactionState {
 }
 
 impl CompactionState {
-    /// Share the session's tool dedup cache so compaction can clear it.
-    pub fn with_dedup(mut self, cache: SharedDedupCache) -> Self {
-        self.dedup = Some(cache);
-        self
-    }
-
-    /// Share the session's tool guardrails so compaction can reset them.
-    pub fn with_guardrails(mut self, guardrails: crate::run::SharedGuardrails) -> Self {
+    /// Share the session's guardrail state (doom tracker, counters, dedup
+    /// cache) so a run that rewrites history can reset it.
+    pub fn with_guardrail_state(mut self, guardrails: std::sync::Arc<GuardrailState>) -> Self {
         self.guardrails = Some(guardrails);
         self
     }
@@ -219,20 +212,13 @@ impl CompactionEngine {
             };
             // A stage that declined to run (too-short history, empty head)
             // leaves the history untouched; that is not an ineffective run,
-            // so the stage stays armed — and the dedup cache and guardrails,
-            // which describe the pre-compaction history, stay intact too.
+            // so the stage stays armed — and the guardrail state, which
+            // describes the pre-compaction history, stays intact too.
             if history.len() == before_len && state.scaled_estimate(history) == before {
                 continue;
             }
-            if let Some(cache) = &state.dedup
-                && let Ok(mut guard) = cache.lock()
-            {
-                guard.clear();
-            }
-            if let Some(guardrails) = &state.guardrails
-                && let Ok(mut guard) = guardrails.lock()
-            {
-                guard.reset();
+            if let Some(guardrails) = &state.guardrails {
+                guardrails.reset();
             }
             ran = true;
             // The carried input survived verbatim at the tail (both stages
@@ -543,23 +529,22 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_clears_dedup_cache() {
-        use crate::run::{ToolDedupCache, shared_cache};
+        use crate::run::ToolDedupCache;
 
-        let cache = shared_cache();
+        let guardrails = std::sync::Arc::new(GuardrailState::new(None));
         let input = serde_json::json!({"path": "/x.rs"});
         let key = ToolDedupCache::key("read", &input);
-        {
-            let mut guard = cache.lock().unwrap();
-            guard.insert(
+        guardrails.with(|inner| {
+            inner.dedup.insert(
                 key,
                 &crate::history::ext::tool_result("c1", Some("read"), "x", false),
                 None,
                 "read",
                 &input,
             );
-        }
+        });
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
-        let mut state = CompactionState::default().with_dedup(cache.clone());
+        let mut state = CompactionState::default().with_guardrail_state(guardrails.clone());
         let mut history = long_history();
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
@@ -574,7 +559,7 @@ mod tests {
                 .await
         );
         assert!(
-            cache.lock().unwrap().get(key, "read", &input).is_none(),
+            guardrails.with(|inner| inner.dedup.get(key, "read", &input).is_none()),
             "a compaction run must clear the dedup cache"
         );
     }
@@ -862,28 +847,27 @@ mod tests {
 
     #[tokio::test]
     async fn declined_compaction_keeps_dedup_cache() {
-        use crate::run::{ToolDedupCache, shared_cache};
+        use crate::run::ToolDedupCache;
 
-        let cache = shared_cache();
+        let guardrails = std::sync::Arc::new(GuardrailState::new(None));
         let input = serde_json::json!({"path": "/x.rs"});
         let key = ToolDedupCache::key("read", &input);
-        {
-            let mut guard = cache.lock().unwrap();
-            guard.insert(
+        guardrails.with(|inner| {
+            inner.dedup.insert(
                 key,
                 &crate::history::ext::tool_result("c1", Some("read"), "x", false),
                 None,
                 "read",
                 &input,
             );
-        }
+        });
         // A short history that crosses a tiny threshold but both compactors
         // decline: the dedup cache must survive repeated runs.
         let engine = CompactionEngine::new(vec![
             stage(CompactionKind::Vcc, 0.1),
             stage(CompactionKind::Llm, 0.1),
         ]);
-        let mut state = CompactionState::default().with_dedup(cache.clone());
+        let mut state = CompactionState::default().with_guardrail_state(guardrails.clone());
         let mut history = vec![stored_user(&"x".repeat(4000))];
         let tokens = estimate_tokens(&history);
         let context_length = ((tokens as f64 / 0.9) as u32).max(1);
@@ -898,7 +882,7 @@ mod tests {
                 .await;
         }
         assert!(
-            cache.lock().unwrap().get(key, "read", &input).is_some(),
+            guardrails.with(|inner| inner.dedup.get(key, "read", &input).is_some()),
             "a declined compaction must not clear the dedup cache"
         );
     }

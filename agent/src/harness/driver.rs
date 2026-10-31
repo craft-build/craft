@@ -3,6 +3,8 @@
 //! channel drained into the conversation sink, awaits the run after
 //! cancellation, adds the terminal markers, and reports the folded usage.
 
+use std::sync::Arc;
+
 use animist::agent::{AgentError, AgentEvent, Cancellation, RunOptions, RunReport, RunStatus};
 use animist::history::{ContentBlock, History, Message, Role, StoredMessage};
 
@@ -38,6 +40,9 @@ pub enum TurnOutcome {
     /// The run was cancelled; the interrupted attempt's validated prefix
     /// and the cancel marker committed.
     Cancelled,
+    /// The doom-loop hard stop ended the run; partial history with an end
+    /// marker committed, so the next prompt continues from there.
+    DoomStop,
     /// The run failed; the committed messages stay (real workspace effects
     /// happened) and a `[Run failed]` observation records the failure.
     Failed(String),
@@ -76,12 +81,29 @@ pub async fn run_turn(
         .events(events)
         .build();
     let run = agent.run(input, options);
+    // Report-less ends (a layer stop) still bill what the run spent, so the
+    // forwarded events are tallied as a fallback usage view.
+    let observed = std::sync::Arc::new(std::sync::Mutex::new((TokenUsage::default(), 0_u64)));
     let forward = async {
+        let observed = Arc::clone(&observed);
         while let Ok(event) = event_stream.recv_async().await {
+            if let AgentEvent::StepFinished { usage, .. } = &event {
+                let mut tally = observed.lock().unwrap_or_else(|poison| poison.into_inner());
+                tally.0.input += usage.input;
+                tally.0.output += usage.output;
+                tally.0.cache_read += usage.cache_read;
+                tally.0.cache_creation += usage.cache_creation;
+                tally.1 += 1;
+            }
             sink.send(Event::Agent(event));
         }
     };
     let (report, _) = tokio::join!(run, forward);
+    // The forward task exited with the run, so the tally is settled.
+    let (observed_usage, observed_steps) = observed
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
     let (outcome, done) = match report {
         Ok(report) => (
             finish_report(&sink, &conversation.history(), &report).await,
@@ -95,7 +117,13 @@ pub async fn run_turn(
     // One more flush after the terminal markers; `turn_end` has already run
     // inside the agent.
     conversation.flush().await;
-    emit_done(&sink, conversation, &outcome, done.as_ref());
+    emit_done(
+        &sink,
+        conversation,
+        &outcome,
+        done.as_ref(),
+        (observed_usage, observed_steps),
+    );
     outcome
 }
 
@@ -124,9 +152,14 @@ async fn finish_report(sink: &EventSink, history: &History, report: &RunReport) 
         RunStatus::MaxTokens => TurnOutcome::MaxTokens {
             reply: reply(report),
         },
-        RunStatus::Cancelled | RunStatus::Stopped => {
-            // 05's only stop source is the approval gate's client cancel;
-            // 07 decides whether a stop stays distinguishable.
+        RunStatus::Cancelled => {
+            commit_cancelled(history, report).await;
+            TurnOutcome::Cancelled
+        }
+        RunStatus::Stopped => {
+            // A layer stop reaches the driver as `AgentError::Stopped` (see
+            // `finish_error`), never as a settled report; this arm only
+            // exists because the status is representable.
             commit_cancelled(history, report).await;
             TurnOutcome::Cancelled
         }
@@ -148,6 +181,19 @@ async fn finish_error(sink: &EventSink, history: &History, error: AgentError) ->
         | AgentError::ShutDown { .. }
         | AgentError::InvalidLimits { .. } => {
             return TurnOutcome::Failed(error.to_string());
+        }
+        AgentError::Stopped { reason, .. } => {
+            // The guardrail layer's hard stop arrives as a tagged stop; the
+            // run ends like a step budget does — partial history committed,
+            // an end marker recording where, replayable from there. Any
+            // other stop (a client cancelling inside an approval) keeps the
+            // failed-run mapping 05 pinned.
+            if reason.starts_with(crate::run::doom::DOOM_STOP_PREFIX) {
+                history
+                    .add_stored(marker::observation(marker::END, END_MARKER))
+                    .await;
+                return TurnOutcome::DoomStop;
+            }
         }
         AgentError::HistoryChanged { messages, .. } => {
             tracing::warn!(
@@ -220,19 +266,31 @@ fn emit_done(
     conversation: &Conversation,
     outcome: &TurnOutcome,
     report: Option<&RunReport>,
+    observed: (TokenUsage, u64),
 ) {
+    let reason = match outcome {
+        TurnOutcome::Done { .. } => DoneReason::Stop,
+        TurnOutcome::MaxTurns => DoneReason::MaxTurns,
+        TurnOutcome::MaxTokens { .. } => DoneReason::MaxTokens,
+        TurnOutcome::Cancelled => DoneReason::Cancelled,
+        TurnOutcome::DoomStop => DoneReason::DoomStop,
+        TurnOutcome::Failed(_) => DoneReason::Error,
+    };
     let Some(report) = report else {
-        // Error paths carry no settled report; emit the bare reason.
+        // Error paths carry no settled report; the outcome still names the
+        // reason (a doom stop is a controlled end, not an error) and the
+        // tallied events carry what the run actually spent.
+        let (usage, steps) = observed;
         sink.craft(CraftEvent::Done {
-            usage: TokenUsage::default(),
+            usage,
             context_size: 0,
             context_window: conversation
                 .model()
                 .context_length()
                 .map(u64::from)
                 .unwrap_or(0),
-            num_turns: 0,
-            reason: DoneReason::Error,
+            num_turns: steps.min(u64::from(u32::MAX)) as u32,
+            reason,
             cost: None,
             by_model: Default::default(),
         });
@@ -273,6 +331,7 @@ fn emit_done(
             TurnOutcome::MaxTurns => DoneReason::MaxTurns,
             TurnOutcome::MaxTokens { .. } => DoneReason::MaxTokens,
             TurnOutcome::Cancelled => DoneReason::Cancelled,
+            TurnOutcome::DoomStop => DoneReason::DoomStop,
             TurnOutcome::Failed(_) => DoneReason::Error,
         },
         cost,

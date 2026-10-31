@@ -12,13 +12,13 @@
 //! `GRACE_THRESHOLD` and triggers the grace call immediately — the per-call
 //! warning alone is too easy for the model to ignore when it repeats.
 //!
-//! Known divergences from the reference (both deliberate, revisit with the
-//! Phase 5 session work): the tracker and the `RecentCalls` window are
-//! run-scoped here, not session-scoped, so a doom loop that survives a
-//! "continue" is re-detected from scratch on the next run; and a blocked
-//! call's error result is committed as soon as it is seen, which can precede
+//! Known divergence from the reference (deliberate): a blocked call's error
+//! result is committed as soon as it is seen, which can precede
 //! still-running earlier calls' results in history (results stay paired by
-//! id, so replay is unaffected).
+//! id, so replay is unaffected). The tracker itself is conversation-scoped
+//! from 07 on, held in the guardrail layer's state: `reset_for_new_user_input`
+//! runs at `turn_start`, and `RecentCalls` survives across runs so a loop
+//! that spans prompts is still detected.
 
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -26,13 +26,27 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 pub(crate) const GRACE_THRESHOLD: u32 = 15;
 pub(crate) const HARD_STOP_THRESHOLD: u32 = 25;
 
+/// Prefix tagging the doom hard stop's `ToolDecision::Stop` reason, so the
+/// driver can tell it from a client-cancelled stop (which has no tag).
+pub(crate) const DOOM_STOP_PREFIX: &str = "doom-stop:";
+
+/// The tagged stop reason the guardrail layer returns at
+/// `HARD_STOP_THRESHOLD`. The model never reads it (unfinished calls close
+/// as not executed); the driver maps it to `TurnOutcome::DoomStop`.
+pub(crate) const DOOM_STOP_REASON: &str =
+    "doom-stop: the doom-loop score reached the hard-stop threshold";
+
 const SCORE_DOOM_LOOP: u32 = 15;
 // Unwired until embeddings land (Phase 5+); kept so the API is complete.
 #[allow(dead_code)]
 const SCORE_STAGNATION: u32 = 3;
+// Compaction-driven scoring lands with 08's compactors and 09's recovery
+// layer; kept so the API is complete.
+#[allow(dead_code)]
 const SCORE_INEFFECTIVE_COMPACT: u32 = 2;
 const SCORE_TOOL_ERROR: u32 = 1;
 const DECAY_TOOL_SUCCESS: u32 = 1;
+#[allow(dead_code)]
 const DECAY_EFFECTIVE_COMPACT: u32 = 1;
 #[allow(dead_code)]
 const STAGNATION_MIN_UNPRODUCTIVE_TURNS: u32 = 3;
@@ -50,6 +64,7 @@ pub(crate) const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom
 
 /// Compaction that recovers less than this fraction is "ineffective" for
 /// scoring purposes (reference `run/compaction.rs`).
+#[allow(dead_code)]
 pub(crate) const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 
 /// Reference also scores validator rejections (+1); no validator exists in
@@ -57,23 +72,14 @@ pub(crate) const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 #[allow(dead_code)]
 const SCORE_VALIDATOR_REJECT: u32 = 1;
 
-/// Per-batch counts used by doom-loop scoring (reference
-/// `tool_dispatch.rs` `ToolBatchOutcome`).
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct ToolBatchOutcome {
-    pub(crate) errors: u32,
-    pub(crate) successes: u32,
-    pub(crate) doom_loops: u32,
-}
-
 #[derive(Default)]
 pub(crate) struct DoomTracker {
     score: u32,
     grace_called: bool,
     turns_since_success: u32,
-    // Session-scoped once Phase 5 lands; the run loop currently drives the
-    // RecentCalls window directly.
-    #[allow(dead_code)]
+    // Conversation-scoped from 07 on: the window survives a new user turn
+    // (via `reset_for_new_user_input`) so loops that span prompts are still
+    // detected.
     pub(crate) recent_calls: RecentCalls,
 }
 
@@ -86,7 +92,7 @@ impl DoomTracker {
         self.score
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn grace_called(&self) -> bool {
         self.grace_called
     }
@@ -115,6 +121,7 @@ impl DoomTracker {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn note_ineffective_compaction(&mut self) {
         self.add(SCORE_INEFFECTIVE_COMPACT);
     }
@@ -128,13 +135,14 @@ impl DoomTracker {
         self.sub(DECAY_TOOL_SUCCESS);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn note_effective_compaction(&mut self) {
         self.sub(DECAY_EFFECTIVE_COMPACT);
     }
 
     /// Reset the volatile signals (score, grace flag) but keep loop-detection
-    /// state so trans-prompt loops remain visible.
-    #[allow(dead_code)]
+    /// state so trans-prompt loops remain visible. The guardrail layer runs
+    /// this at `turn_start` (07), replacing the old loop's per-run tracker.
     pub(crate) fn reset_for_new_user_input(&mut self) {
         self.score = 0;
         self.grace_called = false;

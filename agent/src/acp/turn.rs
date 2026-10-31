@@ -185,6 +185,11 @@ pub(super) async fn run_turn(
         crate::harness::TurnOutcome::MaxTurns => {
             let _ = responder.respond(AcpPromptResponse::new(StopReason::MaxTurnRequests));
         }
+        // The doom-loop hard stop committed the partial history with an end
+        // marker; like MaxTurns, the next prompt continues from the cut-off.
+        crate::harness::TurnOutcome::DoomStop => {
+            let _ = responder.respond(AcpPromptResponse::new(StopReason::MaxTurnRequests));
+        }
         crate::harness::TurnOutcome::Cancelled => {
             let _ = responder.respond(AcpPromptResponse::new(StopReason::Cancelled));
         }

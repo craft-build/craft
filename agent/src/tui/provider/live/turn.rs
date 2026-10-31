@@ -243,16 +243,46 @@ impl TurnRenderer {
                 advisor_tone(&severity),
                 format!("advisor [{severity}]: {message}"),
             ),
+            Event::Craft(CraftEvent::AutoReviewStart { id, .. }) => {
+                // The in-progress line under the tool card; the verdict
+                // event replaces it in place by sharing the call's id.
+                let _ = self.tx.send(AgentEvent::AutoReview {
+                    id,
+                    tone: Tone::Neutral,
+                    text: "auto-review: reviewing…".into(),
+                });
+            }
+            Event::Craft(CraftEvent::AutoReviewDecision {
+                id,
+                verdict,
+                risk,
+                rationale,
+                ..
+            }) => {
+                let (tone, text) = if verdict == "failed" {
+                    (
+                        Tone::Danger,
+                        format!("auto-review failed closed: {rationale}"),
+                    )
+                } else {
+                    (
+                        if verdict == "allow" {
+                            Tone::Success
+                        } else {
+                            Tone::Warning
+                        },
+                        format!("auto-review {verdict}: {risk} — {rationale}"),
+                    )
+                };
+                let _ = self.tx.send(AgentEvent::AutoReview { id, tone, text });
+            }
             // Nothing to render: Done is consumed by the forwarder; Error
-            // rides TurnOutcome::Failed; auto-review renders through its own
-            // seam (approval.rs); the nudge precedes a continuation the
-            // reply rendering covers; the remaining agent events are
+            // rides TurnOutcome::Failed; the nudge precedes a continuation
+            // the reply rendering covers; the remaining agent events are
             // substrate the TUI has no surface for.
             Event::Craft(CraftEvent::Done { .. })
             | Event::Craft(CraftEvent::Error(_))
             | Event::Craft(CraftEvent::Nudge)
-            | Event::Craft(CraftEvent::AutoReviewStart { .. })
-            | Event::Craft(CraftEvent::AutoReviewDecision { .. })
             | Event::Agent(_) => {}
             // Child events arrive wrapped from the subagent launcher's
             // forwarder; route the renderable ones into the subagent's
@@ -483,6 +513,15 @@ fn handle_outcome(
             ));
             TurnFlow::Commit
         }
+        harness::TurnOutcome::DoomStop => {
+            // The partial run (with its end marker) committed, so the
+            // follow-up prompt continues from the cut-off.
+            let _ = tx.send(AgentEvent::AssistantText(
+                "Stopped: the agent appeared stuck in a loop. Send another message to continue."
+                    .into(),
+            ));
+            TurnFlow::Commit
+        }
         harness::TurnOutcome::MaxTokens { reply } => {
             emit_reply(tx, signals.streamed(), &reply);
             let _ = tx.send(AgentEvent::AssistantText(
@@ -661,6 +700,53 @@ mod tests {
             AgentEvent::Notice { tone, text } => (tone, text),
             other => panic!("expected a notice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn auto_review_events_render_as_review_lines() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(Event::Craft(CraftEvent::AutoReviewStart {
+            id: "t1".into(),
+            tool: "write".into(),
+            scopes: vec!["/w/a.rs".into()],
+        }));
+        let AgentEvent::AutoReview { id, tone, text } = rx.try_recv().expect("line") else {
+            panic!("expected the in-progress AutoReview line");
+        };
+        assert_eq!(id, "t1");
+        assert_eq!(tone, Tone::Neutral);
+        assert_eq!(text, "auto-review: reviewing…");
+
+        renderer.map(Event::Craft(CraftEvent::AutoReviewDecision {
+            id: "t1".into(),
+            tool: "write".into(),
+            scopes: vec!["/w/a.rs".into()],
+            verdict: "allow".into(),
+            risk: "low".into(),
+            rationale: "in-project edit".into(),
+        }));
+        let AgentEvent::AutoReview { id, tone, text } = rx.try_recv().expect("verdict") else {
+            panic!("expected the verdict line");
+        };
+        assert_eq!(id, "t1", "the verdict replaces the in-progress line");
+        assert_eq!(tone, Tone::Success);
+        assert_eq!(text, "auto-review allow: low — in-project edit");
+
+        // A failed review renders the fail-closed line.
+        renderer.map(Event::Craft(CraftEvent::AutoReviewDecision {
+            id: "t2".into(),
+            tool: "write".into(),
+            scopes: vec!["/w/a.rs".into()],
+            verdict: "failed".into(),
+            risk: String::new(),
+            rationale: "timed out".into(),
+        }));
+        let AgentEvent::AutoReview { id, tone, text } = rx.try_recv().expect("failure") else {
+            panic!("expected the failure line");
+        };
+        assert_eq!(id, "t2");
+        assert_eq!(tone, Tone::Danger);
+        assert_eq!(text, "auto-review failed closed: timed out");
     }
 
     #[test]

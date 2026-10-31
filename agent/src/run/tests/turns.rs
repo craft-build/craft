@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::history::{ContentBlock, Role, ext, marker};
-use crate::run::{BeforeExecute, BoxFuture, Decision};
+use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 use animist::agent::AgentEvent;
 use std::sync::Arc;
 
@@ -264,7 +264,6 @@ async fn empty_truncated_reply_is_committed_as_max_tokens() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 07"]
 async fn guardrails_warn_then_block_repeated_failures() {
     // Seven failing reads with varied arguments (identical arguments
     // would hit the doom-loop block first): the any-failure counters
@@ -272,7 +271,7 @@ async fn guardrails_warn_then_block_repeated_failures() {
     // and the seventh is blocked.
     let read = |n: usize| {
         tool_event(
-            "t",
+            &format!("t{n}"),
             "read",
             serde_json::json!({ "path": format!("missing{n}") }),
         )
@@ -328,6 +327,12 @@ async fn guardrails_warn_then_block_repeated_failures() {
         texts[3]
     );
     assert!(
+        texts[3]
+            .contains("read is repeating unproductively; consider a different approach or tool"),
+        "the pre-warned fallback is the old guardrail_note wording: {}",
+        texts[3]
+    );
+    assert!(
         texts[6].contains("blocked by guardrails"),
         "block at the seventh call: {}",
         texts[6]
@@ -378,26 +383,34 @@ async fn failed_run_preserves_prior_history_and_commits_the_turn() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 07"]
 async fn doom_loop_scores_reach_grace_then_summarize() {
-    // One batch of identical failing reads: two errors (+1 each) and one
-    // blocked doom-loop call (+15) put the score at 17 — past the grace
-    // threshold — so the next request carries the one-shot grace prompt.
-    // Distinct ids per call: a provider streams each tool use with its own
-    // id, and replay validation rejects duplicates.
-    let read = |n: usize| {
+    // One batch of identical failing probe calls: two errors (+1 each) and
+    // one blocked doom-loop call (+15, exactly — a blocked call never rode
+    // the old wave commit's error count) put the score at 17 — past the
+    // grace threshold — so the next request carries the one-shot grace
+    // prompt. The probe is exclusive-claimed, so the window ordering is
+    // deterministic under concurrent dispatch. Distinct ids per call:
+    // replay validation rejects duplicates.
+    let call = |n: usize| {
         tool_event(
             &format!("t{n}"),
-            "read",
+            "probe",
             serde_json::json!({"path": "missing"}),
         )
     };
     let provider = script(vec![
-        crate::testing::tool_turn(vec![read(1), read(2), read(3)]),
+        crate::testing::tool_turn(vec![call(1), call(2), call(3)]),
         crate::testing::text_turn("summarized"),
     ]);
     let dir = tempfile::tempdir().unwrap();
-    let (conversation, mut stream) = workspace_conversation(&dir, &provider).await;
+    let (conversation, mut stream) = conversation_over(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        registry([Probe::simple("probe").panicking("nope")]),
+        None,
+    )
+    .await;
     let outcome = run_turn(&conversation, "go").await;
     assert!(
         matches!(&outcome, TurnOutcome::Done { reply } if reply == "summarized"),
@@ -409,8 +422,8 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
         .filter(|m| ext::message_text(m) == crate::run::doom::GRACE_CALL_PROMPT)
         .count();
     assert_eq!(grace_count, 1, "grace prompt fired exactly once");
-    let stagnation_count = events_until_done(&mut stream)
-        .await
+    let events = events_until_done(&mut stream).await;
+    let stagnation = events
         .iter()
         .filter(|event| {
             matches!(
@@ -419,17 +432,26 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
             )
         })
         .count();
-    assert_eq!(
-        stagnation_count, 1,
-        "grace posts exactly one StagnationDetected"
+    assert_eq!(stagnation, 1, "grace posts exactly one StagnationDetected");
+    // The score at grace is exactly 2 errors + one doom block: 17/25, the
+    // same normalization the old loop posted (and the executable pin that a
+    // blocked call contributes exactly +15).
+    assert!(
+        events.iter().any(|event| matches!(event,
+        Event::Craft(crate::harness::CraftEvent::StagnationDetected { similarity })
+            if (similarity - 17.0 / 25.0).abs() < f32::EPSILON)),
+        "similarity must be 17/25"
     );
-    // The blocked call's result carries the doom-loop warning.
+    // The blocked call's result carries the doom-loop warning. The step's
+    // results squash into one entry, so the denial is a block in it.
     assert!(messages.iter().any(|stored_message| {
         let message = stored_message.message();
         message.role == Role::User
-            && matches!(&message.content[0],
-                ContentBlock::ToolResult { is_error: true, content, .. }
-                    if ext::tool_content_text(content).contains("stuck in a loop"))
+            && message.content.iter().any(|block| {
+                matches!(block,
+                    ContentBlock::ToolResult { is_error: true, content, .. }
+                        if ext::tool_content_text(content).contains("stuck in a loop"))
+            })
     }));
     // The second request saw the grace prompt as its trailing message.
     let requests = provider.requests();
@@ -441,26 +463,34 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 07"]
 async fn doom_score_hard_stops_the_run() {
     // Two doom-loop batches push the score past the hard-stop threshold
     // (25); the run ends with sanitized partial history and no third
-    // request. Distinct ids per call: replay validation rejects duplicates.
-    let read = |n: usize| {
+    // request. The probe is exclusive-claimed (deterministic window order
+    // under concurrent dispatch); distinct ids per call because replay
+    // validation rejects duplicates.
+    let call = |n: usize| {
         tool_event(
             &format!("t{n}"),
-            "read",
+            "probe",
             serde_json::json!({"path": "missing"}),
         )
     };
     let provider = script(vec![
-        crate::testing::tool_turn(vec![read(4), read(5), read(6)]),
-        crate::testing::tool_turn(vec![read(1), read(2), read(3)]),
+        crate::testing::tool_turn(vec![call(4), call(5), call(6)]),
+        crate::testing::tool_turn(vec![call(1), call(2), call(3)]),
         // Never requested: the hard stop preempts the third turn.
         crate::testing::text_turn("never"),
     ]);
     let dir = tempfile::tempdir().unwrap();
-    let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
+    let (conversation, _stream) = conversation_over(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        registry([Probe::simple("probe").panicking("nope")]),
+        None,
+    )
+    .await;
     let outcome = run_turn(&conversation, "go").await;
     assert!(
         !matches!(&outcome, TurnOutcome::Done { reply } if reply == "never"),
@@ -634,23 +664,27 @@ async fn failed_run_commits_sanitized_partial_history() {
 
 #[tokio::test]
 async fn stop_decision_at_the_dispatch_boundary_commits_the_interrupted_call() {
-    // The before-execution hook denies the call by stopping the run,
-    // standing in for a cancellation arriving at the dispatch boundary.
-    // The turn is committed sanitized: the prompt, the assistant's tool
-    // call, an error result closing it, and a failure note.
+    // The responder answers the ask by stopping the run, standing in for a
+    // cancellation arriving at the approval boundary. The turn is committed
+    // sanitized: the prompt, the assistant's tool call, an error result
+    // closing it, and a failure note.
     struct StopAll;
-    impl BeforeExecute for StopAll {
-        fn decide(&self, _call: ContentBlock) -> BoxFuture<Decision> {
-            Box::pin(async { Decision::Stop("cancelled".into()) })
+    impl ApprovalResponder for StopAll {
+        fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+            Box::pin(async {
+                Approval::Stop {
+                    reason: "cancelled".into(),
+                }
+            })
         }
     }
+    // `bash` prompts under the default rules, so the responder decides it.
     let provider = script(vec![crate::testing::tool_turn(vec![tool_event(
         "t1",
-        "read",
-        serde_json::json!({"path": "f"}),
+        "bash",
+        serde_json::json!({"command": "echo hi"}),
     )])]);
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("f"), "secret\n").unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
     let (sink, stream) = EventSink::new();
     let conversation = ConversationBuilder::new(
@@ -661,7 +695,13 @@ async fn stop_decision_at_the_dispatch_boundary_commits_the_interrupted_call() {
         workspace.registry().unwrap(),
         sink,
     )
-    .approval(Arc::new(StopAll))
+    .policy(crate::harness::PolicyLayerInputs::new(
+        Arc::new(crate::permissions::PermissionManager::new(
+            crate::permissions::PermissionsConfig::default(),
+            dir.path().to_path_buf(),
+        )),
+        Arc::new(StopAll),
+    ))
     .build()
     .unwrap();
     let mut stream = stream;
@@ -679,7 +719,7 @@ async fn stop_decision_at_the_dispatch_boundary_commits_the_interrupted_call() {
     assert_eq!(closure.role, Role::User, "tool result message");
     assert!(matches!(&closure.content[0],
             ContentBlock::ToolResult { is_error: true, name, .. }
-                if name.as_deref() == Some("read")));
+                if name.as_deref() == Some("bash")));
     assert!(marker::is(&messages[3], marker::FAILED));
     let _ = events_until_done(&mut stream).await;
 }

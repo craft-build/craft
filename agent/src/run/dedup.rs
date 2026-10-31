@@ -15,11 +15,9 @@
 //! mitigation every `invalidate_path` also drops pathless entries (grep/glob
 //! resample the tree on their next call).
 
+use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex};
-
-use serde_json::Value;
 
 use animist::history::{ContentBlock, ToolContent, ToolContents};
 
@@ -342,26 +340,6 @@ fn sorted(val: &Value) -> Value {
         Value::Array(arr) => Value::Array(arr.iter().map(sorted).collect()),
         other => other.clone(),
     }
-}
-
-/// Session-wide handle: the dispatcher (which clones per turn) and the
-/// compaction engine share one cache through this.
-pub type SharedDedupCache = Arc<Mutex<ToolDedupCache>>;
-
-pub fn shared_cache() -> SharedDedupCache {
-    // Anchor at the process working directory, resolved once at construction
-    // (never on the hot path): relative and absolute argument spellings then
-    // invalidate the same entries in production callers.
-    let root = std::env::current_dir()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned());
-    shared_cache_with_root(root.as_deref())
-}
-
-/// Like [`shared_cache`], but anchored at a workspace root so relative and
-/// absolute argument paths invalidate the same entries.
-pub fn shared_cache_with_root(root: Option<&str>) -> SharedDedupCache {
-    Arc::new(Mutex::new(ToolDedupCache::with_root(root)))
 }
 
 /// Conflict-grade normalization for write-path comparison (wave scheduling,

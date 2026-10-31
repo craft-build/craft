@@ -22,4 +22,7 @@ mod tests;
 pub use conversation::{Conversation, ConversationBuilder, MaxTurns, TurnSettings};
 pub use driver::{TurnOutcome, run_turn};
 pub use events::{CraftEvent, DoneReason, Event, EventSink, EventStream};
+#[cfg(test)]
+pub(crate) use guardrail::GuardrailLayer;
 pub use persist::Persister;
+pub use policy::PolicyLayerInputs;

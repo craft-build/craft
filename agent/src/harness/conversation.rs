@@ -23,11 +23,9 @@ use crate::error::{BuildConversationSnafu, Result, ShutdownConversationSnafu};
 use crate::provider::ModelHandle;
 use animist::agent::tool::ToolRegistry;
 
-use crate::run::BeforeExecute;
+use crate::run::AgentMode;
+use crate::run::GuardrailState;
 use crate::run::SharedCompactionState;
-use crate::run::dedup::{self, SharedDedupCache};
-use crate::run::guardrails;
-use crate::run::mode::AgentMode;
 use crate::run::recency::RecencySource;
 use crate::snapshot::SnapshotManager;
 use crate::thinking::ThinkingConfig;
@@ -36,7 +34,7 @@ use super::events::{CraftEvent, EventSink};
 use super::guardrail::GuardrailLayer;
 use super::persist::Persister;
 use super::persist_layer::PersistLayer;
-use super::policy::PolicyLayer;
+use super::policy::{PolicyLayer, PolicyLayerInputs};
 use super::request::{RequestLayer, RequestLayerInputs};
 use super::snapshot_layer::SnapshotLayer;
 
@@ -114,7 +112,9 @@ struct Inner {
     config: AgentConfig,
     layers: LayerSet,
     sink: EventSink,
-    dedup: SharedDedupCache,
+    /// The guardrail state's typed handle: 08's compaction resets it when a
+    /// run rewrites history.
+    guardrails: Arc<GuardrailState>,
     compaction: SharedCompactionState,
     snapshots: SnapshotManager,
     /// Serializes rebuilds; runs never overlap a rebuild because both happen
@@ -150,7 +150,7 @@ pub struct ConversationBuilder<'a> {
     max_turns: MaxTurns,
     thinking: Option<ThinkingConfig>,
     fast: bool,
-    approval: Option<Arc<dyn BeforeExecute>>,
+    policy: Option<PolicyLayerInputs>,
     recency: Option<Arc<dyn RecencySource>>,
     snapshots: Option<SnapshotManager>,
     persist: Option<Arc<tokio::sync::Mutex<Persister>>>,
@@ -183,7 +183,7 @@ impl<'a> ConversationBuilder<'a> {
             max_turns: MaxTurns::FromConfig,
             thinking: None,
             fast: false,
-            approval: None,
+            policy: None,
             recency: None,
             snapshots: None,
             persist: None,
@@ -224,10 +224,11 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
-    /// The surface's approval gate (the TUI's permission prompts); the
-    /// interim policy layer consults it before every execution.
-    pub fn approval(mut self, approval: Arc<dyn BeforeExecute>) -> Self {
-        self.approval = Some(approval);
+    /// The approval policy's wiring: the shared permission rules, the
+    /// surface's responder and the auto-review reviewer. Without it the
+    /// conversation runs ungated (tests; the workspace trusts its caller).
+    pub fn policy(mut self, policy: PolicyLayerInputs) -> Self {
+        self.policy = Some(policy);
         self
     }
 
@@ -276,7 +277,7 @@ impl<'a> ConversationBuilder<'a> {
             max_turns,
             thinking,
             fast,
-            approval,
+            policy,
             recency,
             snapshots,
             persist,
@@ -320,25 +321,26 @@ impl<'a> ConversationBuilder<'a> {
             .max_tool_calls(u64::MAX)
             .max_child_calls(u64::MAX)
             .build();
-        let dedup = dedup::shared_cache_with_root(
+        let guardrails = Arc::new(GuardrailState::new(
             write_root
                 .as_deref()
                 .map(|path| path.to_string_lossy().into_owned())
                 .as_deref(),
-        );
+        ));
         let compaction = Arc::new(Mutex::new(
             crate::compaction::CompactionState::default()
-                .with_dedup(Arc::clone(&dedup))
-                .with_guardrails(guardrails::shared_guardrails()),
+                .with_guardrail_state(Arc::clone(&guardrails)),
         ));
         let model_cell = Arc::new(ArcSwap::from_pointee(model));
         let layers = LayerSet {
             policy: Layer::new(PolicyLayer::new(
-                approval,
+                policy,
                 Arc::clone(&settings),
                 write_root.clone(),
+                Arc::clone(&guardrails),
+                sink.clone(),
             )),
-            guardrail: Layer::new(GuardrailLayer::new(Arc::clone(&dedup))),
+            guardrail: Layer::new(GuardrailLayer::new(Arc::clone(&guardrails), sink.clone())),
             request: Layer::new(RequestLayer::new(RequestLayerInputs {
                 model: Arc::clone(&model_cell),
                 settings: Arc::clone(&settings),
@@ -369,7 +371,7 @@ impl<'a> ConversationBuilder<'a> {
             config: agent_config,
             layers,
             sink,
-            dedup,
+            guardrails,
             compaction,
             snapshots,
             rebuild: Mutex::new(()),
@@ -442,9 +444,10 @@ impl Conversation {
         self.set_settings(settings);
     }
 
-    /// The session's dedup cache; compaction clears it (08).
-    pub fn dedup(&self) -> SharedDedupCache {
-        self.inner.dedup.clone()
+    /// The session's guardrail state (doom tracker, guardrail counters,
+    /// dedup cache); 08's compaction resets it when a run rewrites history.
+    pub fn guardrails(&self) -> Arc<GuardrailState> {
+        Arc::clone(&self.inner.guardrails)
     }
 
     /// The session's shared compaction state (08 drives it).

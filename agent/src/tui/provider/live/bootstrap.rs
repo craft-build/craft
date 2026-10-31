@@ -324,15 +324,16 @@ pub(super) async fn build_session_state(
         None => animist::history::History::new(),
     };
 
-    // The approval gate is shared by the tool table and every subagent, so
-    // children cannot bypass approvals.
+    // The approval seam is shared by the conversation and every subagent,
+    // so children cannot bypass approvals: one permission engine, one
+    // interaction, and (for the TUI) the auto-review reviewer.
     let approval = Arc::new(ApprovalGate::new(
         kit.park.clone(),
         kit.evt_tx.clone(),
         kit.cancel_cell.clone(),
-        kit.permissions.clone(),
-        Some(crate::auto_review::reviewer_for(model.clone())),
     ));
+    let policy = crate::harness::PolicyLayerInputs::new(kit.permissions.clone(), approval.clone())
+        .reviewer(crate::auto_review::reviewer_for(model.clone()));
     // The question seam (A.5) parks on the same slots the loop answers.
     let asker = Arc::new(QuestionAsker::new(
         kit.park.clone(),
@@ -360,7 +361,7 @@ pub(super) async fn build_session_state(
     )
     .history(history)
     .thinking(thinking)
-    .approval(approval.clone())
+    .policy(policy.clone())
     .workspace(workspace.clone())
     .persist(persister.clone())
     .build()
@@ -381,7 +382,7 @@ pub(super) async fn build_session_state(
         cancel: kit.cancel_cell.clone(),
         cancels: kit.subagent_cancels.clone(),
         sink: conversation.sink(),
-        before: Some(approval),
+        policy,
         cwd: kit.cwd.clone(),
     });
     let armed = workspace

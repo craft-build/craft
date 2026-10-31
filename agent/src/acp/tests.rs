@@ -241,7 +241,13 @@ async fn registered_tools_route_task_calls_to_the_installed_launcher() {
         )),
         cancels: Arc::new(run::cancel::CancelMap::new()),
         sink,
-        before: None,
+        policy: crate::harness::PolicyLayerInputs::new(
+            Arc::new(crate::permissions::PermissionManager::new(
+                crate::permissions::PermissionsConfig::default(),
+                std::env::temp_dir(),
+            )),
+            Arc::new(crate::headless::HeadlessGate),
+        ),
         cwd,
     });
     let tools = workspace.with_subagents(launcher).registry().unwrap();

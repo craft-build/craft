@@ -1,10 +1,11 @@
 //! Per-tool guardrails against unproductive loops.
 //!
 //! Ported from the reference `craft-agent/src/agent/guardrails.rs`: the
-//! dispatcher consults [`ToolGuardrails::check_before_call`] before executing
-//! a call and feeds results back through [`ToolGuardrails::record_result`].
-//! State resets when a compaction run rewrites history (the compacted
-//! conversation no longer describes the calls that tripped the counters).
+//! guardrail layer consults [`ToolGuardrails::check_before_call`] before
+//! executing a call and feeds results back through
+//! [`ToolGuardrails::record_result`]. State resets when a compaction run
+//! rewrites history (the compacted conversation no longer describes the
+//! calls that tripped the counters).
 //!
 //! Deliberate divergence from the reference: its failure counters never
 //! decayed, so a tool that failed a few non-consecutive times (routine for a
@@ -14,10 +15,13 @@
 //! failure streak, and a block trips as a one-shot circuit breaker that
 //! clears the triggering counters, so no tool can be permanently banned.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 use serde_json::Value;
+
+use super::dedup::ToolDedupCache;
+use super::doom::DoomTracker;
 
 const EXACT_REPEAT_WARN: usize = 2;
 const EXACT_REPEAT_BLOCK: usize = 4;
@@ -26,13 +30,15 @@ const SAME_TOOL_FAIL_BLOCK: usize = 6;
 const NO_PROGRESS_WARN: usize = 2;
 const NO_PROGRESS_BLOCK: usize = 4;
 
-/// Session-shared handle; the dispatcher and the compaction engine both
-/// hold one.
-pub type SharedGuardrails = Arc<Mutex<ToolGuardrails>>;
+/// Model-visible text for a guardrail-blocked call (reference
+/// `tool_dispatch.rs` `GUARDRAIL_BLOCK_MESSAGE`); the user-facing
+/// `CraftEvent::Info` text keys off it.
+pub(crate) const GUARDRAIL_BLOCK_MESSAGE: &str = "blocked by guardrails: this tool call keeps \
+     repeating without progress; change your approach or use a different tool";
 
-pub fn shared_guardrails() -> SharedGuardrails {
-    Arc::new(Mutex::new(ToolGuardrails::new()))
-}
+/// The prefix the guardrail layer puts on warnings carried by a ran result;
+/// the `CraftEvent::Info` text strips it.
+pub(crate) const GUARDRAIL_WARN_PREFIX: &str = "[guardrail] ";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuardrailDecision {
@@ -212,6 +218,102 @@ impl ToolGuardrails {
     }
 }
 
+/// The conversation's guardrail state (07): the doom tracker, the per-tool
+/// guardrail counters and the dedup cache behind one lock, held as an `Arc`
+/// by the guardrail layer, the policy layer (its "answered without
+/// execution" marks) and the conversation's typed handle — the one 08's
+/// compaction calls `reset` on.
+///
+/// `with` runs its closure synchronously, so the lock is never held across
+/// an `.await` even though the layer hooks around it are async. Taking the
+/// whole state at once also keeps one call's pre-exec decision atomic
+/// against the concurrent pre-hooks of its sibling calls.
+pub struct GuardrailState {
+    inner: Mutex<GuardrailInner>,
+}
+
+/// The state behind [`GuardrailState`]'s lock. The guardrail layer's hooks
+/// are the only readers of these fields; they are `pub(crate)` so the layer
+/// can run its multi-step decisions in one `with` pass.
+pub(crate) struct GuardrailInner {
+    pub(crate) doom: DoomTracker,
+    pub(crate) guardrails: ToolGuardrails,
+    pub(crate) dedup: ToolDedupCache,
+    /// Call ids answered without execution this run; `post_tool_exec` skips
+    /// counter and cache bookkeeping for them. Cleared at `turn_start`.
+    pub(crate) answered: HashSet<String>,
+}
+
+impl std::fmt::Debug for GuardrailState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuardrailState").finish_non_exhaustive()
+    }
+}
+
+impl GuardrailState {
+    /// State for a conversation anchored at `write_root` (the workspace
+    /// root, when there is one), so relative and absolute spellings of one
+    /// file dedup and invalidate identically.
+    pub fn new(write_root: Option<&str>) -> Self {
+        Self {
+            inner: Mutex::new(GuardrailInner {
+                doom: DoomTracker::new(),
+                guardrails: ToolGuardrails::new(),
+                dedup: ToolDedupCache::with_root(write_root),
+                answered: HashSet::new(),
+            }),
+        }
+    }
+
+    /// Run `f` over the whole state and return its result. Poison-tolerant:
+    /// the state is counters and caches, never an invariant a poisoned
+    /// thread could corrupt further.
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&mut GuardrailInner) -> T) -> T {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        f(&mut guard)
+    }
+
+    /// A new user turn arrived: reset the volatile doom signals (score,
+    /// grace) while keeping the recent-call window, so loops that survive a
+    /// "continue" are still detected. The guardrail counters and the dedup
+    /// cache are conversation state and stay.
+    pub fn reset_for_turn(&self) {
+        self.with(|inner| {
+            inner.doom.reset_for_new_user_input();
+            inner.answered.clear();
+        });
+    }
+
+    /// A compaction rewrote history: the counters were tripped against a
+    /// conversation that no longer exists, the cache sampled one that is
+    /// gone, and the doom score described that world. Reset everything.
+    pub fn reset(&self) {
+        self.with(|inner| {
+            inner.doom = DoomTracker::new();
+            inner.guardrails.reset();
+            inner.dedup.clear();
+            inner.answered.clear();
+        });
+    }
+
+    /// Record that `id` was answered without executing (a policy or
+    /// guardrail denial), so the guardrail layer's post-hook skips its
+    /// bookkeeping for it.
+    pub(crate) fn mark_answered(&self, id: &str) {
+        self.with(|inner| {
+            inner.answered.insert(id.to_owned());
+        });
+    }
+
+    /// Take the answered-without-execution mark for `id`, if set.
+    pub(crate) fn take_answered(&self, id: &str) -> bool {
+        self.with(|inner| inner.answered.remove(id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +476,68 @@ mod tests {
             g.check_before_call("bash", &json!("other"), false),
             GuardrailDecision::Allow
         );
+    }
+
+    // --- GuardrailState (07) ---
+
+    #[test]
+    fn a_new_turn_resets_the_doom_score_but_keeps_the_window() {
+        let state = GuardrailState::new(None);
+        state.with(|inner| {
+            inner.doom.note_doom_loop();
+            inner.doom.mark_grace_called();
+            inner
+                .doom
+                .recent_calls
+                .record("read".into(), &json!({"p":1}));
+            inner
+                .doom
+                .recent_calls
+                .record("read".into(), &json!({"p":1}));
+            inner.answered.insert("t1".into());
+        });
+        state.reset_for_turn();
+        state.with(|inner| {
+            assert_eq!(inner.doom.score(), 0);
+            assert!(!inner.doom.should_grace());
+            assert!(
+                inner
+                    .doom
+                    .recent_calls
+                    .is_doom_loop("read", &json!({"p":1})),
+                "the recent-call window survives a new prompt"
+            );
+            assert!(inner.answered.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_compaction_reset_clears_everything() {
+        let state = GuardrailState::new(None);
+        state.with(|inner| {
+            inner.doom.note_doom_loop();
+            inner
+                .guardrails
+                .record_result("bash", &json!("cmd"), "err", true, false);
+        });
+        state.reset();
+        state.with(|inner| {
+            assert_eq!(inner.doom.score(), 0);
+            assert_eq!(
+                inner
+                    .guardrails
+                    .check_before_call("bash", &json!("cmd"), false),
+                GuardrailDecision::Allow
+            );
+        });
+    }
+
+    #[test]
+    fn answered_marks_are_taken_once() {
+        let state = GuardrailState::new(None);
+        state.mark_answered("t1");
+        assert!(state.take_answered("t1"));
+        assert!(!state.take_answered("t1"), "a mark is consumed once");
     }
 
     #[test]

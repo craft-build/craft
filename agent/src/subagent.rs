@@ -201,10 +201,10 @@ pub struct SubagentLauncher {
     /// The parent conversation's event sink; filtered child events are
     /// forwarded into it as `CraftEvent::Subagent`.
     pub sink: crate::harness::EventSink,
-    /// The parent's approval gate (B.1): subagent tool calls flow through
-    /// the same permission decisions as the parent's, so a `general`
+    /// The parent's approval seam (B.1): subagent tool calls flow through
+    /// the same permission rules and the same interaction, so a `general`
     /// subagent cannot bypass approvals by running `bash` itself.
-    pub before: Option<Arc<dyn run::BeforeExecute>>,
+    pub policy: crate::harness::PolicyLayerInputs,
     /// The working directory as the child's prompt shows it.
     pub cwd: String,
 }
@@ -359,9 +359,7 @@ impl SubagentLauncher {
                 )))
                 .max_turns(crate::harness::MaxTurns::Unbounded)
                 .workspace(self.workspace.clone());
-        if let Some(hook) = &self.before {
-            builder = builder.approval(Arc::clone(hook));
-        }
+        builder = builder.policy(self.policy.clone());
         let conversation = builder.build().map_err(|e| e.to_string())?;
 
         // Filtered child events forward into the parent's sink, tagged with
@@ -819,7 +817,13 @@ mod tests {
             )),
             cancels: Arc::new(run::cancel::CancelMap::new()),
             sink,
-            before: None,
+            policy: crate::harness::PolicyLayerInputs::new(
+                Arc::new(crate::permissions::PermissionManager::new(
+                    crate::permissions::PermissionsConfig::default(),
+                    root.to_path_buf(),
+                )),
+                Arc::new(crate::headless::HeadlessGate),
+            ),
             cwd,
         }
     }
@@ -847,24 +851,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_gate_governs_child_tool_calls() {
-        use crate::history::ContentBlock;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone)]
-        struct CountingGate(Arc<AtomicUsize>);
-        impl run::BeforeExecute for CountingGate {
-            fn decide(&self, call: ContentBlock) -> run::BoxFuture<run::Decision> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                assert!(matches!(&call,
-                    ContentBlock::ToolUse { name, .. } if name == "list"));
-                Box::pin(async { run::Decision::Run })
-            }
-        }
-
+    async fn approval_policy_governs_child_tool_calls() {
+        // A deny rule on the parent's permission manager must hold for the
+        // child's own tool calls: the child's conversation runs the same
+        // policy layer over the same rules, so a research subagent cannot
+        // read through a denial the parent enforced.
         let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
-        let seen = Arc::new(AtomicUsize::new(0));
-        let mut l = launcher(
+        let l = launcher(
             mock(vec![
                 crate::testing::tool_turn(vec![tool_event(
                     "t1",
@@ -873,17 +866,38 @@ mod tests {
                 )]),
                 crate::testing::text_turn("done"),
             ]),
-            captured,
+            Arc::clone(&captured),
         );
-        l.before = Some(Arc::new(CountingGate(Arc::clone(&seen))));
+        l.policy
+            .permissions
+            .add_session_rule(crate::permissions::PermissionRule {
+                tool: crate::permissions::ToolKey::native("list"),
+                scope: None,
+                effect: crate::permissions::Effect::Deny,
+            });
         let result = l
             .spawn(&SubagentRequest::research("find", "list files"))
             .await;
         assert!(result.is_ok(), "{result:?}");
-        assert_eq!(
-            seen.load(Ordering::SeqCst),
-            1,
-            "gate must see child tool calls"
+        let forwarded = settled_events(&captured).await;
+        let denied = forwarded.iter().any(|event| match event {
+            HarnessEvent::Craft(crate::harness::CraftEvent::Subagent { event, .. }) => {
+                match &**event {
+                    HarnessEvent::Agent(animist::agent::AgentEvent::ToolFinished {
+                        call,
+                        output,
+                    }) if call.name == "list" => {
+                        crate::history::ext::tool_content_text(&output.content)
+                            .starts_with(crate::permissions::PERMISSION_DENIED_PREFIX)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        });
+        assert!(
+            denied,
+            "the child's call must carry the denial: {forwarded:?}"
         );
     }
 

@@ -272,25 +272,43 @@ mod tests {
     }
 
     /// The repeat-failure/no-progress guardrail counters must see batch
-    /// children. The counters move into the GuardrailLayer's post-hook in
-    /// 07; until then the seam cannot observe children, so the test waits.
+    /// children: children ride the agent pipeline, so the guardrail layer's
+    /// post-hook records their results. The reads alternate between two
+    /// files with identical contents — identical *inputs* would trip the
+    /// doom window (which also covers children now) before the no-progress
+    /// counter could speak.
     #[tokio::test]
-    #[ignore = "restored in 07"]
     async fn children_feed_guardrail_counters() {
         let (_dir, workspace) = crate::tools::tests::workspace();
         std::fs::write(workspace.root().join("f"), "same\n").unwrap();
-        let read = || entry(json!({"tool": "read", "parameters": {"path": "f"}}));
-        // Three identical reads: the third result trips the no-progress warning.
-        let output = invoke(
-            &workspace,
-            BatchArgs {
-                tool_calls: vec![read(), read(), read()],
-            },
-        )
-        .await;
+        std::fs::write(workspace.root().join("g"), "same\n").unwrap();
+        let read = |file: &str| entry(json!({"tool": "read", "parameters": {"path": file}}));
+        let guardrails = std::sync::Arc::new(crate::run::GuardrailState::new(None));
+        let (sink, _stream) = crate::harness::EventSink::new();
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .tools(workspace.registry().expect("registry"))
+            .layers(
+                animist::agent::AgentLayer::builder()
+                    .layer(animist::agent::Layer::new(
+                        crate::harness::GuardrailLayer::new(guardrails, sink),
+                    ))
+                    .build(),
+            )
+            .build()
+            .expect("harness");
+        // Three reads with alternating inputs but identical results: the
+        // third result trips the no-progress warning.
+        let output = harness
+            .call(
+                Batch,
+                serde_json::json!({"tool_calls": [read("f"), read("g"), read("f")]}),
+            )
+            .await
+            .expect("batch outcome");
+        let text = invoke_text(&output);
         assert!(
-            invoke_text(&output).contains("guardrail"),
-            "guardrail counters must see batch children"
+            text.contains("guardrail"),
+            "guardrail counters must see batch children: {text}"
         );
     }
 

@@ -12,14 +12,7 @@ use agent_client_protocol::{
 };
 use std::sync::Arc;
 
-use crate::{
-    history,
-    permissions::{
-        ASK_TIMEOUT, PermissionAnswer, PermissionCheck, PermissionError, PermissionManager,
-        ToolKey, append_permission_rule, scope_for_call,
-    },
-    run,
-};
+use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 use super::turn::tool_title;
 
@@ -59,17 +52,19 @@ pub(super) fn permission_options() -> Vec<PermissionOption> {
 
 /// Map the client's choice onto the engine's answers, matching the
 /// reference `craft-acp/src/permissions.rs`.
-pub(super) fn outcome_to_answer(outcome: &RequestPermissionOutcome) -> PermissionAnswer {
+pub(super) fn outcome_to_answer(
+    outcome: &RequestPermissionOutcome,
+) -> crate::permissions::PermissionAnswer {
     match outcome {
         RequestPermissionOutcome::Selected(selected) => match selected.option_id.0.as_ref() {
-            ALLOW_ONCE_ID => PermissionAnswer::AllowOnce,
-            ALLOW_ALWAYS_ID => PermissionAnswer::AllowSession,
-            REJECT_ONCE_ID => PermissionAnswer::Deny,
-            REJECT_ALWAYS_ID => PermissionAnswer::DenyAlwaysLocal,
-            _ => PermissionAnswer::Deny,
+            ALLOW_ONCE_ID => crate::permissions::PermissionAnswer::AllowOnce,
+            ALLOW_ALWAYS_ID => crate::permissions::PermissionAnswer::AllowSession,
+            REJECT_ONCE_ID => crate::permissions::PermissionAnswer::Deny,
+            REJECT_ALWAYS_ID => crate::permissions::PermissionAnswer::DenyAlwaysLocal,
+            _ => crate::permissions::PermissionAnswer::Deny,
         },
-        RequestPermissionOutcome::Cancelled => PermissionAnswer::Deny,
-        _ => PermissionAnswer::Deny,
+        RequestPermissionOutcome::Cancelled => crate::permissions::PermissionAnswer::Deny,
+        _ => crate::permissions::PermissionAnswer::Deny,
     }
 }
 
@@ -96,105 +91,106 @@ pub(super) fn permission_request(
     )
 }
 
-/// Record a client answer, persisting "always" answers to permissions.bml
-/// (project-local). Write failures degrade to the session grant — the answer
-/// still applies now, it just may be asked again later. Mirrors the TUI
-/// gate's `record_answer`.
-fn record_answer(
-    permissions: &PermissionManager,
-    tool: &ToolKey,
-    scopes: &[String],
-    answer: &PermissionAnswer,
-) -> bool {
-    let allow = answer.is_allow();
-    for (tool, scope, effect, target) in permissions.apply_decision(tool, scopes, answer) {
-        if let Err(err) = append_permission_rule(&tool, scope.as_deref(), effect, &target) {
-            eprintln!("permissions: could not persist always-rule: {err}");
-        }
-    }
-    allow
-}
-
-pub(super) fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
-    PermissionError::new(&tool.to_string(), scopes).to_string()
-}
-
-/// The ACP approval gate: the permission engine decides, and where it would
-/// prompt, the client answers a `session/request_permission` instead of the
-/// user answering the TUI overlay. Cancellation is epoch-based, matching the
-/// TUI gate.
+/// The ACP approval responder: where the policy layer would prompt, the
+/// client answers a `session/request_permission` instead of the user
+/// answering the TUI overlay. Permission rules live in the policy layer
+/// (07); this is only the interaction.
+///
+/// Asks serialize on an async mutex: clients (and their permission UIs)
+/// handle one request at a time, exactly like the TUI's single modal.
 pub(super) struct AcpPermissionGate {
     pub(super) connection: ConnectionTo<AcpClient>,
     pub(super) session_id: SessionId,
     /// The session's per-turn cancellation cell; each ask races whatever
     /// turn is current.
     pub(super) cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
-    pub(super) permissions: Arc<PermissionManager>,
+    /// Serializes asks; a client sees one request at a time.
+    ask_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-impl run::BeforeExecute for AcpPermissionGate {
-    fn decide(&self, call: history::ContentBlock) -> run::BoxFuture<run::Decision> {
-        let gate = AcpPermissionGate {
-            connection: self.connection.clone(),
-            session_id: self.session_id.clone(),
-            cancel: self.cancel.clone(),
-            permissions: self.permissions.clone(),
-        };
-        Box::pin(async move { gate_decide(gate, call).await })
-    }
-}
-
-async fn gate_decide(gate: AcpPermissionGate, call: history::ContentBlock) -> run::Decision {
-    let history::ContentBlock::ToolUse {
-        id: call_id,
-        name,
-        input: arguments,
-        ..
-    } = call
-    else {
-        return run::Decision::Skip("not a tool call".into());
-    };
-    let AcpPermissionGate {
-        connection,
-        session_id,
-        cancel,
-        permissions,
-    } = gate;
-    let turn_cancel = (*cancel.load_full()).clone();
-    if turn_cancel.is_cancelled() {
-        return run::Decision::Stop("cancelled by client".into());
-    }
-    let name = name.as_str();
-    let tool = ToolKey::parse(name);
-    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &arguments);
-    match permissions.check_multi(&tool, &scopes, force_prompt) {
-        PermissionCheck::Allowed => return run::Decision::Run,
-        PermissionCheck::Denied => return run::Decision::Skip(denied_message(&tool, &scopes)),
-        PermissionCheck::NeedsPrompt { .. } => {}
-    }
-    let request = permission_request(&session_id, &call_id, name, &arguments, &scopes);
-    // Dropping the sent request on cancel asks the client to cancel it.
-    let answer = {
-        let sent = connection.send_request(request);
-        tokio::select! {
-            biased;
-            () = turn_cancel.cancelled() => {
-                return run::Decision::Stop("cancelled by client".into());
-            }
-            outcome = tokio::time::timeout(
-                ASK_TIMEOUT,
-                sent.block_task(),
-            ) => match outcome {
-                Ok(Ok(response)) => outcome_to_answer(&response.outcome),
-                // A timeout, dead connection, or client error denies — but
-                // never wedges the turn.
-                _ => PermissionAnswer::Deny,
-            },
+impl AcpPermissionGate {
+    pub(super) fn new(
+        connection: ConnectionTo<AcpClient>,
+        session_id: SessionId,
+        cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
+    ) -> Self {
+        Self {
+            connection,
+            session_id,
+            cancel,
+            ask_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
-    };
-    if record_answer(&permissions, &tool, &scopes, &answer) {
-        run::Decision::Run
+    }
+}
+
+impl ApprovalResponder for AcpPermissionGate {
+    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+        // Owned copies: the boxed future outlives the borrowed ask.
+        let id = ask.id.to_owned();
+        let name = ask.name.to_owned();
+        let input = ask.input.clone();
+        let scopes = ask.scopes.to_vec();
+        let tool = crate::permissions::ToolKey::parse(&name);
+        let connection = self.connection.clone();
+        let session_id = self.session_id.clone();
+        let cancel = self.cancel.clone();
+        let ask_lock = self.ask_lock.clone();
+        Box::pin(async move {
+            // Held across the whole ask, so a second gated call queues
+            // behind this one's answer instead of racing a second request.
+            let _serial = ask_lock.lock().await;
+            let turn_cancel = (*cancel.load_full()).clone();
+            if turn_cancel.is_cancelled() {
+                return Approval::Stop {
+                    reason: "cancelled by client".into(),
+                };
+            }
+            let request = permission_request(&session_id, &id, &name, &input, &scopes);
+            // Dropping the sent request on cancel asks the client to cancel it.
+            let sent = connection.send_request(request);
+            tokio::select! {
+                biased;
+                () = turn_cancel.cancelled() => Approval::Stop {
+                    reason: "cancelled by client".into(),
+                },
+                outcome = tokio::time::timeout(
+                    crate::permissions::ASK_TIMEOUT,
+                    sent.block_task(),
+                ) => match outcome {
+                    Ok(Ok(response)) => {
+                        answer_to_approval(outcome_to_answer(&response.outcome), &tool, &scopes)
+                    }
+                    // A timeout, dead connection, or client error denies —
+                    // but never wedges the turn.
+                    _ => Approval::Deny {
+                        message: denied_message(&tool, &scopes),
+                        remember: None,
+                    },
+                },
+            }
+        })
+    }
+}
+
+pub(super) fn denied_message(tool: &crate::permissions::ToolKey, scopes: &[String]) -> String {
+    crate::permissions::PermissionError::new(&tool.to_string(), scopes).to_string()
+}
+
+/// The client's answer as the responder contract: allow/deny plus the
+/// "remember" scope the policy layer records.
+fn answer_to_approval(
+    answer: crate::permissions::PermissionAnswer,
+    tool: &crate::permissions::ToolKey,
+    scopes: &[String],
+) -> Approval {
+    if answer.is_allow() {
+        Approval::Allow {
+            remember: Some(answer),
+        }
     } else {
-        run::Decision::Skip(denied_message(&tool, &scopes))
+        Approval::Deny {
+            message: denied_message(tool, scopes),
+            remember: Some(answer),
+        }
     }
 }
