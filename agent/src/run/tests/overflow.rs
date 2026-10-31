@@ -76,7 +76,7 @@ async fn overflow_conversation(
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .history(seeded_history(overflow_history()).await)

@@ -425,7 +425,6 @@ impl AppState {
             Some(persister) => persister.lock().await.history(),
             None => animist::history::History::new(),
         };
-        let workspace = workspace.with_cancel(cancel_cell.clone());
         // Phase 3: register MCP tool annotations once the tool set is
         // settled so the gate consults the same hints as the TUI.
         if let Some(mcp) = workspace.mcp() {
@@ -436,13 +435,18 @@ impl AppState {
             &cwd,
             &instructions.text,
             handle.clone(),
-            workspace.clone().register(),
+            workspace.clone().registry().map_err(|error| {
+                report(crate::error::Error::Invalid {
+                    reason: format!("building tool registry: {error}"),
+                })
+            })?,
             sink,
         )
         .history(history)
         .max_turns(crate::harness::MaxTurns::Unbounded)
         .thinking(thinking)
         .approval(gate.clone())
+        .workspace(workspace.clone())
         .persist(persister.clone())
         .build()
         .map_err(report)?;
@@ -468,7 +472,8 @@ impl AppState {
             .clone()
             .with_questions(asker)
             .with_subagents(launcher)
-            .register();
+            .registry()
+            .map_err(|e| e.to_string())?;
         conversation.set_tools(armed).map_err(|e| e.to_string())?;
 
         Ok(Session {

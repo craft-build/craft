@@ -1,9 +1,8 @@
 use std::fs;
 
-use rig_core::tool::IntoToolOutput;
 use serde_json::json;
 
-use super::{invoke, workspace};
+use super::{invoke, invoke_error, output_text, workspace};
 use crate::tools::*;
 
 #[tokio::test]
@@ -31,8 +30,7 @@ async fn move_renames_and_rewrites_imports_project_wide() {
         &tool,
         json!({"source": "src/util/old.rs", "destination": "src/util/new.rs"}),
     )
-    .await
-    .unwrap();
+    .await;
 
     assert!(!workspace.root().join("src/util/old.rs").exists());
     assert!(workspace.root().join("src/util/new.rs").exists());
@@ -40,14 +38,9 @@ async fn move_renames_and_rewrites_imports_project_wide() {
         fs::read_to_string(workspace.root().join("src/main.rs")).unwrap(),
         "use util::new::Helper;\n// util::old mentioned in a comment stays\n"
     );
-    assert_eq!(out.source, "src/util/old.rs");
-    assert_eq!(out.destination, "src/util/new.rs");
-    assert_eq!(out.import_updates, vec![("src/main.rs".to_string(), 1)]);
     assert_eq!(
-        out.into_tool_output().unwrap().as_text(),
-        Some(
-            "moved src/util/old.rs -> src/util/new.rs\nupdated imports in 1 file(s)\n  src/main.rs: 1 reference(s)"
-        )
+        output_text(&out),
+        "moved src/util/old.rs -> src/util/new.rs\nupdated imports in 1 file(s)\n  src/main.rs: 1 reference(s)"
     );
     // TS relative './util/old' is not a module path of the Rust-style mapping;
     // only import lines matching the module path are rewritten.
@@ -64,20 +57,18 @@ async fn move_missing_source_and_escapes_are_refused() {
     fs::write(workspace.root().join("a.txt"), "x").unwrap();
     let tool = MoveFile(workspace.clone());
     assert!(
-        invoke(
+        !invoke_error(
             &tool,
             json!({"source": "missing.txt", "destination": "b.txt"})
         )
         .await
-        .is_err()
+        .is_empty()
     );
-    let error = invoke(
+    let error = invoke_error(
         &tool,
         json!({"source": "a.txt", "destination": "../outside.txt"}),
     )
-    .await
-    .unwrap_err()
-    .to_string();
+    .await;
     assert!(
         error.contains("workspace") || error.contains("not allowed"),
         "{error}"
@@ -93,8 +84,7 @@ async fn move_directory_without_import_scan() {
         &MoveFile(workspace.clone()),
         json!({"source": "pkg", "destination": "renamed"}),
     )
-    .await
-    .unwrap();
+    .await;
     assert!(workspace.root().join("renamed/sub/f.rs").exists());
-    assert!(out.import_updates.is_empty());
+    assert_eq!(output_text(&out), "moved pkg -> renamed");
 }

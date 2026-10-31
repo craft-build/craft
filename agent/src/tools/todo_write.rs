@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use rig_core::tool::{IntoToolOutput, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{Result, Workspace, impl_tool, invalid};
+use super::error::{Error, Result, definition, failure, finish, invalid};
 
 /// Per-workspace todo store, replaced wholesale by each call.
 pub(crate) type TodoStore = Arc<Mutex<Vec<Todo>>>;
@@ -35,14 +36,16 @@ pub struct TodoWriteOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for TodoWriteOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for TodoWriteOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
 #[derive(Clone)]
 pub struct TodoWrite(pub Workspace);
+
+use super::Workspace;
 
 impl TodoWrite {
     fn execute(workspace: &Workspace, args: TodoWriteArgs) -> Result<TodoWriteOutput> {
@@ -60,7 +63,7 @@ impl TodoWrite {
         let mut store = workspace
             .todos
             .lock()
-            .map_err(|_| super::failure("todo store was poisoned"))?;
+            .map_err(|_| failure("todo store was poisoned"))?;
         if args.todos.is_empty() {
             store.clear();
             return Ok(TodoWriteOutput {
@@ -74,13 +77,33 @@ impl TodoWrite {
     }
 }
 
-impl_tool!(
-    TodoWrite,
-    TodoWriteArgs,
-    TodoWriteOutput,
-    "todo_write",
-    "Track and update progress on multi-step tasks (3+ steps). Update after EACH completed step, not only all at once. Each task needs an id (e.g. T1, T1.1), content, and status; parent-child nesting is supported via the parent field. Sending the full list replaces the previous state; an empty array clears it."
-);
+#[async_trait]
+impl ToolImpl for TodoWrite {
+    type Args = TodoWriteArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<TodoWriteArgs>(
+            "todo_write",
+            "Track and update progress on multi-step tasks (3+ steps). Update after EACH completed step, not only all at once. Each task needs an id (e.g. T1, T1.1), content, and status; parent-child nesting is supported via the parent field. Sending the full list replaces the previous state; an empty array clears it.",
+        )
+    }
+
+    fn scheduling(&self, _input: &serde_json::Value) -> ToolScheduling {
+        // The store is session state outside the filesystem: writes claim
+        // one resource key so two todo updates serialize, while overlapping
+        // every filesystem call.
+        ToolScheduling::Resources {
+            reads: Vec::new(),
+            writes: vec!["todos".to_owned()],
+        }
+    }
+
+    async fn call(&self, _context: &ToolContext<'_>, args: TodoWriteArgs) -> Result<ToolOutput> {
+        finish(Self::execute(&self.0, args))
+    }
+}
 
 const STATUS_MARKERS: [(&str, &str); 4] = [
     ("pending", "[ ]"),

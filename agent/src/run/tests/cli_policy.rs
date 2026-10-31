@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::permissions::PERMISSION_DENIED_PREFIX;
-use crate::run::dispatch::BeforeExecute;
+use crate::run::BeforeExecute;
 use std::sync::Arc;
 
 /// Resolve the flags exactly as `craft --print` would: parse, then map.
@@ -31,14 +31,14 @@ async fn gated_conversation(
     permissions.add_cli_rules(cli_tool_policy(flags));
     let gate =
         Arc::new(crate::headless::HeadlessGate::new(permissions, None)) as Arc<dyn BeforeExecute>;
-    let workspace = Workspace::new(dir).unwrap().with_before(Arc::clone(&gate));
+    let workspace = Workspace::new(dir).unwrap();
     let (sink, stream) = EventSink::new();
     let conversation = ConversationBuilder::new(
         &Config::parse("").unwrap(),
         &dir.display().to_string(),
         "",
         model(provider),
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .approval(gate)
@@ -179,7 +179,7 @@ async fn mcp_server_rule_denies_wire_tool_calls() {
         &dir.path().display().to_string(),
         "",
         model(&provider),
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .approval(gate)

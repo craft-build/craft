@@ -2,18 +2,21 @@
 //! project-wide imports that referenced the old module path.
 //!
 //! Ports the reference `craft-agent/src/tools/move_file.rs` onto this repo's
-//! workspace model: paths flow through the shared validation walk, the rename
-//! runs under the workspace lock on the blocking worker, and every rewritten
+//! workspace model: paths flow through the shared validation walk, the
+//! rename runs under the workspace-wide path lock, and every rewritten
 //! file is snapshotted for `/undo` before it is touched.
 
 use std::path::{Path, PathBuf};
 
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput};
+use async_trait::async_trait;
 use regex::Regex;
-use rig_core::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{Result, Workspace, impl_tool, invalid, io_error, read_bytes, text};
+use super::Workspace;
+use super::error::{Error, Result, definition, finish, invalid, io_error};
+use super::text;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -32,8 +35,8 @@ pub struct MoveFileOutput {
     pub import_updates: Vec<(String, usize)>,
 }
 
-impl IntoToolOutput for MoveFileOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
+impl super::error::IntoToolResult for MoveFileOutput {
+    fn into_tool_result(self) -> ToolOutput {
         let mut out = format!("moved {} -> {}", self.source, self.destination);
         if !self.import_updates.is_empty() {
             out.push_str(&format!(
@@ -44,7 +47,7 @@ impl IntoToolOutput for MoveFileOutput {
                 out.push_str(&format!("\n  {file}: {count} reference(s)"));
             }
         }
-        Ok(ToolOutput::text(out))
+        super::error::text_output(out)
     }
 }
 
@@ -52,33 +55,91 @@ impl IntoToolOutput for MoveFileOutput {
 pub struct MoveFile(pub Workspace);
 
 impl MoveFile {
-    fn execute(workspace: &Workspace, args: MoveFileArgs) -> Result<MoveFileOutput> {
+    async fn execute(
+        workspace: &Workspace,
+        args: MoveFileArgs,
+        cancel: &animist::agent::Cancellation,
+    ) -> Result<MoveFileOutput> {
         let src = workspace.resolve(&args.source)?;
         let dst = workspace.target(&args.destination)?;
+        // Cross-agent: the import rewrite can touch any file in the tree,
+        // so the move holds the workspace-wide lock (matching its exclusive
+        // scheduling claim).
+        let _guard = workspace.locks().workspace_write(cancel).await?;
 
-        let src_is_file = fs_metadata(&src).map_err(io_error)?.is_file();
+        let src_is_file = tokio::fs::metadata(&src).await.map_err(io_error)?.is_file();
         if src_is_file {
-            workspace.note_snapshot(&src);
+            workspace.note_snapshot(&src).await;
         }
         // `rename` silently overwrites an existing destination file; snapshot
         // it too so the overwrite is reversible.
-        if fs_metadata(&dst).map(|m| m.is_file()).unwrap_or(false) {
-            workspace.note_snapshot(&dst);
+        if tokio::fs::metadata(&dst)
+            .await
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
+            workspace.note_snapshot(&dst).await;
         }
 
-        std::fs::rename(&src, &dst).map_err(io_error)?;
+        tokio::fs::rename(&src, &dst).await.map_err(io_error)?;
 
-        let import_updates = update_imports(workspace, &src, &dst)?;
+        let root = workspace.root().to_path_buf();
+        let snapshots = workspace.snapshots().clone();
+        let old_display = workspace.display(&src);
+        let new_display = workspace.display(&dst);
+        let old_for_scan = old_display.clone();
+        let new_for_scan = new_display.clone();
+        // The ignore walker and the per-file rewrites are sync-only; run the
+        // whole workspace scan as one blocking unit.
+        let import_updates = tokio::task::spawn_blocking(move || {
+            update_imports(&root, &snapshots, &old_for_scan, &new_for_scan)
+        })
+        .await
+        .map_err(|source| Error::Blocking {
+            source: Box::new(source),
+        })??;
         Ok(MoveFileOutput {
-            source: workspace.display(&src),
-            destination: workspace.display(&dst),
+            source: old_display,
+            destination: new_display,
             import_updates,
         })
     }
 }
 
-fn fs_metadata(path: &Path) -> std::io::Result<std::fs::Metadata> {
-    std::fs::metadata(path)
+/// Rewrite imports across the workspace after a move. Only files whose module
+/// path actually changed are scanned; every rewrite is snapshotted first.
+/// Runs on a blocking worker.
+fn update_imports(
+    root: &Path,
+    snapshots: &crate::snapshot::SnapshotManager,
+    old_display: &str,
+    new_display: &str,
+) -> Result<Vec<(String, usize)>> {
+    let old_module_path = file_path_to_module_path(old_display);
+    let new_module_path = file_path_to_module_path(new_display);
+    if old_module_path == new_module_path {
+        return Ok(Vec::new());
+    }
+
+    let re = module_path_regex(&old_module_path).map_err(invalid)?;
+    let mut updates = Vec::new();
+    for path in source_files(root) {
+        let Ok(content) = std::fs::read(&path).map_err(io_error).and_then(text) else {
+            continue;
+        };
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        let (count, new_content) = rewrite_imports(&content, &re, &new_module_path, ext);
+        if count > 0 && new_content != content {
+            snapshots.note(&path);
+            std::fs::write(&path, &new_content).map_err(|e| {
+                super::error::failure(format!("import rewrite failed for {}: {e}", path.display()))
+            })?;
+            updates.push((display_path(root, &path), count));
+        }
+    }
+    Ok(updates)
 }
 
 /// Paths listed in a `move` result's import-update section. The read
@@ -94,39 +155,13 @@ pub(crate) fn rewritten_files(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Rewrite imports across the workspace after a move. Only files whose module
-/// path actually changed are scanned; every rewrite is snapshotted first.
-fn update_imports(
-    workspace: &Workspace,
-    old_path: &Path,
-    new_path: &Path,
-) -> Result<Vec<(String, usize)>> {
-    let old_module_path = file_path_to_module_path(&workspace.display(old_path));
-    let new_module_path = file_path_to_module_path(&workspace.display(new_path));
-    if old_module_path == new_module_path {
-        return Ok(Vec::new());
-    }
-
-    let re = module_path_regex(&old_module_path).map_err(invalid)?;
-    let mut updates = Vec::new();
-    for path in source_files(workspace.root()) {
-        let content = match read_bytes(&path).and_then(text) {
-            Ok(content) => content,
-            Err(_) => continue,
-        };
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        let (count, new_content) = rewrite_imports(&content, &re, &new_module_path, ext);
-        if count > 0 && new_content != content {
-            workspace.note_snapshot(&path);
-            std::fs::write(&path, &new_content).map_err(|e| {
-                super::failure(format!("import rewrite failed for {}: {e}", path.display()))
-            })?;
-            updates.push((workspace.display(&path), count));
-        }
-    }
-    Ok(updates)
+fn display_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .iter()
+        .map(|component| component.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn source_files(root: &Path) -> Vec<PathBuf> {
@@ -209,13 +244,26 @@ fn is_source_file(ext: &str) -> bool {
     )
 }
 
-impl_tool!(
-    MoveFile,
-    MoveFileArgs,
-    MoveFileOutput,
-    "move",
-    "Move or rename a file or directory inside the workspace, updating project-wide import references (Rust use, TS/JS import/export, Python import/from, Go/Java/Kotlin import). Missing destination parent directories are created. Source and destination must stay inside the workspace; symlinks and Git metadata are refused."
-);
+#[async_trait]
+impl ToolImpl for MoveFile {
+    type Args = MoveFileArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<MoveFileArgs>(
+            "move",
+            "Move or rename a file or directory inside the workspace, updating project-wide import references (Rust use, TS/JS import/export, Python import/from, Go/Java/Kotlin import). Missing destination parent directories are created. Source and destination must stay inside the workspace; symlinks and Git metadata are refused.",
+        )
+    }
+
+    // Exclusive: the import rewrite can touch any file in the tree, so no
+    // resource claim would describe the blast radius.
+
+    async fn call(&self, context: &ToolContext<'_>, args: MoveFileArgs) -> Result<ToolOutput> {
+        finish(Self::execute(&self.0, args, &context.run.cancellation).await)
+    }
+}
 
 #[cfg(test)]
 mod tests {

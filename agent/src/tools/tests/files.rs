@@ -1,9 +1,8 @@
 use std::fs;
 
-use rig_core::tool::{IntoToolOutput, ToolErrorKind};
 use serde_json::json;
 
-use super::{invoke, workspace};
+use super::{invoke, invoke_error, output_text, workspace};
 use crate::tools::*;
 
 #[tokio::test]
@@ -13,32 +12,31 @@ async fn delete_reports_skips_and_requires_recursive_for_dirs() {
     fs::write(workspace.root().join("dir/file"), "keep").unwrap();
     let tool = Delete(workspace.clone());
     // Non-empty dir without recursive is skipped, not deleted.
-    let error = invoke(&tool, json!({"files":["dir"]})).await.unwrap_err();
-    assert!(error.to_string().contains("set recursive=true"));
+    let error = invoke_error(&tool, json!({"files":["dir"]})).await;
+    assert!(error.contains("set recursive=true"), "{error}");
     assert!(workspace.root().join("dir/file").exists());
-    assert!(invoke(&tool, json!({"files":["."]})).await.is_err());
+    assert!(
+        invoke_error(&tool, json!({"files":["."], "recursive":true}))
+            .await
+            .contains("workspace root")
+    );
     // The workspace root itself is refused even with recursive=true.
-    let error = invoke(&tool, json!({"files":["."], "recursive":true}))
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("workspace root"), "got: {error}");
     assert!(workspace.root().join("dir/file").exists());
-    let output = invoke(&tool, json!({"files":["dir/file","missing"]}))
-        .await
-        .unwrap();
-    assert_eq!(output.deleted, ["dir/file"]);
-    assert_eq!(output.skipped, ["missing (not found)"]);
-    // Nothing deleted, all missing -> NotFound.
-    let error = invoke(&tool, json!({"files":["dir/file"]}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind(), ToolErrorKind::NotFound);
+    let output = invoke(&tool, json!({"files":["dir/file","missing"]})).await;
+    let text = output_text(&output);
+    assert!(!output.is_error, "{text}");
+    assert!(text.contains("deleted: dir/file"), "{text}");
+    assert!(text.contains("skipped: missing (not found)"), "{text}");
+    // Nothing deleted, all missing -> NotFound text.
+    let error = invoke_error(&tool, json!({"files":["dir/file"]})).await;
+    assert!(
+        error.to_lowercase().contains("no such file") || error.contains("not found"),
+        "not-found text: {error}"
+    );
     // Recursive removes the tree and captures contents for /undo.
     fs::write(workspace.root().join("dir/file"), "keep").unwrap();
-    let output = invoke(&tool, json!({"files":["dir"],"recursive":true}))
-        .await
-        .unwrap();
-    assert_eq!(output.deleted, ["dir"]);
+    let output = invoke(&tool, json!({"files":["dir"],"recursive":true})).await;
+    assert!(output_text(&output).contains("deleted: dir"));
     assert!(!workspace.root().join("dir").exists());
     workspace.snapshots().rollback().await;
     assert_eq!(
@@ -55,10 +53,8 @@ async fn write_creates_overwrites_and_refuses_bad_targets() {
         &tool,
         json!({"path":"nested/dir/new.txt","content":"fresh\n"}),
     )
-    .await
-    .unwrap();
-    assert!(output.created);
-    assert_eq!(output.bytes_written, 6);
+    .await;
+    assert!(output_text(&output).contains("wrote nested/dir/new.txt (6 bytes)"));
     assert_eq!(
         fs::read_to_string(workspace.root().join("nested/dir/new.txt")).unwrap(),
         "fresh\n"
@@ -67,33 +63,32 @@ async fn write_creates_overwrites_and_refuses_bad_targets() {
         &tool,
         json!({"path":"nested/dir/new.txt","content":"replace"}),
     )
-    .await
-    .unwrap();
-    assert!(!output.created);
+    .await;
+    assert!(output_text(&output).contains("overwrote nested/dir/new.txt"));
     assert_eq!(
         fs::read_to_string(workspace.root().join("nested/dir/new.txt")).unwrap(),
         "replace"
     );
     fs::create_dir(workspace.root().join("dir")).unwrap();
     assert!(
-        invoke(&tool, json!({"path":"../outside","content":"x"}))
+        invoke_error(&tool, json!({"path":"../outside","content":"x"}))
             .await
-            .is_err()
+            .contains("not allowed")
     );
     assert!(
-        invoke(&tool, json!({"path":".git/config","content":"x"}))
+        invoke_error(&tool, json!({"path":".git/config","content":"x"}))
             .await
-            .is_err()
+            .contains("Git metadata")
     );
     assert!(
-        invoke(&tool, json!({"path":"dir","content":"x"}))
+        invoke_error(&tool, json!({"path":"dir","content":"x"}))
             .await
-            .is_err()
+            .contains("regular file")
     );
     assert!(
-        invoke(&tool, json!({"path":"ok","content":"\u{0}"}))
+        invoke_error(&tool, json!({"path":"ok","content":"\u{0}"}))
             .await
-            .is_err()
+            .contains("NUL")
     );
 }
 
@@ -115,43 +110,31 @@ async fn glob_finds_matches_newest_first_and_respects_gitignore() {
         .unwrap();
 
     let tool = Glob(workspace.clone());
-    let output = invoke(&tool, json!({"pattern": "**/*.rs"})).await.unwrap();
-    assert!(
-        output.paths == vec!["nested/deep.rs", "new.rs", "old.rs"]
-            || output.paths == vec!["new.rs", "nested/deep.rs", "old.rs"],
-        "got: {:?}",
-        output.paths
-    );
-    assert_eq!(output.paths.last(), Some(&"old.rs".to_string()));
+    let output = invoke(&tool, json!({"pattern": "**/*.rs"})).await;
+    let text = output_text(&output);
+    let mut paths: Vec<&str> = text.lines().collect();
+    paths.sort_unstable();
+    assert_eq!(paths, vec!["nested/deep.rs", "new.rs", "old.rs"], "{text}");
+    assert!(text.ends_with("old.rs"), "oldest last: {text}");
 
     // A narrower path only reports matches under it.
-    let output = invoke(&tool, json!({"pattern": "**/*.rs", "path": "nested"}))
-        .await
-        .unwrap();
-    assert_eq!(output.paths, vec!["nested/deep.rs"]);
+    let output = invoke(&tool, json!({"pattern": "**/*.rs", "path": "nested"})).await;
+    assert_eq!(output_text(&output), "nested/deep.rs");
 }
 
 #[tokio::test]
 async fn glob_reports_no_files_found_and_rejects_bad_input() {
     let (_dir, workspace) = workspace();
     let tool = Glob(workspace.clone());
-    let output = invoke(&tool, json!({"pattern": "**/*.xyzzy"}))
-        .await
-        .unwrap();
-    assert_eq!(
-        output.into_tool_output().unwrap().as_text(),
-        Some("No files found")
-    );
-    let error = invoke(&tool, json!({"pattern": "!"}))
-        .await
-        .unwrap_err()
-        .to_string();
+    let output = invoke(&tool, json!({"pattern": "**/*.xyzzy"})).await;
+    assert_eq!(output_text(&output), "No files found");
+    let error = invoke_error(&tool, json!({"pattern": "!"})).await;
     assert!(error.contains("pattern must be a nonempty include glob"));
     fs::write(workspace.root().join("file.txt"), "").unwrap();
     assert!(
-        invoke(&tool, json!({"pattern": "*", "path": "file.txt"}))
+        invoke_error(&tool, json!({"pattern": "*", "path": "file.txt"}))
             .await
-            .is_err()
+            .contains("directory")
     );
 }
 
@@ -165,9 +148,8 @@ async fn list_sorts_dirs_first_and_hides_instruction_files() {
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
 
     let tool = List(workspace.clone());
-    let output = invoke(&tool, json!({})).await.unwrap();
-    assert_eq!(output.entries, vec!["adir/", "zdir/", "a.rs", "b.txt"]);
-    assert!(output.instructions.is_empty());
+    let output = invoke(&tool, json!({})).await;
+    assert_eq!(output_text(&output), "adir/\nzdir/\na.rs\nb.txt");
 }
 
 #[tokio::test]
@@ -178,25 +160,19 @@ async fn list_injects_subdirectory_instructions_once() {
     fs::write(dir.path().join("src/api/lib.rs"), "").unwrap();
 
     let tool = List(workspace.clone());
-    let output = invoke(&tool, json!({"path": "src/api"})).await.unwrap();
-    assert_eq!(output.instructions.len(), 1);
-    assert!(output.instructions[0].0.ends_with("AGENTS.md"));
-    let text = output
-        .into_tool_output()
-        .unwrap()
-        .as_text()
-        .unwrap()
-        .to_string();
-    assert!(text.ends_with("sub rules"));
+    let output = invoke(&tool, json!({"path": "src/api"})).await;
+    let text = output_text(&output);
+    assert!(text.contains("Instructions from:"), "{text}");
+    assert!(text.ends_with("sub rules"), "{text}");
 
     // Listing a sibling again does not repeat the instruction file.
-    let output = invoke(&tool, json!({"path": "src/api"})).await.unwrap();
-    assert!(output.instructions.is_empty());
+    let output = invoke(&tool, json!({"path": "src/api"})).await;
+    assert!(!output_text(&output).contains("Instructions from:"));
 
     // Non-directory paths are rejected.
     assert!(
-        invoke(&tool, json!({"path": "src/api/lib.rs"}))
+        invoke_error(&tool, json!({"path": "src/api/lib.rs"}))
             .await
-            .is_err()
+            .contains("directory")
     );
 }

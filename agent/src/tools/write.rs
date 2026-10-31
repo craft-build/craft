@@ -1,13 +1,16 @@
-use std::io::Write as _;
-
-use rig_core::tool::{IntoToolOutput, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolImpl, ToolOutput};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::diff::unified_text;
+use crate::run::dedup;
 
 use super::{
-    MAX_FILE_BYTES, Result, Workspace, failure, impl_tool, invalid, io_error, read_bytes, text,
+    MAX_FILE_BYTES, Workspace, claims, commit_staged,
+    error::{Error, Result, definition, failure, finish, invalid, io_error},
+    read_bytes, stage_bytes_for_write, text,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -28,23 +31,23 @@ pub struct WriteOutput {
     pub after: String,
 }
 
-impl IntoToolOutput for WriteOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
+impl super::error::IntoToolResult for WriteOutput {
+    fn into_tool_result(self) -> ToolOutput {
         if self.created {
             // A full-file add-diff would just duplicate the content the model
             // already sent; a summary is enough.
-            return Ok(ToolOutput::text(format!(
+            return super::error::text_output(format!(
                 "wrote {} ({} bytes)",
                 self.path, self.bytes_written
-            )));
+            ));
         }
         let summary = format!("overwrote {} ({} bytes)", self.path, self.bytes_written);
-        Ok(ToolOutput::text(unified_text(
+        super::error::text_output(unified_text(
             &self.before,
             &self.after,
             &summary,
             &self.path,
-        )))
+        ))
     }
 }
 
@@ -52,7 +55,11 @@ impl IntoToolOutput for WriteOutput {
 pub struct Write(pub Workspace);
 
 impl Write {
-    fn execute(workspace: &Workspace, args: WriteArgs) -> Result<WriteOutput> {
+    async fn execute(
+        workspace: &Workspace,
+        args: WriteArgs,
+        cancel: &animist::agent::Cancellation,
+    ) -> Result<WriteOutput> {
         if args.content.contains('\0') {
             return Err(invalid("content must not contain NUL bytes"));
         }
@@ -62,29 +69,37 @@ impl Write {
             ));
         }
         let path = workspace.target(&args.path)?;
-        workspace.note_snapshot(&path);
-        let existed = path.exists();
+        // Cross-agent: the write guard spans resolve → staged write → persist
+        // so a concurrent session cannot interleave with the lost-update check.
+        let _guard = workspace
+            .write_guard(std::slice::from_ref(&args.path), cancel)
+            .await?;
+        workspace.note_snapshot(&path).await;
+        let existed = tokio::fs::symlink_metadata(&path)
+            .await
+            .map(|_| true)
+            .or_else(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => Ok(false),
+                _ => Err(io_error(error)),
+            })?;
         let before = if existed {
-            text(read_bytes(&path)?)?
+            text(read_bytes(&path).await?)?
         } else {
             String::new()
         };
         let parent = path
             .parent()
-            .ok_or_else(|| failure("resolved path has no parent directory"))?;
-        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
-        staged
-            .write_all(args.content.as_bytes())
-            .map_err(io_error)?;
-        staged.as_file().sync_all().map_err(io_error)?;
-        if workspace.target(&args.path)? != path || path.exists() != existed {
+            .ok_or_else(|| failure("resolved path has no parent directory"))?
+            .to_path_buf();
+        let staged = stage_bytes_for_write(&parent, args.content.as_bytes()).await?;
+        if workspace.target(&args.path)? != path
+            || tokio::fs::symlink_metadata(&path).await.is_ok() != existed
+        {
             return Err(failure(
                 "file changed while preparing the write; read it again and retry",
             ));
         }
-        staged
-            .persist(&path)
-            .map_err(|error| io_error(error.error))?;
+        commit_staged(staged, &path).await?;
         Ok(WriteOutput {
             path: workspace.display(&path),
             created: !existed,
@@ -95,10 +110,27 @@ impl Write {
     }
 }
 
-impl_tool!(
-    Write,
-    WriteArgs,
-    WriteOutput,
-    "write",
-    "Write complete content to a UTF-8 file inside the workspace, replacing existing content. Prefer editing existing files; only create files when necessary and never proactively create documentation or README files. Parent directories are created if needed. Atomic, no symlinks, Git metadata, or paths outside the workspace."
-);
+#[async_trait]
+impl ToolImpl for Write {
+    type Args = WriteArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> animist::agent::tool::ToolDefinition {
+        definition::<WriteArgs>(
+            "write",
+            "Write complete content to a UTF-8 file inside the workspace, replacing existing content. Prefer editing existing files; only create files when necessary and never proactively create documentation or README files. Parent directories are created if needed. Atomic, no symlinks, Git metadata, or paths outside the workspace.",
+        )
+    }
+
+    fn scheduling(&self, input: &Value) -> animist::agent::tool::ToolScheduling {
+        claims::writes(
+            self.0.root_key().as_deref(),
+            &dedup::extract_write_paths("write", input),
+        )
+    }
+
+    async fn call(&self, context: &ToolContext<'_>, args: WriteArgs) -> Result<ToolOutput> {
+        finish(Self::execute(&self.0, args, &context.run.cancellation).await)
+    }
+}

@@ -6,12 +6,13 @@
 
 use std::sync::Arc;
 
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Result, invalid};
+use super::error::{Error, Result, definition, finish, invalid};
 use crate::subagent::{SubagentRequest, SubagentResult};
 
 /// Host seam: launch one subagent and run it to completion. The TUI and
@@ -78,11 +79,9 @@ pub struct TaskOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for TaskOutput {
-    fn into_tool_output(
-        self,
-    ) -> std::result::Result<ToolOutput, rig_core::tool::ToolExecutionError> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for TaskOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
@@ -91,11 +90,10 @@ impl IntoToolOutput for TaskOutput {
 pub struct Task(pub Arc<dyn SpawnSubagent>);
 
 impl Task {
-    fn execute(&self, args: TaskArgs) -> crate::run::BoxFuture<Result<TaskOutput>> {
-        let spawn = Arc::clone(&self.0);
-        Box::pin(async move {
+    async fn execute(&self, context: &ToolContext<'_>, args: TaskArgs) -> Result<TaskOutput> {
+        {
             let req = SubagentRequest {
-                tool_use_id: crate::run::dispatch::current_call_id().unwrap_or_default(),
+                tool_use_id: context.call.id.clone(),
                 description: args.description,
                 prompt: args.prompt,
                 subagent_type: args.subagent_type.unwrap_or_else(|| "research".into()),
@@ -104,7 +102,7 @@ impl Task {
                 output_schema: args.output_schema,
                 isolation: args.isolation.unwrap_or_else(|| "none".into()),
             };
-            match spawn.spawn(req).await {
+            match self.0.spawn(req).await {
                 Ok(SubagentResult::Text(text)) => Ok(TaskOutput { text }),
                 Ok(SubagentResult::Json(value)) => {
                     let pretty = serde_json::to_string_pretty(&value)
@@ -113,31 +111,30 @@ impl Task {
                 }
                 Err(e) => Err(invalid(e)),
             }
-        })
+        }
     }
 }
 
-impl PortableTool for Task {
-    const NAME: &'static str = "task";
-    type Args = TaskArgs;
-    type Output = TaskOutput;
-    type Error = rig_core::tool::ToolExecutionError;
-
-    fn description(&self) -> String {
-        "Launch an autonomous subagent to perform a task independently. Best combined with batch: \
+const TASK_DESCRIPTION: &str = "Launch an autonomous subagent to perform a task independently. Best combined with batch: \
 launch multiple tasks concurrently. The subagent starts fresh (tell it everything it needs in \
 the prompt; file paths and line numbers help more than prose) and its final message is its \
-result, so ask for a complete, self-contained answer."
-            .into()
+result, so ask for a complete, self-contained answer.";
+
+#[async_trait]
+impl ToolImpl for Task {
+    type Args = TaskArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<TaskArgs>("task", TASK_DESCRIPTION)
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(TaskArgs)).expect("JSON Schema is serializable")
-    }
+    // Exclusive: the child agent runs with its own tool registry and can
+    // touch anything.
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        let fut = self.execute(args);
-        fut.await
+    async fn call(&self, context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
+        finish(self.execute(context, args).await)
     }
 }
 
@@ -185,11 +182,42 @@ mod tests {
         (Task(mock.clone()), mock)
     }
 
+    async fn invoke(task: &Task, args: TaskArgs) -> animist::agent::tool::ToolOutput {
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        harness
+            .call(
+                task.clone(),
+                serde_json::to_value(args_fields(&args)).unwrap(),
+            )
+            .await
+            .expect("task outcome")
+    }
+
+    /// The wire shape of `TaskArgs`: `args()` builds the typed struct, this
+    /// rebuilds its JSON (TaskArgs is Deserialize-only).
+    fn args_fields(args: &TaskArgs) -> serde_json::Value {
+        serde_json::json!({
+            "description": args.description,
+            "prompt": args.prompt,
+            "subagent_type": args.subagent_type,
+            "model_tier": args.model_tier,
+            "context_mode": args.context_mode,
+            "output_schema": args.output_schema,
+            "isolation": args.isolation,
+        })
+    }
+
+    fn text(output: &animist::agent::tool::ToolOutput) -> String {
+        crate::history::ext::tool_content_text(&output.content)
+    }
+
     #[tokio::test]
     async fn defaults_research_fresh_none_isolation() {
         let (task, mock) = mock(SubagentResult::Text("done".into()));
-        let output = task.call(args()).await.unwrap();
-        assert_eq!(output.text, "done");
+        let output = invoke(&task, args()).await;
+        assert_eq!(text(&output), "done");
         let seen = mock.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].subagent_type, "research");
@@ -201,8 +229,8 @@ mod tests {
     #[tokio::test]
     async fn json_result_is_pretty_printed() {
         let (task, mock) = mock(SubagentResult::Json(serde_json::json!({"summary": "ok"})));
-        let output = task.call(args()).await.unwrap();
-        assert_eq!(output.text, "{\n  \"summary\": \"ok\"\n}");
+        let output = invoke(&task, args()).await;
+        assert_eq!(text(&output), "{\n  \"summary\": \"ok\"\n}");
         assert_eq!(mock.seen.lock().unwrap().len(), 1);
     }
 
@@ -218,14 +246,16 @@ mod tests {
             }
         }
         let task = Task(Arc::new(Failing));
-        let err = task.call(args()).await.unwrap_err();
-        assert!(err.to_string().contains("sub-agent error: boom"));
+        let output = invoke(&task, args()).await;
+        assert!(output.is_error);
+        assert!(text(&output).contains("sub-agent error: boom"));
     }
 
     #[tokio::test]
     async fn no_host_seam_reports_unavailable() {
         let task = Task(Arc::new(NoSubagents));
-        let err = task.call(args()).await.unwrap_err();
-        assert!(err.to_string().contains("not available"));
+        let output = invoke(&task, args()).await;
+        assert!(output.is_error);
+        assert!(text(&output).contains("not available"));
     }
 }

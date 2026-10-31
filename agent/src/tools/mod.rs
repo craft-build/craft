@@ -1,22 +1,28 @@
-//! Workspace-scoped filesystem tools for Rig.
+//! Workspace-scoped filesystem tools as native animist `ToolImpl`s.
 //!
 //! These checks prevent accidental escapes, not hostile filesystem races. The
 //! caller must supply a trusted workspace and apply any approval/sandbox policy.
 //!
-//! Output types implement `IntoToolOutput` rather than `Serialize`: Rig must send
-//! their readable text to both the model and ACP, not serialize the internal fields.
+//! Tools render their readable-text contract for both the model and ACP:
+//! JSON renders to text, images become `ToolContent::Image`. Conflicts are
+//! expressed as [`animist::agent::tool::ToolScheduling`] claims (see
+//! [`claims`]), with a cross-agent path lock ([`locks`]) for subagents and
+//! concurrent sessions sharing one workspace.
 
 pub(crate) mod apply_patch;
 pub(crate) mod bash;
 mod batch;
+mod claims;
 mod delete;
 mod edit;
+pub(crate) mod error;
 pub(crate) mod fuzzy_replace;
 mod glob;
 mod grep;
-mod inplace_edit;
+pub(crate) mod inplace_edit;
 mod list;
 mod list_tools;
+pub(crate) mod locks;
 pub(crate) mod move_file;
 mod multiedit;
 mod question;
@@ -42,7 +48,7 @@ pub use bash::{
     Bash, BashArgs, BashKill, BashKillArgs, BashOutput, BashStatus, BashStatusArgs, BashWatch,
     BashWatchArgs,
 };
-pub use batch::{Batch, BatchArgs, BatchOutput, SharedDispatch};
+pub use batch::{Batch, BatchArgs, BatchOutput};
 pub use delete::{Delete, DeleteArgs, DeleteOutput};
 pub use edit::{
     Edit, EditArgs, EditLines, EditLinesArgs, EditLinesOutput, EditOutput, InsertLines,
@@ -71,23 +77,27 @@ pub use webfetch::{Webfetch, WebfetchArgs, WebfetchOutput};
 pub use websearch::{Websearch, WebsearchArgs, WebsearchOutput};
 pub use write::{Write, WriteArgs, WriteOutput};
 
-use std::{
-    fs::{self, File},
-    io::{self, Read as _},
-    path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+use animist::agent::tool::{
+    ToolContents, ToolContext, ToolDefinition, ToolExecutor, ToolExecutorImpl, ToolOutput,
+    ToolRegistry, ToolScheduling,
 };
+use async_trait::async_trait;
+use serde_json::Value;
+use tokio::io::AsyncReadExt as _;
 
-use rig_core::completion::ToolDefinition;
-use rig_core::completion::message::{ImageMediaType, ToolResultContent as RigToolResultContent};
-use rig_core::tool::{DynamicTool, PortableTool, ToolErrorKind, ToolExecutionError, ToolOutput};
+use crate::mcp::session::McpPart;
+use crate::mcp::{McpHandle, McpToolOutput};
 
-pub(crate) type Result<T> = std::result::Result<T, ToolExecutionError>;
+use crate::history::ImageSource;
+
 pub(crate) const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_LINE_BYTES: usize = 2048;
 
-/// Every tool name registered by [`Workspace::register`]. MCP server names are
+/// Every tool name registered by [`Workspace::registry`]. MCP server names are
 /// rejected when they collide with one of these (they would shadow a builtin).
 const BUILTIN_TOOL_NAMES: &[&str] = &[
     "read",
@@ -127,31 +137,6 @@ pub fn is_builtin_tool(name: &str) -> bool {
 /// Every native tool name the registry can serve: the builtin table plus
 /// the argosy natives. The CLI's tool-name validation checks against this
 /// so the valid-name list cannot drift from the registry.
-/// Convert rig tool definitions to animist provider declarations: the one
-/// conversion point until 06 makes the tools native.
-pub(crate) fn animist_definitions(definitions: &[ToolDefinition]) -> Vec<animist::provider::Tool> {
-    definitions
-        .iter()
-        .map(|definition| {
-            animist::provider::Tool::builder()
-                .name(definition.name.clone())
-                .description(definition.description.clone())
-                .input_schema(definition.parameters.clone())
-                .build()
-        })
-        .collect()
-}
-
-/// A validated rig tool name, tolerating degenerate records with empty
-/// names: those replay under a stable placeholder rather than failing the
-/// registration.
-pub(crate) fn tool_name(name: &str) -> rig_core::completion::message::ToolName {
-    rig_core::completion::message::ToolName::new(name).unwrap_or_else(|_| {
-        rig_core::completion::message::ToolName::new("unnamed")
-            .expect("placeholder tool name is non-empty")
-    })
-}
-
 pub fn native_tool_names() -> Vec<&'static str> {
     let mut names = BUILTIN_TOOL_NAMES.to_vec();
     names.extend(
@@ -164,13 +149,16 @@ pub fn native_tool_names() -> Vec<&'static str> {
     names
 }
 
-/// One fixed root shared by all tools in an agent. Calls are serialized on a
-/// blocking worker, so filesystem I/O does not block Tokio's executor and two
-/// edits from the same tool set cannot overwrite one another.
+/// One fixed root shared by all tools in an agent, plus the state every
+/// tool family needs. Tools hold the workspace (or a slice of it) and run
+/// directly as animist `ToolImpl`s: there is no dispatcher between the
+/// registry and the tool, and no global lock around filesystem I/O.
+/// Ordering within one agent comes from scheduling claims; ordering across
+/// agents (subagents, concurrent sessions) comes from [`locks::PathLocks`].
 #[derive(Clone)]
 pub struct Workspace {
     root: Arc<PathBuf>,
-    lock: Arc<Mutex<()>>,
+    locks: locks::PathLocks,
     loaded_instructions: crate::instructions::LoadedInstructions,
     todos: todo_write::TodoStore,
     compression_store: crate::compression::store::SharedCompressionStore,
@@ -184,42 +172,33 @@ pub struct Workspace {
     /// Session plan file (C.17): the one write target allowed outside the
     /// workspace root. Shared so every clone sees the set, and kept for the
     /// whole session once allocated — mode switches must not revoke it.
-    plan_path: std::sync::Arc<std::sync::RwLock<Option<PathBuf>>>,
-    /// MCP client handle (B.11): when set, `register_with_mode` appends one
-    /// portable tool per published MCP tool under its `server__tool` wire name.
-    /// Shared like every other cell so the per-turn set is visible through clones.
-    mcp: std::sync::Arc<std::sync::RwLock<Option<crate::mcp::McpHandle>>>,
+    plan_path: Arc<RwLock<Option<PathBuf>>>,
+    /// MCP client handle (B.11): when set, [`Workspace::registry`] appends
+    /// one executor per published MCP tool under its `server__tool` wire
+    /// name. Shared like every other cell so the set is visible through
+    /// clones.
+    mcp: Arc<RwLock<Option<McpHandle>>>,
     /// Host seam for the `task` tool (A.5): the TUI and headless surfaces
     /// install a subagent launcher per turn; the default reports that
     /// subagents are unavailable.
     subagents: Arc<dyn task::SpawnSubagent>,
-    /// Session-wide before-execute hook (the approval gate). Applied inside
-    /// every dispatch-table registration, so the batch fan-out's snapshot of
-    /// the table — taken during registration, before any post-register
-    /// `ToolDispatch::with_before` could reach it — consults the gate too.
-    before: Option<Arc<dyn crate::run::dispatch::BeforeExecute>>,
-    /// Phase 6: the current turn's cancellation, stored per turn by the
-    /// surface (the dispatch table is built once now). MCP tool calls race
-    /// it so a cancelled turn tells the server to stop.
-    mcp_cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
     /// Session sandbox policy (resolved from config/env at construction or
-    /// installed by the surface). Turn registrations snapshot or narrow it
-    /// into a frozen per-turn cell, like every other per-turn decision.
+    /// installed by the surface). `bash` reads it at execution time.
     sandbox: crate::sandbox::SandboxPolicyCell,
 }
 
 impl Workspace {
-    pub fn new(root: impl AsRef<Path>) -> Result<Self> {
-        let root = fs::canonicalize(root).map_err(io_error)?;
+    pub fn new(root: impl AsRef<Path>) -> error::Result<Self> {
+        let root = std::fs::canonicalize(root).map_err(error::io_error)?;
         if !root.is_dir() {
-            return Err(invalid("workspace root must be a directory"));
+            return Err(error::invalid("workspace root must be a directory"));
         }
         if root.components().any(|c| is_git_component(c.as_os_str())) {
-            return Err(denied("workspace must not be inside Git metadata"));
+            return Err(error::denied("workspace must not be inside Git metadata"));
         }
         Ok(Self {
+            locks: locks::PathLocks::new(),
             root: Arc::new(root.clone()),
-            lock: Arc::new(Mutex::new(())),
             loaded_instructions: crate::instructions::LoadedInstructions::new(),
             todos: Default::default(),
             compression_store: crate::compression::store::shared_store(),
@@ -227,11 +206,9 @@ impl Workspace {
             bash_jobs: Default::default(),
             state_dir: crate::storage::StateDir::resolve().ok(),
             questions: Arc::new(question::DismissAsk),
-            plan_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            mcp: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            plan_path: Arc::new(RwLock::new(None)),
+            mcp: Arc::new(RwLock::new(None)),
             subagents: Arc::new(task::NoSubagents),
-            mcp_cancel: Default::default(),
-            before: None,
             sandbox: Default::default(),
         })
     }
@@ -241,14 +218,6 @@ impl Workspace {
     #[cfg(test)]
     pub(crate) fn with_state_dir(mut self, dir: crate::storage::StateDir) -> Self {
         self.state_dir = Some(dir);
-        self
-    }
-
-    /// Install the session's before-execute hook (approval gate). See the
-    /// `before` field: registering through a workspace that carries the
-    /// hook is what gates batch children, not a post-register attach.
-    pub fn with_before(mut self, hook: Arc<dyn crate::run::dispatch::BeforeExecute>) -> Self {
-        self.before = Some(hook);
         self
     }
 
@@ -263,13 +232,13 @@ impl Workspace {
     /// Install the session's MCP client (B.11). Call before the first turn
     /// registers tools, after awaiting `McpHandle::ready` where the caller
     /// must not ship a prompt without the MCP tools.
-    pub fn set_mcp(&self, handle: Option<crate::mcp::McpHandle>) {
-        let mut cell = self.mcp.write().expect("mcp cell poisoned");
+    pub fn set_mcp(&self, handle: Option<McpHandle>) {
+        let mut cell = self.mcp.write().unwrap_or_else(|e| e.into_inner());
         *cell = handle;
     }
 
-    pub fn mcp(&self) -> Option<crate::mcp::McpHandle> {
-        self.mcp.read().expect("mcp cell poisoned").clone()
+    pub fn mcp(&self) -> Option<McpHandle> {
+        self.mcp.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Install the session's resolved sandbox policy (from `[sandbox]`
@@ -296,31 +265,6 @@ impl Workspace {
         self.sandbox.clone()
     }
 
-    /// The per-turn sandbox cell baked into a tool table. Plan mode and
-    /// read-only workers get a frozen read-only policy (plan mode keeps the
-    /// allocated plan file writable); build/general turns share the session
-    /// cell so later policy installs are visible.
-    fn turn_sandbox_cell(
-        &self,
-        mode: &crate::run::AgentMode,
-        force_read_only: bool,
-    ) -> crate::sandbox::SandboxPolicyCell {
-        let read_only = force_read_only || matches!(mode, crate::run::AgentMode::Plan(_));
-        if !read_only {
-            return self.sandbox.clone();
-        }
-        let mut policy = self.sandbox_policy();
-        policy.mode = crate::sandbox::SandboxMode::ReadOnly;
-        policy.writable_roots = mode
-            .plan_path()
-            .map(|p| vec![p.to_path_buf()])
-            .unwrap_or_default();
-        std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::SandboxState {
-            policy,
-            note_shown: false,
-        }))
-    }
-
     /// Share the session's instruction-dedupe set so instruction files are
     /// injected into tool output at most once per session.
     pub fn with_loaded_instructions(
@@ -335,6 +279,43 @@ impl Workspace {
         &self.root
     }
 
+    /// The workspace root as the string anchor for path normalization: the
+    /// same spelling scheduling claims, path locks, and the dedup cache use.
+    pub(crate) fn root_key(&self) -> Option<String> {
+        Some(self.root.display().to_string())
+    }
+
+    pub(crate) fn locks(&self) -> &locks::PathLocks {
+        &self.locks
+    }
+
+    /// Cross-agent write guard for one call's write targets: the same
+    /// normalized keys the scheduling claim uses, held for the duration of
+    /// the write.
+    pub(crate) async fn write_guard(
+        &self,
+        paths: &[String],
+        cancel: &animist::agent::Cancellation,
+    ) -> error::Result<locks::WriteGuard> {
+        let keys = claims::write_keys(self.root_key().as_deref(), paths);
+        self.locks.write(&keys, cancel).await
+    }
+
+    /// Cross-agent read guard for one read target: a shared guard under the
+    /// root, so a workspace-wide writer still excludes it.
+    pub(crate) async fn read_guard(
+        &self,
+        paths: &[String],
+        cancel: &animist::agent::Cancellation,
+    ) -> error::Result<locks::ReadGuard> {
+        self.locks
+            .read(
+                &claims::read_keys(self.root_key().as_deref(), paths),
+                cancel,
+            )
+            .await
+    }
+
     /// Set (or clear) the session's plan file (C.17). The plan file lives
     /// in the state dir, outside the workspace root; `walk` exempts exactly
     /// this path from containment. Install when a plan is allocated and
@@ -345,10 +326,14 @@ impl Workspace {
     }
 
     fn plan_target(&self, requested: &str) -> bool {
+        let root = self.root_key();
         let guard = self.plan_path.read().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().is_some_and(|plan| {
-            crate::run::dedup::normalize_write_path(requested)
-                == crate::run::dedup::normalize_write_path(&plan.display().to_string())
+            crate::run::dedup::normalize_write_path_with_root(root.as_deref(), requested)
+                == crate::run::dedup::normalize_write_path_with_root(
+                    root.as_deref(),
+                    &plan.display().to_string(),
+                )
         })
     }
 
@@ -358,34 +343,21 @@ impl Workspace {
     /// Only the exact session plan file ([`Self::plan_target`]) is
     /// writable outside the workspace.
     fn plans_read_target(&self, requested: &str) -> bool {
-        let normalize = crate::run::dedup::normalize_write_path;
+        let root = self.root_key();
+        let normalize =
+            |path: &str| crate::run::dedup::normalize_write_path_with_root(root.as_deref(), path);
         self.state_dir.as_ref().is_some_and(|dir| {
             let plans = normalize(&dir.path().join("plans").display().to_string());
-            Path::new(&normalize(requested)).starts_with(&plans)
+            Path::new(&normalize(requested)).starts_with(plans)
         })
     }
 
     /// Install the question seam (A.5). Taken on a workspace clone per
-    /// turn (like the approval gate) so the asker can carry the turn's
+    /// turn (like the subagent launcher) so the asker can carry the turn's
     /// cancel token and event channel.
     pub fn with_questions(mut self, asker: Arc<dyn question::AskQuestions>) -> Self {
         self.questions = asker;
         self
-    }
-
-    /// The per-turn cancellation cell MCP tool calls race (Phase 6): the
-    /// surface owns the cell and stores each turn's cancellation into it.
-    pub fn with_cancel(
-        mut self,
-        cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
-    ) -> Self {
-        self.mcp_cancel = cancel;
-        self
-    }
-
-    /// The workspace's per-turn cancellation cell.
-    pub fn cancel_cell(&self) -> std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>> {
-        self.mcp_cancel.clone()
     }
 
     /// The session-shared reversible-compression store: request-build
@@ -415,212 +387,281 @@ impl Workspace {
 
     /// Capture `path`'s pre-write contents for `/undo`. Write-family tools
     /// call this after resolving their target and before mutating.
-    pub(crate) fn note_snapshot(&self, path: &Path) {
-        self.snapshots.note(path);
+    pub(crate) async fn note_snapshot(&self, path: &Path) {
+        // sync snapshot store: the capture reads up to 5 MiB under its
+        // state lock.
+        let snapshots = self.snapshots.clone();
+        let path = path.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || snapshots.note(&path)).await;
     }
 
-    /// Register the workspace's tools into our dispatch executor. The batch
-    /// tool joins the table before the `list_tools` snapshot is taken, then
-    /// receives the finished table through its shared slot so its children
-    /// flow through the same interception pipeline.
-    pub fn register(&self) -> crate::run::ToolDispatch {
-        self.register_with_mode(crate::run::AgentMode::Build)
+    /// The full tool registry for a turn: every builtin, the argosy
+    /// knowledge tools under their native names, `batch`, the session's MCP
+    /// tools, and the self-describing `list_tools` entry. One constructor
+    /// row per tool lives in [`Self::register_builtins`]; no dispatcher or
+    /// decorator sits between the registry and the tool.
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    pub fn registry(&self) -> std::result::Result<ToolRegistry, animist::agent::AgentError> {
+        let mut registry = ToolRegistry::default();
+        self.register_builtins(&mut registry, self.sandbox_cell(), BUILTIN_TOOL_NAMES)?;
+        registry.register(Batch)?;
+        // The full registry serves every argosy native; the subagent and
+        // reviewer budgets filter by their allowed lists.
+        self.register_argosy(&mut registry, None)?;
+        self.register_mcp(&mut registry)?;
+        self.register_list_tools(&mut registry)?;
+        Ok(registry)
     }
 
-    /// One constructor row per tool: the single shared table behind both
-    /// [`Self::register_with_mode`] and [`Self::register_subagent`], so the
-    /// two registrations cannot drift — a wire name absent here is simply
-    /// never registered, never rescued by a wildcard arm. The argosy
-    /// knowledge tools register as first-class natives under their own
-    /// names; both surfaces see them.
-    fn builtin_tool_table(
-        &self,
-        sandbox: crate::sandbox::SandboxPolicyCell,
-    ) -> Vec<(&'static str, DynamicTool)> {
-        let mut table = self.core_builtin_table(sandbox);
-        table.extend(argosy_tools());
-        table
-    }
-
-    fn core_builtin_table(
-        &self,
-        sandbox: crate::sandbox::SandboxPolicyCell,
-    ) -> Vec<(&'static str, DynamicTool)> {
-        vec![
-            ("read", dynamic(Read(self.clone()))),
-            ("grep", dynamic(Grep(self.clone()))),
-            ("glob", dynamic(Glob(self.clone()))),
-            ("list", dynamic(List(self.clone()))),
-            ("edit", dynamic(Edit(self.clone()))),
-            ("edit_lines", dynamic(EditLines(self.clone()))),
-            ("insert_lines", dynamic(InsertLines(self.clone()))),
-            ("multiedit", dynamic(MultiEdit(self.clone()))),
-            ("apply_patch", dynamic(ApplyPatch(self.clone()))),
-            ("write", dynamic(Write(self.clone()))),
-            ("delete", dynamic(Delete(self.clone()))),
-            ("move_file", dynamic(MoveFile(self.clone()))),
-            ("bash", dynamic(Bash(self.clone(), sandbox))),
-            ("bash_status", dynamic(BashStatus(self.clone()))),
-            ("bash_watch", dynamic(BashWatch(self.clone()))),
-            ("bash_kill", dynamic(BashKill(self.clone()))),
-            ("todo_write", dynamic(TodoWrite(self.clone()))),
-            (
-                "retrieve",
-                dynamic(Retrieve(self.compression_store.clone())),
-            ),
-            ("skill", dynamic(Skill::new(self.root().to_path_buf()))),
-            (
-                "sessions",
-                dynamic(Sessions::new(
-                    self.root().display().to_string(),
-                    self.state_dir.clone(),
-                )),
-            ),
-            ("webfetch", dynamic(Webfetch)),
-            ("websearch", dynamic(Websearch)),
-            ("view_image", dynamic(ViewImage(self.clone()))),
-            ("question", dynamic(Question(self.questions.clone()))),
-            ("task", dynamic(Task(self.subagents.clone()))),
-            ("review", dynamic(Review(self.subagents.clone()))),
-        ]
-    }
-
-    /// [`Self::register`] with the turn's mode baked into the table — and
-    /// into the batch child table — so write-gating is a frozen snapshot for
-    /// the whole turn.
-    pub fn register_with_mode(&self, mode: crate::run::AgentMode) -> crate::run::ToolDispatch {
-        let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
-        let mut tools = self.mode_tool_set(&mode, batch.clone());
-        let definitions = tools.iter().map(DynamicTool::definition).collect();
-        tools.push(dynamic(ListTools(Arc::new(definitions))));
-        let dispatch = crate::run::ToolDispatch::new(tools)
-            .with_write_root((*self.root).clone())
-            .with_compression_store(self.compression_store.clone())
-            .with_snapshots(self.snapshots.clone())
-            .with_mode(mode);
-        // The gate must be in the table before the batch snapshot below.
-        let dispatch = match &self.before {
-            Some(hook) => dispatch.with_before(Arc::clone(hook)),
-            None => dispatch,
-        };
-        let _ = batch.0.set(dispatch.clone());
-        dispatch
-    }
-
-    /// The provider-facing tool definitions a turn in `mode` would register
-    /// (including MCP tools and the self-describing `list_tools` entry):
-    /// exactly what [`Self::register_with_mode`] sends, so surfaces
-    /// computing request overhead cannot drift from the run's own table.
-    pub fn tool_definitions(&self, mode: &crate::run::AgentMode) -> Vec<animist::provider::Tool> {
-        let mut tools =
-            self.mode_tool_set(mode, Batch(std::sync::Arc::new(std::sync::OnceLock::new())));
-        let mut definitions: Vec<ToolDefinition> =
-            tools.iter().map(DynamicTool::definition).collect();
-        tools.push(dynamic(ListTools(Arc::new(definitions.clone()))));
-        definitions.push(tools.last().expect("list_tools just pushed").definition());
-        animist_definitions(&definitions)
-    }
-
-    /// The mode's full tool set (builtins + batch + MCP), before the
-    /// self-describing `list_tools` entry is appended at registration.
-    fn mode_tool_set(&self, mode: &crate::run::AgentMode, batch: Batch) -> Vec<DynamicTool> {
-        let sandbox = self.turn_sandbox_cell(mode, false);
-        let mut tools: Vec<DynamicTool> = self
-            .builtin_tool_table(sandbox)
-            .into_iter()
-            .map(|(_, tool)| tool)
-            .collect();
-        tools.push(dynamic(batch));
-        if let Some(handle) = self.mcp() {
-            tools.extend(mcp_tools(&handle, self.mcp_cancel.clone()));
-        }
-        tools
-    }
-
-    /// The restricted tool table for a `task`-spawned subagent (A.5):
+    /// The restricted registry for a `task`-spawned subagent (A.5):
     /// `general` adds the write family to the read-only research set;
     /// neither includes `task`, `question`, or `sessions`. MCP tools are
-    /// inherited. The batch child table is built from the same restricted
-    /// set, so batch fan-outs cannot escape the subagent's tool budget.
-    pub fn register_subagent(&self, general: bool) -> crate::run::ToolDispatch {
+    /// inherited, so a subagent's fan-outs cannot escape its tool budget.
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    pub fn subagent_registry(
+        &self,
+        general: bool,
+    ) -> std::result::Result<ToolRegistry, animist::agent::AgentError> {
         let allowed: &[&str] = if general {
             crate::subagent::GENERAL_TOOLS
         } else {
             crate::subagent::RESEARCH_TOOLS
         };
-        let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
-        // Read-only workers never inherit workspace-write, even though their
-        // budget has no bash today: the shared table must not leak it to
-        // future additions.
-        let sandbox = self.turn_sandbox_cell(&crate::run::AgentMode::Build, !general);
-        // The restricted table is the shared builtin table filtered by the
-        // subagent tool budget.
-        let mut tools: Vec<DynamicTool> = self
-            .builtin_tool_table(sandbox)
-            .into_iter()
-            .filter(|(name, _)| allowed.contains(name))
-            .map(|(_, tool)| tool)
-            .collect();
-        if allowed.contains(&"batch") {
-            tools.push(dynamic(batch.clone()));
-        }
-        if let Some(handle) = self.mcp() {
-            tools.extend(mcp_tools(&handle, self.mcp_cancel.clone()));
-        }
-        let definitions = tools.iter().map(DynamicTool::definition).collect();
-        tools.push(dynamic(ListTools(Arc::new(definitions))));
-        let dispatch = crate::run::ToolDispatch::new(tools)
-            .with_write_root((*self.root).clone())
-            .with_compression_store(self.compression_store.clone())
-            .with_snapshots(self.snapshots.clone())
-            .with_mode(crate::run::AgentMode::Build);
-        // Same as above: the subagent's own batch fan-out must see the gate.
-        let dispatch = match &self.before {
-            Some(hook) => dispatch.with_before(Arc::clone(hook)),
-            None => dispatch,
+        let mut registry = ToolRegistry::default();
+        // Read-only workers never inherit workspace-write, even though
+        // their budget has no bash today: the shared cell must not leak it
+        // to future additions.
+        let sandbox = if general {
+            self.sandbox_cell()
+        } else {
+            self.frozen_read_only_cell()
         };
-        let _ = batch.0.set(dispatch.clone());
-        dispatch
+        self.register_builtins(&mut registry, sandbox, allowed)?;
+        if allowed.contains(&"batch") {
+            registry.register(Batch)?;
+        }
+        self.register_argosy(&mut registry, Some(allowed))?;
+        self.register_mcp(&mut registry)?;
+        self.register_list_tools(&mut registry)?;
+        Ok(registry)
     }
 
-    /// The reviewer subagent's table (Phase 5 of the argosy integration):
-    /// the read-only research set plus the argosy review workflow, filtered
-    /// from the same shared builtin table. Plan mode: the reviewer never
-    /// writes.
-    pub fn register_reviewer(&self) -> crate::run::ToolDispatch {
-        let allowed = crate::subagent::REVIEWER_TOOLS;
-        let sandbox = self.turn_sandbox_cell(&crate::run::AgentMode::Build, true);
-        let mut tools: Vec<DynamicTool> = self
-            .builtin_tool_table(sandbox)
-            .into_iter()
-            .filter(|(name, _)| allowed.contains(name))
-            .map(|(_, tool)| tool)
-            .collect();
-        let definitions = tools.iter().map(DynamicTool::definition).collect();
-        tools.push(dynamic(ListTools(Arc::new(definitions))));
-        crate::run::ToolDispatch::new(tools)
-            .with_write_root((*self.root).clone())
-            .with_compression_store(self.compression_store.clone())
-            .with_snapshots(self.snapshots.clone())
-            // Build mode is safe here: the reviewer's budget contains no
-            // write tools at all.
-            .with_mode(crate::run::AgentMode::Build)
-    }
-
-    pub(crate) async fn run<T: Send + 'static>(
+    /// The reviewer subagent's registry (Phase 5 of the argosy
+    /// integration): the read-only research set plus the argosy review
+    /// workflow. The reviewer never writes.
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    pub fn reviewer_registry(
         &self,
-        operation: impl FnOnce(&Self) -> Result<T> + Send + 'static,
-    ) -> Result<T> {
-        let workspace = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let _guard = workspace
-                .lock
-                .lock()
-                .map_err(|_| failure("workspace tool lock was poisoned"))?;
-            operation(&workspace)
-        })
-        .await
-        .map_err(|error| failure(format!("filesystem task failed: {error}")))?
+    ) -> std::result::Result<ToolRegistry, animist::agent::AgentError> {
+        let allowed = crate::subagent::REVIEWER_TOOLS;
+        let mut registry = ToolRegistry::default();
+        // The reviewer never writes.
+        self.register_builtins(&mut registry, self.frozen_read_only_cell(), allowed)?;
+        self.register_argosy(&mut registry, Some(allowed))?;
+        self.register_list_tools(&mut registry)?;
+        Ok(registry)
+    }
+
+    /// A frozen read-only sandbox cell: never observes later session policy
+    /// installs.
+    fn frozen_read_only_cell(&self) -> crate::sandbox::SandboxPolicyCell {
+        let mut policy = self.sandbox_policy();
+        policy.mode = crate::sandbox::SandboxMode::ReadOnly;
+        policy.writable_roots = Vec::new();
+        Arc::new(RwLock::new(crate::sandbox::SandboxState {
+            policy,
+            note_shown: false,
+        }))
+    }
+
+    /// One registration row per tool, keyed by the budget name the
+    /// subagent tool sets use (`move_file` for the `move` tool's wire
+    /// name): a wire name absent here is simply never registered, never
+    /// rescued by a wildcard arm. `bash` reads `sandbox` at execution time;
+    /// read-only workers get a frozen read-only cell so the shared table
+    /// cannot leak workspace-write to future additions.
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    fn register_builtins(
+        &self,
+        registry: &mut ToolRegistry,
+        sandbox: crate::sandbox::SandboxPolicyCell,
+        allowed: &[&str],
+    ) -> std::result::Result<(), animist::agent::AgentError> {
+        if allowed.contains(&"read") {
+            registry.register(Read(self.clone()))?;
+        }
+        if allowed.contains(&"grep") {
+            registry.register(Grep(self.clone()))?;
+        }
+        if allowed.contains(&"glob") {
+            registry.register(Glob(self.clone()))?;
+        }
+        if allowed.contains(&"list") {
+            registry.register(List(self.clone()))?;
+        }
+        if allowed.contains(&"edit") {
+            registry.register(Edit(self.clone()))?;
+        }
+        if allowed.contains(&"edit_lines") {
+            registry.register(EditLines(self.clone()))?;
+        }
+        if allowed.contains(&"insert_lines") {
+            registry.register(InsertLines(self.clone()))?;
+        }
+        if allowed.contains(&"multiedit") {
+            registry.register(MultiEdit(self.clone()))?;
+        }
+        if allowed.contains(&"apply_patch") {
+            registry.register(ApplyPatch(self.clone()))?;
+        }
+        if allowed.contains(&"write") {
+            registry.register(Write(self.clone()))?;
+        }
+        if allowed.contains(&"delete") {
+            registry.register(Delete(self.clone()))?;
+        }
+        if allowed.contains(&"move_file") {
+            registry.register(MoveFile(self.clone()))?;
+        }
+        if allowed.contains(&"bash") {
+            registry.register(Bash(self.clone(), sandbox))?;
+        }
+        if allowed.contains(&"bash_status") {
+            registry.register(BashStatus(self.clone()))?;
+        }
+        if allowed.contains(&"bash_watch") {
+            registry.register(BashWatch(self.clone()))?;
+        }
+        if allowed.contains(&"bash_kill") {
+            registry.register(BashKill(self.clone()))?;
+        }
+        if allowed.contains(&"todo_write") {
+            registry.register(TodoWrite(self.clone()))?;
+        }
+        if allowed.contains(&"retrieve") {
+            registry.register(Retrieve(self.compression_store.clone()))?;
+        }
+        if allowed.contains(&"skill") {
+            registry.register(Skill::new(self.root().to_path_buf()))?;
+        }
+        if allowed.contains(&"sessions") {
+            registry.register(Sessions::new(
+                self.root().display().to_string(),
+                self.state_dir.clone(),
+            ))?;
+        }
+        if allowed.contains(&"webfetch") {
+            registry.register(Webfetch)?;
+        }
+        if allowed.contains(&"websearch") {
+            registry.register(Websearch)?;
+        }
+        if allowed.contains(&"view_image") {
+            registry.register(ViewImage(self.clone()))?;
+        }
+        if allowed.contains(&"question") {
+            registry.register(Question(self.questions.clone()))?;
+        }
+        if allowed.contains(&"task") {
+            registry.register(Task(self.subagents.clone()))?;
+        }
+        if allowed.contains(&"review") {
+            registry.register(Review(self.subagents.clone()))?;
+        }
+        Ok(())
+    }
+
+    /// The argosy knowledge tools (Phase 1 of the argosy integration): one
+    /// executor per argosy definition under its native name, filtered by
+    /// the same budget list as the builtins. Reports render to text via
+    /// [`crate::knowledge::render_report_text`] — embedded bodies
+    /// (`content`, pre-rendered `text`, `drafted`) surface directly instead
+    /// of as pretty JSON.
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    fn register_argosy(
+        &self,
+        registry: &mut ToolRegistry,
+        allowed: Option<&[&str]>,
+    ) -> std::result::Result<(), animist::agent::AgentError> {
+        for def in crate::knowledge::tool_definitions() {
+            if let Some(allowed) = allowed
+                && !allowed.contains(&def.native)
+            {
+                continue;
+            }
+            registry.register_executor(ToolExecutor::new(ArgosyTool {
+                native: def.native,
+                description: def.description.clone(),
+                schema: def.schema.clone(),
+                reads: self.normalized_root(),
+            }))?;
+        }
+        Ok(())
+    }
+
+    /// One executor per published MCP tool (B.11). The model sees the
+    /// `server__tool` wire name; the executor resolves it back to the
+    /// qualified name the manager's tool index is keyed by.
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    fn register_mcp(
+        &self,
+        registry: &mut ToolRegistry,
+    ) -> std::result::Result<(), animist::agent::AgentError> {
+        let Some(handle) = self.mcp() else {
+            return Ok(());
+        };
+        for descriptor in handle.tool_descriptors() {
+            registry.register_executor(ToolExecutor::new(McpTool {
+                handle: handle.clone(),
+                qualified: descriptor.qualified_name.clone(),
+                definition: ToolDefinition::builder()
+                    .name(descriptor.wire_name.clone())
+                    .description(descriptor.description.clone())
+                    .input_schema(descriptor.parameters.clone())
+                    .build(),
+                read_only: descriptor.read_only_hint == Some(true),
+            }))?;
+        }
+        Ok(())
+    }
+
+    /// `list_tools` describes the finished table, so it registers last.
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    fn register_list_tools(
+        &self,
+        registry: &mut ToolRegistry,
+    ) -> std::result::Result<(), animist::agent::AgentError> {
+        let definitions = registry.definitions();
+        registry.register(ListTools(Arc::new(definitions)))?;
+        Ok(())
+    }
+
+    fn normalized_root(&self) -> String {
+        crate::run::dedup::normalize_write_path_with_root(
+            self.root_key().as_deref(),
+            &self.root.display().to_string(),
+        )
     }
 
     /// Shared validation walk for the read and write paths: strips the
@@ -628,14 +669,15 @@ impl Workspace {
     /// component rejecting `..`, Git metadata, and symlinked components.
     /// With `create_dirs` (write path), missing directory components are
     /// created and the final component is returned as the file name instead
-    /// of being appended.
+    /// of being appended. Metadata-only: safe to call from async tool bodies
+    /// and blocking workers alike.
     fn walk<'a>(
         &self,
         requested: &'a str,
         create_dirs: bool,
-    ) -> Result<(PathBuf, Option<Component<'a>>)> {
+    ) -> error::Result<(PathBuf, Option<Component<'a>>)> {
         if requested.is_empty() {
-            return Err(invalid("path must not be empty"));
+            return Err(error::invalid("path must not be empty"));
         }
         // Outside-workspace exemptions (C.17): the session's plan file, plus
         // — read only — the state dir's plans directory. Both are exempt from
@@ -650,7 +692,7 @@ impl Workspace {
             (
                 requested
                     .strip_prefix(self.root())
-                    .map_err(|_| denied("path is outside the workspace"))?,
+                    .map_err(|_| error::denied("path is outside the workspace"))?,
                 self.root().to_path_buf(),
             )
         } else {
@@ -663,7 +705,7 @@ impl Workspace {
                     Component::Normal(name) if !is_git_component(name) => {
                         Ok((path, Some(component)))
                     }
-                    _ => Err(denied(
+                    _ => Err(error::denied(
                         "paths must remain inside the workspace; '..', '.', and Git metadata are not allowed",
                     )),
                 };
@@ -671,7 +713,7 @@ impl Workspace {
             match component {
                 Component::CurDir => continue,
                 Component::Normal(name) if is_git_component(name) => {
-                    return Err(denied("access to Git metadata is not allowed"));
+                    return Err(error::denied("access to Git metadata is not allowed"));
                 }
                 // Exempt targets are absolute paths outside the workspace:
                 // anchor the walk at the path's own root/prefix.
@@ -681,23 +723,23 @@ impl Workspace {
                 }
                 Component::Normal(_) => path.push(component),
                 _ => {
-                    return Err(denied(
+                    return Err(error::denied(
                         "paths must remain inside the workspace; '..' is not allowed",
                     ));
                 }
             }
             if create_dirs
-                && let Err(error) = fs::create_dir(&path)
-                && error.kind() != io::ErrorKind::AlreadyExists
+                && let Err(error) = std::fs::create_dir(&path)
+                && error.kind() != std::io::ErrorKind::AlreadyExists
             {
-                return Err(io_error(error));
+                return Err(error::io_error(error));
             }
-            if fs::symlink_metadata(&path)
-                .map_err(io_error)?
+            if std::fs::symlink_metadata(&path)
+                .map_err(error::io_error)?
                 .file_type()
                 .is_symlink()
             {
-                return Err(denied("symlink paths are not supported"));
+                return Err(error::denied("symlink paths are not supported"));
             }
         }
         Ok((path, None))
@@ -705,14 +747,17 @@ impl Workspace {
 
     /// Existing paths only. Reject `..`, Git metadata, and every symlink
     /// component, including links whose targets are inside the workspace.
-    pub(crate) fn resolve(&self, requested: &str) -> Result<PathBuf> {
+    pub(crate) fn resolve(&self, requested: &str) -> error::Result<PathBuf> {
         self.walk(requested, false).map(|(path, _)| path)
     }
 
-    pub(crate) fn file(&self, requested: &str) -> Result<PathBuf> {
+    pub(crate) fn file(&self, requested: &str) -> error::Result<PathBuf> {
         let path = self.resolve(requested)?;
-        if !fs::symlink_metadata(&path).map_err(io_error)?.is_file() {
-            return Err(invalid("path must identify a regular file"));
+        if !std::fs::symlink_metadata(&path)
+            .map_err(error::io_error)?
+            .is_file()
+        {
+            return Err(error::invalid("path must identify a regular file"));
         }
         Ok(path)
     }
@@ -720,17 +765,17 @@ impl Workspace {
     /// Resolution for writes: like [`Self::resolve`], but the final component
     /// may not exist yet, missing parent directories are created, and an
     /// existing destination must be a regular file (never a symlink).
-    pub(crate) fn target(&self, requested: &str) -> Result<PathBuf> {
+    pub(crate) fn target(&self, requested: &str) -> error::Result<PathBuf> {
         let (mut path, name) = self.walk(requested, true)?;
         let Some(component) = name else {
-            return Err(invalid("path must name a file, not a directory"));
+            return Err(error::invalid("path must name a file, not a directory"));
         };
         path.push(component);
-        match fs::symlink_metadata(&path) {
+        match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_file() => {}
-            Ok(_) => return Err(invalid("path must identify a regular file")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(error)),
+            Ok(_) => return Err(error::invalid("path must identify a regular file")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error::io_error(error)),
         }
         Ok(path)
     }
@@ -745,30 +790,224 @@ impl Workspace {
     }
 }
 
+/// One argosy knowledge tool under its native name. Claim: `reads` of the
+/// workspace root key — knowledge queries overlap file reads and each other
+/// (the service serializes its own mutations internally) and exclude
+/// writers, which claim the root key as their topmost ancestor.
+struct ArgosyTool {
+    native: &'static str,
+    description: String,
+    schema: Value,
+    reads: String,
+}
+
+#[async_trait]
+impl ToolExecutorImpl for ArgosyTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::builder()
+            .name(self.native)
+            .description(self.description.clone())
+            .input_schema(self.schema.clone())
+            .build()
+    }
+
+    fn scheduling(&self, _input: &Value) -> ToolScheduling {
+        ToolScheduling::Resources {
+            reads: vec![self.reads.clone()],
+            writes: Vec::new(),
+        }
+    }
+
+    async fn execute(
+        &self,
+        _context: &ToolContext<'_>,
+        input: Value,
+    ) -> std::result::Result<ToolOutput, animist::agent::tool::ToolError> {
+        match crate::knowledge::call_tool(self.native.to_owned(), input).await {
+            Ok(report) => Ok(error::text_output(crate::knowledge::render_report_text(
+                self.native,
+                &report,
+            ))),
+            Err(message) => Ok(error::error_result(message)),
+        }
+    }
+}
+
+/// One published MCP tool. Read-only servers (their own annotation) claim
+/// independence and overlap other calls; every other MCP tool runs
+/// exclusively, because a server can touch anything.
+struct McpTool {
+    handle: McpHandle,
+    qualified: String,
+    definition: ToolDefinition,
+    read_only: bool,
+}
+
+#[async_trait]
+impl ToolExecutorImpl for McpTool {
+    fn definition(&self) -> ToolDefinition {
+        self.definition.clone()
+    }
+
+    fn scheduling(&self, _input: &Value) -> ToolScheduling {
+        if self.read_only {
+            ToolScheduling::Resources {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            }
+        } else {
+            ToolScheduling::Exclusive
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &ToolContext<'_>,
+        input: Value,
+    ) -> std::result::Result<ToolOutput, animist::agent::tool::ToolError> {
+        // The turn's cancellation stops the in-flight server call: the
+        // session notifies the server instead of parking until it finishes.
+        let outcome = self
+            .handle
+            .call_tool_cancellable(&self.qualified, &input, &context.run.cancellation)
+            .await;
+        Ok(match outcome {
+            Ok(output) => error::contents_output(mcp_contents(output)),
+            Err(error) => error::error_result(error.to_string()),
+        })
+    }
+}
+
+/// Map an MCP tool's output to model-visible contents, preserving the
+/// server's block order: text parts as text, images as base64 image content
+/// interleaved where they appeared.
+fn mcp_contents(output: McpToolOutput) -> ToolContents {
+    if !output.has_images() {
+        return output.joined_text().into();
+    }
+    let parts = output
+        .parts
+        .into_iter()
+        .map(|part| match part {
+            McpPart::Text(text) => animist::agent::tool::ToolContent::Text { text },
+            McpPart::Image(image) => match media_type(&image.mime) {
+                Some(media_type) => animist::agent::tool::ToolContent::Image {
+                    source: ImageSource::Base64 {
+                        media_type: media_type.to_owned(),
+                        data: image.data,
+                    },
+                },
+                // Unknown mimes cannot be served as image content; note the
+                // drop instead of losing the image silently.
+                None => animist::agent::tool::ToolContent::Text {
+                    text: format!("[unsupported image mime: {}]", image.mime),
+                },
+            },
+        })
+        .collect::<Vec<_>>();
+    ToolContents::from(parts)
+}
+
+/// The model-visible media type for an MCP image mime. `image/heic`,
+/// `image/heif`, and `image/svg+xml` are served as `image/png`, as the rig
+/// bridge did.
+fn media_type(mime: &str) -> Option<&'static str> {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/heic" | "image/heif" | "image/svg+xml" => Some("image/png"),
+        _ => None,
+    }
+}
+
 fn is_git_component(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().eq_ignore_ascii_case(".git")
 }
 
-pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>> {
-    let file = File::open(path).map_err(io_error)?;
-    if !file.metadata().map_err(io_error)?.is_file() {
-        return Err(invalid("path must identify a regular file"));
+pub(crate) async fn read_bytes(path: &Path) -> error::Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path).await.map_err(error::io_error)?;
+    if !file.metadata().await.map_err(error::io_error)?.is_file() {
+        return Err(error::invalid("path must identify a regular file"));
     }
     let mut bytes = Vec::new();
     file.take((MAX_FILE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(io_error)?;
+        .await
+        .map_err(error::io_error)?;
     if bytes.len() > MAX_FILE_BYTES {
-        return Err(invalid("file exceeds the 8 MiB tool size limit"));
+        return Err(error::invalid("file exceeds the 8 MiB tool size limit"));
     }
     Ok(bytes)
 }
 
-pub(crate) fn text(bytes: Vec<u8>) -> Result<String> {
+/// Stage `after` beside `parent` as a fresh temp file carrying
+/// `permissions`, fsynced and ready for an atomic rename. Callers hold the
+/// workspace path lock across stage → verify → [`commit_staged`].
+pub(crate) async fn stage_bytes(
+    parent: &Path,
+    after: &[u8],
+    permissions: &std::fs::Permissions,
+) -> error::Result<tempfile::NamedTempFile> {
+    stage(parent, after, Some(permissions)).await
+}
+
+/// Like [`stage_bytes`] without permission preservation: fresh files take
+/// the temp file's default permissions, as full-file writes always have.
+pub(crate) async fn stage_bytes_for_write(
+    parent: &Path,
+    after: &[u8],
+) -> error::Result<tempfile::NamedTempFile> {
+    stage(parent, after, None).await
+}
+
+async fn stage(
+    parent: &Path,
+    after: &[u8],
+    permissions: Option<&std::fs::Permissions>,
+) -> error::Result<tempfile::NamedTempFile> {
+    // tempfile + fsync are sync-only; keep the staged write off the executor.
+    let parent = parent.to_path_buf();
+    let after = after.to_vec();
+    let permissions = permissions.cloned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut staged = tempfile::NamedTempFile::new_in(&parent).map_err(error::io_error)?;
+        staged.write_all(&after).map_err(error::io_error)?;
+        if let Some(permissions) = permissions {
+            staged
+                .as_file()
+                .set_permissions(permissions)
+                .map_err(error::io_error)?;
+        }
+        staged.as_file().sync_all().map_err(error::io_error)?;
+        Ok(staged)
+    })
+    .await
+    .map_err(|source| error::Error::Blocking {
+        source: Box::new(source),
+    })?
+}
+
+/// Atomically move a staged file onto `path`: one rename syscall.
+pub(crate) async fn commit_staged(
+    staged: tempfile::NamedTempFile,
+    path: &Path,
+) -> error::Result<()> {
+    staged
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error::io_error(error.error))
+}
+
+pub(crate) fn text(bytes: Vec<u8>) -> error::Result<String> {
     if bytes.contains(&0) {
-        return Err(invalid("binary files are not supported by this text tool"));
+        return Err(error::invalid(
+            "binary files are not supported by this text tool",
+        ));
     }
-    String::from_utf8(bytes).map_err(|_| invalid("file is not valid UTF-8 text"))
+    String::from_utf8(bytes).map_err(|_| error::invalid("file is not valid UTF-8 text"))
 }
 
 pub(crate) fn clip(text: &str, max_bytes: usize) -> (&str, bool) {
@@ -791,218 +1030,6 @@ pub(crate) fn truncate_output(text: &str) -> String {
     }
 }
 
-pub(crate) fn invalid(message: impl Into<String>) -> ToolExecutionError {
-    ToolExecutionError::new(ToolErrorKind::InvalidArgs, message)
-}
-
-pub(crate) fn denied(message: impl Into<String>) -> ToolExecutionError {
-    ToolExecutionError::refused(message)
-}
-
-pub(crate) fn failure(message: impl Into<String>) -> ToolExecutionError {
-    ToolExecutionError::new(ToolErrorKind::Other, message)
-}
-
-pub(crate) fn not_found(message: impl Into<String>) -> ToolExecutionError {
-    ToolExecutionError::new(ToolErrorKind::NotFound, message)
-}
-
-pub(crate) fn io_error(error: io::Error) -> ToolExecutionError {
-    let kind = match error.kind() {
-        io::ErrorKind::NotFound => ToolErrorKind::NotFound,
-        io::ErrorKind::PermissionDenied => ToolErrorKind::PermissionDenied,
-        _ => ToolErrorKind::Other,
-    };
-    ToolExecutionError::new(kind, error.to_string())
-}
-
-// Keep typed argument schemas and a portable, context-free tool boundary for
-// each tool. `dynamic` adapts them into the erased executor's tool set.
-macro_rules! impl_tool {
-    ($tool:ident, $args:ty, $output:ty, $name:literal, $description:literal) => {
-        impl rig_core::tool::PortableTool for $tool {
-            const NAME: &'static str = $name;
-            type Args = $args;
-            type Output = $output;
-            type Error = rig_core::tool::ToolExecutionError;
-
-            fn description(&self) -> String {
-                $description.into()
-            }
-
-            fn parameters(&self) -> serde_json::Value {
-                serde_json::to_value(schemars::schema_for!($args)).unwrap_or_else(|error| {
-                    tracing::error!(
-                        tool = $name,
-                        %error,
-                        "tool schema serialization failed; serving a bare object schema"
-                    );
-                    serde_json::json!({"type": "object"})
-                })
-            }
-
-            async fn call(&self, args: Self::Args) -> super::Result<Self::Output> {
-                self.0
-                    .run(move |workspace| Self::execute(workspace, args))
-                    .await
-            }
-        }
-    };
-}
-pub(crate) use impl_tool;
-
-/// The argosy knowledge tools (Phase 1 of the argosy integration): one
-/// portable tool per argosy definition under its native name, calling the
-/// in-process service on the blocking pool. The report renders to text via
-/// [`crate::knowledge::render_report_text`] — embedded bodies (`content`,
-/// pre-rendered `text`, `drafted`) surface directly instead of as pretty
-/// JSON.
-fn argosy_tools() -> Vec<(&'static str, DynamicTool)> {
-    crate::knowledge::tool_definitions()
-        .iter()
-        .map(|def| {
-            let name = def.name.clone();
-            (
-                def.native,
-                DynamicTool::new(
-                    tool_name(def.native),
-                    def.description.clone(),
-                    def.schema.clone(),
-                    move |arguments| {
-                        let name = name.clone();
-                        Box::pin(async move {
-                            match crate::knowledge::call_tool(name.clone(), arguments).await {
-                                Ok(report) => Ok(ToolOutput::text(
-                                    crate::knowledge::render_report_text(&name, &report),
-                                )),
-                                Err(e) => Err(failure(e)),
-                            }
-                        })
-                    },
-                ),
-            )
-        })
-        .collect()
-}
-
-/// One portable tool per published MCP tool (B.11). The model sees the
-/// `server__tool` wire name; the closure resolves it back to the qualified
-/// name the manager's tool index is keyed by.
-fn mcp_tools(
-    handle: &crate::mcp::McpHandle,
-    cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
-) -> Vec<DynamicTool> {
-    handle
-        .tool_descriptors()
-        .into_iter()
-        .map(|descriptor| {
-            let handle = handle.clone();
-            let qualified = descriptor.qualified_name.clone();
-            let cancel = cancel.clone();
-            DynamicTool::new(
-                tool_name(&descriptor.wire_name),
-                descriptor.description,
-                descriptor.parameters,
-                move |arguments| {
-                    let handle = handle.clone();
-                    let qualified = qualified.clone();
-                    let cancel = cancel.clone();
-                    Box::pin(async move {
-                        // Phase 6: race the current turn's cancel so a
-                        // cancelled turn stops the in-flight server call
-                        // instead of parking until it finishes or times out.
-                        let cancel = cancel.load();
-                        let outcome = handle
-                            .call_tool_cancellable(&qualified, &arguments, &cancel)
-                            .await;
-                        match outcome {
-                            Ok(output) => Ok(mcp_tool_output(output)),
-                            Err(e) => Err(failure(e.to_string())),
-                        }
-                    })
-                },
-            )
-        })
-        .collect()
-}
-
-/// Map an MCP tool's output into a tool result, preserving the server's
-/// block order: text parts as text, images as vision content parts (same
-/// shape `view_image` emits) interleaved where they appeared.
-fn mcp_tool_output(output: crate::mcp::McpToolOutput) -> ToolOutput {
-    use crate::mcp::session::McpPart;
-
-    if !output.has_images() {
-        return ToolOutput::text(output.joined_text());
-    }
-    let mut content = Vec::new();
-    for part in output.parts {
-        match part {
-            McpPart::Text(text) => content.push(RigToolResultContent::text(text)),
-            McpPart::Image(image) => match image_media_type(&image.mime) {
-                Some(media) => content.push(RigToolResultContent::image_base64(
-                    image.data,
-                    Some(media),
-                    None,
-                )),
-                // Rig only carries known media types; note the drop instead of
-                // losing the image silently.
-                None => content.push(RigToolResultContent::text(format!(
-                    "[unsupported image mime: {}]",
-                    image.mime
-                ))),
-            },
-        }
-    }
-    let text = content
-        .iter()
-        .filter_map(|c| match c {
-            RigToolResultContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    ToolOutput::content(content).unwrap_or_else(|_| ToolOutput::text(text))
-}
-
-fn image_media_type(mime: &str) -> Option<ImageMediaType> {
-    match mime.to_ascii_lowercase().as_str() {
-        "image/jpeg" | "image/jpg" => Some(ImageMediaType::JPEG),
-        "image/png" => Some(ImageMediaType::PNG),
-        "image/gif" => Some(ImageMediaType::GIF),
-        "image/webp" => Some(ImageMediaType::WEBP),
-        "image/heic" => Some(ImageMediaType::HEIC),
-        "image/heif" => Some(ImageMediaType::HEIF),
-        "image/svg+xml" => Some(ImageMediaType::SVG),
-        _ => None,
-    }
-}
-
-/// Adapt a typed portable tool into the erased tool the dispatcher executes.
-fn dynamic<T>(tool: T) -> DynamicTool
-where
-    T: PortableTool + Clone + Send + Sync + 'static,
-    T::Args: serde::de::DeserializeOwned + Send + Sync + 'static,
-    T::Output: rig_core::tool::IntoToolOutput,
-{
-    DynamicTool::new(
-        tool_name(T::NAME),
-        tool.description(),
-        tool.parameters(),
-        move |arguments| {
-            let tool = tool.clone();
-            Box::pin(async move {
-                let args = serde_json::from_value(arguments)
-                    .map_err(|error| invalid(format!("invalid arguments: {error}")))?;
-                match tool.call(args).await {
-                    Ok(output) => rig_core::tool::IntoToolOutput::into_tool_output(output),
-                    Err(error) => Err(tool.map_error(error)),
-                }
-            })
-        },
-    )
-}
-
 #[cfg(test)]
 mod plan_walk_tests {
     //! Plan-mode (C.17) containment exemption: only the workspace-boundary
@@ -1021,31 +1048,31 @@ mod plan_walk_tests {
         (dir, state, workspace, plan)
     }
 
-    #[test]
-    fn plan_file_write_outside_workspace_still_works() {
+    #[tokio::test]
+    async fn plan_file_write_outside_workspace_still_works() {
         let (_dir, _state, workspace, plan) = plan_workspace();
         workspace.set_plan_path(Some(plan.clone()));
         let requested = plan.to_string_lossy().into_owned();
         let target = workspace.target(&requested).unwrap();
         assert_eq!(target, plan);
-        fs::write(&target, "the plan").unwrap();
+        std::fs::write(&target, "the plan").unwrap();
         assert_eq!(workspace.resolve(&requested).unwrap(), plan);
-        assert_eq!(fs::read_to_string(&plan).unwrap(), "the plan");
+        assert_eq!(std::fs::read_to_string(&plan).unwrap(), "the plan");
     }
 
-    #[test]
-    fn plan_file_write_creates_missing_parent_dirs() {
+    #[tokio::test]
+    async fn plan_file_write_creates_missing_parent_dirs() {
         let (_dir, _state, workspace, plan) = plan_workspace();
         let nested = plan.parent().unwrap().join("nested/deep/PLAN.md");
         workspace.set_plan_path(Some(nested.clone()));
         let target = workspace.target(&nested.to_string_lossy()).unwrap();
         assert_eq!(target, nested);
-        fs::write(&target, "plan").unwrap();
-        assert_eq!(fs::read_to_string(&nested).unwrap(), "plan");
+        std::fs::write(&target, "plan").unwrap();
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "plan");
     }
 
-    #[test]
-    fn plan_path_with_parent_component_is_rejected() {
+    #[tokio::test]
+    async fn plan_path_with_parent_component_is_rejected() {
         let (_dir, _state, workspace, plan) = plan_workspace();
         workspace.set_plan_path(Some(plan.clone()));
         // `sub/../PLAN.md` normalizes to the plan path (so it passes the
@@ -1062,8 +1089,8 @@ mod plan_walk_tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn plan_path_through_symlinked_directory_is_rejected() {
+    #[tokio::test]
+    async fn plan_path_through_symlinked_directory_is_rejected() {
         use std::os::unix::fs::symlink;
         let (_dir, _state, workspace, plan) = plan_workspace();
         workspace.set_plan_path(Some(plan.clone()));
@@ -1088,28 +1115,28 @@ mod plan_walk_tests {
         (root, state, canonical, workspace.with_state_dir(state_dir))
     }
 
-    #[test]
-    fn plans_dir_reads_outside_workspace_are_exempt() {
+    #[tokio::test]
+    async fn plans_dir_reads_outside_workspace_are_exempt() {
         let (_root, _state, state, workspace) = plans_workspace();
         let earlier = state.join("plans/old-plan.md");
-        fs::create_dir_all(earlier.parent().unwrap()).unwrap();
-        fs::write(&earlier, "# earlier session's plan").unwrap();
+        std::fs::create_dir_all(earlier.parent().unwrap()).unwrap();
+        std::fs::write(&earlier, "# earlier session's plan").unwrap();
         let requested = earlier.to_string_lossy().into_owned();
         assert_eq!(workspace.resolve(&requested).unwrap(), earlier);
         assert_eq!(workspace.file(&requested).unwrap(), earlier);
     }
 
-    #[test]
-    fn plans_dir_writes_outside_workspace_are_refused() {
+    #[tokio::test]
+    async fn plans_dir_writes_outside_workspace_are_refused() {
         let (_root, _state, state, workspace) = plans_workspace();
         let earlier = state.join("plans/old-plan.md");
-        fs::create_dir_all(earlier.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(earlier.parent().unwrap()).unwrap();
         let requested = earlier.to_string_lossy().into_owned();
         assert!(workspace.target(&requested).is_err());
     }
 
-    #[test]
-    fn state_dir_paths_outside_plans_are_still_refused() {
+    #[tokio::test]
+    async fn state_dir_paths_outside_plans_are_still_refused() {
         let (_root, _state, state, workspace) = plans_workspace();
         let sessions = state.join("sessions/session.json");
         let requested = sessions.to_string_lossy().into_owned();
@@ -1120,12 +1147,12 @@ mod plan_walk_tests {
     /// The implement flow: after clear-context-and-implement the turn runs
     /// in Build mode, which installs no plan path — the session's plan file
     /// must keep its exemption so the agent can read (and update) it.
-    #[test]
-    fn plan_file_exemption_survives_the_build_mode_implement_turn() {
+    #[tokio::test]
+    async fn plan_file_exemption_survives_the_build_mode_implement_turn() {
         let (_dir, _state, workspace, plan) = plan_workspace();
         workspace.set_plan_path(Some(plan.clone()));
         let requested = plan.to_string_lossy().into_owned();
-        fs::write(workspace.target(&requested).unwrap(), "# the plan").unwrap();
+        std::fs::write(workspace.target(&requested).unwrap(), "# the plan").unwrap();
         // The Build-mode turn installs nothing; the earlier set must hold.
         assert_eq!(workspace.file(&requested).unwrap(), plan);
     }

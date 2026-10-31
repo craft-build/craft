@@ -1,9 +1,8 @@
 use std::fs;
 
-use rig_core::tool::IntoToolOutput;
 use serde_json::json;
 
-use super::{invoke, workspace};
+use super::{invoke, invoke_error, output_text, workspace};
 use crate::tools::*;
 
 #[tokio::test]
@@ -12,36 +11,31 @@ async fn grep_text_groups_files_and_reports_partial_searches() {
     fs::write(workspace.root().join("a.rs"), "needle\n  needle again\n").unwrap();
     fs::write(workspace.root().join("b.rs"), "no\nneedle βeta\n").unwrap();
     let tool = Grep(workspace.clone());
-    let full = invoke(&tool, json!({"pattern":"needle"})).await.unwrap();
+    let full = invoke(&tool, json!({"pattern":"needle"})).await;
     assert_eq!(
-        full.into_tool_output().unwrap().as_text(),
-        Some("a.rs:\n  1: needle\n  2:   needle again\n\nb.rs:\n  2: needle βeta")
+        output_text(&full),
+        "a.rs:\n  1: needle\n  2:   needle again\n\nb.rs:\n  2: needle βeta"
     );
-    let empty = invoke(&tool, json!({"pattern":"missing"})).await.unwrap();
-    assert_eq!(
-        empty.into_tool_output().unwrap().as_text(),
-        Some("No files found")
-    );
+    let empty = invoke(&tool, json!({"pattern":"missing"})).await;
+    assert_eq!(output_text(&empty), "No files found");
 
     fs::write(workspace.root().join("0.binary"), [0, 255]).unwrap();
-    let limited = invoke(&tool, json!({"pattern":"needle", "max_matches":1}))
-        .await
-        .unwrap()
-        .into_tool_output()
-        .unwrap();
-    let text = limited.as_text().unwrap();
-    assert!(text.starts_with("a.rs:\n  1: needle\n"));
-    assert!(text.contains("Search truncated: more matches may exist"));
-    assert!(text.contains("Skipped 1 files; results cover only the files searched"));
+    let limited = invoke(&tool, json!({"pattern":"needle", "max_matches":1})).await;
+    let text = output_text(&limited);
+    assert!(text.starts_with("a.rs:\n  1: needle\n"), "{text}");
+    assert!(
+        text.contains("Search truncated: more matches may exist"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Skipped 1 files; results cover only the files searched"),
+        "{text}"
+    );
 
-    let empty_partial = invoke(&tool, json!({"pattern":"missing"}))
-        .await
-        .unwrap()
-        .into_tool_output()
-        .unwrap();
+    let empty_partial = invoke(&tool, json!({"pattern":"missing"})).await;
     assert_eq!(
-        empty_partial.as_text(),
-        Some("No files found\n\n[Skipped 1 files; results cover only the files searched.]")
+        output_text(&empty_partial),
+        "No files found\n\n[Skipped 1 files; results cover only the files searched.]"
     );
 }
 
@@ -67,25 +61,17 @@ async fn grep_obeys_ignore_rules_even_with_globs_and_narrowed_paths() {
             "path":"src", "pattern":"needle", "glob":"*.rs"
         }),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
-        result
-            .matches
-            .iter()
-            .map(|m| m.path.as_str())
-            .collect::<Vec<_>>(),
-        ["src/a.rs", "src/b.rs"]
+        output_text(&result),
+        "src/a.rs:\n  1: needle\n\nsrc/b.rs:\n  1: needle"
     );
-    assert!(!result.truncated);
     let result = invoke(
         &Grep(workspace),
         json!({"path":"src/a.rs","pattern":"needle"}),
     )
-    .await
-    .unwrap();
-    assert_eq!(result.matches.len(), 1);
-    assert_eq!(result.matches[0].line, 1);
+    .await;
+    assert_eq!(output_text(&result), "src/a.rs:\n  1: needle");
 }
 
 #[tokio::test]
@@ -102,27 +88,30 @@ async fn grep_supports_regex_literal_case_and_limits() {
         &tool,
         json!({"pattern":"hello.*","literal":true,"case_sensitive":false}),
     )
-    .await
-    .unwrap();
-    assert_eq!(result.matches.len(), 1);
-    assert_eq!(result.matches[0].line, 1);
-    assert_eq!(result.skipped_files, 1);
-    let result = invoke(&tool, json!({"pattern":"(?i)^hello","max_matches":1}))
-        .await
-        .unwrap();
-    assert_eq!(result.matches.len(), 1);
-    assert!(result.truncated);
-    let result = invoke(&tool, json!({"pattern":"not-present"}))
-        .await
-        .unwrap();
-    assert!(result.matches.is_empty());
-    assert!(!result.truncated);
+    .await;
+    let text = output_text(&result);
+    assert!(
+        text.starts_with("text:\n  1: Hello.*"),
+        "literal case-insensitive match on line 1: {text}"
+    );
+    let result = invoke(&tool, json!({"pattern":"(?i)^hello","max_matches":1})).await;
+    let text = output_text(&result);
+    assert!(
+        text.starts_with("text:\n  1: Hello.*"),
+        "one match kept: {text}"
+    );
+    assert!(
+        text.contains("Search truncated: more matches may exist"),
+        "{text}"
+    );
+    let result = invoke(&tool, json!({"pattern":"not-present"})).await;
+    assert!(!output_text(&result).contains("truncated"));
     for args in [
         json!({"pattern":"["}),
         json!({"pattern":"x","glob":"["}),
         json!({"pattern":"x","max_matches":0}),
     ] {
-        assert!(invoke(&tool, args).await.is_err());
+        assert!(!invoke_error(&tool, args).await.is_empty());
     }
 }
 
@@ -134,22 +123,15 @@ async fn grep_long_line_excerpt_contains_the_match() {
         format!("{}needle", "🦀".repeat(2000)),
     )
     .unwrap();
-    let result = invoke(&Grep(workspace), json!({"pattern":"needle"}))
-        .await
-        .unwrap();
-    let found = &result.matches[0];
-    assert!(found.text.contains("needle"));
-    assert_eq!(found.column, 8001);
-    assert!(found.text_start_column > 1);
-    assert!(found.truncated);
-    assert!(found.text.len() <= MAX_LINE_BYTES);
-    let start = found.text_start_column;
-    let rendered = result.into_tool_output().unwrap();
-    let text = rendered.as_text().unwrap();
-    assert!(text.contains("needle"));
-    assert!(text.ends_with(&format!(
-        "[line truncated; excerpt starts at byte column {start}; match at byte column 8001]"
-    )));
+    let result = invoke(&Grep(workspace), json!({"pattern":"needle"})).await;
+    let text = output_text(&result);
+    assert!(text.contains("needle"), "{text}");
+    assert!(
+        text.ends_with(
+            "[line truncated; excerpt starts at byte column 7745; match at byte column 8001]"
+        ),
+        "{text}"
+    );
 }
 
 #[cfg(unix)]
@@ -157,11 +139,8 @@ async fn grep_long_line_excerpt_contains_the_match() {
 async fn grep_preserves_backslashes_in_filenames() {
     let (_dir, workspace) = workspace();
     fs::write(workspace.root().join("back\\slash"), "needle").unwrap();
-    let result = invoke(&Grep(workspace), json!({"pattern":"needle"}))
-        .await
-        .unwrap();
-    assert_eq!(result.matches.len(), 1);
-    assert_eq!(result.matches[0].path, "back\\slash");
+    let result = invoke(&Grep(workspace), json!({"pattern":"needle"})).await;
+    assert_eq!(output_text(&result), "back\\slash:\n  1: needle");
 }
 
 #[cfg(target_os = "linux")]
@@ -175,9 +154,9 @@ async fn grep_skips_non_unicode_names() {
         "needle",
     )
     .unwrap();
-    let result = invoke(&Grep(workspace), json!({"pattern":"needle"}))
-        .await
-        .unwrap();
-    assert!(result.matches.is_empty());
-    assert_eq!(result.skipped_files, 1);
+    let result = invoke(&Grep(workspace), json!({"pattern":"needle"})).await;
+    assert_eq!(
+        output_text(&result),
+        "No files found\n\n[Skipped 1 files; results cover only the files searched.]"
+    );
 }

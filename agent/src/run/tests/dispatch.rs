@@ -1,48 +1,154 @@
-//! Tool dispatch: decisions and hooks, dedup, and scheduling of one turn's
-//! calls through the conversation.
+//! Tool execution through the conversation: decisions, dedup, and
+//! scheduling of one turn's calls.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+
+use animist::agent::AgentEvent;
+use animist::agent::tool::{
+    ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolRegistry, ToolScheduling,
+};
+use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
 
 use super::*;
 use crate::history::{ContentBlock, Role, ext};
-use crate::run::dispatch::{AfterExecute, BeforeExecute, BoxFuture, Decision, DispatchOutcome};
-use animist::agent::AgentEvent;
-use rig_core::tool::{DynamicTool, ToolOutput};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use crate::run::{BeforeExecute, BoxFuture, Decision};
 
-/// One model-visible tool call block.
-fn call(id: &str, name: &str, args: serde_json::Value) -> ContentBlock {
-    ContentBlock::ToolUse {
-        id: id.into(),
-        name: name.into(),
-        input: args,
-        thought_signature: None,
+/// A native probe tool: sleeps `delay`, appends markers to the shared log,
+/// optionally panics, and answers "ok". Claims come from `claim`.
+#[derive(Clone)]
+struct Probe {
+    name: &'static str,
+    delay: Duration,
+    panic: Option<&'static str>,
+    /// `start`/`end` markers appended to the shared log, when set.
+    log: Option<Arc<StdMutex<Vec<&'static str>>>>,
+    /// Runs at call start (after the delay, before `end`).
+    on_run: Option<Arc<dyn Fn() + Send + Sync>>,
+    claim: ProbeClaim,
+}
+
+#[derive(Clone, Copy)]
+enum ProbeClaim {
+    Exclusive,
+    Independent,
+    /// Claim reads of one opaque key.
+    Reads(&'static str),
+    /// Claim writes of explicit keys.
+    Writes(&'static [&'static str]),
+}
+
+impl Probe {
+    fn simple(name: &'static str) -> Self {
+        Self {
+            name,
+            delay: Duration::ZERO,
+            panic: None,
+            log: None,
+            on_run: None,
+            claim: ProbeClaim::Exclusive,
+        }
+    }
+
+    fn independent(name: &'static str) -> Self {
+        Self {
+            claim: ProbeClaim::Independent,
+            ..Self::simple(name)
+        }
+    }
+
+    fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
+
+    fn panicking(mut self, message: &'static str) -> Self {
+        self.panic = Some(message);
+        self
+    }
+
+    fn logging(mut self, log: &Arc<StdMutex<Vec<&'static str>>>) -> Self {
+        self.log = Some(Arc::clone(log));
+        self
+    }
+
+    fn on_run(mut self, on_run: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_run = Some(Arc::new(on_run));
+        self
+    }
+
+    fn claiming(mut self, claim: ProbeClaim) -> Self {
+        self.claim = claim;
+        self
     }
 }
 
-/// A rig tool that runs `run` and answers "ok".
-fn tool(name: &str, run: impl Fn() + Send + Sync + Clone + 'static) -> DynamicTool {
-    let run2 = run.clone();
-    DynamicTool::new(
-        crate::tools::tool_name(name),
-        name,
-        serde_json::json!({}),
-        move |_| {
-            let run = run2.clone();
-            Box::pin(async move {
-                run();
-                Ok(ToolOutput::text("ok"))
-            })
-        },
-    )
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct ProbeArgs {
+    #[allow(dead_code)]
+    _unused: Option<Value>,
 }
 
-/// Execute one call through the dispatch table's interception pipeline and
-/// return its result block. This is the path batch children take.
-async fn run_call(dispatch: &crate::run::ToolDispatch, call: ContentBlock) -> ContentBlock {
-    match dispatch.execute(call).await.expect("dispatch") {
-        DispatchOutcome::Ran(result) | DispatchOutcome::Skipped(result) => result,
-        DispatchOutcome::Stopped(reason) => panic!("stopped: {reason}"),
+#[async_trait]
+impl ToolImpl for Probe {
+    type Args = ProbeArgs;
+    type Output = ToolOutput;
+    type Error = crate::tools::error::Error;
+
+    fn definition(&self) -> ToolDefinition {
+        crate::tools::error::definition::<ProbeArgs>(self.name, "test probe")
     }
+
+    fn scheduling(&self, _input: &Value) -> ToolScheduling {
+        match self.claim {
+            ProbeClaim::Exclusive => ToolScheduling::Exclusive,
+            ProbeClaim::Independent => ToolScheduling::Resources {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            ProbeClaim::Reads(key) => ToolScheduling::Resources {
+                reads: vec![key.to_owned()],
+                writes: Vec::new(),
+            },
+            ProbeClaim::Writes(keys) => ToolScheduling::Resources {
+                reads: Vec::new(),
+                writes: keys.iter().map(|key| (*key).to_owned()).collect(),
+            },
+        }
+    }
+
+    async fn call(
+        &self,
+        _context: &ToolContext<'_>,
+        _args: ProbeArgs,
+    ) -> Result<ToolOutput, crate::tools::error::Error> {
+        if let Some(log) = &self.log {
+            log.lock().unwrap().push("start");
+        }
+        tokio::time::sleep(self.delay).await;
+        if let Some(on_run) = &self.on_run {
+            on_run();
+        }
+        if let Some(message) = self.panic {
+            panic!("{message}");
+        }
+        if let Some(log) = &self.log {
+            log.lock().unwrap().push("end");
+        }
+        Ok(crate::tools::error::text_output("ok"))
+    }
+}
+
+fn registry(tools: impl IntoIterator<Item = Probe>) -> ToolRegistry {
+    let mut registry = ToolRegistry::default();
+    for tool in tools {
+        registry.register(tool).expect("probe registers");
+    }
+    registry
 }
 
 /// Whether a result block reports an error.
@@ -51,14 +157,6 @@ fn result_is_error(result: &ContentBlock) -> bool {
         panic!("tool result block");
     };
     *is_error
-}
-
-/// A result block's model-visible text.
-fn raw_text(result: &ContentBlock) -> String {
-    let ContentBlock::ToolResult { content, .. } = result else {
-        panic!("tool result block");
-    };
-    ext::tool_content_text(content)
 }
 
 #[tokio::test]
@@ -102,21 +200,6 @@ async fn unknown_tool_surfaces_error_and_run_continues() {
     );
 }
 
-/// An unknown tool becomes a per-call error result through the dispatch
-/// table too (the path batch children take); the wording is ours.
-#[tokio::test]
-async fn unknown_tool_becomes_recoverable_error_result() {
-    let dir = tempfile::tempdir().unwrap();
-    let dispatch = Workspace::new(dir.path()).unwrap().register();
-    let result = run_call(&dispatch, call("t1", "nonexistent", serde_json::json!({}))).await;
-    assert!(result_is_error(&result), "must not stop the run");
-    assert!(
-        raw_text(&result).contains("unknown tool: nonexistent"),
-        "got: {}",
-        raw_text(&result)
-    );
-}
-
 #[tokio::test]
 async fn skip_decision_reports_reason_to_model() {
     struct Deny;
@@ -141,10 +224,11 @@ async fn skip_decision_reports_reason_to_model() {
         &dir.path().display().to_string(),
         "",
         model(&provider),
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .approval(Arc::new(Deny))
+    .workspace(workspace)
     .build()
     .unwrap();
 
@@ -159,39 +243,107 @@ async fn skip_decision_reports_reason_to_model() {
     assert_eq!(result_text(&results[0]), "not allowed");
 }
 
+/// The post-execution transform seam (the old `AfterExecute` hook) is the
+/// layer chain's `post_tool_exec`: an output-transforming layer sees every
+/// executed call's result.
 #[tokio::test]
-async fn after_execute_transform_rewrites_results() {
+async fn post_exec_layer_transforms_results() {
+    use animist::agent::{Layer, LayerImpl};
+
     struct Upper;
-    impl AfterExecute for Upper {
-        fn transform(
+    #[async_trait]
+    impl LayerImpl for Upper {
+        async fn post_tool_exec(
             &self,
-            _call: ContentBlock,
-            mut result: ContentBlock,
-        ) -> BoxFuture<ContentBlock> {
-            Box::pin(async move {
-                if let ContentBlock::ToolResult { content, .. } = &mut result {
-                    for item in &mut content.0 {
-                        if let animist::history::ToolContent::Text { text } = item {
-                            *text = text.to_uppercase();
-                        }
-                    }
-                }
-                result
-            })
+            _agent: &animist::agent::Agent,
+            _context: &ToolContext<'_>,
+            output: ToolOutput,
+        ) -> animist::agent::Result<ToolOutput> {
+            Ok(ToolOutput::builder()
+                .content(ext::tool_content_text(&output.content).to_uppercase())
+                .is_error(output.is_error)
+                .build())
         }
     }
+
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "body\n").unwrap();
-    let dispatch = Workspace::new(dir.path())
-        .unwrap()
-        .register()
-        .with_after(Arc::new(Upper));
-    let result = run_call(
-        &dispatch,
-        call("t1", "read", serde_json::json!({"path": "f"})),
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let mut harness = animist::agent::testing::ToolHarness::builder()
+        .tools(workspace.registry().unwrap())
+        .layers(
+            animist::agent::AgentLayer::builder()
+                .layer(Layer::new(Upper))
+                .build(),
+        )
+        .build()
+        .unwrap();
+    // Root harness calls bypass layers by design, so the read rides a batch
+    // child: children run through the agent pipeline.
+    let output = harness
+        .call(
+            crate::tools::Batch,
+            serde_json::json!({"tool_calls": [{"tool": "read", "parameters": {"path": "f"}}]}),
+        )
+        .await
+        .expect("batch outcome");
+    let text = ext::tool_content_text(&output.content);
+    assert!(
+        text.contains("1: BODY"),
+        "layer must transform the child result: {text}"
+    );
+    assert!(!text.contains("1: body"), "{text}");
+}
+
+/// An approval gate reaches batch children: the fan-out dispatches through
+/// the same pipeline as top-level calls, so the gate's skip answers each
+/// child. (Named replacement for the dispatch-table hook test.)
+#[tokio::test]
+async fn approval_gate_reaches_batch_children() {
+    struct DenyReads;
+    impl BeforeExecute for DenyReads {
+        fn decide(&self, call: ContentBlock) -> BoxFuture<Decision> {
+            // Allow the outer batch so the test reaches the children.
+            let decision = match &call {
+                ContentBlock::ToolUse { name, .. } if name == "batch" => Decision::Run,
+                ContentBlock::ToolUse { name, .. } => Decision::Skip(format!("denied: {name}")),
+                _ => Decision::Run,
+            };
+            Box::pin(std::future::ready(decision))
+        }
+    }
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "batch",
+            serde_json::json!({"tool_calls": [{"tool": "list", "parameters": {"path": "."}}]}),
+        )]),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let (sink, _stream) = EventSink::new();
+    let conversation = ConversationBuilder::new(
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        "",
+        model(&provider),
+        workspace.registry().unwrap(),
+        sink,
     )
-    .await;
-    assert_eq!(raw_text(&result), "1: BODY");
+    .approval(Arc::new(DenyReads))
+    .workspace(workspace)
+    .build()
+    .unwrap();
+    let outcome = run_turn(&conversation, "go").await;
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let results = tool_results(&conversation).await;
+    assert_eq!(results.len(), 1);
+    assert!(
+        result_text(&results[0]).contains("denied: list"),
+        "the gate must reach batch children: {}",
+        result_text(&results[0])
+    );
 }
 
 #[tokio::test]
@@ -202,12 +354,12 @@ async fn dedup_replays_identical_read_calls() {
         crate::testing::tool_turn(vec![tool_event(
             "t1",
             "read",
-            serde_json::json!({"path": "f"}),
+            serde_json::json!({"path":"f"}),
         )]),
         crate::testing::tool_turn(vec![tool_event(
             "t2",
             "read",
-            serde_json::json!({"path": "f"}),
+            serde_json::json!({"path":"f"}),
         )]),
         crate::testing::text_turn("done"),
     ]);
@@ -246,7 +398,7 @@ async fn dedup_invalidated_by_write_to_same_path() {
         crate::testing::tool_turn(vec![tool_event(
             "t1",
             "read",
-            serde_json::json!({"path": "f"}),
+            serde_json::json!({"path":"f"}),
         )]),
         crate::testing::tool_turn(vec![tool_event(
             "t2",
@@ -256,7 +408,7 @@ async fn dedup_invalidated_by_write_to_same_path() {
         crate::testing::tool_turn(vec![tool_event(
             "t3",
             "read",
-            serde_json::json!({"path": "f"}),
+            serde_json::json!({"path":"f"}),
         )]),
         crate::testing::text_turn("done"),
     ]);
@@ -286,7 +438,7 @@ async fn dedup_invalidated_by_multiedit_top_level_path() {
         crate::testing::tool_turn(vec![tool_event(
             "t1",
             "read",
-            serde_json::json!({"path": "f"}),
+            serde_json::json!({"path":"f"}),
         )]),
         crate::testing::tool_turn(vec![tool_event(
             "t2",
@@ -299,7 +451,7 @@ async fn dedup_invalidated_by_multiedit_top_level_path() {
         crate::testing::tool_turn(vec![tool_event(
             "t3",
             "read",
-            serde_json::json!({"path": "f"}),
+            serde_json::json!({"path":"f"}),
         )]),
         crate::testing::text_turn("done"),
     ]);
@@ -322,31 +474,42 @@ async fn dedup_invalidated_by_multiedit_top_level_path() {
 
 #[tokio::test]
 async fn dedup_invalidated_by_batch_child_write() {
-    // A batch child runs through the same dispatch table, so its write must
+    // A batch child dispatches through the same registry, so its write must
     // invalidate the read cache just like a top-level write.
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("f"), "old\n").unwrap();
-    let dispatch = Workspace::new(dir.path())
-        .unwrap()
-        .register()
-        .with_dedup(crate::run::shared_cache());
-    let read = || call("t", "read", serde_json::json!({"path": "f"}));
-    let batch = || {
-        call(
-            "t",
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![tool_event(
+            "t1",
+            "read",
+            serde_json::json!({"path":"f"}),
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t2",
             "batch",
             serde_json::json!({"tool_calls": [{"tool": "write", "parameters": {
                 "path": "f", "content": "new\n"
             }}]}),
-        )
-    };
-    let first = run_call(&dispatch, read()).await;
-    assert_eq!(raw_text(&first), "1: old");
-    let _ = run_call(&dispatch, batch()).await;
-    let third = run_call(&dispatch, read()).await;
+        )]),
+        crate::testing::tool_turn(vec![tool_event(
+            "t3",
+            "read",
+            serde_json::json!({"path":"f"}),
+        )]),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "old\n").unwrap();
+    let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
+    let _ = run_turn(&conversation, "go").await;
+    let texts: Vec<String> = tool_results(&conversation)
+        .await
+        .iter()
+        .map(result_text)
+        .collect();
+    assert_eq!(texts.len(), 3);
+    assert_eq!(texts[0], "1: old");
+    assert!(!texts[1].contains("[error]"), "{}", texts[1]);
     assert_eq!(
-        raw_text(&third),
-        "1: new",
+        texts[2], "1: new",
         "batch child write must invalidate the read cache"
     );
 }
@@ -362,7 +525,7 @@ async fn dedup_cleared_by_bash() {
         crate::testing::tool_turn(vec![tool_event(
             "t1",
             "read",
-            serde_json::json!({"path": "f"}),
+            serde_json::json!({"path":"f"}),
         )]),
         crate::testing::tool_turn(vec![tool_event(
             "t2",
@@ -372,7 +535,7 @@ async fn dedup_cleared_by_bash() {
         crate::testing::tool_turn(vec![tool_event(
             "t3",
             "read",
-            serde_json::json!({"path": "f"}),
+            serde_json::json!({"path":"f"}),
         )]),
         crate::testing::text_turn("done"),
     ]);
@@ -394,62 +557,18 @@ async fn dedup_cleared_by_bash() {
     );
 }
 
-#[tokio::test]
-async fn dedup_replays_through_after_hook() {
-    // The cache stores the raw result; a replay must re-run the per-call
-    // AfterExecute transform instead of replaying its output.
-    struct Counting {
-        count: Arc<AtomicUsize>,
-    }
-    impl AfterExecute for Counting {
-        fn transform(&self, _call: ContentBlock, result: ContentBlock) -> BoxFuture<ContentBlock> {
-            let count = Arc::clone(&self.count);
-            Box::pin(async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                result
-            })
-        }
-    }
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("f"), "body\n").unwrap();
-    let count = Arc::new(AtomicUsize::new(0));
-    let dispatch = Workspace::new(dir.path())
-        .unwrap()
-        .register()
-        .with_dedup(crate::run::shared_cache())
-        .with_after(Arc::new(Counting {
-            count: count.clone(),
-        }));
-    let read = |id: &str| call(id, "read", serde_json::json!({"path": "f"}));
-    let first = run_call(&dispatch, read("t1")).await;
-    assert_eq!(raw_text(&first), "1: body");
-    let replayed = run_call(&dispatch, read("t2")).await;
-    assert_eq!(
-        raw_text(&replayed),
-        "[cached] 1: body",
-        "the replayed result carries the cache marker"
-    );
-    assert_eq!(
-        count.load(Ordering::Relaxed),
-        2,
-        "after hook must run on both the execution and the replay"
-    );
-}
-
 // --- scheduling of one turn's calls ---
 
 /// Two writes to the same path must not overlap: each records start/end
-/// markers around a sleep and the log must show one fully nested pair.
+/// markers around a delay and the log must show one fully nested pair.
 #[tokio::test]
 async fn same_path_writes_serialize() {
     let log = Arc::new(StdMutex::new(Vec::new()));
-    let mk = |name: &'static str, log: &Arc<StdMutex<Vec<&'static str>>>| {
-        let log = Arc::clone(log);
-        tool(name, move || {
-            log.lock().unwrap().push("start");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            log.lock().unwrap().push("end");
-        })
+    let writer = |name: &'static str| {
+        Probe::simple(name)
+            .claiming(ProbeClaim::Writes(&["same.txt"]))
+            .with_delay(Duration::from_millis(20))
+            .logging(&log)
     };
     let provider = script(vec![
         crate::testing::tool_turn(vec![
@@ -471,7 +590,7 @@ async fn same_path_writes_serialize() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        crate::run::ToolDispatch::new([mk("write", &log), mk("edit", &log)]),
+        registry([writer("write"), writer("edit")]),
         None,
     )
     .await;
@@ -484,31 +603,32 @@ async fn same_path_writes_serialize() {
     assert!(!result_is_error(&results[1]));
 }
 
-/// A never-parallel tool joins the wave barrier: everything spawned before
-/// it has finished before it starts. The counter is incremented by the
-/// earlier call at its end and read by the batch call at its start.
+/// An exclusive tool is a barrier: everything spawned before it has
+/// finished before it starts. The counter is incremented by the earlier
+/// call at its end and read by the exclusive call at its start.
 #[tokio::test]
-async fn never_parallel_tool_waits_for_earlier_calls() {
+async fn exclusive_tool_waits_for_earlier_calls() {
     let finished = Arc::new(AtomicUsize::new(0));
     let seen_before = Arc::new(AtomicUsize::new(usize::MAX));
     let earlier = {
         let finished = Arc::clone(&finished);
-        tool("read", move || {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            finished.fetch_add(1, Ordering::SeqCst);
-        })
+        Probe::independent("read")
+            .with_delay(Duration::from_millis(20))
+            .on_run(move || {
+                finished.fetch_add(1, Ordering::SeqCst);
+            })
     };
-    let batch = {
+    let exclusive = {
         let finished = Arc::clone(&finished);
         let seen = Arc::clone(&seen_before);
-        tool("batch", move || {
+        Probe::simple("question").on_run(move || {
             seen.store(finished.load(Ordering::SeqCst), Ordering::SeqCst);
         })
     };
     let provider = script(vec![
         crate::testing::tool_turn(vec![
             tool_event("t1", "read", serde_json::json!({"path": "f"})),
-            tool_event("t2", "batch", serde_json::json!({})),
+            tool_event("t2", "question", serde_json::json!({})),
         ]),
         crate::testing::text_turn("done"),
     ]);
@@ -517,7 +637,7 @@ async fn never_parallel_tool_waits_for_earlier_calls() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        crate::run::ToolDispatch::new([earlier, batch]),
+        registry([earlier, exclusive]),
         None,
     )
     .await;
@@ -526,7 +646,7 @@ async fn never_parallel_tool_waits_for_earlier_calls() {
     assert_eq!(
         seen_before.load(Ordering::SeqCst),
         1,
-        "batch must start only after the earlier call finished"
+        "the exclusive call must start only after the earlier call finished"
     );
 }
 
@@ -534,28 +654,174 @@ async fn never_parallel_tool_waits_for_earlier_calls() {
 /// sequential dispatch would deadlock both on the barrier, concurrent
 /// dispatch passes. Bounded so the suite can never hang on it.
 #[tokio::test]
-#[ignore = "restored in 06"]
 async fn independent_calls_run_concurrently() {
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let mk_probe = |name: &'static str, barrier: &Arc<tokio::sync::Barrier>| {
-        let barrier = Arc::clone(barrier);
-        DynamicTool::new(
-            crate::tools::tool_name(name),
-            name,
-            serde_json::json!({}),
-            move |_: serde_json::Value| {
-                let barrier = Arc::clone(&barrier);
-                Box::pin(async move {
-                    barrier.wait().await;
-                    Ok(ToolOutput::text("ok"))
-                })
-            },
-        )
-    };
+    /// A probe that awaits a shared barrier in its body.
+    struct BarrierProbe {
+        name: &'static str,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl ToolImpl for BarrierProbe {
+        type Args = ProbeArgs;
+        type Output = ToolOutput;
+        type Error = crate::tools::error::Error;
+
+        fn definition(&self) -> ToolDefinition {
+            crate::tools::error::definition::<ProbeArgs>(self.name, "barrier probe")
+        }
+
+        fn scheduling(&self, _input: &Value) -> ToolScheduling {
+            ToolScheduling::Resources {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            }
+        }
+
+        async fn call(
+            &self,
+            _context: &ToolContext<'_>,
+            _args: ProbeArgs,
+        ) -> Result<ToolOutput, crate::tools::error::Error> {
+            let _ = self.barrier.wait().await;
+            Ok(crate::tools::error::text_output("ok"))
+        }
+    }
+
     let provider = script(vec![
         crate::testing::tool_turn(vec![
             tool_event("t1", "probe_a", serde_json::json!({})),
             tool_event("t2", "probe_b", serde_json::json!({})),
+        ]),
+        crate::testing::text_turn("done"),
+    ]);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut registry = ToolRegistry::default();
+    registry
+        .register(BarrierProbe {
+            name: "probe_a",
+            barrier: Arc::clone(&barrier),
+        })
+        .unwrap();
+    registry
+        .register(BarrierProbe {
+            name: "probe_b",
+            barrier: Arc::clone(&barrier),
+        })
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, _stream) = conversation_over(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        registry,
+        None,
+    )
+    .await;
+    // Sequential dispatch would deadlock both probes on the barrier.
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        run_turn(&conversation, "go").await
+    })
+    .await
+    .expect("calls must overlap; dispatch looks sequential");
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+}
+
+/// Two reads of one file overlap: both must start before either finishes,
+/// or the barrier they meet on never releases.
+#[tokio::test]
+async fn two_reads_of_one_file_overlap() {
+    /// A read-claiming probe that awaits a shared barrier in its body.
+    struct ReadProbe {
+        name: &'static str,
+        key: &'static str,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl ToolImpl for ReadProbe {
+        type Args = ProbeArgs;
+        type Output = ToolOutput;
+        type Error = crate::tools::error::Error;
+
+        fn definition(&self) -> ToolDefinition {
+            crate::tools::error::definition::<ProbeArgs>(self.name, "read probe")
+        }
+
+        fn scheduling(&self, _input: &Value) -> ToolScheduling {
+            ToolScheduling::Resources {
+                reads: vec![self.key.to_owned()],
+                writes: Vec::new(),
+            }
+        }
+
+        async fn call(
+            &self,
+            _context: &ToolContext<'_>,
+            _args: ProbeArgs,
+        ) -> Result<ToolOutput, crate::tools::error::Error> {
+            let _ = self.barrier.wait().await;
+            Ok(crate::tools::error::text_output("ok"))
+        }
+    }
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event("t1", "read_one", serde_json::json!({})),
+            tool_event("t2", "read_two", serde_json::json!({})),
+        ]),
+        crate::testing::text_turn("done"),
+    ]);
+    let mut registry = ToolRegistry::default();
+    for name in ["read_one", "read_two"] {
+        registry
+            .register(ReadProbe {
+                name,
+                key: "f",
+                barrier: Arc::clone(&barrier),
+            })
+            .unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, _stream) = conversation_over(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        registry,
+        None,
+    )
+    .await;
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        run_turn(&conversation, "go").await
+    })
+    .await
+    .expect("two reads of one file must overlap");
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+}
+
+/// A write conflicts with a read of the same path: the read observes the
+/// write's effect deterministically (a conflicting call is a barrier).
+#[tokio::test]
+async fn write_then_read_of_the_same_path_serialize() {
+    let log = Arc::new(StdMutex::new(Vec::new()));
+    let writer = Probe::simple("write")
+        .claiming(ProbeClaim::Writes(&["f"]))
+        .with_delay(Duration::from_millis(20))
+        .on_run({
+            let log = Arc::clone(&log);
+            move || log.lock().unwrap().push("wrote")
+        });
+    let reader = Probe::simple("read")
+        .claiming(ProbeClaim::Reads("f"))
+        .on_run({
+            let log = Arc::clone(&log);
+            move || log.lock().unwrap().push("read")
+        });
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event("t1", "write", serde_json::json!({})),
+            tool_event("t2", "read", serde_json::json!({})),
         ]),
         crate::testing::text_turn("done"),
     ]);
@@ -564,20 +830,48 @@ async fn independent_calls_run_concurrently() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        crate::run::ToolDispatch::new([
-            mk_probe("probe_a", &barrier),
-            mk_probe("probe_b", &barrier),
-        ]),
+        registry([writer, reader]),
         None,
     )
     .await;
-    // Sequential dispatch would deadlock both probes on the barrier.
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        run_turn(&conversation, "go").await
-    })
-    .await
-    .expect("calls must overlap; dispatch looks sequential");
+    let outcome = run_turn(&conversation, "go").await;
     assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["wrote", "read"],
+        "the read must start only after the conflicting write finished"
+    );
+}
+
+/// A directory `list` conflicts with a write beneath it, through the real
+/// tools' claims: the listing always observes the written file.
+#[tokio::test]
+async fn directory_list_conflicts_with_a_write_beneath_it() {
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event(
+                "t1",
+                "write",
+                serde_json::json!({"path": "src/new.rs", "content": "fn f() {}\n"}),
+            ),
+            tool_event("t2", "list", serde_json::json!({"path": "src"})),
+        ]),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/old.rs"), "x\n").unwrap();
+    let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
+    let outcome = run_turn(&conversation, "go").await;
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let results = tool_results(&conversation).await;
+    assert_eq!(results.len(), 2);
+    assert!(!result_is_error(&results[0]));
+    assert!(
+        result_text(&results[1]).contains("new.rs"),
+        "the listing must observe the conflicting write: {}",
+        result_text(&results[1])
+    );
 }
 
 /// Three identical calls in a row: the first two execute, the third is
@@ -587,19 +881,12 @@ async fn independent_calls_run_concurrently() {
 #[ignore = "restored in 07"]
 async fn identical_calls_blocked_as_doom_loop() {
     let runs = Arc::new(AtomicUsize::new(0));
-    let runs2 = Arc::clone(&runs);
-    let probe = DynamicTool::new(
-        crate::tools::tool_name("probe"),
-        "probe",
-        serde_json::json!({}),
-        move |_: serde_json::Value| {
-            let runs = Arc::clone(&runs2);
-            Box::pin(async move {
-                runs.fetch_add(1, Ordering::SeqCst);
-                Ok(ToolOutput::text("ok"))
-            })
-        },
-    );
+    let probe = {
+        let runs = Arc::clone(&runs);
+        Probe::simple("probe").on_run(move || {
+            runs.fetch_add(1, Ordering::SeqCst);
+        })
+    };
     let input = serde_json::json!({});
     let provider = script(vec![
         crate::testing::tool_turn(vec![
@@ -617,7 +904,7 @@ async fn identical_calls_blocked_as_doom_loop() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        crate::run::ToolDispatch::new([probe]),
+        registry([probe]),
         None,
     )
     .await;
@@ -629,9 +916,9 @@ async fn identical_calls_blocked_as_doom_loop() {
     let blocked: Vec<&ContentBlock> = results.iter().filter(|r| result_is_error(r)).collect();
     assert_eq!(blocked.len(), 1);
     assert!(
-        raw_text(blocked[0]).contains("stuck in a loop"),
+        result_text(blocked[0]).contains("stuck in a loop"),
         "got: {}",
-        raw_text(blocked[0])
+        result_text(blocked[0])
     );
     assert!(results.iter().any(|r| !result_is_error(r)));
 }
@@ -652,7 +939,10 @@ async fn panicking_tool_becomes_error_result() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        crate::run::ToolDispatch::new([tool("boom", || panic!("kaboom")), tool("fine", || {})]),
+        registry([
+            Probe::simple("boom").panicking("kaboom"),
+            Probe::simple("fine"),
+        ]),
         None,
     )
     .await;

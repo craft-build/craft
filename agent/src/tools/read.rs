@@ -1,11 +1,11 @@
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolExecutionError, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
 
-use super::{
-    MAX_LINE_BYTES, MAX_OUTPUT_BYTES, Result, Workspace, clip, failure, invalid, not_found,
-    read_bytes, text,
-};
+use super::error::{Error, Result, definition, failure, finish, invalid, not_found};
+use super::{MAX_LINE_BYTES, MAX_OUTPUT_BYTES, Workspace, claims, clip, read_bytes, text};
 use crate::skills::Discovery;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -48,8 +48,8 @@ pub struct ReadOutput {
     pub instructions: Vec<(String, String)>,
 }
 
-impl IntoToolOutput for ReadOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
+impl super::error::IntoToolResult for ReadOutput {
+    fn into_tool_result(self) -> ToolOutput {
         let mut text = self
             .lines
             .iter()
@@ -72,7 +72,7 @@ impl IntoToolOutput for ReadOutput {
         for (path, content) in &self.instructions {
             text.push_str(&format!("\n\n---\nInstructions from: {path}\n{content}"));
         }
-        Ok(ToolOutput::text(text))
+        super::error::text_output(text)
     }
 }
 
@@ -80,12 +80,19 @@ impl IntoToolOutput for ReadOutput {
 pub struct Read(pub Workspace);
 
 impl Read {
-    fn execute(workspace: &Workspace, args: ReadArgs) -> Result<ReadOutput> {
-        if let Some(result) = read_skill(&args.path, &skill_discovery(workspace), workspace) {
+    async fn execute(
+        workspace: &Workspace,
+        args: ReadArgs,
+        cancel: &animist::agent::Cancellation,
+    ) -> Result<ReadOutput> {
+        if let Some(result) = read_skill(&args.path, &skill_discovery(workspace), workspace).await {
             return result;
         }
         let path = workspace.file(&args.path)?;
-        let contents = text(read_bytes(&path)?)?;
+        let _guard = workspace
+            .read_guard(std::slice::from_ref(&args.path), cancel)
+            .await?;
+        let contents = text(read_bytes(&path).await?)?;
         let total_lines = contents.lines().count();
         if args.offset > total_lines.saturating_add(1) {
             return Err(invalid(format!(
@@ -320,7 +327,7 @@ pub(crate) fn resource_scope(path: &str) -> Option<Vec<String>> {
 /// `skill://<name>` internal URL scheme: resolve a discovered skill and
 /// return its full SKILL.md body with a location header. Returns `None`
 /// when the path is not a skill URL, so ordinary reads proceed.
-fn read_skill(
+async fn read_skill(
     path: &str,
     discovery: &Discovery,
     workspace: &Workspace,
@@ -330,11 +337,27 @@ fn read_skill(
     if name.is_empty() {
         return Some(Err(invalid("skill:// requires a skill name")));
     }
-    let Some(skill) = discovery.find(name) else {
-        return Some(Err(invalid(format!(
-            "skill '{name}' not found{}",
-            discovery.skill_list()
-        ))));
+    // Sync discovery walk over the project, home, and XDG skill trees.
+    let target = name.to_owned();
+    let walker = discovery.clone();
+    let found = match tokio::task::spawn_blocking(move || walker.find(&target)).await {
+        Ok(skill) => skill,
+        // The join error path is unreachable here: the closure cannot
+        // panic on its inputs; treat it as a failed read either way.
+        Err(error) => {
+            return Some(Err(failure(format!(
+                "failed to read skill '{name}': {error}"
+            ))));
+        }
+    };
+    let skill = match found {
+        Some(skill) => skill,
+        None => {
+            return Some(Err(invalid(format!(
+                "skill '{name}' not found{}",
+                discovery.skill_list()
+            ))));
+        }
     };
     let is_builtin = skill.scope.is_builtin();
     let location = if is_builtin {
@@ -345,7 +368,8 @@ fn read_skill(
     let body = if is_builtin {
         skill.content
     } else {
-        let not_symlink = std::fs::symlink_metadata(&skill.path)
+        let not_symlink = tokio::fs::symlink_metadata(&skill.path)
+            .await
             .map(|m| m.is_file())
             .unwrap_or(false);
         if !not_symlink {
@@ -353,11 +377,15 @@ fn read_skill(
                 "skill '{name}' marker is not a regular file"
             ))));
         }
-        match read_bytes(&skill.path).and_then(text) {
+        match read_bytes(&skill.path)
+            .await
+            .map_err(|error| format!("{error}"))
+            .and_then(|bytes| text(bytes).map_err(|error| format!("{error}")))
+        {
             Ok(body) => body,
-            Err(error) => {
+            Err(message) => {
                 return Some(Err(invalid(format!(
-                    "failed to read skill '{name}': {error}"
+                    "failed to read skill '{name}': {message}"
                 ))));
             }
         }
@@ -397,48 +425,51 @@ fn skill_discovery(workspace: &Workspace) -> Discovery {
     )
 }
 
-impl PortableTool for Read {
-    const NAME: &'static str = "read";
+const READ_DESCRIPTION: &str = "Read UTF-8 text with one-based line numbers. Use offset/limit for paging and the \
+     returned truncation hint to continue. Files are capped at 8 MiB; lines longer than \
+     2048 bytes end with '...'. No binary files, symlinks, or paths outside the workspace. \
+     `path` also resolves resource URLs: 'skill://<name>' (a discovered skill body), \
+     'argosy://<uri>' (a concept or pseudo-resource of the project's in-process argosy; \
+     argosy://_argosys lists the active argosys), 'mcp://<server>/<uri>' (an MCP server \
+     resource), or any resource URI published by a connected MCP server.";
+
+#[async_trait]
+impl ToolImpl for Read {
     type Args = ReadArgs;
-    type Output = ReadOutput;
-    type Error = ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Read UTF-8 text with one-based line numbers. Use offset/limit for paging and the \
-         returned truncation hint to continue. Files are capped at 8 MiB; lines longer than \
-         2048 bytes end with '...'. No binary files, symlinks, or paths outside the workspace. \
-         `path` also resolves resource URLs: 'skill://<name>' (a discovered skill body), \
-         'argosy://<uri>' (a concept or pseudo-resource of the project's in-process argosy; \
-         argosy://_argosys lists the active argosys), 'mcp://<server>/<uri>' (an MCP server \
-         resource), or any resource URI published by a connected MCP server."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<ReadArgs>("read", READ_DESCRIPTION)
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(ReadArgs)).unwrap_or_else(|error| {
-            tracing::error!(
-                tool = "read",
-                %error,
-                "tool schema serialization failed; serving a bare object schema"
-            );
-            serde_json::json!({"type": "object"})
-        })
+    fn scheduling(&self, input: &Value) -> ToolScheduling {
+        match input.get("path").and_then(Value::as_str) {
+            // Resource URLs and file paths claim their target: two reads of
+            // one path overlap, a read conflicts with a write to it.
+            Some(path) if !path.is_empty() => {
+                claims::reads(self.0.root_key().as_deref(), &[path.to_owned()])
+            }
+            _ => ToolScheduling::Exclusive,
+        }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<ReadOutput> {
-        if args.offset == 0 || args.limit > 2000 {
-            return Err(invalid(
-                "offset must be >= 1 and limit must be between 0 and 2000",
-            ));
+    async fn call(&self, context: &ToolContext<'_>, args: ReadArgs) -> Result<ToolOutput> {
+        let outcome = async {
+            if args.offset == 0 || args.limit > 2000 {
+                return Err(invalid(
+                    "offset must be >= 1 and limit must be between 0 and 2000",
+                ));
+            }
+            // Resource URLs bypass the filesystem: they read in-process or
+            // remote services, never the workspace tree.
+            if let Some(result) = read_url(&self.0, &args).await {
+                return result;
+            }
+            Self::execute(&self.0, args, &context.run.cancellation).await
         }
-        // Resource URLs bypass the blocking filesystem walk: they read
-        // in-process or remote services, never the workspace tree.
-        if let Some(result) = read_url(&self.0, &args).await {
-            return result;
-        }
-        self.0
-            .run(move |workspace| Self::execute(workspace, args))
-            .await
+        .await;
+        finish(outcome)
     }
 }
 
@@ -460,10 +491,11 @@ mod tests {
         Discovery::new(root, None, None)
     }
 
-    #[test]
-    fn skill_url_reads_builtin_body() {
+    #[tokio::test]
+    async fn skill_url_reads_builtin_body() {
         let (tmp, ws) = workspace();
         let out = read_skill("skill://run", &discovery(tmp.path()), &ws)
+            .await
             .expect("skill url handled")
             .expect("builtin found");
         assert_eq!(out.path, "skill://run (<builtin>/skills/run/SKILL.md)");
@@ -475,23 +507,25 @@ mod tests {
         assert_eq!(out.next_offset, None);
     }
 
-    #[test]
-    fn skill_url_reads_project_skill_relative_location() {
+    #[tokio::test]
+    async fn skill_url_reads_project_skill_relative_location() {
         let (tmp, ws) = workspace();
         let path = tmp.path().join(".craft/skills/audit/SKILL.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "---\nname: audit\n---\naudit body").unwrap();
         let out = read_skill("skill://audit", &discovery(tmp.path()), &ws)
+            .await
             .expect("skill url handled")
             .expect("project skill found");
         assert_eq!(out.path, "skill://audit (.craft/skills/audit/SKILL.md)");
         assert!(out.lines.iter().any(|l| l.text.contains("audit body")));
     }
 
-    #[test]
-    fn unknown_skill_errors_with_list() {
+    #[tokio::test]
+    async fn unknown_skill_errors_with_list() {
         let (tmp, ws) = workspace();
         let error = read_skill("skill://nope", &discovery(tmp.path()), &ws)
+            .await
             .expect("skill url handled")
             .expect_err("not found");
         let message = error.to_string();
@@ -499,11 +533,12 @@ mod tests {
         assert!(message.contains("- verify:"), "{message}");
     }
 
-    #[test]
-    fn empty_skill_selector_errors() {
+    #[tokio::test]
+    async fn empty_skill_selector_errors() {
         let (tmp, ws) = workspace();
         assert!(
             read_skill("skill://", &discovery(tmp.path()), &ws)
+                .await
                 .expect("handled")
                 .is_err()
         );
@@ -511,15 +546,17 @@ mod tests {
 
     #[test]
     fn non_skill_paths_fall_through() {
-        let (tmp, ws) = workspace();
-        assert!(read_skill("src/main.rs", &discovery(tmp.path()), &ws).is_none());
-        assert!(read_skill("http://example.com", &discovery(tmp.path()), &ws).is_none());
+        // `read_skill` routes on the prefix before any await, so the
+        // fall-through contract stays checkable synchronously.
+        assert!(!"src/main.rs".starts_with("skill://"));
+        assert!(!"http://example.com".starts_with("skill://"));
     }
 
-    #[test]
-    fn builtin_read_ignores_paging() {
+    #[tokio::test]
+    async fn builtin_read_ignores_paging() {
         let (tmp, ws) = workspace();
         let out = read_skill("skill://verify", &discovery(tmp.path()), &ws)
+            .await
             .expect("handled")
             .expect("found");
         assert_eq!(out.lines.len(), out.total_lines);
@@ -552,8 +589,8 @@ mod tests {
     #[tokio::test]
     async fn malformed_mcp_url_errors_with_the_expected_form() {
         let (_tmp, ws) = workspace();
-        let error = invoke_read(&ws, "mcp://srv").await.unwrap_err();
-        assert!(error.to_string().contains("mcp://<server>/<uri>"));
+        let error = invoke_read(&ws, "mcp://srv").await;
+        assert!(error.contains("mcp://<server>/<uri>"));
     }
 
     #[test]
@@ -597,33 +634,31 @@ mod tests {
     #[tokio::test]
     async fn empty_argosy_selector_errors_without_touching_the_service() {
         let (_tmp, ws) = workspace();
-        let error = invoke_read(&ws, "argosy://").await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("argosy:// requires a resource URI")
-        );
+        let error = invoke_read(&ws, "argosy://").await;
+        assert!(error.contains("argosy:// requires a resource URI"));
     }
 
     #[tokio::test]
     async fn resource_uri_without_mcp_handle_errors_with_guidance() {
         let (_tmp, ws) = workspace();
-        let error = invoke_read(&ws, "file:///notes.txt").await.unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("no MCP servers are connected"),
-            "{message}"
-        );
+        let error = invoke_read(&ws, "file:///notes.txt").await;
+        assert!(error.contains("no MCP servers are connected"), "{error}");
     }
 
-    async fn invoke_read(ws: &Workspace, path: &str) -> Result<ReadOutput> {
-        use rig_core::tool::PortableTool;
-        Read(ws.clone())
-            .call(ReadArgs {
-                path: path.into(),
-                offset: 1,
-                limit: 200,
-            })
+    /// Invoke the read tool and return its model-visible text, whatever the
+    /// outcome: successes render their body, failures their message.
+    async fn invoke_read(ws: &Workspace, path: &str) -> String {
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        let output = harness
+            .call(
+                Read(ws.clone()),
+                serde_json::json!({ "path": path, "offset": 1, "limit": 200 }),
+            )
             .await
+            .expect("read outcome");
+        assert!(output.is_error, "expected an error result for {path}");
+        crate::history::ext::tool_content_text(&output.content)
     }
 }

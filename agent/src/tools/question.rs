@@ -8,11 +8,12 @@
 
 use std::sync::Arc;
 
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{Result, invalid};
+use super::error::{Error, Result, definition, finish, invalid};
 
 /// How long a question may wait for the user before the answer degrades
 /// to dismissed. Shared with the permission prompt (reference: 30 min).
@@ -110,11 +111,9 @@ pub struct QuestionOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for QuestionOutput {
-    fn into_tool_output(
-        self,
-    ) -> std::result::Result<ToolOutput, rig_core::tool::ToolExecutionError> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for QuestionOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
@@ -187,36 +186,39 @@ pub fn format_answer_markdown(questions: &[QuestionSpec], answer: &QuestionAnswe
     blocks.join("\n\n")
 }
 
-impl PortableTool for Question {
-    const NAME: &'static str = "question";
+const QUESTION_DESCRIPTION: &str = "Use this tool when you need to ask the user questions during execution. This allows you to:\n\
+     - Gather user preferences or requirements\n\
+     - Clarify ambiguous instructions\n\
+     - Get decisions on implementation choices as you work\n\
+     - Offer choices to the user about what direction to take\n\n\
+     Rules:\n\
+     - `custom` enabled by default adds \"Type your own answer\" - don't include catch-all options.\n\
+     - Answers returned as arrays of labels. Set `multiSelect: true` for multi-select.\n\
+     - Put recommended option first with \"(Recommended)\" suffix.";
+
+#[async_trait]
+impl ToolImpl for Question {
     type Args = QuestionArgs;
-    type Output = QuestionOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Use this tool when you need to ask the user questions during execution. This allows you to:\n\
-         - Gather user preferences or requirements\n\
-         - Clarify ambiguous instructions\n\
-         - Get decisions on implementation choices as you work\n\
-         - Offer choices to the user about what direction to take\n\n\
-         Rules:\n\
-         - `custom` enabled by default adds \"Type your own answer\" - don't include catch-all options.\n\
-         - Answers returned as arrays of labels. Set `multiSelect: true` for multi-select.\n\
-         - Put recommended option first with \"(Recommended)\" suffix."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<QuestionArgs>("question", QUESTION_DESCRIPTION)
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(QuestionArgs))
-            .expect("JSON Schema is serializable")
-    }
+    // Exclusive: the ask parks on the host seam for up to the ask timeout,
+    // and the model must not race a user prompt against other calls.
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        let questions = parse_questions(&args)?;
-        let answer = self.0.ask(questions.clone()).await;
-        Ok(QuestionOutput {
-            text: format_answer_markdown(&questions, &answer),
-        })
+    async fn call(&self, _context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
+        let outcome = async {
+            let questions = parse_questions(&args)?;
+            let answer = self.0.ask(questions.clone()).await;
+            Ok(QuestionOutput {
+                text: format_answer_markdown(&questions, &answer),
+            })
+        }
+        .await;
+        finish(outcome)
     }
 }
 
@@ -332,6 +334,34 @@ mod tests {
         assert!(!is_question_answer("deny:reason"));
     }
 
+    async fn invoke(tool: &Question, args: QuestionArgs) -> animist::agent::tool::ToolOutput {
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        harness
+            .call(tool.clone(), question_json(&args))
+            .await
+            .expect("question outcome")
+    }
+
+    fn text(output: &animist::agent::tool::ToolOutput) -> String {
+        crate::history::ext::tool_content_text(&output.content)
+    }
+
+    /// The wire shape of `QuestionArgs` (Deserialize-only struct).
+    fn question_json(args: &QuestionArgs) -> serde_json::Value {
+        serde_json::json!({ "questions": args.questions.iter().map(|q| serde_json::json!({
+            "question": q.question,
+            "header": q.header,
+            "options": q.options.iter().map(|o| serde_json::json!({
+                "label": o.label,
+                "description": o.description,
+            })).collect::<Vec<_>>(),
+            "multi_select": q.multi_select,
+            "multiple": q.multiple,
+        })).collect::<Vec<_>>() })
+    }
+
     #[tokio::test]
     async fn tool_returns_markdown_of_the_answer() {
         let tool = Question(Arc::new(Scripted(std::sync::Mutex::new(Some(
@@ -340,22 +370,23 @@ mod tests {
                 answers: vec![vec!["A".into()]],
             },
         )))));
-        let out = tool.call(questions()).await.unwrap();
-        assert!(out.text.contains("**Q1.** Pick one"));
-        assert!(out.text.contains("- A"));
+        let out = invoke(&tool, questions()).await;
+        assert!(text(&out).contains("**Q1.** Pick one"));
+        assert!(text(&out).contains("- A"));
     }
 
     #[tokio::test]
     async fn tool_defaults_to_dismissed_without_a_host() {
         let tool = Question(Arc::new(DismissAsk));
-        let out = tool.call(questions()).await.unwrap();
-        assert_eq!(out.text, "(question dismissed by user)");
+        let out = invoke(&tool, questions()).await;
+        assert_eq!(text(&out), "(question dismissed by user)");
     }
 
     #[tokio::test]
     async fn tool_rejects_empty_questions() {
         let tool = Question(Arc::new(DismissAsk));
-        assert!(tool.call(QuestionArgs { questions: vec![] }).await.is_err());
+        let out = invoke(&tool, QuestionArgs { questions: vec![] }).await;
+        assert!(out.is_error);
     }
 
     #[test]

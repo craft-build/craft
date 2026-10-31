@@ -21,10 +21,11 @@ use snafu::ResultExt;
 use crate::config::Config;
 use crate::error::{BuildConversationSnafu, Result, ShutdownConversationSnafu};
 use crate::provider::ModelHandle;
+use animist::agent::tool::ToolRegistry;
+
+use crate::run::BeforeExecute;
 use crate::run::SharedCompactionState;
-use crate::run::ToolDispatch;
 use crate::run::dedup::{self, SharedDedupCache};
-use crate::run::dispatch::BeforeExecute;
 use crate::run::guardrails;
 use crate::run::mode::AgentMode;
 use crate::run::recency::RecencySource;
@@ -37,7 +38,6 @@ use super::persist::Persister;
 use super::persist_layer::PersistLayer;
 use super::policy::PolicyLayer;
 use super::request::{RequestLayer, RequestLayerInputs};
-use super::rig_bridge;
 use super::snapshot_layer::SnapshotLayer;
 
 /// How the surface bounds model calls per run.
@@ -109,7 +109,7 @@ struct Inner {
     history: History,
     model: Arc<ArcSwap<ModelHandle>>,
     settings: Arc<ArcSwap<TurnSettings>>,
-    tools: Arc<ArcSwap<ToolDispatch>>,
+    tools: Arc<ArcSwap<ToolRegistry>>,
     agent: ArcSwap<Arc<Agent>>,
     config: AgentConfig,
     layers: LayerSet,
@@ -143,7 +143,7 @@ pub struct ConversationBuilder<'a> {
     cwd: &'a str,
     instructions_text: &'a str,
     model: ModelHandle,
-    tools: ToolDispatch,
+    tools: ToolRegistry,
     sink: EventSink,
     history: Option<History>,
     mode: AgentMode,
@@ -154,6 +154,9 @@ pub struct ConversationBuilder<'a> {
     recency: Option<Arc<dyn RecencySource>>,
     snapshots: Option<SnapshotManager>,
     persist: Option<Arc<tokio::sync::Mutex<Persister>>>,
+    /// The session workspace: anchors write-path normalization and owns
+    /// the compression store the request layer reads from.
+    workspace: Option<crate::tools::Workspace>,
 }
 
 impl<'a> ConversationBuilder<'a> {
@@ -165,7 +168,7 @@ impl<'a> ConversationBuilder<'a> {
         cwd: &'a str,
         instructions_text: &'a str,
         model: ModelHandle,
-        tools: ToolDispatch,
+        tools: ToolRegistry,
         sink: EventSink,
     ) -> Self {
         Self {
@@ -184,6 +187,7 @@ impl<'a> ConversationBuilder<'a> {
             recency: None,
             snapshots: None,
             persist: None,
+            workspace: None,
         }
     }
 
@@ -247,6 +251,13 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
+    /// The session workspace. Supplies the write-path anchor and the
+    /// compression store; without it both derive from the cwd.
+    pub fn workspace(mut self, workspace: crate::tools::Workspace) -> Self {
+        self.workspace = Some(workspace);
+        self
+    }
+
     /// Assemble the layers, the settings cell, and the first `Agent`.
     #[expect(
         clippy::result_large_err,
@@ -269,9 +280,22 @@ impl<'a> ConversationBuilder<'a> {
             recency,
             snapshots,
             persist,
+            workspace,
         } = self;
-        let write_root = tools.write_root().map(PathBuf::from);
-        let snapshots = snapshots.unwrap_or_else(|| SnapshotManager::new(PathBuf::from(cwd)));
+        let write_root = workspace
+            .as_ref()
+            .map(|workspace| PathBuf::from(workspace.root()))
+            .or_else(|| Some(PathBuf::from(cwd)));
+        let compression_store = workspace
+            .as_ref()
+            .map(|workspace| workspace.compression_store().clone())
+            .unwrap_or_else(crate::compression::store::shared_store);
+        let snapshots = snapshots.unwrap_or_else(|| {
+            workspace
+                .as_ref()
+                .map(|workspace| workspace.snapshots().clone())
+                .unwrap_or_else(|| SnapshotManager::new(PathBuf::from(cwd)))
+        });
         let settings = Arc::new(ArcSwap::from_pointee(TurnSettings {
             mode,
             thinking: thinking
@@ -319,7 +343,7 @@ impl<'a> ConversationBuilder<'a> {
                 model: Arc::clone(&model_cell),
                 settings: Arc::clone(&settings),
                 recency,
-                compression_store: tools.compression_store().cloned(),
+                compression_store: Some(compression_store),
                 write_root: write_root
                     .as_deref()
                     .map(|path| path.to_string_lossy().into_owned()),
@@ -358,7 +382,7 @@ impl<'a> ConversationBuilder<'a> {
 }
 
 /// Build one agent around the given config, history, model, layers, and
-/// bridged tool registry.
+/// tool registry.
 #[expect(
     clippy::result_large_err,
     reason = "AgentError is animist's public error type and cannot be boxed here"
@@ -368,14 +392,13 @@ fn build_agent(
     history: &History,
     model: &ModelHandle,
     layers: &LayerSet,
-    tools: &ToolDispatch,
+    tools: &ToolRegistry,
 ) -> std::result::Result<Agent, animist::agent::AgentError> {
-    let registry = rig_bridge::registry(tools)?;
     Ok(Agent::builder()
         .model(model.model.clone())
         .history(history.clone())
         .config(config.clone())
-        .tools(registry)
+        .tools(tools.clone())
         .layers(layers.chain())
         .build())
 }
@@ -471,12 +494,12 @@ impl Conversation {
         self.rebuild().context(BuildConversationSnafu)
     }
 
-    /// Swap the tool set and rebuild the agent between runs.
+    /// Swap the tool registry and rebuild the agent between runs.
     #[expect(
         clippy::result_large_err,
         reason = "the crate error type is deliberately unboxed"
     )]
-    pub fn set_tools(&self, tools: ToolDispatch) -> Result<()> {
+    pub fn set_tools(&self, tools: ToolRegistry) -> Result<()> {
         self.inner.tools.store(Arc::new(tools));
         self.rebuild().context(BuildConversationSnafu)
     }

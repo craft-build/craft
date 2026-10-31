@@ -46,7 +46,58 @@ impl McpSession for FailingSession {
 }
 
 pub(crate) fn stub_handle(tools: &[(&str, &str)]) -> McpHandle {
-    let session: Arc<dyn McpSession> = Arc::new(FailingSession);
+    stub_handle_with_session(tools, Arc::new(FailingSession))
+}
+
+/// [`stub_handle`] whose single tool call returns `output` instead of
+/// failing, for output-mapping tests.
+pub(crate) fn stub_handle_with_output(tools: &[(&str, &str)], output: McpToolOutput) -> McpHandle {
+    stub_handle_with_session(tools, Arc::new(CannedSession(output)))
+}
+
+struct CannedSession(McpToolOutput);
+
+impl McpSession for CannedSession {
+    fn server_name(&self) -> &str {
+        "stub"
+    }
+    fn list_tools(&self) -> BoxFuture<'_, Result<Vec<ToolInfo>, McpError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn call_tool(
+        &self,
+        _name: &str,
+        _args: &Value,
+    ) -> BoxFuture<'_, Result<McpToolOutput, McpError>> {
+        let output = crate::mcp::session::McpToolOutput {
+            parts: self.0.parts.clone(),
+        };
+        Box::pin(async move { Ok(output) })
+    }
+    fn call_tool_cancellable<'a>(
+        &'a self,
+        name: &'a str,
+        args: &'a Value,
+        cancel: &'a animist::agent::Cancellation,
+    ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
+        super::session::race_call_cancel(self, name, args, cancel)
+    }
+    fn list_prompts(&self) -> BoxFuture<'_, Result<Vec<PromptInfo>, McpError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn get_prompt(
+        &self,
+        _name: &str,
+        _arguments: &HashMap<String, String>,
+    ) -> BoxFuture<'_, Result<Vec<session::PromptMessage>, McpError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn shutdown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+fn stub_handle_with_session(tools: &[(&str, &str)], session: Arc<dyn McpSession>) -> McpHandle {
     let mut index = ToolIndex::default();
     for (qualified, description) in tools {
         let (_server, raw) = qualified

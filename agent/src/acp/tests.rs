@@ -64,7 +64,8 @@ fn test_session() -> Session {
         mock_model(),
         Workspace::new(std::env::temp_dir())
             .expect("workspace")
-            .register(),
+            .registry()
+            .unwrap(),
         sink,
     )
     .build()
@@ -222,7 +223,7 @@ async fn registered_tools_route_task_calls_to_the_installed_launcher() {
         &cwd,
         "",
         mock_model(),
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink.clone(),
     )
     .build()
@@ -243,52 +244,50 @@ async fn registered_tools_route_task_calls_to_the_installed_launcher() {
         before: None,
         cwd,
     });
-    let tools = workspace.with_subagents(launcher).register();
-    let call = || history::ContentBlock::ToolUse {
-        id: "1".into(),
-        name: "task".into(),
-        input: serde_json::json!({
+    let tools = workspace.with_subagents(launcher).registry().unwrap();
+    let call = || {
+        serde_json::json!({
             "description": "probe",
             "prompt": "probe",
             "subagent_type": "bogus",
-        }),
-        thought_signature: None,
+        })
     };
-    let result = match tools.execute(call()).await {
-        Ok(run::DispatchOutcome::Ran(result)) => result,
-        other => panic!("the task call must run: {other:?}"),
-    };
-    let history::ContentBlock::ToolResult {
-        is_error, content, ..
-    } = &result
-    else {
-        panic!("the task result is a tool-result block: {result:?}");
-    };
-    assert!(*is_error);
+    let output = invoke_task(&tools, call()).await;
+    let text = history::ext::tool_content_text(&output.content);
     assert!(
-        history::ext::tool_content_text(content).contains("unknown subagent type: bogus"),
-        "the registered task tool must reach the installed launcher"
+        text.contains("unknown subagent type: bogus"),
+        "the registered task tool must reach the installed launcher: {text}"
     );
 
     // Counterfactual (the pre-fix ACP behavior): without an installed
     // launcher the same registered call only gets the availability error.
-    let bare = Workspace::new(dir.path()).unwrap().register();
-    let result = match bare.execute(call()).await {
-        Ok(run::DispatchOutcome::Ran(result)) => result,
-        other => panic!("the task call must run: {other:?}"),
-    };
-    let history::ContentBlock::ToolResult {
-        is_error, content, ..
-    } = &result
-    else {
-        panic!("the task result is a tool-result block: {result:?}");
-    };
-    assert!(*is_error);
+    let bare = Workspace::new(dir.path()).unwrap().registry().unwrap();
+    let output = invoke_task(&bare, call()).await;
+    let text = history::ext::tool_content_text(&output.content);
     assert!(
-        history::ext::tool_content_text(content)
-            .contains("task tool is not available in this session"),
-        "a missing launcher degrades to the availability error"
+        text.contains("task tool is not available in this session"),
+        "a missing launcher degrades to the availability error: {text}"
     );
+}
+
+/// Invoke the registered `task` tool through the registry, routed as a
+/// batch child so the registered instance (with its installed launcher)
+/// serves the call.
+async fn invoke_task(
+    registry: &animist::agent::tool::ToolRegistry,
+    input: serde_json::Value,
+) -> animist::agent::tool::ToolOutput {
+    let mut harness = animist::agent::testing::ToolHarness::builder()
+        .tools(registry.clone())
+        .build()
+        .expect("harness");
+    harness
+        .call(
+            crate::tools::Batch,
+            serde_json::json!({ "tool_calls": [{"tool": "task", "parameters": input}] }),
+        )
+        .await
+        .expect("task batch outcome")
 }
 
 #[tokio::test]
@@ -331,7 +330,7 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
         &provider,
         crate::testing::model_info("scripted", 200_000, 8_192, false, false),
     ));
-    let tools = Workspace::new(dir.path()).unwrap().register();
+    let tools = Workspace::new(dir.path()).unwrap().registry().unwrap();
     let (sink, stream) = crate::harness::EventSink::new();
     let conversation = crate::harness::ConversationBuilder::new(
         &Config::parse("").expect("default config"),

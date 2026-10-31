@@ -14,13 +14,15 @@
 
 use std::time::Duration;
 
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::bash::wrap_untrusted;
+use super::error::{Error, Result, definition, finish, invalid};
 use super::ssrf::{self, GuardedDns};
-use super::{Result, invalid, truncate_output};
+use super::truncate_output;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 120;
@@ -50,11 +52,9 @@ pub struct WebfetchOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for WebfetchOutput {
-    fn into_tool_output(
-        self,
-    ) -> std::result::Result<ToolOutput, rig_core::tool::ToolExecutionError> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for WebfetchOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
@@ -88,41 +88,51 @@ impl Format {
     }
 }
 
-impl PortableTool for Webfetch {
-    const NAME: &'static str = "webfetch";
+const WEBFETCH_DESCRIPTION: &str = "Fetch a URL and return its contents.\n\n\
+     - Supports markdown (default), text, or html output formats.\n\
+     - HTTP URLs are auto-upgraded to HTTPS.\n\
+     - Max response size is 5MB, max timeout is 120s.\n\
+     - Best used inside code_execution with some truncation / filter to \
+     avoid context bloat.";
+
+#[async_trait]
+impl ToolImpl for Webfetch {
     type Args = WebfetchArgs;
-    type Output = WebfetchOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Fetch a URL and return its contents.\n\n\
-         - Supports markdown (default), text, or html output formats.\n\
-         - HTTP URLs are auto-upgraded to HTTPS.\n\
-         - Max response size is 5MB, max timeout is 120s.\n\
-         - Best used inside code_execution with some truncation / filter to \
-         avoid context bloat."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<WebfetchArgs>("webfetch", WEBFETCH_DESCRIPTION)
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(WebfetchArgs))
-            .expect("JSON Schema is serializable")
+    // Network-only: claims no workspace resources, so fetches overlap
+    // every other call.
+
+    fn scheduling(&self, _input: &serde_json::Value) -> ToolScheduling {
+        ToolScheduling::Resources {
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        let url = ssrf::validate_and_upgrade_url(&args.url).map_err(invalid)?;
-        let format = match args.format.as_deref() {
-            None => Format::Markdown,
-            Some(raw) => {
-                Format::parse(raw).ok_or_else(|| invalid(format!("unknown format: {raw}")))?
-            }
-        };
-        let timeout = resolve_timeout(args.timeout);
+    async fn call(&self, _context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
+        let outcome = async {
+            let url = ssrf::validate_and_upgrade_url(&args.url).map_err(invalid)?;
+            let format = match args.format.as_deref() {
+                None => Format::Markdown,
+                Some(raw) => {
+                    Format::parse(raw).ok_or_else(|| invalid(format!("unknown format: {raw}")))?
+                }
+            };
+            let timeout = resolve_timeout(args.timeout);
 
-        let body = fetch(&url, format, timeout).await.map_err(invalid)?;
-        Ok(WebfetchOutput {
-            text: wrap_untrusted(&truncate_output(&body)),
-        })
+            let body = fetch(&url, format, timeout).await.map_err(invalid)?;
+            Ok(WebfetchOutput {
+                text: wrap_untrusted(&truncate_output(&body)),
+            })
+        }
+        .await;
+        finish(outcome)
     }
 }
 
@@ -461,27 +471,34 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_unknown_format_before_any_network() {
-        let error = Webfetch
-            .call(WebfetchArgs {
-                url: "https://example.com".into(),
-                format: Some("pdf".into()),
-                timeout: None,
-            })
-            .await
-            .expect_err("invalid format");
-        assert!(error.to_string().contains("unknown format: pdf"));
+        let output = invoke(
+            Webfetch,
+            serde_json::json!({
+                "url": "https://example.com", "format": "pdf"
+            }),
+        )
+        .await;
+        assert!(output.is_error);
+        assert!(invoke_text(output).contains("unknown format: pdf"));
+    }
+
+    async fn invoke(tool: Webfetch, args: serde_json::Value) -> animist::agent::tool::ToolOutput {
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        harness.call(tool, args).await.expect("webfetch outcome")
+    }
+
+    fn invoke_text(output: animist::agent::tool::ToolOutput) -> String {
+        crate::history::ext::tool_content_text(&output.content)
     }
 
     #[tokio::test]
     async fn rejects_non_http_scheme_before_any_network() {
-        let error = Webfetch
-            .call(WebfetchArgs {
-                url: "ftp://example.com".into(),
-                format: None,
-                timeout: None,
-            })
-            .await
-            .expect_err("bad scheme");
-        assert!(error.to_string().contains("http://"));
+        let output = invoke(Webfetch, serde_json::json!({ "url": "ftp://example.com" })).await;
+        assert!(output.is_error);
+        let text = invoke_text(output);
+        assert!(text.contains("URL"), "{text}");
+        assert!(text.contains("http://"), "{text}");
     }
 }

@@ -1,10 +1,15 @@
-use rig_core::tool::{IntoToolOutput, ToolExecutionError, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
+
+use crate::run::dedup;
 
 use super::edit::persist;
+use super::error::{Error, Result, definition, finish, invalid};
 use super::fuzzy_replace;
-use super::{MAX_FILE_BYTES, Result, Workspace, impl_tool, invalid, read_bytes, text};
+use super::{MAX_FILE_BYTES, Workspace, claims, read_bytes, text};
 
 const SNIPPET_MAX_CHARS: usize = 32;
 
@@ -34,13 +39,13 @@ pub struct MultiEditOutput {
     pub bytes_written: usize,
 }
 
-impl IntoToolOutput for MultiEditOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
+impl super::error::IntoToolResult for MultiEditOutput {
+    fn into_tool_result(self) -> ToolOutput {
         let plural = if self.edits == 1 { "" } else { "s" };
-        Ok(ToolOutput::text(format!(
+        super::error::text_output(format!(
             "applied {} edit{plural} to {}",
             self.edits, self.path
-        )))
+        ))
     }
 }
 
@@ -58,7 +63,7 @@ impl MultiEdit {
         }
     }
 
-    fn edit_error(index: usize, edit: &EditEntry, reason: &str) -> ToolExecutionError {
+    fn edit_error(index: usize, edit: &EditEntry, reason: &str) -> Error {
         invalid(format!(
             "edits[{index}] (old_string {:?}): {reason}",
             Self::first_line_snippet(&edit.old_string)
@@ -76,7 +81,11 @@ impl MultiEdit {
         .map(|r| r.content)
     }
 
-    fn execute(workspace: &Workspace, args: MultiEditArgs) -> Result<MultiEditOutput> {
+    async fn execute(
+        workspace: &Workspace,
+        args: MultiEditArgs,
+        cancel: &animist::agent::Cancellation,
+    ) -> Result<MultiEditOutput> {
         if args.edits.is_empty() {
             return Err(invalid("provide at least one edit"));
         }
@@ -94,7 +103,10 @@ impl MultiEdit {
             }
         }
         let path = workspace.file(&args.path)?;
-        let before = text(read_bytes(&path)?)?;
+        let _guard = workspace
+            .write_guard(std::slice::from_ref(&args.path), cancel)
+            .await?;
+        let before = text(read_bytes(&path).await?)?;
         let mut after = before.clone();
         for (index, edit) in args.edits.iter().enumerate() {
             after = Self::apply_edit(&after, edit)
@@ -106,7 +118,7 @@ impl MultiEdit {
             ));
         }
         let size = after.len();
-        persist(workspace, &args.path, &path, &before, &after)?;
+        persist(workspace, &args.path, &path, &before, &after).await?;
         Ok(MultiEditOutput {
             path: workspace.display(&path),
             edits: args.edits.len(),
@@ -115,10 +127,27 @@ impl MultiEdit {
     }
 }
 
-impl_tool!(
-    MultiEdit,
-    MultiEditArgs,
-    MultiEditOutput,
-    "multiedit",
-    "Apply multiple find/replace edits to one existing UTF-8 file atomically and in sequence; each edit sees the result of the previous one. Matching is fuzzy-tolerant like edit: old_string must resolve to one match unless replace_all is set. Any failure leaves the file unchanged. No creation, symlinks, Git metadata, or paths outside the workspace."
-);
+#[async_trait]
+impl ToolImpl for MultiEdit {
+    type Args = MultiEditArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<MultiEditArgs>(
+            "multiedit",
+            "Apply multiple find/replace edits to one existing UTF-8 file atomically and in sequence; each edit sees the result of the previous one. Matching is fuzzy-tolerant like edit: old_string must resolve to one match unless replace_all is set. Any failure leaves the file unchanged. No creation, symlinks, Git metadata, or paths outside the workspace.",
+        )
+    }
+
+    fn scheduling(&self, input: &Value) -> ToolScheduling {
+        claims::writes(
+            self.0.root_key().as_deref(),
+            &dedup::extract_write_paths("multiedit", input),
+        )
+    }
+
+    async fn call(&self, context: &ToolContext<'_>, args: MultiEditArgs) -> Result<ToolOutput> {
+        finish(Self::execute(&self.0, args, &context.run.cancellation).await)
+    }
+}

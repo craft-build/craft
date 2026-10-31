@@ -12,7 +12,7 @@ use animist::agent::tool::{ToolContext, ToolOutput};
 use animist::agent::{Agent, LayerImpl, Result, ToolDecision};
 
 use crate::history::ContentBlock;
-use crate::run::dispatch::{BeforeExecute, Decision};
+use crate::run::{BeforeExecute, Decision};
 
 use super::conversation::TurnSettings;
 

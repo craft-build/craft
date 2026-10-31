@@ -1,9 +1,8 @@
 use std::fs;
 
-use rig_core::tool::{PortableTool, ToolErrorKind};
 use serde_json::json;
 
-use super::{invoke, workspace};
+use super::{invoke, invoke_error, output_text, workspace};
 use crate::tools::*;
 
 /// A run model over the scripted attempts, and its recorder.
@@ -43,26 +42,26 @@ async fn all_tools_reject_outside_paths_and_git_metadata() {
         outside.path().join("file").to_string_lossy().into_owned(),
         ".git/config".into(),
     ] {
-        let read = invoke(&Read(workspace.clone()), json!({"path":path}))
-            .await
-            .unwrap_err();
-        let grep = invoke(
+        let read = invoke_error(&Read(workspace.clone()), json!({"path":path})).await;
+        let grep = invoke_error(
             &Grep(workspace.clone()),
             json!({"path":path,"pattern":"old"}),
         )
-        .await
-        .unwrap_err();
-        let edit = invoke(
+        .await;
+        let edit = invoke_error(
             &Edit(workspace.clone()),
             json!({"path":path,"old_string":"old","new_string":"new"}),
         )
-        .await
-        .unwrap_err();
-        let delete = invoke(&Delete(workspace.clone()), json!({"files":[path]}))
-            .await
-            .unwrap_err();
+        .await;
+        let delete = invoke_error(&Delete(workspace.clone()), json!({"files":[path]})).await;
         for error in [read, grep, edit, delete] {
-            assert_eq!(error.kind(), ToolErrorKind::PermissionDenied);
+            // Every refusal is the containment or Git-metadata denial.
+            assert!(
+                error.contains("paths must remain inside the workspace")
+                    || error.contains("access to Git metadata is not allowed")
+                    || error.contains("path is outside the workspace"),
+                "{error}"
+            );
         }
     }
     assert_eq!(
@@ -89,28 +88,26 @@ async fn rejects_symlink_components_and_special_files() {
     let _socket = UnixListener::bind(workspace.root().join("socket")).unwrap();
     for path in ["linked-dir/file", "linked-file", "socket"] {
         assert!(
-            invoke(&Read(workspace.clone()), json!({"path":path}))
+            !invoke_error(&Read(workspace.clone()), json!({"path":path}))
                 .await
-                .is_err()
+                .is_empty()
         );
         assert!(
-            invoke(
+            !invoke_error(
                 &Edit(workspace.clone()),
                 json!({"path":path,"old_string":"old","new_string":"new"})
             )
             .await
-            .is_err()
+            .is_empty()
         );
         assert!(
-            invoke(&Delete(workspace.clone()), json!({"files":[path]}))
+            !invoke_error(&Delete(workspace.clone()), json!({"files":[path]}))
                 .await
-                .is_err()
+                .is_empty()
         );
     }
-    let result = invoke(&Grep(workspace), json!({"pattern":"old"}))
-        .await
-        .unwrap();
-    assert!(result.matches.is_empty());
+    let result = invoke(&Grep(workspace), json!({"pattern":"old"})).await;
+    assert_eq!(output_text(&result), "No files found");
     assert_eq!(
         fs::read_to_string(outside.path().join("file")).unwrap(),
         "old"
@@ -120,15 +117,23 @@ async fn rejects_symlink_components_and_special_files() {
 #[test]
 fn schemas_match_strict_arguments() {
     let (_dir, workspace) = workspace();
-    let schemas = [
-        Read(workspace.clone()).parameters(),
-        Grep(workspace.clone()).parameters(),
-        Edit(workspace.clone()).parameters(),
-        EditLines(workspace.clone()).parameters(),
-        InsertLines(workspace.clone()).parameters(),
-        Write(workspace.clone()).parameters(),
-        Delete(workspace).parameters(),
+    let registry = workspace.registry().unwrap();
+    let names = [
+        "read",
+        "grep",
+        "edit",
+        "edit_lines",
+        "insert_lines",
+        "write",
+        "delete",
     ];
+    let schemas: Vec<_> = registry
+        .definitions()
+        .into_iter()
+        .filter(|definition| names.contains(&definition.name.as_str()))
+        .map(|definition| definition.input_schema)
+        .collect();
+    assert_eq!(schemas.len(), names.len());
     for schema in schemas {
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
@@ -172,7 +177,7 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
         )]),
         crate::testing::text_turn("done"),
     ]);
-    let tools = workspace.register();
+    let tools = workspace.registry().unwrap();
     let (sink, _stream) = crate::harness::EventSink::new();
     let conversation = crate::harness::ConversationBuilder::new(
         &crate::config::Config::parse("").expect("default config"),
@@ -182,6 +187,7 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
         tools,
         sink,
     )
+    .workspace(workspace.clone())
     .build()
     .expect("conversation builds");
     let outcome = crate::harness::run_turn(
@@ -274,7 +280,7 @@ async fn dispatch_loop_preserves_permission_refusals() {
         )]),
         crate::testing::text_turn("permission denied"),
     ]);
-    let tools = workspace.register();
+    let tools = workspace.registry().unwrap();
     let (sink, stream) = crate::harness::EventSink::new();
     let conversation = crate::harness::ConversationBuilder::new(
         &crate::config::Config::parse("").expect("default config"),
@@ -284,6 +290,7 @@ async fn dispatch_loop_preserves_permission_refusals() {
         tools,
         sink,
     )
+    .workspace(workspace.clone())
     .build()
     .expect("conversation builds");
     let outcome = crate::harness::run_turn(

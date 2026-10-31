@@ -7,11 +7,12 @@
 
 use std::sync::Arc;
 
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{Result, invalid};
+use super::error::{Error, Result, definition, finish, invalid};
 use crate::subagent::{SubagentRequest, SubagentResult};
 use crate::tools::SpawnSubagent;
 
@@ -31,11 +32,9 @@ pub struct ReviewOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for ReviewOutput {
-    fn into_tool_output(
-        self,
-    ) -> std::result::Result<ToolOutput, rig_core::tool::ToolExecutionError> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for ReviewOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
@@ -57,9 +56,8 @@ calling agent. Be concise.";
 pub struct Review(pub Arc<dyn SpawnSubagent>);
 
 impl Review {
-    fn execute(&self, args: ReviewArgs) -> crate::run::BoxFuture<Result<ReviewOutput>> {
-        let spawn = Arc::clone(&self.0);
-        Box::pin(async move {
+    async fn execute(&self, context: &ToolContext<'_>, args: ReviewArgs) -> Result<ReviewOutput> {
+        {
             let mut prompt = String::from(
                 "Review the current changes and report verified defects with priorities.\n\n\
                  Start with start_review (cwd is this project's root) to snapshot the \
@@ -79,7 +77,7 @@ impl Review {
                 }
             }
             let req = SubagentRequest {
-                tool_use_id: crate::run::dispatch::current_call_id().unwrap_or_default(),
+                tool_use_id: context.call.id.clone(),
                 description: "code review".into(),
                 prompt,
                 subagent_type: "reviewer".into(),
@@ -88,7 +86,7 @@ impl Review {
                 output_schema: None,
                 isolation: "none".into(),
             };
-            match spawn.spawn(req).await {
+            match self.0.spawn(req).await {
                 Ok(SubagentResult::Text(text)) => Ok(ReviewOutput { text }),
                 Ok(SubagentResult::Json(value)) => {
                     let pretty = serde_json::to_string_pretty(&value)
@@ -97,32 +95,30 @@ impl Review {
                 }
                 Err(e) => Err(invalid(e)),
             }
-        })
+        }
     }
 }
 
-impl PortableTool for Review {
-    const NAME: &'static str = "review";
+const REVIEW_DESCRIPTION: &str = "Spawn a code review subagent for the current working-tree changes (or a commit). Use \
+proactively after completing a feature, bugfix, refactor, or multi-file change. The \
+reviewer is read-only: it snapshots the diff with the argosy review tools, checks \
+styleguide rules, records prioritized findings (P0-P3), and returns a verdict with \
+per-priority counts.";
+
+#[async_trait]
+impl ToolImpl for Review {
     type Args = ReviewArgs;
-    type Output = ReviewOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Spawn a code review subagent for the current working-tree changes (or a commit). Use \
-         proactively after completing a feature, bugfix, refactor, or multi-file change. The \
-         reviewer is read-only: it snapshots the diff with the argosy review tools, checks \
-         styleguide rules, records prioritized findings (P0-P3), and returns a verdict with \
-         per-priority counts."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<ReviewArgs>("review", REVIEW_DESCRIPTION)
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(ReviewArgs))
-            .expect("JSON Schema is serializable")
-    }
+    // Exclusive: the child reviewer runs with its own tool registry.
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        self.execute(args).await
+    async fn call(&self, context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
+        finish(self.execute(context, args).await)
     }
 }
 
@@ -152,9 +148,21 @@ mod tests {
         let mock: Arc<MockSpawn> = Arc::new(MockSpawn(Mutex::new(Vec::new())));
         let spawn: Arc<dyn SpawnSubagent> = mock.clone();
         let tool = Review(spawn);
-        let out = tool.call(args).await.unwrap();
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        let out = harness
+            .call(
+                tool,
+                serde_json::json!({
+                    "task": args.task,
+                    "focus_files": args.focus_files,
+                }),
+            )
+            .await
+            .expect("review outcome");
         let req = mock.0.lock().unwrap().remove(0);
-        (out.text, req)
+        (crate::history::ext::tool_content_text(&out.content), req)
     }
 
     #[tokio::test]

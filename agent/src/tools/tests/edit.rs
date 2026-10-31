@@ -1,9 +1,8 @@
 use std::fs;
 
-use rig_core::tool::{IntoToolOutput, ToolErrorKind};
 use serde_json::json;
 
-use super::{invoke, workspace};
+use super::{invoke, invoke_error, output_text, workspace};
 use crate::tools::*;
 
 #[tokio::test]
@@ -13,38 +12,43 @@ async fn edit_requires_unambiguous_matches_and_preserves_bytes() {
     fs::write(&path, "\u{feff}α\r\nsame\r\nsame\r\n").unwrap();
     let tool = Edit(workspace);
     assert!(
-        invoke(
+        invoke_error(
             &tool,
             json!({"path":"file","old_string":"same","new_string":"other"})
         )
         .await
-        .is_err()
+        .contains("matches")
     );
     assert!(
-        invoke(
+        invoke_error(
             &tool,
             json!({"path":"file","old_string":"missing","new_string":"other"})
         )
         .await
-        .is_err()
+        .contains("not found")
     );
     assert!(
-        invoke(
+        invoke_error(
             &tool,
             json!({"path":"file","old_string":"","new_string":"other"})
         )
         .await
-        .is_err()
+        .contains("must not be empty")
     );
     assert!(
-        invoke(
+        !invoke_error(
             &tool,
             json!({"path":"file","old_string":"same","new_string":"other","occurrence":0})
         )
         .await
-        .is_err()
+        .is_empty()
     );
-    assert!(invoke(&tool, json!({"path":"file","old_string":"same","new_string":"other","occurrence":1,"replace_all":true})).await.is_err());
+    assert!(invoke_error(
+        &tool,
+        json!({"path":"file","old_string":"same","new_string":"other","occurrence":1,"replace_all":true})
+    )
+    .await
+    .contains("mutually exclusive"));
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "\u{feff}α\r\nsame\r\nsame\r\n"
@@ -53,9 +57,12 @@ async fn edit_requires_unambiguous_matches_and_preserves_bytes() {
         &tool,
         json!({"path":"file","old_string":"same","new_string":"other","occurrence":2}),
     )
-    .await
-    .unwrap();
-    assert_eq!(result.replacements, 1);
+    .await;
+    assert!(
+        output_text(&result).starts_with("edited file\n"),
+        "{}",
+        output_text(&result)
+    );
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "\u{feff}α\r\nsame\r\nother\r\n"
@@ -64,14 +71,13 @@ async fn edit_requires_unambiguous_matches_and_preserves_bytes() {
         &tool,
         json!({"path":"file","old_string":"e","new_string":"E","replace_all":true}),
     )
-    .await
-    .unwrap();
-    assert_eq!(result.replacements, 2);
+    .await;
+    let text = output_text(&result);
+    assert!(text.starts_with("edited file"), "{text}");
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "\u{feff}α\r\nsamE\r\nothEr\r\n"
     );
-    assert_eq!(result.bytes_written, fs::read(&path).unwrap().len());
     assert_eq!(
         fs::read_dir(path.parent().unwrap()).unwrap().count(),
         1,
@@ -91,17 +97,14 @@ async fn edit_fuzzy_passes_tolerate_model_drift_and_report_the_pass() {
         &tool,
         json!({"path":"f.py","old_string":"if x:\na()","new_string":"if x:\n    if y:\n        a()"}),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "def f():\n    if x:\n        if y:\n            a()\n    return 1\n"
     );
     assert_eq!(
-        result.into_tool_output().unwrap().as_text(),
-        Some(
-            "edited f.py (fuzzy match pass 2)\n--- f.py\n+++ f.py\n@@ -1 +1 @@\n  def f():\n      if x:\n-         a()\n+         if y:\n+             a()\n      return 1"
-        )
+        output_text(&result),
+        "edited f.py (fuzzy match pass 2)\n--- f.py\n+++ f.py\n@@ -1 +1 @@\n  def f():\n      if x:\n-         a()\n+         if y:\n+             a()\n      return 1"
     );
 
     // Whitespace collapse.
@@ -110,8 +113,7 @@ async fn edit_fuzzy_passes_tolerate_model_drift_and_report_the_pass() {
         &tool,
         json!({"path":"f.py","old_string":"let x = 1;","new_string":"let y = 2;"}),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(fs::read_to_string(&path).unwrap(), "let y = 2;\n");
 
     // Escaped quotes in old_string/new_string are unescaped before matching.
@@ -122,8 +124,7 @@ async fn edit_fuzzy_passes_tolerate_model_drift_and_report_the_pass() {
         &tool,
         json!({"path":"f.py","old_string": escaped_old, "new_string": escaped_new}),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(fs::read_to_string(&path).unwrap(), "print(\"world\")\n");
 
     // Unicode NFKD: FULLWIDTH LATIN CAPITAL LETTER A matches "A".
@@ -132,13 +133,12 @@ async fn edit_fuzzy_passes_tolerate_model_drift_and_report_the_pass() {
         &tool,
         json!({"path":"f.py","old_string":"let A = 1;","new_string":"let B = 2;"}),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(fs::read_to_string(&path).unwrap(), "let B = 2;\n");
 }
 
 #[tokio::test]
-async fn concurrent_edits_share_one_workspace_lock() {
+async fn concurrent_edits_share_one_path_lock() {
     let (_dir, workspace) = workspace();
     fs::write(workspace.root().join("file"), "one two").unwrap();
     let tool = Edit(workspace.clone());
@@ -152,8 +152,8 @@ async fn concurrent_edits_share_one_workspace_lock() {
             json!({"path":"file","old_string":"two","new_string":"2"})
         ),
     );
-    first.unwrap();
-    second.unwrap();
+    assert!(!first.is_error, "{}", output_text(&first));
+    assert!(!second.is_error, "{}", output_text(&second));
     assert_eq!(
         fs::read_to_string(workspace.root().join("file")).unwrap(),
         "1 2"
@@ -174,8 +174,7 @@ async fn atomic_edits_preserve_mode_without_modifying_other_hardlinks() {
         &Edit(workspace),
         json!({"path":"script","old_string":"old","new_string":"new"}),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(fs::read_to_string(&path).unwrap(), "new");
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -197,24 +196,21 @@ async fn edit_lines_replaces_and_deletes_ranges() {
         &tool,
         json!({"path":"file","start":2,"end":3,"new_string":"XXX\nYYY"}),
     )
-    .await
-    .unwrap();
-    assert_eq!(output.path, "file");
+    .await;
+    assert!(output_text(&output).starts_with("edited lines in file"));
     assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nXXX\nYYY\nddd\n");
     invoke(
         &tool,
         json!({"path":"file","start":2,"end":3,"new_string":""}),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nddd\n");
-    let error = invoke(
+    let error = invoke_error(
         &tool,
         json!({"path":"file","start":9,"end":9,"new_string":"x"}),
     )
-    .await
-    .unwrap_err();
-    assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
+    .await;
+    assert!(error.contains("out of range"), "{error}");
     assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nddd\n");
 }
 
@@ -228,27 +224,24 @@ async fn insert_lines_works_on_empty_and_existing_files() {
         &tool,
         json!({"path":"empty","line":0,"new_string":"seed\nmore"}),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         fs::read_to_string(workspace.root().join("empty")).unwrap(),
         "seed\nmore\n"
     );
-    invoke(&tool, json!({"path":"file","line":2,"new_string":"tail"}))
-        .await
-        .unwrap();
+    invoke(&tool, json!({"path":"file","line":2,"new_string":"tail"})).await;
     assert_eq!(
         fs::read_to_string(workspace.root().join("file")).unwrap(),
         "aaa\nbbb\ntail\n"
     );
     assert!(
-        invoke(&tool, json!({"path":"file","line":4,"new_string":"x"}))
+        invoke_error(&tool, json!({"path":"file","line":4,"new_string":"x"}))
             .await
-            .is_err()
+            .contains("out of range")
     );
     assert!(
-        invoke(&tool, json!({"path":"file","line":0,"new_string":""}))
+        invoke_error(&tool, json!({"path":"file","line":0,"new_string":""}))
             .await
-            .is_err()
+            .contains("must not be empty")
     );
 }

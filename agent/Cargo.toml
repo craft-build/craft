@@ -37,8 +37,6 @@ minijinja.workspace = true
 nucleo-matcher.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-rig-core.workspace = true
-rig-reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -68,5 +66,4 @@ uuid.workspace = true
 [dev-dependencies]
 animist = { workspace = true, features = ["testing"] }
 fastrand = "2"
-rig-core = { workspace = true, features = ["reqwest", "test-utils"] }
 test-case = "3"

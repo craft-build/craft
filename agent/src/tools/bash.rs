@@ -1,10 +1,10 @@
 //! Shell command execution: `bash` plus the background-task companions
 //! `bash_status`, `bash_watch`, and `bash_kill`.
 //!
-//! Unlike the filesystem tools these run a child process for potentially
-//! minutes, so they implement `PortableTool` manually instead of going
-//! through the workspace blocking lock: holding that mutex across a
-//! `sleep 60` would freeze every other tool call.
+//! These run a child process for potentially minutes, so they are
+//! exclusive under the scheduler: a shell command can touch anything.
+//! Foreground runs stream their accumulated output as call progress and
+//! race the run's cancellation.
 //!
 //! Background tasks live in a session-shared registry on [`Workspace`]
 //! (same pattern as the todo store), so the tool that spawned a job and
@@ -18,7 +18,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::{
@@ -29,13 +30,17 @@ use tokio::{
 
 use crate::child_guard::ChildGuard;
 
-use super::{MAX_OUTPUT_BYTES, Result, Workspace, clip, denied, failure, invalid};
+use super::MAX_OUTPUT_BYTES;
+use super::error::{Error, Result, definition, denied, failure, finish, invalid};
+use super::{Workspace, clip};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MIN_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_WATCH_TIMEOUT_SECS: u64 = 60;
 /// Poll cadence for background task supervision and `bash_watch`.
 const POLL: Duration = Duration::from_millis(100);
+/// Cadence for streaming accumulated output as call progress.
+const PROGRESS: Duration = Duration::from_millis(500);
 const READ_CHUNK: usize = 4096;
 /// Newest output retained per pipe before the oldest bytes are dropped.
 const MAX_BUFFERED_OUTPUT: usize = MAX_OUTPUT_BYTES * 4;
@@ -525,11 +530,9 @@ pub struct BashOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for BashOutput {
-    fn into_tool_output(
-        self,
-    ) -> std::result::Result<ToolOutput, rig_core::tool::ToolExecutionError> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for BashOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
@@ -541,7 +544,7 @@ impl Bash {
         Self(workspace.clone(), workspace.sandbox_cell())
     }
 
-    async fn execute(&self, args: BashArgs) -> Result<BashOutput> {
+    async fn execute(&self, context: &ToolContext<'_>, args: BashArgs) -> Result<BashOutput> {
         let workspace = &self.0;
         let (command, cwd) = prepare(workspace, &args)?;
         // Snapshot files targeted by in-place edits (`sed -i` / `perl -i`)
@@ -553,13 +556,13 @@ impl Bash {
             } else {
                 cwd.join(&rel)
             };
-            workspace.note_snapshot(&abs);
+            workspace.note_snapshot(&abs).await;
         }
         let timeout_secs = args
             .timeout
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .max(MIN_TIMEOUT_SECS);
-        let (mut guard, note) = spawn(workspace.root(), &command, &cwd, &self.1)?;
+        let (guard, note) = spawn(workspace.root(), &command, &cwd, &self.1)?;
         let output: OutputBuf = Arc::default();
 
         if args.background {
@@ -587,46 +590,125 @@ impl Bash {
                 text: prepend_note(text, note),
             });
         }
-        let mut readers = spawn_readers(&mut guard, &output, None);
-
-        // Reap the child, then join the readers: `wait` can return while the
-        // pipe still holds undrained tail bytes.
-        let wait_and_drain = async {
-            let status = guard
-                .status()
-                .await
-                .map_err(|error| failure(format!("wait failed: {error}")))?;
-            for handle in readers.drain(..) {
-                let _ = handle.await;
-            }
-            Ok::<_, rig_core::tool::ToolExecutionError>(status)
+        // The foreground run reuses the background job machinery: the child
+        // lives in a shared slot, a waiter task polls it to completion, and
+        // the kill paths take it out of the slot. Holding a lock around a
+        // live `status()` await instead would deadlock the kill: the kill
+        // needs the very lock the waiter would hold until the child dies.
+        let pending_readers = Arc::new(AtomicUsize::new(0));
+        let job = BgJob {
+            command,
+            output: output.clone(),
+            state: Arc::new(Mutex::new(BgState::Running)),
+            child: Arc::new(Mutex::new(Some(guard))),
+            pending_readers: pending_readers.clone(),
         };
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), wait_and_drain).await {
-            Ok(status) => {
-                let code = status?.code().unwrap_or(-1);
-                let text = truncate_output(&compress_output(&output.lock().unwrap().snapshot()));
-                if code == 0 {
-                    Ok(BashOutput {
-                        text: prepend_note(format_exit(&text, code), note),
-                    })
-                } else {
-                    Err(failure(prepend_note(format_exit(&text, code), note)))
+        let mut held = job.child.lock().unwrap().take().unwrap();
+        spawn_readers(&mut held, &output, Some(&pending_readers));
+        job.child.lock().unwrap().replace(held);
+        spawn_waiter(&job);
+        let terminal = |job: &BgJob| {
+            matches!(
+                *job.state.lock().unwrap(),
+                BgState::Exited(_) | BgState::Killed
+            ) && job.pending_readers.load(Ordering::Acquire) == 0
+        };
+        // Race completion against the deadline, the run's cancellation, and
+        // a progress cadence that streams the accumulated output whenever
+        // it grew.
+        let deadline = tokio::time::sleep_until(
+            tokio::time::Instant::now() + Duration::from_secs(timeout_secs),
+        );
+        tokio::pin!(deadline);
+        let mut progress = tokio::time::interval(PROGRESS);
+        progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut emitted = output.lock().unwrap().text.len();
+        let status = loop {
+            tokio::select! {
+                biased;
+                () = context.run.cancellation.cancelled() => {
+                    kill_job(&job).await;
+                    wait_terminal(&job, timeout_secs).await;
+                    let partial =
+                        truncate_output(&compress_output(&output.lock().unwrap().snapshot()));
+                    let body = wrap_untrusted(&partial);
+                    return Err(failure(format!(
+                        "{body}\ntool bash cancelled",
+                    )));
+                }
+                _ = &mut deadline => {
+                    kill_job(&job).await;
+                    wait_terminal(&job, timeout_secs).await;
+                    let partial =
+                        truncate_output(&compress_output(&output.lock().unwrap().snapshot()));
+                    let body = wrap_untrusted(&partial);
+                    let detail = if body.is_empty() {
+                        format!("tool bash timed out after {timeout_secs}s")
+                    } else {
+                        format!("{body}\ntool bash timed out after {timeout_secs}s")
+                    };
+                    return Err(failure(detail));
+                }
+                _ = sleep(POLL) => {
+                    if terminal(&job) {
+                        break *job.state.lock().unwrap();
+                    }
+                }
+                _ = progress.tick() => {
+                    let full_so_far = {
+                        let buffer = output.lock().unwrap();
+                        (buffer.text.len(), buffer.snapshot())
+                    };
+                    if full_so_far.0 != emitted {
+                        emitted = full_so_far.0;
+                        context
+                            .progress(truncate_output(&compress_output(&full_so_far.1)))
+                            .await;
+                    }
                 }
             }
-            Err(_) => {
-                // Kill the whole process group and reap it before reporting;
-                // dropping the guard would do the same, but unreaped.
-                guard.kill_and_reap().await;
-                let partial = truncate_output(&compress_output(&output.lock().unwrap().snapshot()));
-                let body = wrap_untrusted(&partial);
-                let detail = if body.is_empty() {
-                    format!("tool bash timed out after {timeout_secs}s")
-                } else {
-                    format!("{body}\ntool bash timed out after {timeout_secs}s")
-                };
-                Err(failure(detail))
-            }
+        };
+        let code = match status {
+            BgState::Exited(code) => code,
+            _ => -1,
+        };
+        let text = truncate_output(&compress_output(&output.lock().unwrap().snapshot()));
+        if code == 0 {
+            Ok(BashOutput {
+                text: prepend_note(format_exit(&text, code), note),
+            })
+        } else {
+            Err(failure(prepend_note(format_exit(&text, code), note)))
         }
+    }
+}
+
+/// Take a job's live child, kill the whole process group, and reap it;
+/// dropping the guard would do the same, but unreaped. Marking the state
+/// `Killed` first stops the waiter task.
+async fn kill_job(job: &BgJob) {
+    *job.state.lock().unwrap() = BgState::Killed;
+    // Bind the take separately: the guard itself must not live across the
+    // kill await.
+    let taken = job.child.lock().unwrap().take();
+    if let Some(mut guard) = taken {
+        guard.kill_and_reap().await;
+    }
+}
+
+/// Poll until the job reached a terminal state and its pipes finished
+/// draining, bounded by `budget_secs`.
+async fn wait_terminal(job: &BgJob, budget_secs: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(budget_secs);
+    while !matches!(
+        *job.state.lock().unwrap(),
+        BgState::Exited(_) | BgState::Killed
+    ) || job.pending_readers.load(Ordering::Acquire) != 0
+    {
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        sleep(POLL).await;
     }
 }
 
@@ -661,28 +743,27 @@ fn spawn_readers(
     readers
 }
 
-impl PortableTool for Bash {
-    const NAME: &'static str = "bash";
+const BASH_DESCRIPTION: &str = "Executes a non-interactive bash command (`bash -c`) with combined stdout/stderr captured. \
+Runs in the workspace root unless workdir is given or the command starts with \
+`cd DIR && `. Default timeout is 120s (minimum 5): timed-out commands are killed and the \
+partial output is returned. Set background:true to run long tasks in the background and \
+poll them with bash_status, bash_watch, and bash_kill. Use for system commands (git, \
+builds, tests); prefer the file tools for file operations.";
+
+#[async_trait]
+impl ToolImpl for Bash {
     type Args = BashArgs;
-    type Output = BashOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Executes a non-interactive bash command (`bash -c`) with combined stdout/stderr captured. \
-         Runs in the workspace root unless workdir is given or the command starts with \
-         `cd DIR && `. Default timeout is 120s (minimum 5): timed-out commands are killed and the \
-         partial output is returned. Set background:true to run long tasks in the background and \
-         poll them with bash_status, bash_watch, and bash_kill. Use for system commands (git, \
-         builds, tests); prefer the file tools for file operations."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<BashArgs>("bash", BASH_DESCRIPTION)
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(BashArgs)).expect("JSON Schema is serializable")
-    }
+    // Exclusive: a shell command can touch anything.
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        self.execute(args).await
+    async fn call(&self, context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
+        finish(self.execute(context, args).await)
     }
 }
 
@@ -727,15 +808,13 @@ pub struct BashStatusOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for BashStatusOutput {
-    fn into_tool_output(
-        self,
-    ) -> std::result::Result<ToolOutput, rig_core::tool::ToolExecutionError> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for BashStatusOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
-fn unknown_task(id: &str) -> rig_core::tool::ToolExecutionError {
+fn unknown_task(id: &str) -> Error {
     invalid(format!("unknown task_id \"{id}\""))
 }
 
@@ -756,149 +835,168 @@ impl Bash {
 #[derive(Clone)]
 pub struct BashStatus(pub Workspace);
 
-impl PortableTool for BashStatus {
-    const NAME: &'static str = "bash_status";
+#[async_trait]
+impl ToolImpl for BashStatus {
     type Args = BashStatusArgs;
-    type Output = BashStatusOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Check status and current output of a background bash task.".into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<BashStatusArgs>(
+            "bash_status",
+            "Check status and current output of a background bash task.",
+        )
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(BashStatusArgs))
-            .expect("JSON Schema is serializable")
-    }
+    // Exclusive, like the rest of the bash family.
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        let (text, is_error) = Bash::new(self.0.clone()).status_text(&args.task_id)?;
-        // The terminal report has been delivered; release the finished
-        // job's retained output buffer.
-        if self.0.bash_jobs.terminal(&args.task_id) {
-            self.0.bash_jobs.release_output(&args.task_id);
+    async fn call(&self, _context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
+        let outcome = async {
+            let (text, is_error) = Bash::new(self.0.clone()).status_text(&args.task_id)?;
+            // The terminal report has been delivered; release the finished
+            // job's retained output buffer.
+            if self.0.bash_jobs.terminal(&args.task_id) {
+                self.0.bash_jobs.release_output(&args.task_id);
+            }
+            if is_error {
+                Err(failure(text))
+            } else {
+                Ok(BashStatusOutput { text })
+            }
         }
-        if is_error {
-            Err(failure(text))
-        } else {
-            Ok(BashStatusOutput { text })
-        }
+        .await;
+        finish(outcome)
     }
 }
 
 #[derive(Clone)]
 pub struct BashWatch(pub Workspace);
 
-impl PortableTool for BashWatch {
-    const NAME: &'static str = "bash_watch";
+#[async_trait]
+impl ToolImpl for BashWatch {
     type Args = BashWatchArgs;
-    type Output = BashStatusOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Wait for a substring in a background bash task's output, or for the task to exit. \
-         Polls until the pattern matches, the task exits, or the timeout (default 60s) elapses."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<BashWatchArgs>(
+            "bash_watch",
+            "Wait for a substring in a background bash task's output, or for the task to exit. \
+Polls until the pattern matches, the task exits, or the timeout (default 60s) elapses.",
+        )
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(BashWatchArgs))
-            .expect("JSON Schema is serializable")
-    }
+    // Exclusive, like the rest of the bash family.
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        let job = self
-            .0
-            .bash_jobs
-            .get(&args.task_id)
-            .ok_or_else(|| unknown_task(&args.task_id))?;
-        let timeout_secs = args.timeout.unwrap_or(DEFAULT_WATCH_TIMEOUT_SECS);
-        let pattern = args.pattern;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-        loop {
-            let output = job.snapshot_output();
-            let exited = match *job.state.lock().unwrap() {
-                BgState::Running => None,
-                BgState::Exited(code) => Some(code),
-                BgState::Killed => Some(-1),
-            };
-            let matched = pattern
-                .as_deref()
-                .is_some_and(|pattern| output.contains(pattern));
-            if matched {
-                let qualifier = match exited {
-                    Some(_) => " (task exited)",
-                    None => " (task still running)",
+    async fn call(&self, context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
+        let outcome = async {
+            let job = self
+                .0
+                .bash_jobs
+                .get(&args.task_id)
+                .ok_or_else(|| unknown_task(&args.task_id))?;
+            let timeout_secs = args.timeout.unwrap_or(DEFAULT_WATCH_TIMEOUT_SECS);
+            let pattern = args.pattern;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+            let mut emitted = usize::MAX;
+            loop {
+                let output = job.snapshot_output();
+                if output.len() != emitted {
+                    emitted = output.len();
+                    context.progress(truncate_output(&output)).await;
+                }
+                let exited = match *job.state.lock().unwrap() {
+                    BgState::Running => None,
+                    BgState::Exited(code) => Some(code),
+                    BgState::Killed => Some(-1),
                 };
-                return Ok(BashStatusOutput {
-                    text: format!("pattern found{qualifier}\n{}", wrap_untrusted(&output)),
-                });
+                let matched = pattern
+                    .as_deref()
+                    .is_some_and(|pattern| output.contains(pattern));
+                if matched {
+                    let qualifier = match exited {
+                        Some(_) => " (task exited)",
+                        None => " (task still running)",
+                    };
+                    return Ok(BashStatusOutput {
+                        text: format!("pattern found{qualifier}\n{}", wrap_untrusted(&output)),
+                    });
+                }
+                if let Some(code) = exited {
+                    let text = if output.is_empty() {
+                        format!("task exited (code: {code})")
+                    } else {
+                        format!("task exited (code: {code})\n{}", wrap_untrusted(&output))
+                    };
+                    return if code == 0 {
+                        Ok(BashStatusOutput { text })
+                    } else {
+                        Err(failure(text))
+                    };
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Ok(BashStatusOutput {
+                        text: format!(
+                            "timed out after {timeout_secs}s (task still running)\n{}",
+                            wrap_untrusted(&output)
+                        ),
+                    });
+                }
+                tokio::select! {
+                    biased;
+                    () = context.run.cancellation.cancelled() => {
+                        return Err(failure("bash_watch cancelled"));
+                    }
+                    _ = sleep(POLL) => {}
+                }
             }
-            if let Some(code) = exited {
-                let text = if output.is_empty() {
-                    format!("task exited (code: {code})")
-                } else {
-                    format!("task exited (code: {code})\n{}", wrap_untrusted(&output))
-                };
-                return if code == 0 {
-                    Ok(BashStatusOutput { text })
-                } else {
-                    Err(failure(text))
-                };
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Ok(BashStatusOutput {
-                    text: format!(
-                        "timed out after {timeout_secs}s (task still running)\n{}",
-                        wrap_untrusted(&output)
-                    ),
-                });
-            }
-            sleep(POLL).await;
         }
+        .await;
+        finish(outcome)
     }
 }
 
 #[derive(Clone)]
 pub struct BashKill(pub Workspace);
 
-impl PortableTool for BashKill {
-    const NAME: &'static str = "bash_kill";
+#[async_trait]
+impl ToolImpl for BashKill {
     type Args = BashKillArgs;
-    type Output = BashStatusOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Terminate a background bash task.".into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<BashKillArgs>("bash_kill", "Terminate a background bash task.")
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(BashKillArgs))
-            .expect("JSON Schema is serializable")
-    }
+    // Exclusive, like the rest of the bash family.
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        let job = self
-            .0
-            .bash_jobs
-            .get(&args.task_id)
-            .ok_or_else(|| unknown_task(&args.task_id))?;
-        if let BgState::Exited(code) = *job.state.lock().unwrap() {
-            return Ok(BashStatusOutput {
-                text: format!("task already exited (code: {code})"),
-            });
+    async fn call(&self, _context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
+        let outcome = async {
+            let job = self
+                .0
+                .bash_jobs
+                .get(&args.task_id)
+                .ok_or_else(|| unknown_task(&args.task_id))?;
+            if let BgState::Exited(code) = *job.state.lock().unwrap() {
+                return Ok(BashStatusOutput {
+                    text: format!("task already exited (code: {code})"),
+                });
+            }
+            if let Some(mut guard) = job.child.lock().unwrap().take() {
+                // Kill-and-reap off the hot path so the tool responds
+                // immediately; the guard's Drop is the backstop.
+                tokio::spawn(async move {
+                    guard.kill_and_reap().await;
+                });
+            }
+            *job.state.lock().unwrap() = BgState::Killed;
+            Ok(BashStatusOutput {
+                text: format!("task {} killed", args.task_id),
+            })
         }
-        if let Some(mut guard) = job.child.lock().unwrap().take() {
-            // Kill-and-reap off the hot path so the tool responds
-            // immediately; the guard's Drop is the backstop.
-            tokio::spawn(async move {
-                guard.kill_and_reap().await;
-            });
-        }
-        *job.state.lock().unwrap() = BgState::Killed;
-        Ok(BashStatusOutput {
-            text: format!("task {} killed", args.task_id),
-        })
+        .await;
+        finish(outcome)
     }
 }
 
@@ -909,7 +1007,6 @@ impl PortableTool for BashKill {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::PortableTool;
     use serde_json::json;
 
     fn workspace() -> (tempfile::TempDir, Workspace) {
@@ -922,24 +1019,25 @@ mod tests {
         (dir, workspace)
     }
 
-    async fn invoke<T: PortableTool<Error = rig_core::tool::ToolExecutionError>>(
-        tool: &T,
-        args: serde_json::Value,
-    ) -> Result<T::Output> {
-        tool.call(serde_json::from_value(args).unwrap()).await
+    async fn invoke<T>(tool: &T, args: serde_json::Value) -> animist::agent::tool::ToolOutput
+    where
+        T: animist::agent::tool::ToolImpl<
+                Output = animist::agent::tool::ToolOutput,
+                Error = crate::tools::error::Error,
+            > + Clone,
+    {
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        harness
+            .call(tool.clone(), args)
+            .await
+            .expect("bash outcome")
     }
 
-    #[allow(dead_code)]
-    fn bash_text(result: Result<BashOutput>) -> String {
-        match result {
-            Ok(out) => out
-                .into_tool_output()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .to_string(),
-            Err(error) => error.to_string(),
-        }
+    /// The model-visible text of an outcome, success or error.
+    fn bash_text(output: &animist::agent::tool::ToolOutput) -> String {
+        crate::history::ext::tool_content_text(&output.content)
     }
 
     #[test]
@@ -1005,23 +1103,17 @@ mod tests {
     async fn foreground_success_and_exit_codes() {
         let (_dir, workspace) = workspace();
         let tool = Bash::new(workspace);
-        let out = invoke(&tool, json!({"command": "echo hello"}))
-            .await
-            .unwrap();
+        let out = invoke(&tool, json!({"command": "echo hello"})).await;
         let body = "<untrusted-content>\nhello\n</untrusted-content>";
-        assert_eq!(out.into_tool_output().unwrap().as_text().unwrap(), body);
-        let err = invoke(&tool, json!({"command": "echo oops >&2; exit 3"}))
-            .await
-            .unwrap_err();
+        assert_eq!(bash_text(&out), body);
+        let err = invoke(&tool, json!({"command": "echo oops >&2; exit 3"})).await;
+        assert!(err.is_error);
         assert_eq!(
-            err.to_string(),
+            bash_text(&err),
             "<untrusted-content>\noops\n</untrusted-content>\nExit code: 3"
         );
-        let empty = invoke(&tool, json!({"command": "true"})).await.unwrap();
-        assert_eq!(
-            empty.into_tool_output().unwrap().as_text().unwrap(),
-            "Exit code: 0"
-        );
+        let empty = invoke(&tool, json!({"command": "true"})).await;
+        assert_eq!(bash_text(&empty), "Exit code: 0");
     }
 
     #[tokio::test]
@@ -1029,31 +1121,17 @@ mod tests {
         let (dir, workspace) = workspace();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let tool = Bash::new(workspace.clone());
-        let out = invoke(&tool, json!({"command": "cd sub && pwd"}))
-            .await
-            .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        let out = invoke(&tool, json!({"command": "cd sub && pwd"})).await;
+        let text = bash_text(&out);
         assert!(text.contains("/sub"), "got {text}");
-        let out = invoke(&tool, json!({"command": "pwd", "workdir": "sub"}))
-            .await
-            .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        let out = invoke(&tool, json!({"command": "pwd", "workdir": "sub"})).await;
+        let text = bash_text(&out);
         assert!(text.contains("/sub"), "got {text}");
         // Outside the workspace is refused.
         assert!(
             invoke(&tool, json!({"command": "pwd", "workdir": "../"}))
                 .await
-                .is_err()
+                .is_error
         );
     }
 
@@ -1065,10 +1143,14 @@ mod tests {
             &tool,
             json!({"command": "echo partial; sleep 30", "timeout": 5}),
         )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("partial"), "{}", err);
-        assert!(err.to_string().contains("timed out after 5s"), "{}", err);
+        .await;
+        assert!(err.is_error);
+        assert!(bash_text(&err).contains("partial"), "{}", bash_text(&err));
+        assert!(
+            bash_text(&err).contains("timed out after 5s"),
+            "{}",
+            bash_text(&err)
+        );
     }
 
     #[cfg(unix)]
@@ -1085,14 +1167,17 @@ mod tests {
                 "timeout": 5
             }),
         )
-        .await
-        .unwrap_err();
-        let pid: i32 = err
-            .to_string()
+        .await;
+        assert!(err.is_error);
+        let pid: i32 = bash_text(&err)
             .lines()
             .find_map(|l| l.trim().parse::<i32>().ok())
             .expect("grandchild pid in partial output");
-        assert!(err.to_string().contains("timed out after 5s"), "{err}");
+        assert!(
+            bash_text(&err).contains("timed out after 5s"),
+            "{}",
+            bash_text(&err)
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
             let alive = unsafe { libc::kill(pid, 0) } == 0;
@@ -1127,14 +1212,8 @@ mod tests {
             &Bash::new(workspace.clone()),
             json!({"command": "yes padded-output-line | head -c 500000", "background": true}),
         )
-        .await
-        .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        .await;
+        let text = bash_text(&out);
         let id = text
             .lines()
             .find_map(|l| l.strip_prefix("Background task: "))
@@ -1152,15 +1231,8 @@ mod tests {
         );
         assert!(buf.dropped > 0);
         drop(buf);
-        let status = invoke(&BashStatus(workspace.clone()), json!({"task_id": id}))
-            .await
-            .unwrap();
-        let text = status
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        let status = invoke(&BashStatus(workspace.clone()), json!({"task_id": id})).await;
+        let text = bash_text(&status);
         assert!(text.contains("truncated"), "{text}");
         // And the delivered terminal report released the retained buffer.
         let job = workspace.bash_jobs.get(id).expect("job record stays");
@@ -1174,43 +1246,19 @@ mod tests {
             &Bash::new(workspace.clone()),
             json!({"command": "echo done", "background": true}),
         )
-        .await
-        .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        .await;
+        let text = bash_text(&out);
         let id = text
             .lines()
             .find_map(|l| l.strip_prefix("Background task: "))
             .expect("task id");
         wait_terminal(&workspace, id).await;
-        let first = invoke(&BashStatus(workspace.clone()), json!({"task_id": id}))
-            .await
-            .unwrap();
-        assert!(
-            first
-                .into_tool_output()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .contains("exited")
-        );
+        let first = invoke(&BashStatus(workspace.clone()), json!({"task_id": id})).await;
+        assert!(bash_text(&first).contains("exited"));
         // The buffer was released after delivery; the job record stays, so
         // a follow-up status still resolves (now with no output).
-        let second = invoke(&BashStatus(workspace.clone()), json!({"task_id": id}))
-            .await
-            .unwrap();
-        assert!(
-            second
-                .into_tool_output()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .contains("exited")
-        );
+        let second = invoke(&BashStatus(workspace.clone()), json!({"task_id": id})).await;
+        assert!(bash_text(&second).contains("exited"));
     }
 
     #[tokio::test]
@@ -1222,14 +1270,8 @@ mod tests {
             &Bash::new(workspace.clone()),
             json!({"command": "printf '%4095s' ' ' | tr ' ' 'a'; printf '\\342\\202\\254'; printf 'xxxxxxxx'"}),
         )
-        .await
-        .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        .await;
+        let text = bash_text(&out);
         assert!(
             text.contains('€'),
             "missing €: {}",
@@ -1257,7 +1299,8 @@ mod tests {
         let _ = invoke(&tool, json!({"command": "echo hi"})).await;
         assert_eq!(workspace.snapshots().snapshot_count(), 2);
         // Restore proves the pre-edit contents were captured.
-        let restored = workspace.snapshots().rollback().await.unwrap();
+        let restored = workspace.snapshots().rollback().await;
+        let restored = restored.unwrap_or_default();
         assert!(restored.contains("2/2"), "{restored}");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("one.txt")).unwrap(),
@@ -1272,10 +1315,9 @@ mod tests {
     #[tokio::test]
     async fn denied_find_command_is_refused() {
         let (_dir, workspace) = workspace();
-        let err = invoke(&Bash::new(workspace), json!({"command": "find / -name x"}))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("refused"), "{}", err);
+        let err = invoke(&Bash::new(workspace), json!({"command": "find / -name x"})).await;
+        assert!(err.is_error);
+        assert!(bash_text(&err).contains("refused"), "{}", bash_text(&err));
     }
 
     #[tokio::test]
@@ -1286,14 +1328,8 @@ mod tests {
             &bash,
             json!({"command": "echo hi from bg", "background": true}),
         )
-        .await
-        .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        .await;
+        let text = bash_text(&out);
         let id = text
             .lines()
             .next()
@@ -1306,13 +1342,8 @@ mod tests {
         // Poll until the task exits.
         let mut final_text = String::new();
         for _ in 0..100 {
-            let out = invoke(&status, json!({"task_id": id})).await.unwrap();
-            final_text = out
-                .into_tool_output()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .to_string();
+            let out = invoke(&status, json!({"task_id": id})).await;
+            final_text = bash_text(&out);
             if final_text.contains("exited") {
                 break;
             }
@@ -1326,11 +1357,8 @@ mod tests {
 
         // Kill after exit is an idempotent success.
         let kill = BashKill(workspace.clone());
-        let out = invoke(&kill, json!({"task_id": id})).await.unwrap();
-        assert_eq!(
-            out.into_tool_output().unwrap().as_text().unwrap(),
-            "task already exited (code: 0)"
-        );
+        let out = invoke(&kill, json!({"task_id": id})).await;
+        assert_eq!(bash_text(&out), "task already exited (code: 0)");
     }
 
     #[tokio::test]
@@ -1341,14 +1369,8 @@ mod tests {
             &bash,
             json!({"command": "sleep 1; echo ready", "background": true}),
         )
-        .await
-        .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        .await;
+        let text = bash_text(&out);
         let id = text
             .lines()
             .next()
@@ -1361,14 +1383,8 @@ mod tests {
             &watch,
             json!({"task_id": id, "pattern": "ready", "timeout": 15}),
         )
-        .await
-        .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        .await;
+        let text = bash_text(&out);
         assert!(text.starts_with("pattern found"), "{}", text);
         assert!(text.contains("ready"), "{}", text);
     }
@@ -1377,15 +1393,8 @@ mod tests {
     async fn bash_kill_terminates_running_task() {
         let (_dir, workspace) = workspace();
         let bash = Bash::new(workspace.clone());
-        let out = invoke(&bash, json!({"command": "sleep 60", "background": true}))
-            .await
-            .unwrap();
-        let text = out
-            .into_tool_output()
-            .unwrap()
-            .as_text()
-            .unwrap()
-            .to_string();
+        let out = invoke(&bash, json!({"command": "sleep 60", "background": true})).await;
+        let text = bash_text(&out);
         let id = text
             .lines()
             .next()
@@ -1394,20 +1403,11 @@ mod tests {
             .to_string();
 
         let kill = BashKill(workspace.clone());
-        let out = invoke(&kill, json!({"task_id": id})).await.unwrap();
-        assert_eq!(
-            out.into_tool_output().unwrap().as_text().unwrap(),
-            format!("task {id} killed")
-        );
+        let out = invoke(&kill, json!({"task_id": id})).await;
+        assert_eq!(bash_text(&out), format!("task {id} killed"));
         let status = BashStatus(workspace);
-        let out = invoke(&status, json!({"task_id": id})).await.unwrap();
-        assert!(
-            out.into_tool_output()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .contains("status: killed")
-        );
+        let out = invoke(&status, json!({"task_id": id})).await;
+        assert!(bash_text(&out).contains("status: killed"));
     }
 
     #[tokio::test]
@@ -1418,7 +1418,7 @@ mod tests {
             invoke(&BashWatch(workspace.clone()), json!({"task_id": "bg_99"})).await,
             invoke(&BashKill(workspace), json!({"task_id": "bg_99"})).await,
         ] {
-            assert!(result.is_err());
+            assert!(result.is_error);
         }
     }
 }

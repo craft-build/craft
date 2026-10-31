@@ -22,7 +22,7 @@ async fn recency_tail_rides_the_request_but_not_history() {
         &dir.path().display().to_string(),
         "",
         model(&provider),
-        crate::run::ToolDispatch::default(),
+        animist::agent::tool::ToolRegistry::default(),
         sink,
     )
     .recency(std::sync::Arc::new(Turns))
@@ -246,7 +246,7 @@ async fn compression_disabled_sends_raw_output() {
         &provider,
         &Config::parse("compression { enabled = false }").unwrap(),
         &dir.path().display().to_string(),
-        workspace.register(),
+        workspace.registry().unwrap(),
         None,
     )
     .await;

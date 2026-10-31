@@ -94,7 +94,7 @@ impl SessionState {
             &std::env::temp_dir().display().to_string(),
             "",
             model,
-            workspace.register(),
+            workspace.registry().expect("registry"),
             sink,
         )
         .build()

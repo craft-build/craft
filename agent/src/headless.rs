@@ -13,7 +13,7 @@ use crate::history::{self, ContentBlock};
 use crate::permissions::{
     PermissionCheck, PermissionError, PermissionManager, ToolKey, scope_for_call,
 };
-use crate::run::dispatch::BeforeExecute;
+use crate::run::BeforeExecute;
 
 /// The session store every surface shares; moved to the storage layer in 05.
 pub use crate::storage::sessions::SessionStore;
@@ -566,16 +566,14 @@ mod tests {
     ) -> (Vec<crate::harness::Event>, crate::harness::TurnOutcome) {
         let gate: Arc<dyn BeforeExecute> =
             Arc::new(HeadlessGate::new(Arc::clone(&permissions), reviewer));
-        let workspace = Workspace::new(tmp.path())
-            .unwrap()
-            .with_before(Arc::clone(&gate));
+        let workspace = Workspace::new(tmp.path()).unwrap();
         let (sink, stream) = crate::harness::EventSink::new();
         let conversation = crate::harness::ConversationBuilder::new(
             &crate::config::Config::default(),
             &tmp.path().display().to_string(),
             "",
             model,
-            workspace.register(),
+            workspace.registry().unwrap(),
             sink,
         )
         .approval(gate)

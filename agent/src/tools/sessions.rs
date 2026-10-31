@@ -1,13 +1,13 @@
 use std::path::Path;
 
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{Result, invalid};
+use super::error::{Error, Result, definition, finish, invalid};
 use crate::headless::StoredSession;
 use crate::storage::StateDir;
-
 /// Sessions listed per call, newest first.
 const MAX_ROWS: usize = 50;
 const NO_STORAGE: &str = "no session storage directory is available";
@@ -25,11 +25,9 @@ pub struct SessionsOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for SessionsOutput {
-    fn into_tool_output(
-        self,
-    ) -> std::result::Result<ToolOutput, rig_core::tool::ToolExecutionError> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for SessionsOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
@@ -105,27 +103,33 @@ fn rel_age(epoch: u64) -> String {
     }
 }
 
-impl PortableTool for Sessions {
-    const NAME: &'static str = "sessions";
+const SESSIONS_DESCRIPTION: &str = "List persisted sessions for this working directory (short id, title, \
+     last-updated age), newest first. Pass all_cwds to include other \
+     directories. Read-only: to resume a session, ask the user to run \
+     /sessions.";
+
+#[async_trait]
+impl ToolImpl for Sessions {
     type Args = SessionsArgs;
-    type Output = SessionsOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "List persisted sessions for this working directory (short id, title, \
-         last-updated age), newest first. Pass all_cwds to include other \
-         directories. Read-only: to resume a session, ask the user to run \
-         /sessions."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<SessionsArgs>("sessions", SESSIONS_DESCRIPTION)
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(SessionsArgs))
-            .expect("JSON Schema is serializable")
+    // The state dir is outside the workspace and read-only here, so the
+    // call is independent.
+
+    fn scheduling(&self, _input: &serde_json::Value) -> ToolScheduling {
+        ToolScheduling::Resources {
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        self.execute(args)
+    async fn call(&self, _context: &ToolContext<'_>, args: SessionsArgs) -> Result<ToolOutput> {
+        finish(Self::execute(self, args))
     }
 }
 
@@ -173,7 +177,14 @@ mod tests {
     }
 
     async fn call(tool: &Sessions, all_cwds: bool) -> String {
-        tool.call(SessionsArgs { all_cwds }).await.unwrap().text
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        let output = harness
+            .call(tool.clone(), serde_json::json!({ "all_cwds": all_cwds }))
+            .await
+            .expect("sessions outcome");
+        crate::history::ext::tool_content_text(&output.content)
     }
 
     #[tokio::test]
@@ -216,8 +227,16 @@ mod tests {
     #[tokio::test]
     async fn missing_state_dir_is_an_invalid_args_error() {
         let tool = Sessions::new(CWD, None);
-        let error = tool.call(SessionsArgs::default()).await.unwrap_err();
-        assert!(error.to_string().contains("no session storage"), "{error}");
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        let output = harness
+            .call(tool, serde_json::json!({}))
+            .await
+            .expect("sessions outcome");
+        assert!(output.is_error);
+        let error = crate::history::ext::tool_content_text(&output.content);
+        assert!(error.contains("no session storage"), "{error}");
     }
 
     #[tokio::test]
@@ -233,10 +252,16 @@ mod tests {
     }
 
     #[test]
-    fn registered_in_the_workspace_dispatch_table() {
+    fn registered_in_the_workspace_registry() {
         let tmp = TempDir::new().unwrap();
         let workspace = crate::tools::Workspace::new(tmp.path()).unwrap();
-        let names = workspace.register().names();
-        assert!(names.contains(&Sessions::NAME.to_owned()), "{names:?}");
+        let names: Vec<_> = workspace
+            .registry()
+            .unwrap()
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(names.contains(&"sessions".to_owned()), "{names:?}");
     }
 }

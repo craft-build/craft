@@ -15,7 +15,6 @@ pub mod persist;
 mod persist_layer;
 mod policy;
 pub(crate) mod request;
-mod rig_bridge;
 mod snapshot_layer;
 #[cfg(test)]
 mod tests;

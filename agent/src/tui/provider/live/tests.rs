@@ -86,7 +86,7 @@ async fn persisted_state(
         cwd,
         "",
         model,
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .history(history)
@@ -729,19 +729,20 @@ async fn clear_and_reset_drop_the_previous_todo_plan() {
             wake: Arc::new(Notify::new()),
         };
         // Seed the todo store the way a turn's `todo_write` call would.
-        use rig_core::tool::PortableTool;
-        crate::tools::TodoWrite(ctx.kit.workspace.clone())
-            .call(crate::tools::TodoWriteArgs {
-                todos: vec![crate::tools::Todo {
-                    id: "T1".into(),
-                    parent: None,
-                    content: "stale plan".into(),
-                    status: "pending".into(),
-                    owner: None,
-                }],
-            })
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        harness
+            .call(
+                crate::tools::TodoWrite(ctx.kit.workspace.clone()),
+                serde_json::json!({ "todos": [{
+                    "id": "T1",
+                    "content": "stale plan",
+                    "status": "pending",
+                }] }),
+            )
             .await
-            .unwrap();
+            .expect("todo_write outcome");
         assert_eq!(ctx.kit.workspace.todos().len(), 1);
 
         let mut current_turn = None;

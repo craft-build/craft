@@ -1,5 +1,5 @@
-//! The run loop's supporting modules: request-view shaping, tool dispatch,
-//! dedup, guardrails, cancellation, and the mode taxonomy.
+//! The run's supporting modules: request-view shaping, dedup, guardrails,
+//! cancellation, the approval seam, and the mode taxonomy.
 //!
 //! The multi-turn loop itself moved to the animist `Agent` behind
 //! `harness::Conversation` (docs/animist/05); what remains here are the
@@ -8,7 +8,6 @@
 
 pub mod cancel;
 pub mod dedup;
-pub mod dispatch;
 // The doom tracker and the retry classification are the recovery layers'
 // substrate, unwired until 07 (doom) and 09 (retry) land.
 #[allow(dead_code)]
@@ -23,15 +22,32 @@ pub mod view;
 
 pub use cancel::{CancelFlag, CancelToken, cancel_channel};
 pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
-pub use dispatch::{
-    AfterExecute, BeforeExecute, BoxFuture, Decision, DispatchOutcome, ToolDispatch,
-};
 pub use guardrails::{SharedGuardrails, shared_guardrails};
 pub use mode::{AgentMode, PLAN_WRITE_RESTRICTED};
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use retry::RetryCtx;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+
+/// What to do with a tool call before it executes.
+#[derive(Debug, Clone)]
+pub enum Decision {
+    /// Execute the tool as requested.
+    Run,
+    /// Do not execute; `reason` is reported to the model as the result.
+    Skip(String),
+    /// Abort the run (cancellation) with the given reason.
+    Stop(String),
+}
+
+/// The approval seam: consulted before every tool execution. The TUI's
+/// permission gate, the ACP permission gate, and the headless gate
+/// implement it; `harness::PolicyLayer` runs it for every surface.
+pub trait BeforeExecute: Send + Sync {
+    fn decide(&self, call: crate::history::ContentBlock) -> BoxFuture<Decision>;
+}
 
 /// Floor for the output-token clamp, never applied above the configured
 /// cap. Servers like vLLM reject `prompt + max_tokens > window` even when
@@ -69,6 +85,8 @@ pub(crate) fn clamped_max_tokens(
 /// and layers read and write the same estimator/effectiveness state (08
 /// drives it).
 pub type SharedCompactionState = Arc<std::sync::Mutex<crate::compaction::CompactionState>>;
+
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 #[cfg(test)]
 // The module is `run_tests` (a sibling inline `mod tests` exists below);

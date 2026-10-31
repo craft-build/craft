@@ -204,7 +204,7 @@ pub struct SubagentLauncher {
     /// The parent's approval gate (B.1): subagent tool calls flow through
     /// the same permission decisions as the parent's, so a `general`
     /// subagent cannot bypass approvals by running `bash` itself.
-    pub before: Option<Arc<dyn run::dispatch::BeforeExecute>>,
+    pub before: Option<Arc<dyn run::BeforeExecute>>,
     /// The working directory as the child's prompt shows it.
     pub cwd: String,
 }
@@ -342,26 +342,23 @@ impl SubagentLauncher {
         config.compression = self.compression.clone();
 
         let tools = match kind {
-            SubagentKind::General => self.workspace.register_subagent(true),
-            SubagentKind::Research => self.workspace.register_subagent(false),
-            SubagentKind::Reviewer => self.workspace.register_reviewer(),
-        };
-        // The parent's approval gate governs the child's tool calls too
-        // (reference shares ctx.permissions with the spawned agent); the
-        // dispatch-level copy covers the batch child table.
-        let tools = match &self.before {
-            Some(hook) => tools.with_before(Arc::clone(hook)),
-            None => tools,
-        };
+            SubagentKind::General => self.workspace.subagent_registry(true),
+            SubagentKind::Research => self.workspace.subagent_registry(false),
+            SubagentKind::Reviewer => self.workspace.reviewer_registry(),
+        }
+        .map_err(|e| e.to_string())?;
         // A child conversation with its own layer instances — never the
-        // parent's, whose per-run state would collide on run ids.
+        // parent's, whose per-run state would collide on run ids. The
+        // parent's approval gate governs the child's tool calls too
+        // (reference shares ctx.permissions with the spawned agent).
         let (sink, stream) = crate::harness::EventSink::new();
         let mut builder =
             crate::harness::ConversationBuilder::new(&config, &self.cwd, "", model, tools, sink)
                 .history(animist::history::History::from_entries(ext::entries(
                     seeded,
                 )))
-                .max_turns(crate::harness::MaxTurns::Unbounded);
+                .max_turns(crate::harness::MaxTurns::Unbounded)
+                .workspace(self.workspace.clone());
         if let Some(hook) = &self.before {
             builder = builder.approval(Arc::clone(hook));
         }
@@ -804,7 +801,7 @@ mod tests {
             &cwd,
             "",
             model,
-            workspace.clone().register(),
+            workspace.clone().registry().unwrap(),
             sink.clone(),
         )
         .build()
@@ -856,7 +853,7 @@ mod tests {
 
         #[derive(Clone)]
         struct CountingGate(Arc<AtomicUsize>);
-        impl run::dispatch::BeforeExecute for CountingGate {
+        impl run::BeforeExecute for CountingGate {
             fn decide(&self, call: ContentBlock) -> run::BoxFuture<run::Decision> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 assert!(matches!(&call,
@@ -1015,8 +1012,15 @@ mod tests {
     fn subagent_tables_are_restricted() {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = Workspace::new(tmp.path()).unwrap();
-        let research = workspace.register_subagent(false).names();
-        let general = workspace.register_subagent(true).names();
+        let registry_names = |registry: &animist::agent::tool::ToolRegistry| {
+            registry
+                .definitions()
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<Vec<_>>()
+        };
+        let research = registry_names(&workspace.subagent_registry(false).unwrap());
+        let general = registry_names(&workspace.subagent_registry(true).unwrap());
         for banned in ["task", "question", "sessions"] {
             assert!(
                 !research.contains(&banned.to_string()),

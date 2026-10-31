@@ -2354,24 +2354,27 @@ async fn run_headless_query_with(
         Some(persister) => persister.lock().await.history(),
         None => animist::history::History::new(),
     };
-    // Per-turn cancellation cell: the MCP tools and the subagent launcher
-    // read whatever the current turn stored.
+    // Per-turn cancellation cell: the subagent launcher reads whatever the
+    // current turn stored.
     let cancel_cell = Arc::new(arc_swap::ArcSwap::from_pointee(
         animist::agent::Cancellation::default(),
     ));
-    let workspace = workspace.with_cancel(cancel_cell.clone());
     let (sink, stream) = crate::harness::EventSink::new();
     let conversation = crate::harness::ConversationBuilder::new(
         &config,
         &cwd_str,
         &env.instructions.text,
         model.clone(),
-        workspace.clone().register(),
+        workspace
+            .clone()
+            .registry()
+            .map_err(crate::error::client_error)?,
         sink,
     )
     .history(history)
     .mode(mode)
     .approval(Arc::clone(before.as_ref().expect("headless always gates")))
+    .workspace(workspace.clone())
     .build()?;
     // Arm the subagent seam on the conversation (one registry rebuild at
     // startup; headless carries no provider configs beyond the selection,
@@ -2395,9 +2398,16 @@ async fn run_headless_query_with(
         before: before.clone(),
         cwd: cwd_str.clone(),
     });
-    let armed = workspace.clone().with_subagents(launcher).register();
+    let armed = workspace
+        .clone()
+        .with_subagents(launcher)
+        .registry()
+        .map_err(crate::error::client_error)?;
     conversation.set_tools(armed)?;
-    let tool_names = workspace.register().names();
+    let tool_names: Vec<String> = crate::tools::native_tool_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
 
     let turn_cancel = animist::agent::Cancellation::default();
     cancel_cell.store(Arc::new(turn_cancel.clone()));

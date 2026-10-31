@@ -10,6 +10,7 @@ mod spec;
 mod turns;
 
 use animist::agent::Cancellation;
+use animist::agent::tool::ToolRegistry;
 use animist::history::{ContentBlock, History, HistoryEntry, StoredMessage};
 
 use crate::config::Config;
@@ -17,7 +18,6 @@ use crate::harness::{
     Conversation, ConversationBuilder, Event, EventSink, EventStream, TurnOutcome,
 };
 use crate::provider::ModelHandle;
-use crate::run::ToolDispatch;
 use crate::testing::{Attempt, ScriptedProvider, ToolCallSpec};
 use crate::tools::Workspace;
 
@@ -44,7 +44,7 @@ fn tool_event(id: &str, name: &str, args: serde_json::Value) -> ToolCallSpec {
     (id.to_owned(), name.to_owned(), args)
 }
 
-/// A conversation over the workspace's real dispatch table.
+/// A conversation over the workspace's real tool registry.
 async fn workspace_conversation(
     dir: &tempfile::TempDir,
     scripted: &ScriptedProvider,
@@ -54,18 +54,18 @@ async fn workspace_conversation(
         scripted,
         &Config::parse("").expect("default config"),
         &dir.path().display().to_string(),
-        workspace.register(),
+        workspace.registry().expect("registry"),
         None,
     )
     .await
 }
 
-/// A conversation over `dispatch`, optionally restoring a seeded history.
+/// A conversation over `tools`, optionally restoring a seeded history.
 async fn conversation_over(
     scripted: &ScriptedProvider,
     config: &Config,
     cwd: &str,
-    dispatch: ToolDispatch,
+    tools: ToolRegistry,
     history: Option<History>,
 ) -> (Conversation, EventStream) {
     let (sink, stream) = EventSink::new();
@@ -73,7 +73,7 @@ async fn conversation_over(
         scripted,
         crate::testing::model_info("scripted", 200_000, 8_192, false, false),
     ));
-    let mut builder = ConversationBuilder::new(config, cwd, "", handle, dispatch, sink);
+    let mut builder = ConversationBuilder::new(config, cwd, "", handle, tools, sink);
     if let Some(history) = history {
         builder = builder.history(history);
     }
@@ -81,6 +81,17 @@ async fn conversation_over(
     (conversation, stream)
 }
 
+/// A conversation over `tools` with a fake tool injected under `name`:
+/// the classic way the scheduling tests pinned ordering.
+#[allow(dead_code)]
+async fn conversation_with_tools(
+    scripted: &ScriptedProvider,
+    config: &Config,
+    cwd: &str,
+    tools: ToolRegistry,
+) -> (Conversation, EventStream) {
+    conversation_over(scripted, config, cwd, tools, None).await
+}
 /// A history seeded with `messages`, as a resumed session restores it.
 async fn seeded_history(messages: Vec<StoredMessage>) -> History {
     let history = History::default();

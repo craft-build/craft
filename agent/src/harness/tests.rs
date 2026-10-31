@@ -10,10 +10,10 @@ use animist::provider::ProviderEvent;
 use crate::config::Config;
 use crate::harness::{Conversation, ConversationBuilder, Event, EventSink, TurnOutcome};
 use crate::provider::ModelHandle;
-use crate::run::ToolDispatch;
 use crate::run::recency::{RecencyCtx, RecencyFacts, RecencySource};
 use crate::testing::{self, ScriptedProvider};
 use crate::tools::Workspace;
+use animist::agent::tool::ToolRegistry;
 
 struct FixedRecency;
 impl RecencySource for FixedRecency {
@@ -40,9 +40,10 @@ async fn workspace_conversation(
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.register(),
+        workspace.registry().expect("registry"),
         sink,
     )
+    .workspace(workspace)
     .build()
     .expect("conversation builds");
     (conversation, stream)
@@ -182,15 +183,53 @@ async fn tool_round_trip_completes_and_commits_history() {
     assert!(saw_finished, "the executed call must finish");
 }
 
+/// A native test tool: `boom` panics, `stall` waits for release. The old
+/// rig DynamicTool fakes for panic and cancellation coverage.
+#[derive(Clone)]
+struct HarnessProbe {
+    name: &'static str,
+    release: Option<tokio::sync::watch::Receiver<bool>>,
+}
+
+#[derive(Debug, Default, schemars::JsonSchema, serde::Deserialize)]
+struct HarnessProbeArgs {}
+
+#[async_trait::async_trait]
+impl animist::agent::tool::ToolImpl for HarnessProbe {
+    type Args = HarnessProbeArgs;
+    type Output = animist::agent::tool::ToolOutput;
+    type Error = crate::tools::error::Error;
+
+    fn definition(&self) -> animist::agent::tool::ToolDefinition {
+        crate::tools::error::definition::<HarnessProbeArgs>(self.name, "harness probe")
+    }
+
+    async fn call(
+        &self,
+        _context: &animist::agent::tool::ToolContext<'_>,
+        _args: HarnessProbeArgs,
+    ) -> Result<animist::agent::tool::ToolOutput, crate::tools::error::Error> {
+        if let Some(mut release) = self.release.clone() {
+            let _ = release.changed().await;
+            return Ok(crate::tools::error::text_output("late"));
+        }
+        panic!("boom");
+    }
+}
+
+fn probe_registry(probe: HarnessProbe) -> ToolRegistry {
+    let mut registry = ToolRegistry::default();
+    registry.register(probe).expect("probe registers");
+    registry
+}
+
 #[tokio::test]
 async fn panicking_tool_yields_panicked_error_result_and_the_run_continues() {
     let dir = tempfile::tempdir().unwrap();
-    let boom = rig_core::tool::DynamicTool::new(
-        crate::tools::tool_name("boom"),
-        "always panics",
-        serde_json::json!({ "type": "object" }),
-        move |_arguments| Box::pin(async move { panic!("boom") }),
-    );
+    let boom = HarnessProbe {
+        name: "boom",
+        release: None,
+    };
     let scripted = ScriptedProvider::new(Vec::new());
     scripted
         .push(testing::tool_turn(vec![(
@@ -209,7 +248,7 @@ async fn panicking_tool_yields_panicked_error_result_and_the_run_continues() {
         &dir.path().display().to_string(),
         "",
         handle,
-        ToolDispatch::new(vec![boom]),
+        probe_registry(boom),
         sink,
     )
     .build()
@@ -296,18 +335,10 @@ async fn cancel_mid_stream_commits_partial_text_marker_and_replays_next_turn() {
 async fn cancel_mid_tool_leaves_the_interrupted_result_committed() {
     let dir = tempfile::tempdir().unwrap();
     let (release, _receiver) = tokio::sync::watch::channel(false);
-    let blocker = rig_core::tool::DynamicTool::new(
-        crate::tools::tool_name("stall"),
-        "waits for release",
-        serde_json::json!({ "type": "object" }),
-        move |_arguments| {
-            let mut receiver = release.subscribe();
-            Box::pin(async move {
-                let _ = receiver.changed().await;
-                Ok(rig_core::tool::ToolOutput::text("late"))
-            })
-        },
-    );
+    let blocker = HarnessProbe {
+        name: "stall",
+        release: Some(release.subscribe()),
+    };
     let scripted = ScriptedProvider::new(Vec::new());
     scripted.push(testing::tool_turn(vec![(
         "t1".into(),
@@ -324,7 +355,7 @@ async fn cancel_mid_tool_leaves_the_interrupted_result_committed() {
         &dir.path().display().to_string(),
         "",
         handle,
-        ToolDispatch::new(vec![blocker]),
+        probe_registry(blocker),
         sink,
     )
     .build()
@@ -551,7 +582,7 @@ async fn recency_tail_rides_the_request_view_but_not_stored_history() {
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .recency(Arc::new(FixedRecency))
@@ -635,7 +666,7 @@ async fn max_turns_budget_ends_with_the_end_marker() {
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .build()
@@ -686,7 +717,7 @@ async fn persisted_conversation(
         &tmp.path().display().to_string(),
         "",
         handle,
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .history(history)
@@ -849,7 +880,7 @@ async fn a_checkpoint_failure_surfaces_an_event_and_never_fails_the_run() {
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.register(),
+        workspace.registry().unwrap(),
         sink,
     )
     .history(history)

@@ -5,15 +5,18 @@
 //! (parser, chunk matching, replacement planning) is unchanged, while file
 //! I/O goes through the workspace's safety and atomic-write primitives.
 
-use std::io::Write as _;
-
-use rig_core::tool::{IntoToolOutput, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
+
+use crate::run::dedup;
 
 use super::edit::persist;
+use super::error::{Error, Result, definition, failure, finish, invalid, io_error};
 use super::{
-    MAX_FILE_BYTES, Result, Workspace, failure, impl_tool, invalid, io_error, read_bytes, text,
+    MAX_FILE_BYTES, Workspace, claims, commit_staged, read_bytes, stage_bytes_for_write, text,
 };
 
 const DIFF_MAX_LINES: usize = 30;
@@ -30,9 +33,9 @@ pub struct ApplyPatchOutput {
     pub applied: Vec<String>,
 }
 
-impl IntoToolOutput for ApplyPatchOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(self.applied.join("\n")))
+impl super::error::IntoToolResult for ApplyPatchOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.applied.join("\n"))
     }
 }
 
@@ -63,7 +66,8 @@ enum PatchHunk {
     },
 }
 
-/// Every file path a patch text touches, for dedup-cache invalidation.
+/// Every file path a patch text touches, for scheduling claims and
+/// dedup-cache invalidation.
 pub fn patch_paths(patch_text: &str) -> Vec<String> {
     patch_text
         .lines()
@@ -78,31 +82,39 @@ pub fn patch_paths(patch_text: &str) -> Vec<String> {
 }
 
 impl ApplyPatch {
-    fn execute(workspace: &Workspace, args: ApplyPatchArgs) -> Result<ApplyPatchOutput> {
+    async fn execute(
+        workspace: &Workspace,
+        args: ApplyPatchArgs,
+        cancel: &animist::agent::Cancellation,
+    ) -> Result<ApplyPatchOutput> {
         if args.patch_text.contains('\0') {
             return Err(invalid("patch_text must not contain NUL bytes"));
         }
         let hunks = parse_apply_patch(&args.patch_text).map_err(invalid)?;
+        // Cross-agent: one guard spans every hunk, so hunks apply as a set
+        // against other sessions' writers.
+        let targets = patch_paths(&args.patch_text);
+        let _guard = workspace.write_guard(&targets, cancel).await?;
         let mut results = Vec::new();
         for hunk in &hunks {
             match hunk {
                 PatchHunk::AddFile { path, contents } => {
-                    let display = Self::add_file(workspace, path, contents)?;
+                    let display = Self::add_file(workspace, path, contents).await?;
                     results.push(format!("{display}: created"));
                 }
                 PatchHunk::DeleteFile { path } => {
                     let resolved = workspace.file(path)?;
-                    let before = text(read_bytes(&resolved)?)?;
+                    let before = text(read_bytes(&resolved).await?)?;
                     let display = workspace.display(&resolved);
                     let summary =
                         diff_summary(&before, "", &format!("{display}: deleted"), &display);
-                    workspace.note_snapshot(&resolved);
-                    std::fs::remove_file(&resolved).map_err(io_error)?;
+                    workspace.note_snapshot(&resolved).await;
+                    tokio::fs::remove_file(&resolved).await.map_err(io_error)?;
                     results.push(summary);
                 }
                 PatchHunk::UpdateFile { path, chunks } => {
                     let resolved = workspace.file(path)?;
-                    let before = text(read_bytes(&resolved)?)?;
+                    let before = text(read_bytes(&resolved).await?)?;
                     let after = apply_update_chunks(&before, chunks, path).map_err(invalid)?;
                     if after.len() > MAX_FILE_BYTES {
                         return Err(invalid(
@@ -116,7 +128,7 @@ impl ApplyPatch {
                         &format!("{display}: modified ({} hunks)", chunks.len()),
                         &display,
                     );
-                    persist(workspace, path, &resolved, &before, &after)?;
+                    persist(workspace, path, &resolved, &before, &after).await?;
                     results.push(summary);
                 }
             }
@@ -129,8 +141,8 @@ impl ApplyPatch {
 
     /// Create a new file through the workspace write path (staged, atomic,
     /// snapshot for `/undo`). Existing files are refused. Returns the
-    /// workspace-relative display path.
-    fn add_file(workspace: &Workspace, requested: &str, contents: &str) -> Result<String> {
+    /// workspace-relative display path. Callers hold the patch's path lock.
+    async fn add_file(workspace: &Workspace, requested: &str, contents: &str) -> Result<String> {
         if contents.contains('\0') {
             return Err(invalid("added file content must not contain NUL bytes"));
         }
@@ -138,38 +150,54 @@ impl ApplyPatch {
             return Err(invalid("added file would exceed the 8 MiB tool size limit"));
         }
         let path = workspace.target(requested)?;
-        if path.exists() {
+        if tokio::fs::symlink_metadata(&path).await.is_ok() {
             return Err(invalid(format!(
                 "Add File target {} already exists; use Update File",
                 workspace.display(&path)
             )));
         }
-        workspace.note_snapshot(&path);
-        let parent = path
-            .parent()
-            .ok_or_else(|| failure("resolved path has no parent directory"))?;
-        let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
-        staged.write_all(contents.as_bytes()).map_err(io_error)?;
-        staged.as_file().sync_all().map_err(io_error)?;
-        if workspace.target(requested)? != path || path.exists() {
+        workspace.note_snapshot(&path).await;
+        let staged = stage_bytes_for_write(
+            path.parent()
+                .ok_or_else(|| failure("resolved path has no parent directory"))?,
+            contents.as_bytes(),
+        )
+        .await?;
+        if workspace.target(requested)? != path || tokio::fs::symlink_metadata(&path).await.is_ok()
+        {
             return Err(failure(
                 "file changed while preparing the patch; read it again and retry",
             ));
         }
-        staged
-            .persist(&path)
-            .map_err(|error| io_error(error.error))?;
+        commit_staged(staged, &path).await?;
         Ok(workspace.display(&path))
     }
 }
 
-impl_tool!(
-    ApplyPatch,
-    ApplyPatchArgs,
-    ApplyPatchOutput,
-    "apply_patch",
-    "Apply a Codex-style patch (*** Begin Patch / *** End Patch) adding, updating, or deleting multiple workspace files at once. Update hunks use ' ', '+', '-' diff lines with optional '@@ context' markers and three-pass fuzzy matching (exact, trailing-whitespace, fully trimmed); '*** End of File' anchors a hunk at the end. Files apply sequentially: a later failure leaves earlier files patched. No symlinks, Git metadata, or paths outside the workspace."
-);
+#[async_trait]
+impl ToolImpl for ApplyPatch {
+    type Args = ApplyPatchArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<ApplyPatchArgs>(
+            "apply_patch",
+            "Apply a Codex-style patch (*** Begin Patch / *** End Patch) adding, updating, or deleting multiple workspace files at once. Update hunks use ' ', '+', '-' diff lines with optional '@@ context' markers and three-pass fuzzy matching (exact, trailing-whitespace, fully trimmed); '*** End of File' anchors a hunk at the end. Files apply sequentially: a later failure leaves earlier files patched. No symlinks, Git metadata, or paths outside the workspace.",
+        )
+    }
+
+    fn scheduling(&self, input: &Value) -> ToolScheduling {
+        claims::writes(
+            self.0.root_key().as_deref(),
+            &dedup::extract_write_paths("apply_patch", input),
+        )
+    }
+
+    async fn call(&self, context: &ToolContext<'_>, args: ApplyPatchArgs) -> Result<ToolOutput> {
+        finish(Self::execute(&self.0, args, &context.run.cancellation).await)
+    }
+}
 
 fn apply_update_chunks(
     original_contents: &str,

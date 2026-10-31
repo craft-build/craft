@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolExecutionError, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{Result, invalid};
+use super::error::{Error, Result, definition, finish, invalid};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -20,14 +20,14 @@ pub struct ListToolsOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for ListToolsOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for ListToolsOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(self.text)
     }
 }
 
 /// Introspection over the session's registered tools. Holds a snapshot of
-/// the dispatch definitions taken at registration time.
+/// the registry's definitions taken at registration time.
 #[derive(Clone)]
 pub struct ListTools(pub Arc<Vec<ToolDefinition>>);
 
@@ -35,8 +35,8 @@ impl ListTools {
     fn execute(&self, args: ListToolsArgs) -> Result<ListToolsOutput> {
         if let Some(name) = args.detail.as_deref() {
             if let Some(definition) = self.0.iter().find(|definition| definition.name == name) {
-                let schema = serde_json::to_string_pretty(&definition.parameters)
-                    .unwrap_or_else(|_| definition.parameters.to_string());
+                let schema = serde_json::to_string_pretty(&definition.input_schema)
+                    .unwrap_or_else(|_| definition.input_schema.to_string());
                 return Ok(ListToolsOutput {
                     text: format!("{name}:\n\nInput schema:\n{schema}"),
                 });
@@ -64,24 +64,30 @@ impl ListTools {
     }
 }
 
-impl PortableTool for ListTools {
-    const NAME: &'static str = "list_tools";
+#[async_trait]
+impl ToolImpl for ListTools {
     type Args = ListToolsArgs;
-    type Output = ListToolsOutput;
-    type Error = ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Introspect the available tools. With no arguments, lists every registered tool with a \
-         one-line description. With detail=\"<name>\", returns that tool's full input schema."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<ListToolsArgs>(
+            "list_tools",
+            "Introspect the available tools. With no arguments, lists every registered tool with a \
+             one-line description. With detail=\"<name>\", returns that tool's full input schema.",
+        )
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(ListToolsArgs))
-            .expect("JSON Schema is serializable")
+    // In-memory snapshot: independent of every other call.
+
+    fn scheduling(&self, _input: &serde_json::Value) -> ToolScheduling {
+        ToolScheduling::Resources {
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
     }
 
-    async fn call(&self, args: Self::Args) -> super::Result<Self::Output> {
-        self.execute(args)
+    async fn call(&self, _context: &ToolContext<'_>, args: ListToolsArgs) -> Result<ToolOutput> {
+        finish(Self::execute(self, args))
     }
 }

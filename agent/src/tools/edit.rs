@@ -1,16 +1,17 @@
-use std::{fs, io::Write, path::Path};
+use std::path::Path;
 
-use rig_core::tool::{IntoToolOutput, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::diff::unified_text;
+use crate::run::dedup;
 
+use super::error::{Error, Result, definition, denied, failure, finish, invalid, io_error};
 use super::fuzzy_replace;
-use super::{
-    MAX_FILE_BYTES, Result, Workspace, denied, failure, impl_tool, invalid, io_error, read_bytes,
-    text,
-};
+use super::{MAX_FILE_BYTES, Workspace, claims, commit_staged, read_bytes, stage_bytes, text};
 
 const OUT_OF_RANGE: &str = "out of range";
 
@@ -39,14 +40,14 @@ pub struct EditOutput {
     pub after: String,
 }
 
-impl IntoToolOutput for EditOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(unified_text(
+impl super::error::IntoToolResult for EditOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(unified_text(
             &self.before,
             &self.after,
             &format!("edited {}{}", self.path, self.pass),
             &self.path,
-        )))
+        ))
     }
 }
 
@@ -54,7 +55,11 @@ impl IntoToolOutput for EditOutput {
 pub struct Edit(pub Workspace);
 
 impl Edit {
-    fn execute(workspace: &Workspace, args: EditArgs) -> Result<EditOutput> {
+    async fn execute(
+        workspace: &Workspace,
+        args: EditArgs,
+        cancel: &animist::agent::Cancellation,
+    ) -> Result<EditOutput> {
         if args.old_string.is_empty() {
             return Err(invalid(
                 "old_string must not be empty; edit only modifies existing files",
@@ -70,14 +75,27 @@ impl Edit {
             return Err(invalid("new_string must not contain NUL bytes"));
         }
         let path = workspace.file(&args.path)?;
-        let before = text(read_bytes(&path)?)?;
-        let result = fuzzy_replace::replace(
-            &before,
-            &args.old_string,
-            &args.new_string,
-            args.replace_all,
-            args.occurrence,
-        )
+        let _guard = workspace
+            .write_guard(std::slice::from_ref(&args.path), cancel)
+            .await?;
+        let before = text(read_bytes(&path).await?)?;
+        // CPU-bound fuzzy matching over up to 8 MiB.
+        let haystack = before.clone();
+        let old_string = args.old_string.clone();
+        let new_string = args.new_string.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            fuzzy_replace::replace(
+                &haystack,
+                &old_string,
+                &new_string,
+                args.replace_all,
+                args.occurrence,
+            )
+        })
+        .await
+        .map_err(|source| Error::Blocking {
+            source: Box::new(source),
+        })?
         .map_err(invalid)?;
         let after = result.content;
         if after.len() > MAX_FILE_BYTES {
@@ -94,7 +112,7 @@ impl Edit {
             format!(" (fuzzy match pass {})", result.pass.number())
         };
         let size = after.len();
-        persist(workspace, &args.path, &path, &before, &after)?;
+        persist(workspace, &args.path, &path, &before, &after).await?;
         Ok(EditOutput {
             path: workspace.display(&path),
             replacements,
@@ -106,48 +124,61 @@ impl Edit {
     }
 }
 
-impl_tool!(
-    Edit,
-    EditArgs,
-    EditOutput,
-    "edit",
-    "Atomically replace text in an existing UTF-8 file. Read first and exclude line-number prefixes. Matching tolerates drift: trailing whitespace, indentation, collapsed whitespace, Unicode, and escaped characters, plus fuzzy block anchoring. old_string must resolve to one match unless replace_all or a one-based occurrence is set. No creation, symlinks, Git metadata, or paths outside the workspace."
-);
+#[async_trait]
+impl ToolImpl for Edit {
+    type Args = EditArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<EditArgs>(
+            "edit",
+            "Atomically replace text in an existing UTF-8 file. Read first and exclude line-number prefixes. Matching tolerates drift: trailing whitespace, indentation, collapsed whitespace, Unicode, and escaped characters, plus fuzzy block anchoring. old_string must resolve to one match unless replace_all or a one-based occurrence is set. No creation, symlinks, Git metadata, or paths outside the workspace.",
+        )
+    }
+
+    fn scheduling(&self, input: &Value) -> ToolScheduling {
+        claims::writes(
+            self.0.root_key().as_deref(),
+            &dedup::extract_write_paths("edit", input),
+        )
+    }
+
+    async fn call(&self, context: &ToolContext<'_>, args: EditArgs) -> Result<ToolOutput> {
+        finish(Self::execute(&self.0, args, &context.run.cancellation).await)
+    }
+}
 
 /// Stage `after` beside the destination and atomically replace `path` while
 /// preserving permissions, unless the file changed while we prepared the edit.
-pub(crate) fn persist(
+/// Callers hold the workspace path lock for the whole read-modify-write.
+pub(crate) async fn persist(
     workspace: &Workspace,
     requested: &str,
     path: &Path,
     before: &str,
     after: &str,
 ) -> Result<()> {
-    let permissions = fs::metadata(path).map_err(io_error)?.permissions();
+    let permissions = tokio::fs::metadata(path)
+        .await
+        .map_err(io_error)?
+        .permissions();
     if permissions.readonly() {
         return Err(denied("file is read-only"));
     }
-    workspace.note_snapshot(path);
+    workspace.note_snapshot(path).await;
     // Stage beside the destination for same-filesystem atomic replacement.
     // Preserve exact bytes outside the replacement, including CRLF and BOM.
     let parent = path
         .parent()
         .ok_or_else(|| failure("resolved path has no parent directory"))?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
-    staged.write_all(after.as_bytes()).map_err(io_error)?;
-    staged
-        .as_file()
-        .set_permissions(permissions)
-        .map_err(io_error)?;
-    staged.as_file().sync_all().map_err(io_error)?;
-    if workspace.file(requested)? != path || read_bytes(path)? != before.as_bytes() {
+    let staged = stage_bytes(parent, after.as_bytes(), &permissions).await?;
+    if workspace.file(requested)? != path || read_bytes(path).await? != before.as_bytes() {
         return Err(failure(
             "file changed while preparing the edit; read it again and retry",
         ));
     }
-    staged
-        .persist(path)
-        .map_err(|error| io_error(error.error))?;
+    commit_staged(staged, path).await?;
     Ok(())
 }
 
@@ -188,14 +219,14 @@ pub struct EditLinesOutput {
     pub after: String,
 }
 
-impl IntoToolOutput for EditLinesOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(unified_text(
+impl super::error::IntoToolResult for EditLinesOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(unified_text(
             &self.before,
             &self.after,
             &format!("edited lines in {}", self.path),
             &self.path,
-        )))
+        ))
     }
 }
 
@@ -226,12 +257,19 @@ impl EditLines {
         Ok(join_lines(&result, trailing_newline))
     }
 
-    fn execute(workspace: &Workspace, args: EditLinesArgs) -> Result<EditLinesOutput> {
+    async fn execute(
+        workspace: &Workspace,
+        args: EditLinesArgs,
+        cancel: &animist::agent::Cancellation,
+    ) -> Result<EditLinesOutput> {
         if args.new_string.contains('\0') {
             return Err(invalid("new_string must not contain NUL bytes"));
         }
         let path = workspace.file(&args.path)?;
-        let before = text(read_bytes(&path)?)?;
+        let _guard = workspace
+            .write_guard(std::slice::from_ref(&args.path), cancel)
+            .await?;
+        let before = text(read_bytes(&path).await?)?;
         let after = Self::replace_lines(&before, args.start, args.end, &args.new_string)
             .map_err(invalid)?;
         if after.len() > MAX_FILE_BYTES {
@@ -240,7 +278,7 @@ impl EditLines {
             ));
         }
         let size = after.len();
-        persist(workspace, &args.path, &path, &before, &after)?;
+        persist(workspace, &args.path, &path, &before, &after).await?;
         Ok(EditLinesOutput {
             path: workspace.display(&path),
             bytes_written: size,
@@ -250,13 +288,30 @@ impl EditLines {
     }
 }
 
-impl_tool!(
-    EditLines,
-    EditLinesArgs,
-    EditLinesOutput,
-    "edit_lines",
-    "Edit lines by number in an existing UTF-8 file. Replaces lines start..=end (one-based, inclusive) with new_string; empty new_string deletes the range. Read and grep show lines as '<nr>: <content>', so those numbers can be used directly. An empty file exposes one empty line 1. Out-of-range ranges are rejected before any write; a trailing newline is preserved. Atomic, no symlinks, Git metadata, or paths outside the workspace."
-);
+#[async_trait]
+impl ToolImpl for EditLines {
+    type Args = EditLinesArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<EditLinesArgs>(
+            "edit_lines",
+            "Edit lines by number in an existing UTF-8 file. Replaces lines start..=end (one-based, inclusive) with new_string; empty new_string deletes the range. Read and grep show lines as '<nr>: <content>', so those numbers can be used directly. An empty file exposes one empty line 1. Out-of-range ranges are rejected before any write; a trailing newline is preserved. Atomic, no symlinks, Git metadata, or paths outside the workspace.",
+        )
+    }
+
+    fn scheduling(&self, input: &Value) -> ToolScheduling {
+        claims::writes(
+            self.0.root_key().as_deref(),
+            &dedup::extract_write_paths("edit_lines", input),
+        )
+    }
+
+    async fn call(&self, context: &ToolContext<'_>, args: EditLinesArgs) -> Result<ToolOutput> {
+        finish(Self::execute(&self.0, args, &context.run.cancellation).await)
+    }
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -276,14 +331,14 @@ pub struct InsertLinesOutput {
     pub after: String,
 }
 
-impl IntoToolOutput for InsertLinesOutput {
-    fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(unified_text(
+impl super::error::IntoToolResult for InsertLinesOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        super::error::text_output(unified_text(
             &self.before,
             &self.after,
             &format!("inserted lines in {}", self.path),
             &self.path,
-        )))
+        ))
     }
 }
 
@@ -308,7 +363,11 @@ impl InsertLines {
         Ok(join_lines(&result, trailing_newline))
     }
 
-    fn execute(workspace: &Workspace, args: InsertLinesArgs) -> Result<InsertLinesOutput> {
+    async fn execute(
+        workspace: &Workspace,
+        args: InsertLinesArgs,
+        cancel: &animist::agent::Cancellation,
+    ) -> Result<InsertLinesOutput> {
         if args.new_string.is_empty() {
             return Err(invalid(
                 "new_string must not be empty; use edit_lines to delete",
@@ -318,7 +377,10 @@ impl InsertLines {
             return Err(invalid("new_string must not contain NUL bytes"));
         }
         let path = workspace.file(&args.path)?;
-        let before = text(read_bytes(&path)?)?;
+        let _guard = workspace
+            .write_guard(std::slice::from_ref(&args.path), cancel)
+            .await?;
+        let before = text(read_bytes(&path).await?)?;
         let after = Self::insert_lines(&before, args.line, &args.new_string).map_err(invalid)?;
         if after.len() > MAX_FILE_BYTES {
             return Err(invalid(
@@ -326,7 +388,7 @@ impl InsertLines {
             ));
         }
         let size = after.len();
-        persist(workspace, &args.path, &path, &before, &after)?;
+        persist(workspace, &args.path, &path, &before, &after).await?;
         Ok(InsertLinesOutput {
             path: workspace.display(&path),
             bytes_written: size,
@@ -336,13 +398,30 @@ impl InsertLines {
     }
 }
 
-impl_tool!(
-    InsertLines,
-    InsertLinesArgs,
-    InsertLinesOutput,
-    "insert_lines",
-    "Insert new_string after a one-based line number in an existing UTF-8 file; 0 inserts at the top, and the last line number appends at the end. Only pass new lines, never lines already in the file. An empty file exposes one empty line 1. Out-of-range line numbers are rejected before any write; a trailing newline is preserved. Atomic, no symlinks, Git metadata, or paths outside the workspace."
-);
+#[async_trait]
+impl ToolImpl for InsertLines {
+    type Args = InsertLinesArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<InsertLinesArgs>(
+            "insert_lines",
+            "Insert new_string after a one-based line number in an existing UTF-8 file; 0 inserts at the top, and the last line number appends at the end. Only pass new lines, never lines already in the file. An empty file exposes one empty line 1. Out-of-range line numbers are rejected before any write; a trailing newline is preserved. Atomic, no symlinks, Git metadata, or paths outside the workspace.",
+        )
+    }
+
+    fn scheduling(&self, input: &Value) -> ToolScheduling {
+        claims::writes(
+            self.0.root_key().as_deref(),
+            &dedup::extract_write_paths("insert_lines", input),
+        )
+    }
+
+    async fn call(&self, context: &ToolContext<'_>, args: InsertLinesArgs) -> Result<ToolOutput> {
+        finish(Self::execute(&self.0, args, &context.run.cancellation).await)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -375,8 +454,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fuzzy_replace_all_reports_actual_count() {
+    #[tokio::test]
+    async fn fuzzy_replace_all_reports_actual_count() {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = Workspace::new(tmp.path()).unwrap();
         std::fs::write(
@@ -384,6 +463,7 @@ mod tests {
             "let   x  =   1;\nlet   x  =   1;\n",
         )
         .unwrap();
+        let cancel = animist::agent::Cancellation::default();
         let out = Edit::execute(
             &workspace,
             EditArgs {
@@ -393,7 +473,9 @@ mod tests {
                 replace_all: true,
                 occurrence: None,
             },
+            &cancel,
         )
+        .await
         .unwrap();
         // An exact recount of old_string would report 0; the fuzzy pass
         // replaced both lines.

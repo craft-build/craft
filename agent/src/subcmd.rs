@@ -407,7 +407,10 @@ pub async fn prompt(variant: PromptVariant, plan: bool, tools: bool, names: bool
 
     if tools {
         let workspace = crate::tools::Workspace::new(&cwd).map_err(crate::error::client_error)?;
-        let defs = workspace.register().definitions();
+        let defs = workspace
+            .registry()
+            .map_err(crate::error::client_error)?
+            .definitions();
         if names {
             for def in &defs {
                 println!("{}", def.name);

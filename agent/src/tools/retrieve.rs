@@ -1,8 +1,9 @@
-use rig_core::tool::{IntoToolOutput, PortableTool, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{Result, invalid};
+use super::error::{Error, Result, definition, finish, invalid, text_output};
 use crate::compression::store::SharedCompressionStore;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -18,11 +19,9 @@ pub struct RetrieveOutput {
     pub text: String,
 }
 
-impl IntoToolOutput for RetrieveOutput {
-    fn into_tool_output(
-        self,
-    ) -> std::result::Result<ToolOutput, rig_core::tool::ToolExecutionError> {
-        Ok(ToolOutput::text(self.text))
+impl super::error::IntoToolResult for RetrieveOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        text_output(self.text)
     }
 }
 
@@ -49,26 +48,32 @@ impl Retrieve {
     }
 }
 
-impl PortableTool for Retrieve {
-    const NAME: &'static str = "retrieve";
+const RETRIEVE_DESCRIPTION: &str = "Retrieve the original (uncompressed) content for a previously compressed tool output. \
+     Use the hash value from a compression marker in the conversation. Markers appear as \
+     [N lines compressed from M. Retrieve original: hash=HASH].";
+
+#[async_trait]
+impl ToolImpl for Retrieve {
     type Args = RetrieveArgs;
-    type Output = RetrieveOutput;
-    type Error = rig_core::tool::ToolExecutionError;
+    type Output = ToolOutput;
+    type Error = Error;
 
-    fn description(&self) -> String {
-        "Retrieve the original (uncompressed) content for a previously compressed tool output. \
-         Use the hash value from a compression marker in the conversation. Markers appear as \
-         [N lines compressed from M. Retrieve original: hash=HASH]."
-            .into()
+    fn definition(&self) -> ToolDefinition {
+        definition::<RetrieveArgs>("retrieve", RETRIEVE_DESCRIPTION)
     }
 
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(RetrieveArgs))
-            .expect("JSON Schema is serializable")
+    // The store is guarded by its own lock and nothing else claims it, so
+    // retrieval is independent of every other call.
+
+    fn scheduling(&self, _input: &serde_json::Value) -> ToolScheduling {
+        ToolScheduling::Resources {
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        self.execute(args)
+    async fn call(&self, _context: &ToolContext<'_>, args: RetrieveArgs) -> Result<ToolOutput> {
+        finish(Self::execute(self, args))
     }
 }
 
@@ -82,23 +87,37 @@ mod tests {
         }
     }
 
+    async fn invoke(tool: &Retrieve, args: RetrieveArgs) -> animist::agent::tool::ToolOutput {
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        harness
+            .call(tool.clone(), serde_json::json!({ "hash": args.hash }))
+            .await
+            .expect("retrieve outcome")
+    }
+
     #[tokio::test]
     async fn returns_stored_original() {
         let store = crate::compression::store::shared_store();
         let hash = store.lock().unwrap().put("the original text");
         let tool = Retrieve(store);
-        let output = tool.call(args(&hash)).await.expect("hit");
-        assert_eq!(output.text, "the original text");
+        let output = invoke(&tool, args(&hash)).await;
+        assert_eq!(
+            crate::history::ext::tool_content_text(&output.content),
+            "the original text"
+        );
     }
 
     #[tokio::test]
     async fn unknown_hash_is_an_error() {
         let tool = Retrieve(crate::compression::store::shared_store());
-        let error = tool.call(args("deadbeef")).await.expect_err("miss");
+        let output = invoke(&tool, args("deadbeef")).await;
+        assert!(output.is_error, "expected an error result");
+        let text = crate::history::ext::tool_content_text(&output.content);
         assert!(
-            error
-                .to_string()
-                .contains("no content found for hash=deadbeef")
+            text.contains("no content found for hash=deadbeef"),
+            "{text}"
         );
     }
 }
