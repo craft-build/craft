@@ -616,6 +616,12 @@ impl StoredSession {
     /// it without a second write.
     pub fn save_to(&mut self, dir: &Path) -> Result<SessionLog, SessionError> {
         self.updated_at = now_epoch();
+        // A whole-file write replaces the file the append handles point
+        // into (tmp + rename): void every outstanding append cursor so the
+        // next append diverges and recovers with a full rewrite, instead of
+        // writing into the unlinked old inode. The handle this write
+        // returns captures the bumped value, so it stays appendable.
+        self.rewrites = self.rewrites.saturating_add(1);
         SessionLog::rewrite(dir, self)
     }
 

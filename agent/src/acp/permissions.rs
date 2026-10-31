@@ -126,7 +126,9 @@ pub(super) fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
 pub(super) struct AcpPermissionGate {
     pub(super) connection: ConnectionTo<AcpClient>,
     pub(super) session_id: SessionId,
-    pub(super) cancel: run::CancelToken,
+    /// The session's per-turn cancellation cell; each ask races whatever
+    /// turn is current.
+    pub(super) cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
     pub(super) permissions: Arc<PermissionManager>,
 }
 
@@ -158,7 +160,8 @@ async fn gate_decide(gate: AcpPermissionGate, call: history::ContentBlock) -> ru
         cancel,
         permissions,
     } = gate;
-    if cancel.cancelled() {
+    let turn_cancel = (*cancel.load_full()).clone();
+    if turn_cancel.is_cancelled() {
         return run::Decision::Stop("cancelled by client".into());
     }
     let name = name.as_str();
@@ -171,13 +174,11 @@ async fn gate_decide(gate: AcpPermissionGate, call: history::ContentBlock) -> ru
     }
     let request = permission_request(&session_id, &call_id, name, &arguments, &scopes);
     // Dropping the sent request on cancel asks the client to cancel it.
-    let mut cancel_rx = cancel.subscribe();
     let answer = {
         let sent = connection.send_request(request);
         tokio::select! {
             biased;
-            changed = cancel_rx.changed() => {
-                let _ = changed;
+            () = turn_cancel.cancelled() => {
                 return run::Decision::Stop("cancelled by client".into());
             }
             outcome = tokio::time::timeout(

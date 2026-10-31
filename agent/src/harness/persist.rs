@@ -76,6 +76,11 @@ impl Persister {
         &mut self.store
     }
 
+    /// Read access to the session store.
+    pub fn store(&self) -> &SessionStore {
+        &self.store
+    }
+
     /// Write everything the history gained since the last checkpoint.
     /// Never fails the run for a disk problem: the caller logs and surfaces
     /// the error.

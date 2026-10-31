@@ -173,19 +173,25 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
         crate::testing::text_turn("done"),
     ]);
     let tools = workspace.register();
-    let (_, cancel) = crate::run::cancel_channel();
-    let mut history = Vec::new();
-    let outcome = crate::run::run(
-        &model,
-        &crate::run::RunParams::default(),
-        &tools,
-        &mut history,
+    let (sink, _stream) = crate::harness::EventSink::new();
+    let conversation = crate::harness::ConversationBuilder::new(
+        &crate::config::Config::parse("").expect("default config"),
+        &workspace.root().display().to_string(),
+        "",
+        model,
+        tools,
+        sink,
+    )
+    .build()
+    .expect("conversation builds");
+    let outcome = crate::harness::run_turn(
+        &conversation,
         "read, search, edit, then delete file.txt",
-        &cancel,
-        &|_| {},
+        &[],
+        animist::agent::Cancellation::default(),
     )
     .await;
-    assert!(matches!(outcome, crate::run::RunOutcome::Done { ref reply } if reply == "done"));
+    assert!(matches!(outcome, crate::harness::TurnOutcome::Done { ref reply } if reply == "done"));
     assert_eq!(provider.requests().len(), 8);
     assert!(!path.exists());
     assert_eq!(
@@ -269,42 +275,57 @@ async fn dispatch_loop_preserves_permission_refusals() {
         crate::testing::text_turn("permission denied"),
     ]);
     let tools = workspace.register();
-    let (_, cancel) = crate::run::cancel_channel();
-    let mut history = Vec::new();
-    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let outcome = crate::run::run(
-        &model,
-        &crate::run::RunParams::default(),
-        &tools,
-        &mut history,
+    let (sink, stream) = crate::harness::EventSink::new();
+    let conversation = crate::harness::ConversationBuilder::new(
+        &crate::config::Config::parse("").expect("default config"),
+        &workspace.root().display().to_string(),
+        "",
+        model,
+        tools,
+        sink,
+    )
+    .build()
+    .expect("conversation builds");
+    let outcome = crate::harness::run_turn(
+        &conversation,
         "delete outside",
-        &cancel,
-        &|event| events.lock().unwrap().push(event),
+        &[],
+        animist::agent::Cancellation::default(),
     )
     .await;
     assert!(
-        matches!(outcome, crate::run::RunOutcome::Done { ref reply } if reply == "permission denied")
+        matches!(outcome, crate::harness::TurnOutcome::Done { ref reply } if reply == "permission denied")
     );
     assert_eq!(provider.requests().len(), 2);
     // The refusal is recorded as an errored tool result; the next model turn
     // can explain it.
-    let events = events.lock().unwrap();
-    let refused = events
-        .iter()
-        .find_map(|event| match event {
-            crate::run::Event::ToolDone { result, .. } => Some(result),
-            _ => None,
-        })
-        .expect("a tool result event");
-    let crate::history::ContentBlock::ToolResult {
-        content, is_error, ..
-    } = refused
-    else {
-        panic!("tool result");
+    let refused = {
+        let mut stream = stream;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let event = tokio::time::timeout_at(deadline.into(), stream.next())
+                .await
+                .expect("the run's events drain")
+                .expect("the stream outlives the conversation");
+            if let crate::harness::Event::Agent(animist::agent::AgentEvent::ToolFinished {
+                output,
+                ..
+            }) = &event
+            {
+                break output.clone();
+            }
+            assert!(
+                !matches!(
+                    event,
+                    crate::harness::Event::Craft(crate::harness::CraftEvent::Done { .. })
+                ),
+                "the terminal Done arrived without a tool result"
+            );
+        }
     };
-    assert!(*is_error);
+    assert!(refused.is_error);
     assert!(
-        crate::history::ext::tool_content_text(content)
+        crate::history::ext::tool_content_text(&refused.content)
             .contains("paths must remain inside the workspace")
     );
 }

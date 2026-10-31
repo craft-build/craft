@@ -142,7 +142,7 @@ mod tests {
                 session_id: "s1".into(),
                 ..UsageLedger::default()
             },
-            ..SessionState::linked()
+            ..SessionState::for_tests()
         }
     }
 

@@ -1,124 +1,174 @@
-//! One agent turn: drives the shared run loop, rendering to the TUI seam.
+//! One agent turn: drives the conversation's run, rendering to the TUI seam
+//! through the session-long forwarder.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{Mutex, mpsc};
 
-use crate::compaction::CompactionEngine;
 use crate::config::Config;
+use animist::agent::AgentEvent as RuntimeEvent;
+use animist::provider::ProviderEvent;
+
+use crate::harness::{self, CraftEvent, Event, EventStream};
 use crate::history;
-use crate::permissions::PermissionManager;
-use crate::run::{self, AgentMode, CancelToken, RunOutcome};
-use crate::tools::Workspace;
+use crate::run::AgentMode;
 
 use super::super::cards::{self, Files};
-use super::SessionState;
-use super::approval::ApprovalGate;
 use super::usage_recorder::record_run_usage;
 use crate::tui::provider::{AgentEvent, PlanItem, Status, Tone, ToolCallData};
 
-use super::{Selection, report};
+use super::{Selection, SessionKit, SessionState, report};
 
-fn lock_sink<T>(sink: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    sink.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+/// How long a finished run waits for the forwarder to process its terminal
+/// Done before reading the streamed flags anyway: a dead forwarder must not
+/// hang the turn (and with it the whole session) past recovery.
+const FORWARDER_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Everything one agent turn needs, bundled so the turn's helpers avoid a
 /// long parameter list.
 pub(super) struct TurnCtx {
-    pub(super) config: Arc<Config>,
-    pub(super) workspace: Workspace,
-    pub(super) instructions_text: String,
-    pub(super) selection: Selection,
+    pub(super) kit: SessionKit,
     pub(super) state: Arc<Mutex<SessionState>>,
-    pub(super) files: Files,
-    pub(super) cancel: CancelToken,
-    /// Per-tool-call subagent cancellation: shared with the task-tool
-    /// launcher so `Command::CancelSubagent` can stop one child.
-    pub(super) subagent_cancels: Arc<run::cancel::CancelMap<String>>,
-    pub(super) tx: mpsc::UnboundedSender<AgentEvent>,
-    pub(super) permissions: Arc<PermissionManager>,
     pub(super) mode: AgentMode,
 }
 
-/// Maps run-loop events to TUI events for one model call. Owns the
-/// streaming-progress flags the outcome rendering consults afterwards.
-struct TurnRenderer {
-    tx: mpsc::UnboundedSender<AgentEvent>,
-    files: Files,
-    context_length: Option<u32>,
+/// Turn-level signals shared with the session forwarder: the streamed-reply
+/// flags (so the outcome rendering knows what the user already saw) and the
+/// generation counter the forwarder bumps once a run's terminal Done — and
+/// every event before it — has been forwarded.
+#[derive(Clone, Debug)]
+pub(super) struct RunSignals {
     streamed_text: Arc<AtomicBool>,
     streamed_reasoning: Arc<AtomicBool>,
     tools_started: Arc<AtomicBool>,
+    done: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl RunSignals {
+    pub(super) fn new() -> Self {
+        let (done, _) = tokio::sync::watch::channel(0);
+        Self {
+            streamed_text: Arc::new(AtomicBool::new(false)),
+            streamed_reasoning: Arc::new(AtomicBool::new(false)),
+            tools_started: Arc::new(AtomicBool::new(false)),
+            done: Arc::new(done),
+        }
+    }
+
+    /// Clear the per-run flags before a run starts.
+    fn reset(&self) {
+        self.streamed_text.store(false, Ordering::Relaxed);
+        self.streamed_reasoning.store(false, Ordering::Relaxed);
+        self.tools_started.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether text or reasoning already streamed this run (the reply was
+    /// shown live, so it must not be emitted again).
+    fn streamed(&self) -> bool {
+        self.streamed_text.load(Ordering::Relaxed)
+            || self.streamed_reasoning.load(Ordering::Relaxed)
+    }
+
+    /// The current terminal-Done generation.
+    fn current(&self) -> u64 {
+        *self.done.borrow()
+    }
+
+    /// Wait until the forwarder has processed the terminal Done of the run
+    /// that started at `previous`. Bounded: a missing Done (a forwarder that
+    /// died mid-run) degrades to stale flags, never a stuck turn.
+    async fn settle(&self, previous: u64) {
+        let mut rx = self.done.subscribe();
+        let settled = tokio::time::timeout(FORWARDER_SETTLE_TIMEOUT, async {
+            while *rx.borrow() <= previous {
+                if rx.changed().await.is_err() {
+                    // The forwarder is gone; nothing further will arrive.
+                    return;
+                }
+            }
+        })
+        .await;
+        if settled.is_err() {
+            tracing::warn!("session forwarder did not settle after the run");
+        }
+    }
+
+    /// Publish that a run's terminal Done was forwarded.
+    fn bump(&self) {
+        self.done.send_modify(|generation| *generation += 1);
+    }
+}
+
+/// Maps conversation events to TUI events for the session's lifetime; the
+/// forwarder task drives it. Owns the streaming-progress flags the outcome
+/// rendering consults after each run.
+struct TurnRenderer {
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    files: Files,
+    selection: Arc<arc_swap::ArcSwap<Selection>>,
+    signals: RunSignals,
 }
 
 impl TurnRenderer {
     fn new(
         tx: mpsc::UnboundedSender<AgentEvent>,
         files: Files,
-        context_length: Option<u32>,
+        selection: Arc<arc_swap::ArcSwap<Selection>>,
     ) -> Self {
         Self {
             tx,
             files,
-            context_length,
-            streamed_text: Arc::new(AtomicBool::new(false)),
-            streamed_reasoning: Arc::new(AtomicBool::new(false)),
-            tools_started: Arc::new(AtomicBool::new(false)),
+            selection,
+            signals: RunSignals::new(),
         }
     }
 
-    fn map(&self, event: run::Event) {
+    fn map(&self, event: Event) {
         match event {
-            run::Event::TextDelta(delta) => {
-                self.streamed_text.store(true, Ordering::Relaxed);
-                let _ = self.tx.send(AgentEvent::AssistantDelta(delta));
+            Event::Agent(RuntimeEvent::Provider {
+                event: ProviderEvent::TextDelta { text },
+                ..
+            }) => {
+                self.signals.streamed_text.store(true, Ordering::Relaxed);
+                let _ = self.tx.send(AgentEvent::AssistantDelta(text));
             }
-            run::Event::ThinkingDelta(delta) => {
-                self.streamed_reasoning.store(true, Ordering::Relaxed);
-                let _ = self.tx.send(AgentEvent::ReasoningDelta(delta));
+            Event::Agent(RuntimeEvent::Provider {
+                event: ProviderEvent::ThinkingDelta { text },
+                ..
+            }) => {
+                self.signals
+                    .streamed_reasoning
+                    .store(true, Ordering::Relaxed);
+                let _ = self.tx.send(AgentEvent::ReasoningDelta(text));
             }
-            run::Event::ToolStart {
-                id,
-                name,
-                arguments,
-            } => {
-                if !self.tools_started.swap(true, Ordering::Relaxed) {
+            Event::Agent(RuntimeEvent::ToolStarted { call, .. }) => {
+                if !self.signals.tools_started.swap(true, Ordering::Relaxed) {
                     let _ = self.tx.send(AgentEvent::StatusChanged(Status::Running));
                 }
                 let _ = self.tx.send(AgentEvent::ToolCall(ToolCallData {
-                    id,
-                    kind: cards::tool_head(&name, &arguments),
+                    id: call.id,
+                    kind: cards::tool_head(&call.name, &call.input),
                     lines: Vec::new(),
                     awaiting_approval: false,
                     image: None,
                 }));
             }
-            run::Event::ToolDone {
-                id,
-                name,
-                arguments,
-                result,
-            } => {
+            Event::Agent(RuntimeEvent::ToolFinished { call, output }) => {
                 // A finished task tool call settles its subagent's chat
                 // (task 96): is_error is the most specific ending it sees.
-                let is_error = match &result {
-                    crate::history::ContentBlock::ToolResult { is_error, .. } => *is_error,
-                    _ => false,
-                };
-                if name == "task" {
+                if call.name == "task" {
                     let _ = self.tx.send(AgentEvent::SubagentFinished {
-                        tool_use_id: id.clone(),
-                        is_error,
+                        tool_use_id: call.id.clone(),
+                        is_error: output.is_error,
                     });
                 }
-                let done = cards::tool_done(id, &name, &arguments, &result);
+                let result = tool_result_block(&call, &output);
+                let done = cards::tool_done(call.id.clone(), &call.name, &call.input, &result);
                 if !done.touched.is_empty() {
                     // Poison-tolerant: a poisoned mutex must not leave
                     // the UI stuck "Running".
-                    let mut sink = lock_sink(&self.files);
+                    let mut sink = self.files.lock().unwrap_or_else(|e| e.into_inner());
                     for (path, status) in &done.touched {
                         sink.insert(path.clone(), *status);
                     }
@@ -128,50 +178,51 @@ impl TurnRenderer {
                         .send(AgentEvent::FilesSet(cards::touched_files(&self.files)));
                 }
                 let _ = self.tx.send(AgentEvent::ToolCall(done.card));
-                if name == "todo_write" {
-                    let _ = self.tx.send(AgentEvent::PlanSet(todo_plan(&arguments)));
+                if call.name == "todo_write" {
+                    let _ = self.tx.send(AgentEvent::PlanSet(todo_plan(&call.input)));
                 }
             }
-            run::Event::TurnComplete { usage, .. } => {
+            Event::Agent(RuntimeEvent::StepFinished { usage, .. }) => {
                 let in_tokens = u64::from(usage.input) + u64::from(usage.cache_read);
+                let context_length = self.selection.load().context_length;
                 let _ = self.tx.send(AgentEvent::TokenUsage(cards::usage_label(
                     in_tokens + u64::from(usage.output),
                     in_tokens,
-                    self.context_length,
+                    context_length,
                 )));
             }
-            run::Event::Retry {
+            Event::Craft(CraftEvent::Retry {
                 attempt,
                 message,
                 delay_ms,
-            } => self.notice(
+            }) => self.notice(
                 Tone::Warning,
                 format!(
                     "retrying (attempt {attempt}): {message} — next in {:?}",
                     std::time::Duration::from_millis(delay_ms)
                 ),
             ),
-            run::Event::AuthRequired { attempt, .. } => self.notice(
+            Event::Craft(CraftEvent::AuthRequired { attempt, .. }) => self.notice(
                 Tone::Warning,
                 format!(
                     "authentication failed (attempt {attempt}); waiting for re-authentication…"
                 ),
             ),
-            run::Event::AutoCompacting {
+            Event::Craft(CraftEvent::AutoCompacting {
                 context_size,
                 context_window,
-            } => self.notice(
+            }) => self.notice(
                 Tone::Info,
                 format!(
                     "auto-compacting context ({})…",
                     usage_label_size(context_size, context_window)
                 ),
             ),
-            run::Event::CompactionDone {
+            Event::Craft(CraftEvent::CompactionDone {
                 context_size_before,
                 context_size_after,
                 ..
-            } => self.notice(
+            }) => self.notice(
                 Tone::Success,
                 format!(
                     "context compacted {} → {} tokens",
@@ -179,36 +230,38 @@ impl TurnRenderer {
                     fmt_tokens(context_size_after)
                 ),
             ),
-            run::Event::StagnationDetected { .. } => self.notice(
+            Event::Craft(CraftEvent::StagnationDetected { .. }) => self.notice(
                 Tone::Danger,
                 "agent looks stuck in a loop; asking it to summarize and stop.".into(),
             ),
-            run::Event::Info(text) => self.notice(Tone::Neutral, text),
-            run::Event::AdvisorNote { severity, message } => self.notice(
+            Event::Craft(CraftEvent::Info(text)) => self.notice(Tone::Neutral, text),
+            Event::Craft(CraftEvent::PersistenceFailed(message)) => self.notice(
+                Tone::Warning,
+                format!("session checkpoint failed: {message}"),
+            ),
+            Event::Craft(CraftEvent::AdvisorNote { severity, message }) => self.notice(
                 advisor_tone(&severity),
                 format!("advisor [{severity}]: {message}"),
             ),
-            // Nothing to render: ToolPending/ToolOutput/ToolResultsSubmitted
-            // is Phase 8 tool work; Done is consumed by the caller; Error
-            // rides RunOutcome::Failed; auto-review renders through its tool
-            // card (approval.rs).
-            run::Event::Nudge
-            | run::Event::ToolPending { .. }
-            | run::Event::ToolOutput { .. }
-            | run::Event::ToolResultsSubmitted { .. }
-            | run::Event::Done { .. }
-            | run::Event::Error(_)
-            | run::Event::AutoReviewStart { .. }
-            | run::Event::AutoReviewDecision { .. }
-            | run::Event::StreamClosed => {}
-            // Normally subagent events go straight from the launcher's emit
-            // closure; this arm only catches any riding the parent stream
-            // (task 96) and routes them the same way.
-            run::Event::Subagent {
+            // Nothing to render: Done is consumed by the forwarder; Error
+            // rides TurnOutcome::Failed; auto-review renders through its own
+            // seam (approval.rs); the nudge precedes a continuation the
+            // reply rendering covers; the remaining agent events are
+            // substrate the TUI has no surface for.
+            Event::Craft(CraftEvent::Done { .. })
+            | Event::Craft(CraftEvent::Error(_))
+            | Event::Craft(CraftEvent::Nudge)
+            | Event::Craft(CraftEvent::AutoReviewStart { .. })
+            | Event::Craft(CraftEvent::AutoReviewDecision { .. })
+            | Event::Agent(_) => {}
+            // Child events arrive wrapped from the subagent launcher's
+            // forwarder; route the renderable ones into the subagent's
+            // task chat (task 96), tagged with the spawning call's id.
+            Event::Craft(CraftEvent::Subagent {
                 tool_use_id,
                 description,
                 event,
-            } => {
+            }) => {
                 if let Some(inner) = subagent_event(*event) {
                     let _ = self.tx.send(AgentEvent::Subagent {
                         tool_use_id,
@@ -223,12 +276,20 @@ impl TurnRenderer {
     fn notice(&self, tone: Tone, text: String) {
         let _ = self.tx.send(AgentEvent::Notice { tone, text });
     }
+}
 
-    /// Whether text or reasoning already streamed this call (the reply was
-    /// shown live, so it must not be emitted again).
-    fn streamed(&self) -> bool {
-        self.streamed_text.load(Ordering::Relaxed)
-            || self.streamed_reasoning.load(Ordering::Relaxed)
+/// The model-facing result block of a finished tool call, in the shape the
+/// card renderer reads (same bytes the model saw).
+fn tool_result_block(
+    call: &animist::agent::tool::ToolCall,
+    output: &animist::agent::tool::ToolOutput,
+) -> history::ContentBlock {
+    history::ContentBlock::ToolResult {
+        tool_use_id: call.id.clone(),
+        name: Some(call.name.clone()),
+        content: output.content.clone(),
+        is_error: output.is_error,
+        loaded_tools: output.loaded_tools.clone(),
     }
 }
 
@@ -242,45 +303,49 @@ fn advisor_tone(severity: &str) -> Tone {
     }
 }
 
-/// Convert one forwarded child run event into the `AgentEvent` its task
-/// chat renders (task 96); anything the chat has no surface for is dropped.
-/// Tool cards complete from `ToolDone` (child streaming output is filtered
-/// upstream).
-fn subagent_event(event: run::Event) -> Option<AgentEvent> {
+/// Convert one forwarded child event into the `AgentEvent` its task chat
+/// renders (task 96); anything the chat has no surface for is dropped.
+/// Tool cards complete from `ToolFinished` (child streaming output is
+/// filtered upstream).
+fn subagent_event(event: Event) -> Option<AgentEvent> {
     match event {
-        run::Event::TextDelta(text) => Some(AgentEvent::AssistantDelta(text)),
-        run::Event::ThinkingDelta(text) => Some(AgentEvent::ReasoningDelta(text)),
-        run::Event::ToolStart {
-            id,
-            name,
-            arguments,
-        } => Some(AgentEvent::ToolCall(ToolCallData {
-            id,
-            kind: cards::tool_head(&name, &arguments),
-            lines: Vec::new(),
-            awaiting_approval: false,
-            image: None,
-        })),
-        run::Event::ToolDone {
-            id,
-            name,
-            arguments,
-            result,
+        Event::Agent(RuntimeEvent::Provider {
+            event: ProviderEvent::TextDelta { text },
             ..
-        } => Some(AgentEvent::ToolCall(
-            cards::tool_done(id, &name, &arguments, &result).card,
+        }) => Some(AgentEvent::AssistantDelta(text)),
+        Event::Agent(RuntimeEvent::Provider {
+            event: ProviderEvent::ThinkingDelta { text },
+            ..
+        }) => Some(AgentEvent::ReasoningDelta(text)),
+        Event::Agent(RuntimeEvent::ToolStarted { call, .. }) => {
+            Some(AgentEvent::ToolCall(ToolCallData {
+                id: call.id,
+                kind: cards::tool_head(&call.name, &call.input),
+                lines: Vec::new(),
+                awaiting_approval: false,
+                image: None,
+            }))
+        }
+        Event::Agent(RuntimeEvent::ToolFinished { call, output }) => Some(AgentEvent::ToolCall(
+            cards::tool_done(
+                call.id.clone(),
+                &call.name,
+                &call.input,
+                &tool_result_block(&call, &output),
+            )
+            .card,
         )),
-        run::Event::Info(text) => Some(AgentEvent::Notice {
+        Event::Craft(CraftEvent::Info(text)) => Some(AgentEvent::Notice {
             tone: Tone::Neutral,
             text,
         }),
-        run::Event::AdvisorNote { severity, message } => Some(AgentEvent::Notice {
+        Event::Craft(CraftEvent::AdvisorNote { severity, message }) => Some(AgentEvent::Notice {
             tone: advisor_tone(&severity),
             text: format!("advisor [{severity}]: {message}"),
         }),
-        run::Event::Retry {
+        Event::Craft(CraftEvent::Retry {
             attempt, message, ..
-        } => Some(AgentEvent::Notice {
+        }) => Some(AgentEvent::Notice {
             tone: Tone::Warning,
             text: format!("retrying (attempt {attempt}): {message}"),
         }),
@@ -343,220 +408,96 @@ pub(super) async fn resolve_model(
         .map_err(report)
 }
 
-/// Run armed compaction stages whose threshold is crossed before the
-/// history is sent; silent unless a stage actually ran.
-async fn compact_history(
-    state: &Arc<Mutex<SessionState>>,
-    config: &Config,
-    model: &crate::provider::ModelHandle,
-    history: &mut Vec<history::StoredMessage>,
-    context_length: Option<u32>,
-    tx: &mpsc::UnboundedSender<AgentEvent>,
-    cancel: &CancelToken,
-) {
-    let shared = state.lock().await.compaction.clone();
-    if let Some(mut compaction) = shared.lock().ok().map(|guard| guard.clone()) {
-        // before/after speak the engine's currency: history + the request
-        // overhead the surfaces refreshed onto the shared state.
-        let history_tokens = |c: &crate::compaction::CompactionState,
-                              h: &[history::StoredMessage]| {
-            c.estimator
-                .scale(crate::compaction::estimate_tokens(h).saturating_add(c.request_overhead()))
-        };
-        let before = history_tokens(&compaction, history);
-        // Esc during the summary call must settle the turn instead of
-        // hanging past the interrupt grace abort; on cancel the history
-        // and shared compaction state stay untouched and the run's own
-        // cancel path commits the staged prompt.
-        let engine =
-            CompactionEngine::new(config.compaction.clone()).with_buffer(config.compaction_buffer);
-        let ran = match cancel
-            .race(engine.maybe_compact(&mut compaction, model, history, context_length))
-            .await
-        {
-            Ok(ran) => ran,
-            Err(_) => return,
-        };
-        if let Ok(mut guard) = shared.lock() {
-            *guard = compaction;
+/// Forward one conversation's events to the TUI for the conversation's
+/// lifetime: render through [`TurnRenderer`], fold each run's terminal Done
+/// into the usage ledgers, and publish the generation the turn settles on.
+/// Exits when the conversation (and with it the sink) is dropped. Returns
+/// the signals the session's turns settle on.
+pub(super) fn start_forwarder(
+    mut stream: EventStream,
+    state: Arc<Mutex<SessionState>>,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    files: Files,
+    selection: Arc<arc_swap::ArcSwap<Selection>>,
+) -> RunSignals {
+    let renderer = TurnRenderer::new(tx, files, selection);
+    let signals = renderer.signals.clone();
+    let task_signals = signals.clone();
+    tokio::spawn(async move {
+        while let Some(event) = stream.next().await {
+            match event {
+                Event::Craft(CraftEvent::Done { by_model, .. }) => {
+                    let persister = state.lock().await.conversation.persister();
+                    record_run_usage(&state, &renderer.tx, by_model.clone(), false).await;
+                    if let Some(persister) = persister {
+                        let mut guard = persister.lock().await;
+                        guard.store_mut().record_cost(&by_model, false);
+                    }
+                    task_signals.bump();
+                }
+                other => renderer.map(other),
+            }
         }
-        if ran {
-            let after = shared
-                .lock()
-                .map(|guard| history_tokens(&guard, history))
-                .unwrap_or_default();
-            let _ = tx.send(AgentEvent::Notice {
-                tone: Tone::Info,
-                text: format!(
-                    "context compacted {} → {} tokens",
-                    fmt_tokens(before),
-                    fmt_tokens(after)
-                ),
-            });
-        }
-    }
-}
-
-/// `/compact`: force every armed stage over the session history, announcing
-/// the run and reporting through notices; also refreshes the token label.
-/// An empty or already-compact history reports a neutral no-op (silence
-/// would read as a lost command).
-pub(super) async fn compact_now(
-    config: &Config,
-    selection: &Selection,
-    state: &Arc<Mutex<SessionState>>,
-    tx: &mpsc::UnboundedSender<AgentEvent>,
-) {
-    let model = match resolve_model(config, selection).await {
-        Ok(model) => model,
-        Err(message) => {
-            let _ = tx.send(AgentEvent::Notice {
-                tone: Tone::Warning,
-                text: message,
-            });
-            return;
-        }
-    };
-    let shared = state.lock().await.compaction.clone();
-    let Some(mut compaction) = shared.lock().ok().map(|guard| guard.clone()) else {
-        return;
-    };
-    let mut session = state.lock().await;
-    // The same overhead-inclusive currency as `compact_history` (E).
-    let history_tokens = |c: &crate::compaction::CompactionState, h: &[history::StoredMessage]| {
-        c.estimator
-            .scale(crate::compaction::estimate_tokens(h).saturating_add(c.request_overhead()))
-    };
-    let before = history_tokens(&compaction, &session.history);
-    // `force_compact` can await an LLM summary; announce the run so the
-    // pause is not mistaken for a lost command.
-    let _ = tx.send(AgentEvent::Notice {
-        tone: Tone::Info,
-        text: format!(
-            "compacting context ({})…",
-            usage_label_size(before, u64::from(selection.context_length.unwrap_or(0)))
-        ),
     });
-    let ran = CompactionEngine::new(config.compaction.clone())
-        .with_buffer(config.compaction_buffer)
-        .force_compact(
-            &mut compaction,
-            &model,
-            &mut session.history,
-            selection.context_length,
-        )
-        .await;
-    let after = history_tokens(&compaction, &session.history);
-    if ran {
-        let messages = session.history.clone();
-        if let Some(store) = &mut session.store {
-            store.record_turn(
-                &messages,
-                format!("{}/{}", selection.provider, selection.model),
-            );
-        }
-    }
-    drop(session);
-    if let Ok(mut guard) = shared.lock() {
-        *guard = compaction;
-    }
-    if ran {
-        let _ = tx.send(AgentEvent::Notice {
-            tone: Tone::Success,
-            text: format!(
-                "context compacted {} → {} tokens",
-                fmt_tokens(before),
-                fmt_tokens(after)
-            ),
-        });
-        let _ = tx.send(AgentEvent::TokenUsage(cards::usage_label(
-            after,
-            after,
-            selection.context_length,
-        )));
-    } else {
-        let _ = tx.send(AgentEvent::Notice {
-            tone: Tone::Neutral,
-            text: "context already compact".into(),
-        });
-    }
+    signals
 }
 
-/// What the continuation loop does after one outcome: keep looping, stop
-/// and commit the history, or abort the turn leaving history untouched.
+/// What the continuation loop does after one outcome: keep looping or stop.
+/// The conversation commits its own history now — the driver owns every
+/// terminal marker — so outcomes only render.
 enum TurnFlow {
     Continue,
     Commit,
     Abort,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_outcome(
-    outcome: RunOutcome,
-    renderer: &TurnRenderer,
-    history: &[history::StoredMessage],
+fn handle_outcome(
+    outcome: harness::TurnOutcome,
+    signals: &RunSignals,
     prompt: &mut String,
     continuations: &mut usize,
-    state: &Arc<Mutex<SessionState>>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> TurnFlow {
     match outcome {
-        RunOutcome::Cancelled => {
-            // Commit the partial run: dropping it would erase the
-            // interrupted turn from the next prompt's context.
-            state.lock().await.history = history.to_vec();
+        harness::TurnOutcome::Cancelled => {
+            // The driver committed the interrupted attempt's prefix and the
+            // cancel marker; close the bubble and settle like a done turn.
             let _ = tx.send(AgentEvent::AssistantEnd);
-            let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
             TurnFlow::Commit
         }
-        RunOutcome::Failed(message) => {
-            // No state write: the run committed nothing, and the prompt
-            // staged at turn start already keeps the user's message in
-            // the session the next turn reads (Abort, not Commit — a
-            // Commit here would overwrite the staged prompt with the
-            // pre-turn clone that lacks it).
-            if renderer.streamed() {
+        harness::TurnOutcome::Failed(message) => {
+            // The failure is recorded in the conversation (a `[Run failed]`
+            // observation); the turn's tail must not follow an aborted run.
+            if signals.streamed() {
                 let _ = tx.send(AgentEvent::AssistantEnd);
             }
             let _ = tx.send(AgentEvent::AssistantText(message));
             let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
             TurnFlow::Abort
         }
-        RunOutcome::MaxTurns => {
-            // Keep the partial run so the follow-up prompt continues
-            // from where the budget ran out.
-            state.lock().await.history = history.to_vec();
+        harness::TurnOutcome::MaxTurns => {
+            // The partial run (with its end marker) committed, so the
+            // follow-up prompt continues from where the budget ran out.
             let _ = tx.send(AgentEvent::AssistantText(
                 "Reached the turn limit. Send another message to continue.".into(),
             ));
             TurnFlow::Commit
         }
-        RunOutcome::DoomStop => {
-            // The doom-loop stop committed the sanitized partial run;
-            // continue from the cut-off on the next message.
-            state.lock().await.history = history.to_vec();
-            let _ = tx.send(AgentEvent::AssistantText(
-                "Stopped: the agent appeared stuck in a loop. Send another message to continue."
-                    .into(),
-            ));
-            TurnFlow::Commit
-        }
-        RunOutcome::MaxTokens { reply } => {
-            state.lock().await.history = history.to_vec();
-            emit_reply(tx, renderer.streamed(), &reply);
+        harness::TurnOutcome::MaxTokens { reply } => {
+            emit_reply(tx, signals.streamed(), &reply);
             let _ = tx.send(AgentEvent::AssistantText(
                 "The reply hit the output-token limit. Send another message to continue.".into(),
             ));
             TurnFlow::Commit
         }
-        RunOutcome::Done { reply } => {
+        harness::TurnOutcome::Done { reply } => {
             if reply.is_empty() && *continuations > 0 {
                 *continuations -= 1;
                 *prompt = CONTINUE_AFTER_EMPTY.into();
                 return TurnFlow::Continue;
             }
-            if renderer.streamed() || !reply.is_empty() {
-                emit_reply(tx, renderer.streamed(), &reply);
+            if signals.streamed() || !reply.is_empty() {
+                emit_reply(tx, signals.streamed(), &reply);
             } else {
                 let _ = tx.send(AgentEvent::AssistantText(
                     "The model returned an empty response. Send another message to continue."
@@ -578,24 +519,9 @@ const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and
 /// covered, a hung server cannot pin the turn.
 const MCP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-pub(super) async fn run_turn(
-    ctx: TurnCtx,
-    text: String,
-    images: Vec<crate::history::ContentBlock>,
-) {
-    let TurnCtx {
-        config,
-        workspace,
-        instructions_text,
-        selection,
-        state,
-        files,
-        cancel,
-        subagent_cancels,
-        tx,
-        permissions,
-        mode,
-    } = ctx;
+pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<history::ContentBlock>) {
+    let TurnCtx { kit, state, mode } = ctx;
+    let tx = kit.evt_tx.clone();
     macro_rules! fail {
         ($message:expr) => {{
             let _ = tx.send(AgentEvent::AssistantText($message));
@@ -604,266 +530,107 @@ pub(super) async fn run_turn(
         }};
     }
 
-    state.lock().await.pending_approval = None;
-
-    let model = match resolve_model(&config, &selection).await {
+    let selection = Arc::unwrap_or_clone(kit.selection.load_full());
+    let model = match resolve_model(&kit.config, &selection).await {
         Ok(model) => model,
         Err(message) => fail!(message),
     };
 
+    let conversation = state.lock().await.conversation.clone();
+    // A model switch since the conversation was built swaps it between
+    // runs, keeping the history, the layer state, and the event stream.
+    // The spec, not the id alone: two providers can share a model id.
+    if conversation.model_spec() != format!("{}/{}", selection.provider, model.model.id)
+        && let Err(error) = conversation.set_model(model.clone())
+    {
+        fail!(report(error));
+    }
+
     {
         let mut session = state.lock().await;
-        {
-            let effective =
-                crate::thinking::reconcile_for(session.thinking, Some(&model.model.info));
-            if effective != session.thinking {
-                session.thinking = effective;
-                if let Some(store) = &mut session.store {
-                    store.set_thinking(effective);
-                }
-                let _ = tx.send(AgentEvent::ThinkingChanged(effective));
+        let effective = crate::thinking::reconcile_for(session.thinking, Some(&model.model.info));
+        if effective != session.thinking {
+            session.thinking = effective;
+            conversation.update_settings(|settings| settings.thinking = effective);
+            if let Some(persister) = conversation.persister() {
+                persister.lock().await.store_mut().set_thinking(effective);
             }
+            let _ = tx.send(AgentEvent::ThinkingChanged(effective));
         }
     }
-    // Abort safety: stage the user's message into the shared session before
-    // the run owns it. The run's own turn adds the prompt to the request and
-    // commits it, so the copy handed to the run must be taken BEFORE the
-    // staging push — otherwise the request and the committed history both
-    // carry the prompt twice (issue #17: the model saw every prompt doubled,
-    // and Bedrock merged the adjacent user messages). The staged copy only
-    // survives when this task dies without committing — the interrupt grace
-    // abort on a stuck await — and the next turn still sees the prompt
-    // instead of silently losing it.
-    let mut history = {
-        let mut session = state.lock().await;
-        let history = session.history.clone();
-        session
-            .history
-            .push(crate::run::prompt_message(&text, &images));
-        history
-    };
-    let thinking = state.lock().await.thinking;
-    let dedup = state.lock().await.dedup.clone();
-    let guardrails = state.lock().await.guardrails.clone();
-    // The plan file is the one write target allowed outside the workspace,
-    // and the exception is session-scoped: never cleared here, so the
-    // Build-mode turn that implements the plan keeps access to it (also
-    // after a context clear).
+    // Per-turn mode (Tab toggle, plan implementation) and the plan-file
+    // exception: the one write target allowed outside the workspace,
+    // session-scoped so the Build-mode turn that implements the plan keeps
+    // access to it (also after a context clear).
+    conversation.update_settings(|settings| settings.mode = mode.clone());
     if let Some(plan) = mode.plan_path() {
-        workspace.set_plan_path(Some(plan.to_path_buf()));
+        kit.workspace.set_plan_path(Some(plan.to_path_buf()));
     }
-    // The compaction context and run params depend only on config/cwd/
-    // instructions/mode/model selection — not on the approval gate or the
-    // dispatcher — so they are built up here where the pre-turn compaction
-    // check can read the same preamble.
-    let compaction_ctx = crate::runtime::compaction_ctx(
-        state.lock().await.compaction.clone(),
-        &config,
-        selection.context_length,
-    );
-    // The run-policy summary carries only the window; the output ceiling is
-    // resolved on the model handle (per-model config, then the warmed
-    // models.dev catalog) where request shaping reads it.
-    let resolved = crate::runtime::ResolvedModel {
-        provider: selection.provider.clone(),
-        model_id: selection.model.clone(),
-        context_length: selection.context_length,
-    };
-    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
-        config: &config,
-        cwd: &workspace.root().display().to_string(),
-        instructions_text: &instructions_text,
-        mode: &mode,
-        model: &resolved,
-        compaction: Some(compaction_ctx),
-        recency: None,
-        retry: run::RetryCtx::default(),
-        fast: false,
-        thinking: Some(thinking),
-        max_turns: crate::runtime::MaxTurns::FromConfig,
-    });
+    // The turn's cancellation goes into the cell the gates, the MCP tools,
+    // and the subagent launcher read; a new turn replaces it wholesale.
+    let turn_cancel = animist::agent::Cancellation::default();
+    kit.cancel_cell.store(Arc::new(turn_cancel.clone()));
 
     // B.11: the first prompt must not ship without MCP tools, but a hung
     // server cannot block forever — the gate times out and the turn
     // proceeds with whatever has landed. Esc skips the wait (and the
-    // warning): the run's own cancel check commits the turn immediately.
-    if let Some(mcp) = workspace.mcp() {
+    // warning): the run's own cancel check settles the turn immediately.
+    if let Some(mcp) = kit.workspace.mcp() {
         let gate = tokio::time::timeout(MCP_READY_TIMEOUT, mcp.ready());
-        if let Ok(Err(_)) = cancel.race(gate).await {
-            tracing::warn!("MCP servers not ready after {MCP_READY_TIMEOUT:?}");
-            let _ = tx.send(AgentEvent::Notice {
-                tone: Tone::Warning,
-                text: format!(
-                    "MCP servers still connecting after {MCP_READY_TIMEOUT:?}; \
-                     continuing without their tools"
-                ),
-            });
-        }
-    }
-    // Phase 3: feed MCP tool annotations to the permission engine before
-    // the tool table is built; sync is generation-keyed, so steady state
-    // is a no-op.
-    if let Some(mcp) = workspace.mcp() {
-        permissions.sync_mcp_annotations(&mcp);
-    }
-    // The pre-turn compaction check must see the full request budget:
-    // refresh the shared state's overhead (preamble + the tool schemas the
-    // settled MCP set contributes) before any threshold is consulted.
-    {
-        let definitions = workspace.tool_definitions(&mode);
-        let overhead = crate::compaction::RequestOverhead::from_parts(
-            params.preamble.as_deref(),
-            &definitions,
-        );
-        let shared = state.lock().await.compaction.clone();
-        if let Ok(mut guard) = shared.lock() {
-            guard.set_request_overhead(overhead.tokens());
-        }
-    }
-    compact_history(
-        &state,
-        &config,
-        &model,
-        &mut history,
-        selection.context_length,
-        &tx,
-        &cancel,
-    )
-    .await;
-
-    // The approval gate is shared by the dispatch table and every subagent,
-    // so children cannot bypass approvals.
-    let approval = Arc::new(ApprovalGate::new(
-        state.clone(),
-        tx.clone(),
-        cancel.clone(),
-        permissions.clone(),
-        Some(crate::auto_review::reviewer_for(model.clone())),
-    ));
-    // The question seam (A.5) is per-turn like the approval gate; the
-    // subagent launcher is installed on the same clone, carrying the
-    // turn's model, history snapshot, cancel token, and event channel.
-    let subagent_emit_tx = tx.clone();
-    let mut agent = config.agent.clone();
-    agent.thinking = Some(thinking);
-    let subagents = Arc::new(crate::subagent::SubagentLauncher {
-        parent_model: model.clone(),
-        parent_spec: format!("{}/{}", selection.provider, selection.model),
-        provider: selection.provider.clone(),
-        providers: config.providers.clone(),
-        agent,
-        compression: config.compression.clone(),
-        base_prompt: format!("{}{}", config.agent.preamble, instructions_text),
-        workspace: workspace.clone(),
-        history: history.clone(),
-        cancel: cancel.clone(),
-        cancels: subagent_cancels,
-        emit: Arc::new(move |event| {
-            // Filtered child events arrive wrapped in `Event::Subagent`;
-            // route the renderable ones into the subagent's task chat
-            // (task 96), tagged with the spawning call's id.
-            if let run::Event::Subagent {
-                tool_use_id,
-                description,
-                event,
-            } = event
-                && let Some(inner) = subagent_event(*event)
-            {
-                let _ = subagent_emit_tx.send(AgentEvent::Subagent {
-                    tool_use_id,
-                    description,
-                    event: Box::new(inner),
-                });
+        tokio::select! {
+            biased;
+            () = turn_cancel.cancelled() => {}
+            ready = gate => {
+                if ready.is_err() {
+                    tracing::warn!("MCP servers not ready after {MCP_READY_TIMEOUT:?}");
+                    let _ = tx.send(AgentEvent::Notice {
+                        tone: Tone::Warning,
+                        text: format!(
+                            "MCP servers still connecting after {MCP_READY_TIMEOUT:?}; \
+                             continuing without their tools"
+                        ),
+                    });
+                }
             }
-        }),
-        before: Some(approval.clone()),
-    });
-    let workspace = workspace
-        .clone()
-        .with_questions(Arc::new(super::question::QuestionAsker::new(
-            state.clone(),
-            tx.clone(),
-            cancel.clone(),
-        )))
-        .with_subagents(subagents)
-        .with_cancel(cancel.clone());
-    let tools = workspace
-        .register_with_mode(mode.clone())
-        .with_dedup(dedup)
-        .with_guardrails(guardrails)
-        .with_before(approval);
+        }
+        // Phase 3: feed MCP tool annotations to the permission engine;
+        // sync is generation-keyed, so steady state is a no-op.
+        kit.permissions.sync_mcp_annotations(&mcp);
+    }
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
     let mut prompt = text;
     let mut continuations = MAX_EMPTY_CONTINUATIONS;
     loop {
-        let renderer = TurnRenderer::new(tx.clone(), files.clone(), selection.context_length);
-        // The terminal Done's per-model ledger, folded into the session
-        // and the cost ledger once the run returns.
-        let done_by_model = Arc::new(std::sync::Mutex::new(None));
-        let sink = Arc::clone(&done_by_model);
-        let outcome = run::run_with_images(
-            &model,
-            &params,
-            &tools,
-            &mut history,
-            &prompt,
-            &images,
-            &cancel,
-            &|event| {
-                if let run::Event::Done { by_model, .. } = event {
-                    lock_sink(&done_by_model).replace(by_model);
-                    return;
-                }
-                renderer.map(event);
-            },
-        )
-        .await;
-        let by_model = lock_sink(&sink).take().unwrap_or_default();
-        record_run_usage(&state, &tx, by_model, params.fast).await;
-
-        match handle_outcome(
-            outcome,
-            &renderer,
-            &history,
-            &mut prompt,
-            &mut continuations,
-            &state,
-            &tx,
-        )
-        .await
-        {
+        let signals = state.lock().await.signals.clone();
+        signals.reset();
+        let generation = signals.current();
+        let outcome = harness::run_turn(&conversation, &prompt, &images, turn_cancel.clone()).await;
+        // The terminal Done rides the forwarder; settle before reading the
+        // streamed flags so the reply is not emitted twice.
+        signals.settle(generation).await;
+        match handle_outcome(outcome, &signals, &mut prompt, &mut continuations, &tx) {
             TurnFlow::Continue => continue,
             TurnFlow::Abort => return,
             TurnFlow::Commit => break,
         }
     }
-    {
-        let mut session = state.lock().await;
-        session.history = history.clone();
-        // Persist through the same seam headless uses, so `/sessions` can
-        // list and reload this conversation. (The clone is sequenced before
-        // the store borrow: field splits do not apply through the guard's
-        // deref.)
-        let messages = session.history.clone();
-        if let Some(store) = &mut session.store {
-            store.record_turn(
-                &messages,
-                params.model_spec.as_deref().unwrap_or("unknown").to_owned(),
-            );
-        }
-    }
-    // Phase 4: detached, best-effort memory extraction; never blocks or
-    // fails the turn.
+    // Phase 4: detached, best-effort memory extraction over the committed
+    // conversation; never blocks or fails the turn.
+    let messages = conversation
+        .history()
+        .snapshot()
+        .await
+        .entries()
+        .iter()
+        .filter_map(animist::history::HistoryEntry::current)
+        .map(|stored| stored.message().clone())
+        .collect();
     crate::knowledge_memory::spawn_extraction(
-        model,
-        history
-            .iter()
-            .map(crate::history::StoredMessage::message)
-            .cloned()
-            .collect(),
-        workspace.root().to_path_buf(),
-        config.agent.memory_extraction,
+        conversation.model(),
+        messages,
+        kit.workspace.root().to_path_buf(),
+        kit.config.agent.memory_extraction,
     );
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
 }
@@ -874,7 +641,18 @@ mod tests {
 
     fn renderer() -> (TurnRenderer, mpsc::UnboundedReceiver<AgentEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (TurnRenderer::new(tx, Files::default(), Some(1_000_000)), rx)
+        (
+            TurnRenderer::new(
+                tx,
+                Files::default(),
+                Arc::new(arc_swap::ArcSwap::from_pointee(Selection {
+                    provider: "mock".into(),
+                    model: "model".into(),
+                    context_length: Some(1_000_000),
+                })),
+            ),
+            rx,
+        )
     }
 
     fn notice(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> (Tone, String) {
@@ -887,16 +665,22 @@ mod tests {
     #[test]
     fn todo_write_done_emits_plan_set() {
         let (renderer, mut rx) = renderer();
-        renderer.map(run::Event::ToolDone {
-            id: "t1".into(),
-            name: "todo_write".into(),
-            arguments: serde_json::json!({"todos": [
-                {"id": "T1", "parent": null, "content": "Map the seam", "status": "completed"},
-                {"id": "T1.1", "parent": "T1", "content": "Fix the renderer", "status": "in_progress"},
-                {"id": "T2", "parent": null, "content": "Add tests", "status": "pending"},
-            ]}),
-            result: history::ext::tool_result("t1", Some("todo_write"), "ok", false),
-        });
+        renderer.map(Event::Agent(RuntimeEvent::ToolFinished {
+            call: animist::agent::tool::ToolCall {
+                id: "t1".into(),
+                name: "todo_write".into(),
+                input: serde_json::json!({"todos": [
+                    {"id": "T1", "parent": null, "content": "Map the seam", "status": "completed"},
+                    {"id": "T1.1", "parent": "T1", "content": "Fix the renderer", "status": "in_progress"},
+                    {"id": "T2", "parent": null, "content": "Add tests", "status": "pending"},
+                ]}),
+            },
+            output: animist::agent::tool::ToolOutput::builder()
+                .content(history::ToolContents(vec![history::ToolContent::Text {
+                    text: "ok".into(),
+                }]))
+                .build(),
+        }));
         // Tool card first, then the plan snapshot.
         assert!(matches!(rx.try_recv(), Ok(AgentEvent::ToolCall(_))));
         let AgentEvent::PlanSet(plan) = rx.try_recv().expect("plan was sent") else {
@@ -913,11 +697,11 @@ mod tests {
     #[test]
     fn retry_maps_to_a_warning_notice() {
         let (renderer, mut rx) = renderer();
-        renderer.map(run::Event::Retry {
+        renderer.map(Event::Craft(CraftEvent::Retry {
             attempt: 2,
             message: "stream reset".into(),
             delay_ms: 1500,
-        });
+        }));
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Warning);
         assert!(
@@ -929,10 +713,10 @@ mod tests {
     #[test]
     fn auth_required_maps_to_a_warning_notice() {
         let (renderer, mut rx) = renderer();
-        renderer.map(run::Event::AuthRequired {
+        renderer.map(Event::Craft(CraftEvent::AuthRequired {
             attempt: 1,
             message: "401".into(),
-        });
+        }));
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Warning);
         assert!(
@@ -944,10 +728,10 @@ mod tests {
     #[test]
     fn auto_compacting_maps_to_an_info_notice() {
         let (renderer, mut rx) = renderer();
-        renderer.map(run::Event::AutoCompacting {
+        renderer.map(Event::Craft(CraftEvent::AutoCompacting {
             context_size: 50_000,
             context_window: 1_000_000,
-        });
+        }));
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Info);
         assert!(text.starts_with("auto-compacting context ("), "{text}");
@@ -956,11 +740,11 @@ mod tests {
     #[test]
     fn compaction_done_maps_to_a_success_notice() {
         let (renderer, mut rx) = renderer();
-        renderer.map(run::Event::CompactionDone {
+        renderer.map(Event::Craft(CraftEvent::CompactionDone {
             context_size_before: 50_000,
             context_size_after: 10_000,
             context_window: 1_000_000,
-        });
+        }));
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Success);
         assert_eq!(text, "context compacted 50.0K → 10.0K tokens");
@@ -969,7 +753,9 @@ mod tests {
     #[test]
     fn stagnation_maps_to_a_danger_notice() {
         let (renderer, mut rx) = renderer();
-        renderer.map(run::Event::StagnationDetected { similarity: 0.68 });
+        renderer.map(Event::Craft(CraftEvent::StagnationDetected {
+            similarity: 0.68,
+        }));
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Danger);
         assert!(text.contains("stuck in a loop"), "{text}");
@@ -978,33 +764,67 @@ mod tests {
     #[test]
     fn info_maps_to_a_neutral_notice() {
         let (renderer, mut rx) = renderer();
-        renderer.map(run::Event::Info(
+        renderer.map(Event::Craft(CraftEvent::Info(
             "guardrail blocked read: no progress".into(),
-        ));
+        )));
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Neutral);
         assert!(text.contains("guardrail blocked read"), "{text}");
     }
 
     #[tokio::test]
-    async fn cancelled_commits_partial_history() {
+    async fn settle_returns_once_the_forwarder_bumps_the_generation() {
+        let signals = RunSignals::new();
+        let before = signals.current();
+        let waiter = signals.clone();
+        let settled = tokio::spawn(async move { waiter.settle(before).await });
+        // Not settled until the bump lands…
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(!settled.is_finished());
+        signals.bump();
+        settled.await.expect("settle completes");
+        assert_eq!(signals.current(), before + 1);
+    }
+
+    #[test]
+    fn empty_done_continues_and_decrements_the_budget() {
         let (renderer, _rx) = renderer();
-        let (tx, _tx_out) = mpsc::unbounded_channel();
-        let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
-        let history = vec![history::ext::stored_user_text("stop here")];
+        let (tx, _out) = mpsc::unbounded_channel();
         let mut prompt = String::new();
         let mut continuations = MAX_EMPTY_CONTINUATIONS;
         let flow = handle_outcome(
-            RunOutcome::Cancelled,
-            &renderer,
-            &history,
+            harness::TurnOutcome::Done {
+                reply: String::new(),
+            },
+            &renderer.signals,
             &mut prompt,
             &mut continuations,
-            &state,
             &tx,
-        )
-        .await;
-        assert!(matches!(flow, TurnFlow::Commit));
-        assert_eq!(state.lock().await.history, history);
+        );
+        assert!(matches!(flow, TurnFlow::Continue));
+        assert_eq!(continuations, MAX_EMPTY_CONTINUATIONS - 1);
+        assert!(!prompt.is_empty(), "the continuation prompt was staged");
+    }
+
+    #[test]
+    fn failed_aborts_without_the_done_tail() {
+        let (renderer, _) = renderer();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut prompt = String::new();
+        let mut continuations = MAX_EMPTY_CONTINUATIONS;
+        let flow = handle_outcome(
+            harness::TurnOutcome::Failed("provider exploded".into()),
+            &renderer.signals,
+            &mut prompt,
+            &mut continuations,
+            &tx,
+        );
+        assert!(matches!(flow, TurnFlow::Abort));
+        let event = rx.try_recv().expect("the failure text was sent");
+        assert!(matches!(event, AgentEvent::AssistantText(ref t) if t == "provider exploded"));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentEvent::StatusChanged(Status::Failed))
+        ));
     }
 }

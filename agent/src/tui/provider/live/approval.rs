@@ -10,9 +10,9 @@ use crate::permissions::{
     ASK_TIMEOUT, FILE_WRITE_TOOLS, PermissionAnswer, PermissionCheck, PermissionError,
     PermissionManager, ToolKey, append_permission_rule, scope_for_call,
 };
-use crate::run::{CancelToken, Decision};
+use crate::run::Decision;
 
-use super::SessionState;
+use super::{ParkSlots, SharedPark};
 use crate::tui::provider::cards;
 use crate::tui::provider::{AgentEvent, Status, Tone, ToolCallData};
 
@@ -23,9 +23,11 @@ use crate::tui::provider::{AgentEvent, Status, Tone, ToolCallData};
 /// the prompt is answered by a locked-down reviewer model call (E.7)
 /// instead of the user; the reviewer fails closed.
 pub(super) struct ApprovalGate {
-    state: Arc<Mutex<SessionState>>,
+    park: SharedPark,
     tx: mpsc::UnboundedSender<AgentEvent>,
-    cancel: CancelToken,
+    /// The session's per-turn cancellation cell; each ask races whatever
+    /// turn is current.
+    cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
     permissions: Arc<PermissionManager>,
     /// One-shot reviewer model call; `None` in tests that drive the gate
     /// without a provider.
@@ -34,14 +36,14 @@ pub(super) struct ApprovalGate {
 
 impl ApprovalGate {
     pub(super) fn new(
-        state: Arc<Mutex<SessionState>>,
+        park: SharedPark,
         tx: mpsc::UnboundedSender<AgentEvent>,
-        cancel: CancelToken,
+        cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
         permissions: Arc<PermissionManager>,
         reviewer: Option<Reviewer>,
     ) -> Self {
         Self {
-            state,
+            park,
             tx,
             cancel,
             permissions,
@@ -141,20 +143,20 @@ async fn auto_review_decide(
 impl crate::run::BeforeExecute for ApprovalGate {
     fn decide(&self, call: history::ContentBlock) -> crate::run::BoxFuture<Decision> {
         let ApprovalGate {
-            state,
+            park,
             tx,
             cancel,
             permissions,
             reviewer,
         } = self.clone_for_call();
-        Box::pin(async move { gate_decide(state, tx, cancel, permissions, reviewer, call).await })
+        Box::pin(async move { gate_decide(park, tx, cancel, permissions, reviewer, call).await })
     }
 }
 
 impl ApprovalGate {
     fn clone_for_call(&self) -> Self {
         Self {
-            state: self.state.clone(),
+            park: self.park.clone(),
             tx: self.tx.clone(),
             cancel: self.cancel.clone(),
             permissions: self.permissions.clone(),
@@ -187,14 +189,17 @@ fn display_context(
 }
 
 async fn gate_decide(
-    state: Arc<Mutex<SessionState>>,
+    park: Arc<Mutex<ParkSlots>>,
     tx: mpsc::UnboundedSender<AgentEvent>,
-    cancel: CancelToken,
+    // The session's per-turn cancellation cell; each ask races whatever
+    // turn is current.
+    cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
     permissions: Arc<PermissionManager>,
     reviewer: Option<Reviewer>,
     call: history::ContentBlock,
 ) -> Decision {
-    if cancel.cancelled() {
+    let turn_cancel = (*cancel.load_full()).clone();
+    if turn_cancel.is_cancelled() {
         return Decision::Stop("cancelled by client".into());
     }
     let history::ContentBlock::ToolUse {
@@ -244,7 +249,7 @@ async fn gate_decide(
     // Register before emitting: an answer racing in on event receipt
     // must find the oneshot already parked.
     let (decision_tx, mut decision_rx) = oneshot::channel();
-    state.lock().await.pending_approval = Some((id.clone(), decision_tx));
+    park.lock().await.pending_approval = Some((id.clone(), decision_tx));
     let _ = tx.send(AgentEvent::PermissionRequest {
         id: id.clone(),
         tool: name.to_string(),
@@ -253,20 +258,15 @@ async fn gate_decide(
         commands,
     });
 
-    let mut cancel_rx = cancel.subscribe();
-    // Cancellation is epoch-based: `changed()` fires only on a
-    // `set(true)` generation bump or a dropped flag — a re-arm
-    // never writes, so a ready change is always a real cancel.
     let answer = tokio::select! {
         biased;
-        changed = cancel_rx.changed() => {
-            let _ = changed;
-            state.lock().await.pending_approval = None;
+        () = turn_cancel.cancelled() => {
+            park.lock().await.pending_approval = None;
             let _ = tx.send(AgentEvent::PermissionResolved { id });
             return Decision::Stop("cancelled by client".into());
         }
         decision = tokio::time::timeout(ASK_TIMEOUT, &mut decision_rx) => {
-            state.lock().await.pending_approval = None;
+            park.lock().await.pending_approval = None;
             let _ = tx.send(AgentEvent::PermissionResolved { id });
             decision
                 .unwrap_or(Ok(PermissionAnswer::Deny))
@@ -288,10 +288,10 @@ async fn gate_decide(
 
 /// Deliver the user's decision to a tool call waiting on it, if the id
 /// matches the currently pending one.
-pub(super) async fn decide(state: &Arc<Mutex<SessionState>>, id: String, answer: PermissionAnswer) {
-    let mut session = state.lock().await;
-    if matches!(&session.pending_approval, Some((pid, _)) if *pid == id)
-        && let Some((_, decision)) = session.pending_approval.take()
+pub(super) async fn decide(park: &SharedPark, id: String, answer: PermissionAnswer) {
+    let mut slots = park.lock().await;
+    if matches!(&slots.pending_approval, Some((pid, _)) if *pid == id)
+        && let Some((_, decision)) = slots.pending_approval.take()
     {
         let _ = decision.send(answer);
     }
@@ -319,21 +319,25 @@ mod tests {
         *slot = input;
     }
 
-    fn gate(state: &Arc<Mutex<SessionState>>) -> (ApprovalGate, crate::run::CancelFlag) {
+    type Cell = std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>;
+
+    fn cell() -> Cell {
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            animist::agent::Cancellation::default(),
+        ))
+    }
+
+    fn gate(state: &Arc<Mutex<ParkSlots>>) -> ApprovalGate {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (flag, cancel) = crate::run::cancel_channel();
-        (
-            ApprovalGate::new(
-                state.clone(),
-                tx,
-                cancel,
-                Arc::new(PermissionManager::new(
-                    PermissionsConfig::default(),
-                    std::env::temp_dir(),
-                )),
-                None,
-            ),
-            flag,
+        ApprovalGate::new(
+            state.clone(),
+            tx,
+            cell(),
+            Arc::new(PermissionManager::new(
+                PermissionsConfig::default(),
+                std::env::temp_dir(),
+            )),
+            None,
         )
     }
 
@@ -354,9 +358,9 @@ mod tests {
 
     #[tokio::test]
     async fn read_only_tools_run_without_approval() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         for name in crate::permissions::READ_ONLY_TOOLS {
-            let (gate, _flag) = gate(&state);
+            let gate = gate(&state);
             let decision = gate.decide(tool_call("t1", name)).await;
             assert!(matches!(decision, Decision::Run), "{name}");
         }
@@ -367,8 +371,8 @@ mod tests {
     /// without an approval prompt.
     #[tokio::test]
     async fn task_runs_without_approval() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
-        let (gate, _flag) = gate(&state);
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
+        let gate = gate(&state);
         let mut call = tool_call("t1", "task");
         set_input(&mut call, serde_json::json!({"description": "research"}));
         let decision = gate.decide(call).await;
@@ -380,8 +384,8 @@ mod tests {
     /// runs without a prompt; the same write outside the project still parks.
     #[tokio::test]
     async fn in_project_write_runs_without_approval() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
-        let (gate, _flag) = gate(&state);
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
+        let gate = gate(&state);
         let inside = std::env::temp_dir().join("craft_builtin_allow_test.rs");
         let mut call = tool_call("t1", "write");
         set_input(
@@ -396,9 +400,9 @@ mod tests {
     /// run without a prompt, main agent and subagent alike.
     #[tokio::test]
     async fn argosy_tools_run_without_approval() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         for name in crate::permissions::ARGOSY_ALLOW_TOOLS {
-            let (gate, _flag) = gate(&state);
+            let gate = gate(&state);
             assert!(
                 matches!(gate.decide(tool_call("t1", name)).await, Decision::Run),
                 "{name}"
@@ -411,9 +415,9 @@ mod tests {
     /// allow list, so they park on the approval seam like any other write.
     #[tokio::test]
     async fn argosy_code_tools_require_approval() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         for name in ["astgrep", "conflicts"] {
-            let (gate, _flag) = gate(&state);
+            let gate = gate(&state);
             let call = tool_call("t1", name);
             let pending = tokio::spawn(async move { gate.decide(call).await });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -429,9 +433,9 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_and_mutating_tools_require_approval() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         for name in ["write", "delete", "some_future_bash_tool"] {
-            let (gate, _flag) = gate(&state);
+            let gate = gate(&state);
             let call = tool_call("t1", name);
             let pending = tokio::spawn(async move { gate.decide(call).await });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -450,15 +454,13 @@ mod tests {
     /// allow-session answer keys the rule as `McpTool`.
     #[tokio::test]
     async fn mcp_wire_tool_prompts_and_grants_as_mcp_key() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::env::temp_dir(),
         ));
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (flag, cancel) = crate::run::cancel_channel();
-        let gate = ApprovalGate::new(state.clone(), tx, cancel, permissions.clone(), None);
-        let _ = flag;
+        let gate = ApprovalGate::new(state.clone(), tx, cell(), permissions.clone(), None);
         let pending =
             tokio::spawn(async move { gate.decide(tool_call("t1", "github__create_issue")).await });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -484,7 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn decide_ignores_stale_ids_and_delivers_current_one() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, mut rx) = oneshot::channel();
         state.lock().await.pending_approval = Some(("current".into(), tx));
 
@@ -502,20 +504,16 @@ mod tests {
 
     #[tokio::test]
     async fn approval_grants_the_session_scope() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::env::temp_dir(),
         ));
         let make_gate = |permissions: Arc<PermissionManager>| {
             let (tx, _rx) = mpsc::unbounded_channel();
-            let (flag, cancel) = crate::run::cancel_channel();
-            (
-                ApprovalGate::new(state.clone(), tx, cancel, permissions, None),
-                flag,
-            )
+            ApprovalGate::new(state.clone(), tx, cell(), permissions, None)
         };
-        let (gate, _flag) = make_gate(permissions.clone());
+        let gate = make_gate(permissions.clone());
 
         let mut call = tool_call("t1", "write");
         // Out-of-project: an in-project write is now a builtin allow and would
@@ -532,7 +530,7 @@ mod tests {
 
         // The grant generalized to the parent dir and lives in the session:
         // a sibling write now runs without asking again.
-        let (gate, _flag) = make_gate(permissions);
+        let gate = make_gate(permissions);
         let mut sibling = tool_call("t2", "write");
         set_input(
             &mut sibling,
@@ -544,15 +542,13 @@ mod tests {
 
     #[tokio::test]
     async fn deny_with_guidance_reaches_the_model() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (flag, cancel) = crate::run::cancel_channel();
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::env::temp_dir(),
         ));
-        let gate = ApprovalGate::new(state.clone(), tx, cancel, permissions, None);
-        let _ = flag;
+        let gate = ApprovalGate::new(state.clone(), tx, cell(), permissions, None);
 
         let call = tool_call("t1", "write");
         let pending = tokio::spawn(async move { gate.decide(call).await });
@@ -578,23 +574,19 @@ mod tests {
 
     #[tokio::test]
     async fn allow_once_grants_nothing_persistent() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::env::temp_dir(),
         ));
         let make_gate = |permissions: Arc<PermissionManager>| {
             let (tx, _rx) = mpsc::unbounded_channel();
-            let (flag, cancel) = crate::run::cancel_channel();
-            (
-                ApprovalGate::new(state.clone(), tx, cancel, permissions, None),
-                flag,
-            )
+            ApprovalGate::new(state.clone(), tx, cell(), permissions, None)
         };
 
         for i in 0..2 {
             let id = format!("t{i}");
-            let (gate, _flag) = make_gate(permissions.clone());
+            let gate = make_gate(permissions.clone());
             let mut call = tool_call(&id, "write");
             // Off-project so it still prompts (in-project writes auto-allow).
             set_input(&mut call, serde_json::json!({ "path": "/proj/src/lib.rs" }));
@@ -620,15 +612,13 @@ mod tests {
 
     #[tokio::test]
     async fn permission_request_event_carries_display_context() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let (flag, cancel) = crate::run::cancel_channel();
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::env::temp_dir(),
         ));
-        let gate = ApprovalGate::new(state.clone(), tx.clone(), cancel, permissions, None);
-        let _ = flag;
+        let gate = ApprovalGate::new(state.clone(), tx.clone(), cell(), permissions, None);
 
         let mut call = tool_call("t1", "bash");
         set_input(&mut call, serde_json::json!({ "command": "echo hi" }));
@@ -668,18 +658,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flag_rearm_while_pending_does_not_cancel_the_approval() {
-        // A re-arm (`set(false)`) must not disturb a pending approval;
-        // with epoch-based cancellation it never writes, so a ready
-        // `changed()` is always a genuine cancel.
-        let state = Arc::new(Mutex::new(SessionState::default()));
+    async fn a_new_turns_cancellation_does_not_cancel_a_parked_approval() {
+        // A re-arm (the next turn storing a fresh cancellation) must not
+        // disturb a pending approval: the ask watches the cancellation it
+        // captured, so only a real cancel ends it early.
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (flag, cancel) = crate::run::cancel_channel();
+        let cell = cell();
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::env::temp_dir(),
         ));
-        let gate = ApprovalGate::new(state.clone(), tx, cancel, permissions, None);
+        let gate = ApprovalGate::new(state.clone(), tx, cell.clone(), permissions, None);
 
         let mut call = tool_call("t1", "bash");
         set_input(&mut call, serde_json::json!({ "command": "echo hi" }));
@@ -687,9 +677,9 @@ mod tests {
         while state.lock().await.pending_approval.is_none() {
             tokio::task::yield_now().await;
         }
-        // Version bump with the same (false) value, delivered after the
-        // gate subscribed but before the decision.
-        flag.set(false);
+        // The next turn replaces the cell's cancellation; the parked ask
+        // keeps watching the one it captured (uncancelled).
+        cell.store(std::sync::Arc::new(animist::agent::Cancellation::default()));
         tokio::task::yield_now().await;
         decide(&state, "t1".into(), PermissionAnswer::AllowSession).await;
         assert!(matches!(pending.await.unwrap(), Decision::Run));
@@ -710,14 +700,9 @@ mod tests {
 
     fn auto_review_gate(
         reviewer: Reviewer,
-    ) -> (
-        ApprovalGate,
-        Arc<Mutex<SessionState>>,
-        Arc<PermissionManager>,
-    ) {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+    ) -> (ApprovalGate, Arc<Mutex<ParkSlots>>, Arc<PermissionManager>) {
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (_flag, cancel) = crate::run::cancel_channel();
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::env::temp_dir(),
@@ -726,7 +711,7 @@ mod tests {
         let gate = ApprovalGate::new(
             state.clone(),
             tx,
-            cancel,
+            cell(),
             permissions.clone(),
             Some(reviewer),
         );
@@ -751,15 +736,14 @@ mod tests {
                 })
             })
         });
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_flag, cancel) = crate::run::cancel_channel();
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::env::temp_dir(),
         ));
         permissions.toggle_auto_review();
-        let gate = ApprovalGate::new(state, tx, cancel, permissions, Some(reviewer));
+        let gate = ApprovalGate::new(state, tx, cell(), permissions, Some(reviewer));
         let pending = tokio::spawn(async move { gate.decide(tool_call("t1", "write")).await });
 
         let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())

@@ -1,32 +1,19 @@
 //! Headless session API: the substrate non-TUI surfaces (ACP, print mode,
-//! SDK-style embedding) share instead of each hand-rolling the run loop.
+//! SDK-style embedding) share instead of each hand-rolling a run loop.
 //!
-//! Ported from the reference `craft-agent/src/headless.rs`, re-expressed on
-//! this repo's seams: events ride [`crate::run::events`] (tokio mpsc, not
-//! flume), turns are driven by [`crate::run::run`] rather than a
-//! crate-owned agent loop, and persistence lands on the JSONL
+//! Turns run on the shared [`crate::harness::Conversation`] seam;
+//! persistence lands on the JSONL
 //! [`Session`](crate::storage::sessions::Session) store behind
-//! [`SessionStore`]. Params and handles carry only the inputs this repo's
-//! run seam actually takes; MCP handles, Flow attachments, and plugin rule
-//! stores from the reference have no counterpart here (yet).
+//! [`SessionStore`]. MCP handles, Flow attachments, and plugin rule stores
+//! from the reference have no counterpart here (yet).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-
-use crate::history::{self, ContentBlock, StoredMessage, ext};
-use crate::id::SessionRef;
+use crate::history::{self, ContentBlock};
 use crate::permissions::{
     PermissionCheck, PermissionError, PermissionManager, ToolKey, scope_for_call,
 };
-use crate::provider::ModelHandle;
 use crate::run::dispatch::BeforeExecute;
-use crate::run::events::{SessionEvents, event_stream};
-use crate::run::{Event, RunParams, cancel_channel};
-use crate::storage::StateDir;
-use crate::tools::Workspace;
 
 /// The session store every surface shares; moved to the storage layer in 05.
 pub use crate::storage::sessions::SessionStore;
@@ -167,393 +154,14 @@ async fn auto_review_decide(
     }
 }
 
-/// A ready-to-run one-shot turn: model, run parameters, tools workspace,
-/// and the prompt to send.
-pub struct HeadlessParams {
-    pub model: ModelHandle,
-    /// `provider/model` for pricing and the session header; `None` disables
-    /// pricing and records the model as unknown.
-    pub model_spec: Option<Arc<str>>,
-    pub run: RunParams,
-    pub workspace: Workspace,
-    /// Optional interception point for every tool call (approval gate).
-    pub before: Option<Arc<dyn BeforeExecute>>,
-    pub prompt: String,
-    /// Vision attachments staged on the prompt message (`-p --image`).
-    pub images: Vec<ContentBlock>,
-    pub initial_wd: PathBuf,
-    /// Where the session is persisted; `None` disables persistence.
-    pub state_dir: Option<StateDir>,
-    pub session_id: Option<SessionRef>,
-}
-
-pub struct HeadlessHandle {
-    /// The run's events; `None` (closed) once the task ends.
-    pub events: SessionEvents,
-    pub tool_names: Vec<String>,
-    pub session_id: SessionRef,
-    pub cwd: String,
-    /// Why the session is not being persisted, if persistence failed to open.
-    pub persistence_error: Option<String>,
-    pub task: JoinHandle<()>,
-}
-
-fn lock_sink<T>(sink: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    sink.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Run one prompt to completion in the background. The event stream closes
-/// when the task ends; provider/run failures surface as `Event::Error`
-/// followed by a terminal `Done` (the run driver emits both itself).
-pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
-    let cwd = params.initial_wd.to_string_lossy().into_owned();
-    let session_ref = params.session_id.unwrap_or_else(SessionRef::generate);
-    let model_spec: Option<String> = params.model_spec.as_ref().map(|s| s.to_string());
-
-    let (guard, events) = event_stream();
-    let tool_names = params.workspace.register().names();
-
-    let opened = params
-        .state_dir
-        .map(|dir| {
-            SessionStore::open_in(
-                dir,
-                session_ref.clone(),
-                &cwd,
-                model_spec.as_deref().unwrap_or("unknown"),
-            )
-        })
-        .transpose();
-    let persistence_error = opened.as_ref().err().map(|e| e.to_string());
-    if let Some(e) = &persistence_error {
-        eprintln!("session {session_ref} will not be persisted: {e}");
-    }
-    let store = opened.ok().flatten();
-
-    let task = tokio::spawn(async move {
-        // A resumed session continues from its stored turns; a fresh one
-        // starts empty (H.9: `record_turn` persists old + new alike).
-        let mut history = store
-            .as_ref()
-            .map(|s| ext::stored_of_entries(s.messages()))
-            .unwrap_or_default();
-        let (_flag, cancel) = cancel_channel();
-        let mut run_params = params.run;
-        run_params.model_spec = params.model_spec.clone();
-        let event_tx = guard.sender(0);
-        let subagent_event_tx = event_tx.clone();
-        // The subagent seam (A.5): headless sessions carry no provider
-        // configs, so tier selection degrades to the parent model.
-        let provider = params
-            .model_spec
-            .as_ref()
-            .and_then(|s| s.split('/').next().map(str::to_owned))
-            .unwrap_or_default();
-        // The gate rides the workspace itself so every registration — the
-        // turn's table, batch fan-outs, subagent children — sees it; a
-        // post-register attach would miss the batch snapshot.
-        let gated_workspace = match &params.before {
-            Some(hook) => params.workspace.clone().with_before(Arc::clone(hook)),
-            None => params.workspace.clone(),
-        };
-        let subagents = Arc::new(crate::subagent::SubagentLauncher {
-            parent_model: params.model.clone(),
-            parent_spec: params.model_spec.as_deref().unwrap_or("").to_owned(),
-            provider,
-            providers: Default::default(),
-            agent: crate::config::AgentConfig {
-                temperature: run_params.temperature,
-                max_tokens: run_params.max_tokens,
-                thinking: Some(run_params.thinking),
-                ..Default::default()
-            },
-            compression: run_params.compression.clone(),
-            base_prompt: String::new(),
-            workspace: gated_workspace.clone(),
-            history: Vec::new(),
-            cancel: cancel.clone(),
-            cancels: Arc::new(crate::run::cancel::CancelMap::new()),
-            emit: Arc::new(move |event| subagent_event_tx.send(event)),
-            before: params.before.clone(),
-        });
-        let tools = gated_workspace
-            .with_subagents(subagents)
-            .with_cancel(cancel.clone())
-            .register();
-
-        let mut store = store;
-        if let Some(store) = &mut store {
-            store.set_thinking(run_params.thinking);
-        }
-        // The terminal Done's per-model ledger, captured from the event
-        // seam so the store can persist it after the run ends.
-        let done_by_model = Arc::new(std::sync::Mutex::new(None));
-        let sink = Arc::clone(&done_by_model);
-        crate::run::run_with_images(
-            &params.model,
-            &run_params,
-            &tools,
-            &mut history,
-            &params.prompt,
-            &params.images,
-            &cancel,
-            &|event| {
-                if let Event::Done { by_model, .. } = &event {
-                    lock_sink(&sink).replace(by_model.clone());
-                }
-                event_tx.send(event);
-            },
-        )
-        .await;
-        let by_model = lock_sink(&done_by_model).take().unwrap_or_default();
-        if let Some(store) = &mut store {
-            store.record_cost(&by_model, run_params.fast);
-            store.record_turn(&history, model_spec.unwrap_or_else(|| "unknown".into()));
-        }
-        // `guard` drops here, closing the stream.
-    });
-
-    HeadlessHandle {
-        events,
-        tool_names,
-        session_id: session_ref,
-        cwd,
-        persistence_error,
-        task,
-    }
-}
-
-/// A channel-driven interactive session: each input runs one multi-turn
-/// run against the shared history, which is persisted after every turn.
-pub struct InteractiveParams {
-    pub model: ModelHandle,
-    pub model_spec: Option<Arc<str>>,
-    pub run: RunParams,
-    pub workspace: Workspace,
-    /// Optional interception point for every tool call (approval gate).
-    pub before: Option<Arc<dyn BeforeExecute>>,
-    pub initial_wd: PathBuf,
-    /// Resume an existing session; omitted generates a fresh id.
-    pub session_id: Option<SessionRef>,
-    /// Seeded history (e.g. replayed from a prior session).
-    pub initial_history: Vec<StoredMessage>,
-    /// Where the session is persisted; `None` disables persistence.
-    pub state_dir: Option<StateDir>,
-    /// Post-turn argosy memory extraction (Phase 4): mirrors
-    /// `agent.memory_extraction`; callers with a config pass it through.
-    pub memory_extraction: bool,
-}
-
-pub struct InteractiveHandle {
-    /// The session's events for its whole lifetime; `None` (closed) once
-    /// the task ends.
-    pub events: SessionEvents,
-    pub tool_names: Vec<String>,
-    /// Next prompt to run.
-    pub input_tx: mpsc::UnboundedSender<String>,
-    /// Cancel the in-flight turn (or any pending signal is drained before
-    /// the next turn starts).
-    pub cancel_tx: mpsc::UnboundedSender<()>,
-    /// Swap the model before the next turn; the last value wins.
-    pub model_tx: mpsc::UnboundedSender<(ModelHandle, Option<Arc<str>>)>,
-    pub session_id: SessionRef,
-    /// Why the session is not being persisted, if persistence failed to open.
-    pub persistence_error: Option<String>,
-    pub task: JoinHandle<()>,
-}
-
-pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
-    let cwd = params.initial_wd.to_string_lossy().into_owned();
-    let session_ref = params
-        .session_id
-        .clone()
-        .unwrap_or_else(SessionRef::generate);
-    let model_spec: Option<String> = params.model_spec.as_ref().map(|s| s.to_string());
-
-    let (guard, events) = event_stream();
-    let tools = params.workspace.register();
-    let tool_names = tools.names();
-
-    let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
-    let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
-    let (model_tx, model_rx) = mpsc::unbounded_channel::<(ModelHandle, Option<Arc<str>>)>();
-    let cancel_rx = Arc::new(tokio::sync::Mutex::new(cancel_rx));
-
-    let opened = params
-        .state_dir
-        .map(|dir| {
-            SessionStore::open_in(
-                dir,
-                session_ref.clone(),
-                &cwd,
-                model_spec.as_deref().unwrap_or("unknown"),
-            )
-        })
-        .transpose();
-    let persistence_error = opened.as_ref().err().map(|e| e.to_string());
-    if let Some(e) = &persistence_error {
-        eprintln!("session {session_ref} will not be persisted: {e}");
-    }
-    let store = opened.ok().flatten();
-
-    let task = tokio::spawn(async move {
-        let mut model = params.model;
-        let mut model_spec = model_spec;
-        let mut run_params = params.run;
-        let mut history = params.initial_history;
-        let mut store = store;
-        if let Some(store) = &mut store {
-            if let Some(thinking) = store.thinking() {
-                run_params.thinking = thinking;
-            } else {
-                store.set_thinking(run_params.thinking);
-            }
-        }
-        let mut input_rx = input_rx;
-        let mut model_rx = model_rx;
-        let mut run_id: u64 = 0;
-
-        while let Some(prompt) = input_rx.recv().await {
-            let event_tx = guard.sender(run_id);
-
-            // Last model swap requested before this turn wins: drain the
-            // queue and apply only the most recent spec.
-            let mut swap = None;
-            while let Ok(next) = model_rx.try_recv() {
-                swap = Some(next);
-            }
-            if let Some((new_model, new_spec)) = swap {
-                model = new_model;
-                model_spec = new_spec
-                    .as_ref()
-                    .map(|s| s.to_string())
-                    .or_else(|| Some(model.model.id.clone()));
-            }
-            run_params.model_spec = model_spec.clone().map(Arc::from);
-
-            // A cancel left over from a previous turn must not kill this
-            // one, so drain before arming the watcher.
-            drain_cancel(&cancel_rx).await;
-            let (flag, cancel) = cancel_channel();
-
-            // The subagent seam (A.5), armed with this turn's cancel token
-            // and event channel; headless carries no provider configs, so
-            // tier selection degrades to the parent model.
-            let turn_event_tx = event_tx.clone();
-            let provider = model_spec
-                .as_ref()
-                .and_then(|s| s.split('/').next().map(str::to_owned))
-                .unwrap_or_default();
-            // The gate rides the workspace itself so every registration —
-            // this turn's table, batch fan-outs, subagent children — sees
-            // it; a post-register attach would miss the batch snapshot.
-            let turn_workspace = match &params.before {
-                Some(hook) => params.workspace.clone().with_before(Arc::clone(hook)),
-                None => params.workspace.clone(),
-            };
-            let subagents = Arc::new(crate::subagent::SubagentLauncher {
-                parent_model: model.clone(),
-                parent_spec: model_spec.as_deref().unwrap_or("").to_owned(),
-                provider,
-                providers: Default::default(),
-                agent: crate::config::AgentConfig {
-                    temperature: run_params.temperature,
-                    max_tokens: run_params.max_tokens,
-                    thinking: Some(run_params.thinking),
-                    ..Default::default()
-                },
-                compression: run_params.compression.clone(),
-                base_prompt: String::new(),
-                workspace: turn_workspace.clone(),
-                history: history.clone(),
-                cancel: cancel.clone(),
-                cancels: Arc::new(crate::run::cancel::CancelMap::new()),
-                emit: Arc::new(move |event| turn_event_tx.send(event)),
-                before: params.before.clone(),
-            });
-            let tools = turn_workspace.with_subagents(subagents).register();
-
-            let watcher = {
-                let cancel_rx = Arc::clone(&cancel_rx);
-                tokio::spawn(async move {
-                    let mut guard = cancel_rx.lock().await;
-                    if guard.recv().await.is_some() {
-                        flag.set(true);
-                    }
-                })
-            };
-
-            // The terminal Done's per-model ledger for this turn.
-            let done_by_model = Arc::new(std::sync::Mutex::new(None));
-            let sink = Arc::clone(&done_by_model);
-            crate::run::run(
-                &model,
-                &run_params,
-                &tools,
-                &mut history,
-                &prompt,
-                &cancel,
-                &|event| {
-                    if let Event::Done { by_model, .. } = &event {
-                        *sink.lock().expect("usage sink") = Some(by_model.clone());
-                    }
-                    event_tx.send(event);
-                },
-            )
-            .await;
-            watcher.abort();
-
-            // Phase 4: detached, best-effort memory extraction into the
-            // project's local argosy. Never blocks or fails the turn.
-            crate::knowledge_memory::spawn_extraction(
-                model.clone(),
-                history
-                    .iter()
-                    .map(crate::history::StoredMessage::message)
-                    .cloned()
-                    .collect(),
-                params.workspace.root().to_path_buf(),
-                params.memory_extraction,
-            );
-            if let Some(store) = &mut store {
-                let by_model = lock_sink(&done_by_model).take().unwrap_or_default();
-                store.record_cost(&by_model, run_params.fast);
-                store.record_turn(
-                    &history,
-                    model_spec.clone().unwrap_or_else(|| "unknown".into()),
-                );
-            }
-            run_id += 1;
-        }
-        crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
-        // `guard` drops here, closing the stream.
-    });
-
-    InteractiveHandle {
-        events,
-        tool_names,
-        input_tx,
-        cancel_tx,
-        model_tx,
-        session_id: session_ref,
-        persistence_error,
-        task,
-    }
-}
-
-async fn drain_cancel(cancel_rx: &Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<()>>>) {
-    let mut guard = cancel_rx.lock().await;
-    while guard.try_recv().is_ok() {}
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::run::Event;
-
     use super::StoredSession;
+    use super::*;
+    use crate::id::SessionRef;
+    use crate::storage::StateDir;
     use crate::storage::sessions::generate_title;
+    use crate::tools::Workspace;
 
     const CWD: &str = "/project";
     const MODEL_SPEC: &str = "anthropic/claude-test";
@@ -710,342 +318,6 @@ mod tests {
         let loaded = load(&tmp);
         assert_eq!(loaded.messages().len(), 2);
         assert_eq!(loaded.model, "other/model");
-    }
-
-    fn workspace() -> Workspace {
-        let root = std::env::temp_dir().join(format!("craft-headless-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        Workspace::new(&root).unwrap()
-    }
-
-    fn params(
-        model: crate::provider::ModelHandle,
-        prompt: &str,
-        state: Option<StateDir>,
-    ) -> HeadlessParams {
-        HeadlessParams {
-            model,
-            model_spec: Some(Arc::from("mock/model")),
-            run: RunParams::default(),
-            workspace: workspace(),
-            before: None,
-            prompt: prompt.into(),
-            images: Vec::new(),
-            initial_wd: std::env::temp_dir(),
-            state_dir: state,
-            session_id: None,
-        }
-    }
-
-    async fn drain_until_done(events: &mut SessionEvents) -> Vec<Event> {
-        let mut out = Vec::new();
-        while let Some(envelope) = events.next().await {
-            let is_done = matches!(envelope.event, Event::Done { .. });
-            out.push(envelope.event);
-            if is_done {
-                break;
-            }
-        }
-        out
-    }
-
-    #[tokio::test]
-    async fn spawn_streams_events_and_persists_the_turn() {
-        let tmp = tempfile::tempdir().unwrap();
-        let model = mock(vec![crate::testing::text_turn("all done")]);
-        let mut handle = spawn(params(model, "hello", Some(state_dir(&tmp))));
-
-        let events = drain_until_done(&mut handle.events).await;
-        assert!(events.iter().any(|e| matches!(e, Event::Done { .. })));
-        let _ = handle.task.await;
-
-        let loaded = StoredSession::load(handle.session_id.id(), &state_dir(&tmp)).unwrap();
-        // User prompt + assistant reply.
-        assert_eq!(loaded.messages().len(), 2);
-        assert!(
-            crate::history::ext::message_text(loaded.messages()[1].latest()).contains("all done")
-        );
-    }
-
-    /// H.9 regression: a resumed run seeds its history from the loaded
-    /// store, so the persisted session keeps the prior turns plus the new
-    /// one (`spawn` used to start empty and wipe the log on first save).
-    #[tokio::test]
-    async fn spawn_resume_preserves_prior_history() {
-        let tmp = tempfile::tempdir().unwrap();
-        {
-            let mut store = store_in(&tmp);
-            store.record_turn(
-                &[crate::history::ext::stored_user_text("earlier turn")],
-                MODEL_SPEC.into(),
-            );
-        }
-        let model = mock(vec![crate::testing::text_turn("fresh reply")]);
-        let mut handle = spawn(HeadlessParams {
-            session_id: Some(session_ref()),
-            ..params(model, "hello", Some(state_dir(&tmp)))
-        });
-
-        let events = drain_until_done(&mut handle.events).await;
-        assert!(events.iter().any(|e| matches!(e, Event::Done { .. })));
-        let _ = handle.task.await;
-
-        let loaded = StoredSession::load(handle.session_id.id(), &state_dir(&tmp)).unwrap();
-        // The earlier turn survives, then this run's user prompt and reply.
-        assert_eq!(loaded.messages().len(), 3);
-        assert_eq!(
-            crate::history::ext::message_text(loaded.messages()[0].latest()),
-            "earlier turn"
-        );
-        assert!(
-            crate::history::ext::message_text(loaded.messages()[2].latest())
-                .contains("fresh reply")
-        );
-    }
-
-    #[tokio::test]
-    async fn spawn_stream_closes_after_the_task_ends() {
-        let model = mock(vec![crate::testing::text_turn("done")]);
-        let mut handle = spawn(params(model, "hello", None));
-        let events = drain_until_done(&mut handle.events).await;
-        assert!(events.iter().any(|e| matches!(e, Event::Done { .. })));
-        let _ = handle.task.await;
-        assert!(handle.events.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn interactive_runs_and_persists_multiple_turns() {
-        let tmp = tempfile::tempdir().unwrap();
-        let model = mock(vec![
-            crate::testing::text_turn("one"),
-            crate::testing::text_turn("two"),
-        ]);
-        let handle = spawn_interactive(InteractiveParams {
-            model,
-            model_spec: Some(Arc::from("mock/model")),
-            run: RunParams::default(),
-            workspace: workspace(),
-            before: None,
-            initial_wd: std::env::temp_dir(),
-            session_id: None,
-            initial_history: Vec::new(),
-            state_dir: Some(state_dir(&tmp)),
-            memory_extraction: false,
-        });
-        let mut events = handle.events;
-
-        handle.input_tx.send("first".into()).unwrap();
-        let one = drain_until_done(&mut events).await;
-        assert!(one.iter().any(|e| matches!(e, Event::Done { .. })));
-
-        handle.input_tx.send("second".into()).unwrap();
-        let two = drain_until_done(&mut events).await;
-        assert!(two.iter().any(|e| matches!(e, Event::Done { .. })));
-
-        drop(handle.input_tx);
-        let _ = handle.task.await;
-
-        let loaded = StoredSession::load(handle.session_id.id(), &state_dir(&tmp)).unwrap();
-        // two user prompts + two assistant replies
-        assert_eq!(loaded.messages().len(), 4);
-    }
-
-    #[tokio::test]
-    async fn interactive_applies_model_swap_before_next_turn() {
-        let first = mock(vec![crate::testing::text_turn("from first")]);
-        let second = mock(vec![crate::testing::text_turn("from second")]);
-        let handle = spawn_interactive(InteractiveParams {
-            model: first,
-            model_spec: Some(Arc::from("mock/first")),
-            run: RunParams::default(),
-            workspace: workspace(),
-            before: None,
-            initial_wd: std::env::temp_dir(),
-            session_id: None,
-            initial_history: Vec::new(),
-            state_dir: None,
-            memory_extraction: false,
-        });
-        let mut events = handle.events;
-
-        handle.input_tx.send("go".into()).unwrap();
-        let one = drain_until_done(&mut events).await;
-        assert!(
-            one.iter()
-                .any(|e| matches!(e, Event::TextDelta(t) if t.contains("from first")))
-        );
-
-        handle
-            .model_tx
-            .send((second, Some(Arc::from("mock/second"))))
-            .unwrap();
-        handle.input_tx.send("again".into()).unwrap();
-        let two = drain_until_done(&mut events).await;
-        assert!(
-            two.iter()
-                .any(|e| matches!(e, Event::TextDelta(t) if t.contains("from second")))
-        );
-
-        drop(handle.input_tx);
-        let _ = handle.task.await;
-    }
-
-    #[tokio::test]
-    async fn interactive_last_queued_model_swap_wins() {
-        let initial = mock(vec![crate::testing::text_turn("from initial")]);
-        let stale = mock(vec![crate::testing::text_turn("from stale")]);
-        let latest = mock(vec![crate::testing::text_turn("from latest")]);
-        let handle = spawn_interactive(InteractiveParams {
-            model: initial,
-            model_spec: Some(Arc::from("mock/initial")),
-            run: RunParams::default(),
-            workspace: workspace(),
-            before: None,
-            initial_wd: std::env::temp_dir(),
-            session_id: None,
-            initial_history: Vec::new(),
-            state_dir: None,
-            memory_extraction: false,
-        });
-        let mut events = handle.events;
-
-        // Both swaps land in the queue before the turn starts (swaps are
-        // only drained after a prompt arrives); the LAST one must win.
-        handle
-            .model_tx
-            .send((stale, Some(Arc::from("mock/stale"))))
-            .unwrap();
-        handle
-            .model_tx
-            .send((latest, Some(Arc::from("mock/latest"))))
-            .unwrap();
-        handle.input_tx.send("go".into()).unwrap();
-        let events = drain_until_done(&mut events).await;
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::TextDelta(t) if t.contains("from latest"))),
-            "the last queued model swap must win: {events:?}"
-        );
-
-        drop(handle.input_tx);
-        let _ = handle.task.await;
-    }
-
-    #[tokio::test]
-    async fn stale_cancel_is_drained_before_the_next_turn() {
-        let model = mock(vec![
-            crate::testing::text_turn("one"),
-            crate::testing::text_turn("two"),
-        ]);
-        let handle = spawn_interactive(InteractiveParams {
-            model,
-            model_spec: None,
-            run: RunParams::default(),
-            workspace: workspace(),
-            before: None,
-            initial_wd: std::env::temp_dir(),
-            session_id: None,
-            initial_history: Vec::new(),
-            state_dir: None,
-            memory_extraction: false,
-        });
-        let mut events = handle.events;
-
-        handle.input_tx.send("first".into()).unwrap();
-        let one = drain_until_done(&mut events).await;
-        assert!(matches!(
-            one.last(),
-            Some(Event::Done {
-                reason: crate::run::DoneReason::Stop,
-                ..
-            })
-        ));
-
-        // A cancel with no turn in flight must not poison the next turn.
-        handle.cancel_tx.send(()).unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        handle.input_tx.send("second".into()).unwrap();
-        let two = drain_until_done(&mut events).await;
-        assert!(matches!(
-            two.last(),
-            Some(Event::Done {
-                reason: crate::run::DoneReason::Stop,
-                ..
-            })
-        ));
-
-        drop(handle.input_tx);
-        let _ = handle.task.await;
-    }
-
-    /// Blocks the run's only tool call until the test releases it, so the
-    /// cancel lands while the turn is genuinely in flight.
-    struct GatedHook(Arc<tokio::sync::Notify>);
-
-    impl BeforeExecute for GatedHook {
-        fn decide(
-            &self,
-            _call: history::ContentBlock,
-        ) -> crate::run::BoxFuture<crate::run::dispatch::Decision> {
-            let release = Arc::clone(&self.0);
-            Box::pin(async move {
-                release.notified().await;
-                crate::run::dispatch::Decision::Run
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn interactive_cancel_mid_run_ends_the_turn_as_cancelled() {
-        let model = mock(vec![
-            crate::testing::tool_turn(vec![tool_event(
-                "t1",
-                "list",
-                serde_json::json!({"path": "."}),
-            )]),
-            crate::testing::text_turn("never reached"),
-        ]);
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let handle = spawn_interactive(InteractiveParams {
-            model,
-            model_spec: None,
-            run: RunParams::default(),
-            workspace: workspace(),
-            before: Some(Arc::new(GatedHook(Arc::clone(&gate)))),
-            initial_wd: std::env::temp_dir(),
-            session_id: None,
-            initial_history: Vec::new(),
-            state_dir: None,
-            memory_extraction: false,
-        });
-        let mut events = handle.events;
-
-        handle.input_tx.send("go".into()).unwrap();
-        // Wait until the tool call is actually in flight, then cancel and
-        // let the gated call through; the next model call must not run.
-        loop {
-            let Some(envelope) = events.next().await else {
-                panic!("stream closed")
-            };
-            if matches!(envelope.event, Event::ToolStart { .. }) {
-                break;
-            }
-        }
-        handle.cancel_tx.send(()).unwrap();
-        gate.notify_one();
-
-        let mut terminal = None;
-        while let Some(envelope) = events.next().await {
-            if let Event::Done { reason, .. } = envelope.event {
-                terminal = Some(reason);
-                break;
-            }
-        }
-        assert_eq!(terminal, Some(crate::run::DoneReason::Cancelled));
-
-        drop(handle.input_tx);
-        let _ = handle.task.await;
     }
 
     // --- HeadlessGate --------------------------------------------------------
@@ -1283,48 +555,81 @@ mod tests {
 
     // --- Gate-wired execution -------------------------------------------------
 
-    /// The concatenated text of one tool result, for deny-text assertions.
-    fn result_text(result: &history::ContentBlock) -> String {
-        let history::ContentBlock::ToolResult { content, .. } = result else {
-            return String::new();
-        };
-        history::ext::tool_content_text(content)
+    /// One gated turn over the real workspace, driven through the
+    /// conversation: the gate rides the policy layer for model calls and
+    /// the workspace's before hook for batch children.
+    async fn gated_turn(
+        model: crate::provider::ModelHandle,
+        tmp: &tempfile::TempDir,
+        permissions: Arc<PermissionManager>,
+        reviewer: Option<crate::auto_review::Reviewer>,
+    ) -> (Vec<crate::harness::Event>, crate::harness::TurnOutcome) {
+        let gate: Arc<dyn BeforeExecute> =
+            Arc::new(HeadlessGate::new(Arc::clone(&permissions), reviewer));
+        let workspace = Workspace::new(tmp.path())
+            .unwrap()
+            .with_before(Arc::clone(&gate));
+        let (sink, stream) = crate::harness::EventSink::new();
+        let conversation = crate::harness::ConversationBuilder::new(
+            &crate::config::Config::default(),
+            &tmp.path().display().to_string(),
+            "",
+            model,
+            workspace.register(),
+            sink,
+        )
+        .approval(gate)
+        .build()
+        .unwrap();
+        let outcome = crate::harness::run_turn(
+            &conversation,
+            "go",
+            &[],
+            animist::agent::Cancellation::default(),
+        )
+        .await;
+        let mut stream = stream;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let done = matches!(
+                &event,
+                crate::harness::Event::Craft(crate::harness::CraftEvent::Done { .. })
+            );
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        (events, outcome)
     }
 
-    fn tool_results(events: &[Event]) -> Vec<(String, String)> {
+    /// The `(name, text)` pairs of every finished tool call.
+    fn tool_results(events: &[crate::harness::Event]) -> Vec<(String, String)> {
         events
             .iter()
             .filter_map(|event| match event {
-                Event::ToolDone { name, result, .. } => Some((name.clone(), result_text(result))),
+                crate::harness::Event::Agent(animist::agent::AgentEvent::ToolFinished {
+                    call,
+                    output,
+                }) => Some((
+                    call.name.clone(),
+                    crate::history::ext::tool_content_text(&output.content),
+                )),
                 _ => None,
             })
             .collect()
     }
 
-    /// A spawn-shaped [`HeadlessParams`] with the real gate installed:
-    /// permissions rooted at `tmp`, workspace at `tmp`.
-    fn gated(
-        model: crate::provider::ModelHandle,
-        tmp: &tempfile::TempDir,
-        permissions: Arc<PermissionManager>,
-        reviewer: Option<crate::auto_review::Reviewer>,
-    ) -> HeadlessParams {
-        let before = Some(
-            Arc::new(HeadlessGate::new(Arc::clone(&permissions), reviewer))
-                as Arc<dyn BeforeExecute>,
-        );
-        HeadlessParams {
-            model,
-            model_spec: Some(Arc::from("mock/model")),
-            run: RunParams::default(),
-            workspace: Workspace::new(tmp.path()).unwrap(),
-            before,
-            prompt: "go".into(),
-            images: Vec::new(),
-            initial_wd: tmp.path().to_path_buf(),
-            state_dir: Some(state_dir(tmp)),
-            session_id: None,
-        }
+    fn ends_cleanly(events: &[crate::harness::Event]) -> bool {
+        matches!(
+            events.last(),
+            Some(crate::harness::Event::Craft(
+                crate::harness::CraftEvent::Done {
+                    reason: crate::harness::DoneReason::Stop,
+                    ..
+                }
+            ))
+        )
     }
 
     #[tokio::test]
@@ -1347,19 +652,11 @@ mod tests {
             )]),
             crate::testing::text_turn("done anyway"),
         ]);
-        let mut handle = spawn(gated(model, &tmp, permissions, None));
-        let events = drain_until_done(&mut handle.events).await;
-        let _ = handle.task.await;
+        let (events, outcome) = gated_turn(model, &tmp, permissions, None).await;
 
         assert!(
-            matches!(
-                events.last(),
-                Some(Event::Done {
-                    reason: crate::run::DoneReason::Stop,
-                    ..
-                })
-            ),
-            "a denial is a normal end, not a run failure"
+            ends_cleanly(&events),
+            "a denial is a normal end, not a run failure: {outcome:?}"
         );
         assert!(!marker.exists(), "the denied bash call must not run");
         assert!(
@@ -1390,12 +687,10 @@ mod tests {
             )]),
             crate::testing::text_turn("done"),
         ]);
-        let mut handle = spawn(gated(model, &tmp, permissions, None));
-        drain_until_done(&mut handle.events).await;
-        let _ = handle.task.await;
+        let (events, _) = gated_turn(model, &tmp, permissions, None).await;
         assert!(
             tmp.path().join("free.rs").exists(),
-            "yolo must bypass the deny"
+            "yolo must bypass the deny: {events:?}"
         );
     }
 
@@ -1419,9 +714,7 @@ mod tests {
             )]),
             crate::testing::text_turn("done"),
         ]);
-        let mut handle = spawn(gated(model, &tmp, permissions, Some(reviewer)));
-        let events = drain_until_done(&mut handle.events).await;
-        let _ = handle.task.await;
+        let (events, _) = gated_turn(model, &tmp, permissions, Some(reviewer)).await;
         assert!(
             marker.exists(),
             "an allowed verdict must let the call execute: {events:?}"
@@ -1447,9 +740,7 @@ mod tests {
             )]),
             crate::testing::text_turn("done"),
         ]);
-        let mut handle = spawn(gated(model, &tmp, permissions, None));
-        let events = drain_until_done(&mut handle.events).await;
-        let _ = handle.task.await;
+        let (events, _) = gated_turn(model, &tmp, permissions, None).await;
         assert!(
             !tmp.path().join("child.rs").exists(),
             "the denied batch child must not run"
@@ -1479,17 +770,9 @@ mod tests {
             )]),
             crate::testing::text_turn("ok"),
         ]);
-        let mut handle = spawn(gated(model, &tmp, manager(tmp.path()), None));
-        let events = drain_until_done(&mut handle.events).await;
-        let _ = handle.task.await;
+        let (events, _) = gated_turn(model, &tmp, manager(tmp.path()), None).await;
         assert!(
-            matches!(
-                events.last(),
-                Some(Event::Done {
-                    reason: crate::run::DoneReason::Stop,
-                    ..
-                })
-            ),
+            ends_cleanly(&events),
             "a dismissed ask ends the run normally, it never hangs"
         );
         let asked = tool_results(&events);

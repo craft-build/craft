@@ -188,61 +188,6 @@ pub async fn complete_text(
     Ok(String::new())
 }
 
-// --- Re-authentication -----------------------------------------------------------
-
-/// How often the reauth hook polls a credential env var for a fresh value.
-const REAUTH_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-/// How long the reauth hook waits for refreshed credentials before giving
-/// up (reference `REAUTH_MAX_WAIT`).
-const REAUTH_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// The run loop's re-authentication responder (E.10). Env-keyed kinds wait
-/// for the named variable to change (the user is mid-paste when the 401
-/// lands), then rebuild the provider — animist binds credentials at
-/// construction, so the refreshed key reaches the wire only through a new
-/// provider, returned as the run's replacement model. Bedrock has no single
-/// env var; it rebuilds the AWS chain directly.
-pub fn reauth_hook(config: &ProviderConfig, model_id: &str) -> crate::run::ReauthHook {
-    let owned = config.clone();
-    let model_id = model_id.to_owned();
-    Arc::new(move |_attempt| {
-        let owned = owned.clone();
-        let model_id = model_id.clone();
-        Box::pin(async move {
-            let before = owned
-                .credential_env()
-                .map(std::env::var)
-                .and_then(|value| value.ok());
-            if let (Some(env), Some(before)) = (owned.credential_env(), before) {
-                let deadline = tokio::time::Instant::now() + REAUTH_MAX_WAIT;
-                while tokio::time::Instant::now() < deadline {
-                    if let Ok(value) = std::env::var(env)
-                        && !value.trim().is_empty()
-                        && value != before
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(REAUTH_POLL).await;
-                }
-                if std::env::var(env).ok().as_deref() == Some(before.as_str()) {
-                    return Err(format!(
-                        "credentials in {env} were not refreshed within {}s",
-                        REAUTH_MAX_WAIT.as_secs()
-                    ));
-                }
-            }
-            let provider = ProviderHandle::from_config(&owned, None)
-                .await
-                .map_err(|e| e.to_string())?;
-            let model = provider
-                .model(&owned, None, &model_id)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(Some(model))
-        })
-    })
-}
-
 // --- Construction --------------------------------------------------------------
 
 /// A constructed provider for one config entry.
@@ -955,92 +900,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_failed_refresh_serves_the_stale_cache_or_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(CATALOG_CACHE_FILE);
-        save_cache(&path, &cache_with_provider("gpt-x")).await;
-        let stale = stale_or_empty(&path, Some("fetch failed".to_owned())).await;
-        assert!(stale.providers.contains_key("openai"), "stale bytes serve");
-
-        let missing = tmp.path().join("absent.json");
-        let empty = stale_or_empty(&missing, Some("fetch failed".to_owned())).await;
-        assert!(empty.providers.is_empty(), "nothing to serve but empty");
-    }
-
-    #[tokio::test]
-    async fn cache_freshness_follows_the_ttl() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(CATALOG_CACHE_FILE);
-        std::fs::write(&path, b"x").unwrap();
-        assert!(cache_is_fresh(&path).await);
-        // Backdate past the TTL.
-        let old =
-            std::time::SystemTime::now() - CATALOG_CACHE_TTL - std::time::Duration::from_secs(60);
-        let file = std::fs::File::options().write(true).open(&path).unwrap();
-        file.set_times(std::fs::FileTimes::new().set_modified(old))
-            .unwrap();
-        drop(file);
-        assert!(!cache_is_fresh(&path).await);
-    }
-
-    // --- re-authentication ---
-
-    #[tokio::test(start_paused = true)]
-    async fn reauth_waits_for_a_fresh_key_and_returns_a_rebuilt_model() {
-        // The hook captures the current value on invocation and only
-        // accepts a *changed*, nonempty value.
-        unsafe { std::env::set_var("CRAFT_REAUTH_TEST_KEY", "stale") };
-        let config = crate::config::Config::parse(
-            "provider \"reauth\" { kind = \"openai\"\n  api_key_env = \"CRAFT_REAUTH_TEST_KEY\" }",
-        )
-        .unwrap();
-        let hook = reauth_hook(&config.providers["reauth"], "gpt-x");
-        let mut future = hook(1);
-        // First poll captures `stale` and parks on the poll interval.
-        let mut stepped = 0;
-        while future
-            .as_mut()
-            .poll(&mut std::task::Context::from_waker(
-                &futures::task::noop_waker(),
-            ))
-            .is_pending()
-            && stepped < 100
-        {
-            if stepped == 1 {
-                unsafe { std::env::set_var("CRAFT_REAUTH_TEST_KEY", "fresh") };
-            }
-            stepped += 1;
-        }
-        let model = future
-            .await
-            .expect("a refreshed key resolves the hook")
-            .expect("animist binds keys at construction, so the model is rebuilt");
-        assert_eq!(model.model.id, "gpt-x");
-        unsafe { std::env::remove_var("CRAFT_REAUTH_TEST_KEY") };
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reauth_reports_an_unrefreshed_key() {
-        // Its own variable: the env is process-global and tests run in
-        // parallel.
-        unsafe { std::env::set_var("CRAFT_REAUTH_UNCHANGED_KEY", "stale") };
-        let config = crate::config::Config::parse(
-            "provider \"reauth\" { kind = \"openai\"\n  api_key_env = \"CRAFT_REAUTH_UNCHANGED_KEY\" }",
-        )
-        .unwrap();
-        let hook = reauth_hook(&config.providers["reauth"], "gpt-x");
-        // Time races past the whole wait window with the key unchanged.
-        let Err(message) = hook(1).await else {
-            panic!("an unchanged key must fail the hook");
-        };
-        assert!(
-            message.contains("CRAFT_REAUTH_UNCHANGED_KEY"),
-            "the error names the environment variable: {message}"
-        );
-        unsafe { std::env::remove_var("CRAFT_REAUTH_UNCHANGED_KEY") };
-    }
-
     // --- keyless local routing ---
 
     fn openai_config(base_url: &str) -> OpenAiConfig {
@@ -1083,6 +942,35 @@ mod tests {
             &openai_config("https://api.example.com/v1"),
             false
         ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_serves_the_stale_cache_or_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CATALOG_CACHE_FILE);
+        save_cache(&path, &cache_with_provider("gpt-x")).await;
+        let stale = stale_or_empty(&path, Some("fetch failed".to_owned())).await;
+        assert!(stale.providers.contains_key("openai"), "stale bytes serve");
+
+        let missing = tmp.path().join("absent.json");
+        let empty = stale_or_empty(&missing, Some("fetch failed".to_owned())).await;
+        assert!(empty.providers.is_empty(), "nothing to serve but empty");
+    }
+
+    #[tokio::test]
+    async fn cache_freshness_follows_the_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(CATALOG_CACHE_FILE);
+        std::fs::write(&path, b"x").unwrap();
+        assert!(cache_is_fresh(&path).await);
+        // Backdate past the TTL.
+        let old =
+            std::time::SystemTime::now() - CATALOG_CACHE_TTL - std::time::Duration::from_secs(60);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        drop(file);
+        assert!(!cache_is_fresh(&path).await);
     }
 
     // --- Bedrock protocol table ---

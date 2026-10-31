@@ -9,16 +9,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::history::marker;
 
+/// The legacy nudge prompt's literal text (the run loop that produced it
+/// is gone; sessions written before the animist cutover still carry it).
+pub(crate) const LEGACY_NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty \
+     response. Please process the tool results above and continue with the task.";
+
 /// Marker texts the old format spelled into plain user messages; the
 /// converter recognizes them and tags the converted observation instead.
 fn marker_of(text: &str) -> Option<&'static str> {
-    if text == crate::run::CANCEL_MARKER {
+    if text == crate::harness::driver::CANCEL_MARKER {
         Some(marker::CANCEL)
-    } else if text == crate::run::END_MARKER {
+    } else if text == crate::harness::driver::END_MARKER {
         Some(marker::END)
     } else if text == crate::run::doom::GRACE_CALL_PROMPT {
         Some(marker::GRACE)
-    } else if text == crate::run::NUDGE_PROMPT {
+    } else if text == LEGACY_NUDGE_PROMPT {
         Some(marker::NUDGE)
     } else if text.starts_with("[Run failed: ") && text.ends_with(']') {
         Some(marker::FAILED)
@@ -305,7 +310,7 @@ mod tests {
         let messages = [
             Message::User {
                 content: vec![UserContent::Text(Text {
-                    text: crate::run::CANCEL_MARKER.into(),
+                    text: crate::harness::driver::CANCEL_MARKER.into(),
                 })],
             },
             Message::User {

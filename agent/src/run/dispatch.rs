@@ -20,7 +20,6 @@ use animist::history::{ContentBlock, ToolContents};
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::DynamicTool;
 
-use crate::history::Message;
 use crate::history::{self, ext};
 
 use super::dedup::{self, SharedDedupCache, ToolDedupCache};
@@ -451,6 +450,13 @@ fn gated_write_paths(name: &str, input: &serde_json::Value) -> Vec<String> {
 /// Feed one finished result back into the guardrail counters and surface
 /// any warning (from this result, or carried from the pre-call check) as
 /// a prefix on the model-visible text.
+/// Model-visible text for a guardrail-blocked call; the result note keys
+/// the user-facing event off it, so keep the wording in sync.
+pub(crate) const GUARDRAIL_BLOCK_MESSAGE: &str = "blocked by guardrails: this tool call keeps \
+     repeating without progress; change your approach or use a different tool";
+/// The prefix `guardrail_note` puts on warnings carried by a ran result.
+const GUARDRAIL_WARN_PREFIX: &str = "[guardrail] ";
+
 fn guardrail_note(
     dispatch: &ToolDispatch,
     name: &str,
@@ -543,241 +549,6 @@ pub(crate) fn rig_content_to_contents(
         })
         .collect::<Vec<_>>()
         .into()
-}
-
-use super::doom;
-use super::task_set;
-use super::{CancelToken, Event, RunOutcome};
-
-/// Model-visible text for a guardrail-blocked call; `commit_wave` also keys
-/// the user-facing `Event::Info` off it, so keep the constant in sync.
-pub(crate) const GUARDRAIL_BLOCK_MESSAGE: &str = "blocked by guardrails: this tool call keeps \
-     repeating without progress; change your approach or use a different tool";
-/// The prefix `guardrail_note` puts on warnings carried by a ran result;
-/// `commit_wave` strips it into the `Event::Info` text.
-const GUARDRAIL_WARN_PREFIX: &str = "[guardrail] ";
-
-/// Tools that must never share a wave with another call: `batch` nests its
-/// own parallel dispatch and `question` blocks on the user.
-pub(crate) fn is_never_parallel(name: &str) -> bool {
-    matches!(name, "batch" | "question")
-}
-
-/// The model-visible text of a result block, or the empty string for a
-/// non-result block.
-fn result_first_text(result: &ContentBlock) -> String {
-    match result {
-        ContentBlock::ToolResult { content, .. } => content
-            .0
-            .first()
-            .map(|item| match item {
-                animist::history::ToolContent::Text { text } => text.clone(),
-                animist::history::ToolContent::Image { .. } => "[image]".to_owned(),
-            })
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
-/// Execute the turn's tool calls, appending their results to `turn`.
-/// Returns `Some(outcome)` when the run must stop (cancel or dispatch
-/// failure); `None` means the loop continues.
-///
-/// Calls run concurrently in waves; a wave is joined and drained before the
-/// next starts whenever two calls write the same path or a
-/// never-parallel tool joins the batch. Results are committed in call
-/// order; a panicking tool future becomes an error result instead of
-/// unwinding the run.
-pub(crate) async fn dispatch_tool_calls(
-    tools: &ToolDispatch,
-    turn: &mut Vec<history::StoredMessage>,
-    calls: Vec<ContentBlock>,
-    recent: &mut doom::RecentCalls,
-    cancel: &CancelToken,
-    emit: &(dyn Fn(Event) + Send + Sync),
-) -> (Option<RunOutcome>, doom::ToolBatchOutcome) {
-    // Spawned tasks need owned state; the dispatch table is cheap to clone.
-    let tools = Arc::new(tools.clone());
-    let mut set = task_set::TaskSet::new();
-    let mut wave: Vec<ContentBlock> = Vec::new();
-    let mut all_write_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut batch = doom::ToolBatchOutcome::default();
-
-    for call in calls {
-        if cancel.cancelled() {
-            let outcome =
-                commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
-            return (outcome.or(Some(RunOutcome::Cancelled)), batch);
-        }
-        let (id, name, arguments) = call_parts(&call);
-        let id = id.to_owned();
-        let name = name.to_owned();
-        let arguments = arguments.clone();
-        if recent.is_doom_loop(&name, &arguments) {
-            // The call is blocked, not executed: emit the reference's error
-            // result directly and clear the window so the warning does not
-            // re-fire identically on the next retry.
-            batch.doom_loops += 1;
-            let result = ext::tool_result(id.clone(), Some(&name), doom::DOOM_LOOP_MESSAGE, true);
-            turn.push(ext::stored(ext::observation(vec![result.clone()])));
-            emit(Event::ToolDone {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-                result,
-            });
-            recent.clear();
-        } else {
-            // A never-parallel tool or a repeat write path must not share a
-            // wave with earlier calls, so the pending wave is flushed
-            // *before* this call is spawned into a fresh one.
-            let write_paths: Vec<String> = dedup::extract_write_paths(&name, &arguments)
-                .iter()
-                .map(|p| {
-                    let root = tools
-                        .write_root
-                        .as_deref()
-                        .map(|r| r.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    dedup::normalize_write_path_with_root(Some(&root), p)
-                })
-                .collect();
-            let conflicts = is_never_parallel(&name)
-                || write_paths
-                    .iter()
-                    .any(|path| all_write_paths.contains(path));
-            if conflicts && !wave.is_empty() {
-                if let Some(outcome) =
-                    commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await
-                {
-                    return (Some(outcome), batch);
-                }
-                set = task_set::TaskSet::new();
-                all_write_paths.clear();
-            }
-            all_write_paths.extend(write_paths);
-            let executor = Arc::clone(&tools);
-            wave.push(call.clone());
-            set.spawn(async move { executor.execute(call).await });
-        }
-        recent.record(name, &arguments);
-    }
-    let stopped = commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
-    (stopped, batch)
-}
-
-/// One finished wave entry: the call paired with its dispatch outcome, or
-/// the panic/cancellation string when the tool task itself failed.
-type WaveEntry = (
-    ContentBlock,
-    Result<Result<DispatchOutcome, String>, String>,
-);
-
-/// Join a finished wave, pairing each spawn-order result with its call.
-async fn join_wave(
-    set: task_set::TaskSet<Result<DispatchOutcome, String>>,
-    wave: std::vec::Drain<'_, ContentBlock>,
-) -> Vec<WaveEntry> {
-    let ids: Vec<ContentBlock> = wave.collect();
-    set.join_all()
-        .await
-        .into_iter()
-        .zip(ids)
-        .map(|(outcome, call)| (call, outcome))
-        .collect()
-}
-
-/// Commit one wave's results to `turn` in call order, emitting `ToolDone`
-/// per call. `Some(outcome)` when the run must stop.
-async fn commit_wave(
-    results: Vec<WaveEntry>,
-    turn: &mut Vec<history::StoredMessage>,
-    batch: &mut doom::ToolBatchOutcome,
-    emit: &(dyn Fn(Event) + Send + Sync),
-) -> Option<RunOutcome> {
-    let mut wave_results: Vec<ContentBlock> = Vec::new();
-    for (call, outcome) in results {
-        let (id, name, arguments) = call_parts(&call);
-        let id = id.to_owned();
-        let name = name.to_owned();
-        let arguments = arguments.to_owned();
-        // `guardrail_blocked` identifies the one Skipped outcome that is an
-        // error (the guardrail block), so its skip surfaces as a warning
-        // rather than silent tool output.
-        let (guardrail_blocked, result) = match outcome {
-            Ok(Ok(DispatchOutcome::Ran(result))) => (false, result),
-            Ok(Ok(DispatchOutcome::Skipped(result))) => {
-                let ContentBlock::ToolResult { is_error, .. } = &result else {
-                    unreachable!("skipped outcome carries a result");
-                };
-                (
-                    *is_error && result_first_text(&result) == GUARDRAIL_BLOCK_MESSAGE,
-                    result,
-                )
-            }
-            Ok(Ok(DispatchOutcome::Stopped(_))) => return Some(RunOutcome::Cancelled),
-            // A dispatch-level failure is one call's error, not the run's:
-            // surface it as a result the model can adapt to instead of
-            // dropping the whole turn.
-            Ok(Err(e)) => (false, ext::tool_result(id.clone(), Some(&name), e, true)),
-            // The task itself failed: a panic or cancellation inside the
-            // tool future, reported as a per-call error result.
-            Err(panic) => (
-                false,
-                ext::tool_result(
-                    id.clone(),
-                    Some(&name),
-                    format!("internal error: tool panicked: {panic}"),
-                    true,
-                ),
-            ),
-        };
-        // Guardrail warn/block statuses ride `Event::Info` so a surface can
-        // show them as warnings instead of silent tool text.
-        if guardrail_blocked {
-            let reason = result_first_text(&result)
-                .trim_start_matches("blocked by guardrails: ")
-                .to_owned();
-            emit(Event::Info(format!("guardrail blocked {name}: {reason}")));
-        } else if let Some(warning) = result_first_text(&result)
-            .strip_prefix(GUARDRAIL_WARN_PREFIX)
-            .map(str::to_owned)
-        {
-            emit(Event::Info(format!(
-                "guardrail warning on {name}: {warning}"
-            )));
-        }
-        let ContentBlock::ToolResult { is_error, .. } = &result else {
-            unreachable!("results are tool-result shaped");
-        };
-        if *is_error {
-            batch.errors += 1;
-        } else {
-            batch.successes += 1;
-        }
-        turn.push(ext::stored(ext::observation(vec![result.clone()])));
-        wave_results.push(result.clone());
-        emit(Event::ToolDone {
-            id: id.clone(),
-            name: name.clone(),
-            arguments: arguments.clone(),
-            result,
-        });
-    }
-    if !wave_results.is_empty() {
-        // One submission event per wave, carrying all of its results in
-        // call order (reference semantics), independent of the per-call
-        // messages committed to history above.
-        emit(Event::ToolResultsSubmitted {
-            message: Message {
-                role: history::Role::User,
-                content: wave_results,
-                display_text: None,
-                kind: history::MessageKind::Observation,
-            },
-        });
-    }
-    None
 }
 
 #[cfg(test)]

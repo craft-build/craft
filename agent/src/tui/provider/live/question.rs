@@ -2,29 +2,26 @@
 //! this asker, mirroring the approval gate's parking pattern — event out,
 //! oneshot back, cancellation and a 30-minute ask timeout.
 
-use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot};
 
-use tokio::sync::{Mutex, mpsc, oneshot};
-
-use crate::run::CancelToken;
 use crate::tools::{ASK_TIMEOUT, AskQuestions, QuestionAnswer, QuestionSpec};
 
-use super::SessionState;
+use super::SharedPark;
 use crate::tui::provider::AgentEvent;
 
 pub(super) struct QuestionAsker {
-    state: Arc<Mutex<SessionState>>,
+    park: SharedPark,
     tx: mpsc::UnboundedSender<AgentEvent>,
-    cancel: CancelToken,
+    cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
 }
 
 impl QuestionAsker {
     pub(super) fn new(
-        state: Arc<Mutex<SessionState>>,
+        park: SharedPark,
         tx: mpsc::UnboundedSender<AgentEvent>,
-        cancel: CancelToken,
+        cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
     ) -> Self {
-        Self { state, tx, cancel }
+        Self { park, tx, cancel }
     }
 }
 
@@ -37,8 +34,8 @@ fn dismissed() -> QuestionAnswer {
 
 impl AskQuestions for QuestionAsker {
     fn ask(&self, questions: Vec<QuestionSpec>) -> crate::run::BoxFuture<QuestionAnswer> {
-        let QuestionAsker { state, tx, cancel } = QuestionAsker {
-            state: self.state.clone(),
+        let QuestionAsker { park, tx, cancel } = QuestionAsker {
+            park: self.park.clone(),
             tx: self.tx.clone(),
             cancel: self.cancel.clone(),
         };
@@ -47,16 +44,15 @@ impl AskQuestions for QuestionAsker {
             // Register before emitting: an answer racing in on event
             // receipt must find the oneshot already parked.
             let (answer_tx, mut answer_rx) = oneshot::channel();
-            state.lock().await.pending_question = Some((id.clone(), answer_tx));
+            park.lock().await.pending_question = Some((id.clone(), answer_tx));
             let _ = tx.send(AgentEvent::QuestionRequest {
                 id: id.clone(),
                 questions: questions.clone(),
             });
-            let mut cancel_rx = cancel.subscribe();
+            let turn_cancel = (*cancel.load_full()).clone();
             let answer = tokio::select! {
                 biased;
-                changed = cancel_rx.changed() => {
-                    let _ = changed;
+                () = turn_cancel.cancelled() => {
                     dismissed()
                 }
                 answer = tokio::time::timeout(ASK_TIMEOUT, &mut answer_rx) => {
@@ -64,7 +60,7 @@ impl AskQuestions for QuestionAsker {
                         .unwrap_or_else(|_| dismissed())
                 }
             };
-            state.lock().await.pending_question = None;
+            park.lock().await.pending_question = None;
             let _ = tx.send(AgentEvent::QuestionResolved { id });
             answer
         })
@@ -73,14 +69,10 @@ impl AskQuestions for QuestionAsker {
 
 /// Deliver the user's answer to the parked `question` call, if the id
 /// matches the currently pending one.
-pub(super) async fn answer_question(
-    state: &Arc<Mutex<SessionState>>,
-    id: String,
-    answer: QuestionAnswer,
-) {
-    let mut session = state.lock().await;
-    if matches!(&session.pending_question, Some((pid, _)) if *pid == id)
-        && let Some((_, sender)) = session.pending_question.take()
+pub(super) async fn answer_question(park: &SharedPark, id: String, answer: QuestionAnswer) {
+    let mut slots = park.lock().await;
+    if matches!(&slots.pending_question, Some((pid, _)) if *pid == id)
+        && let Some((_, sender)) = slots.pending_question.take()
     {
         let _ = sender.send(answer);
     }
@@ -88,7 +80,18 @@ pub(super) async fn answer_question(
 
 #[cfg(test)]
 mod tests {
+    use super::super::ParkSlots;
     use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    type TestCell = std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>;
+
+    fn test_cell() -> TestCell {
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            animist::agent::Cancellation::default(),
+        ))
+    }
 
     fn spec() -> QuestionSpec {
         QuestionSpec {
@@ -101,10 +104,10 @@ mod tests {
 
     #[tokio::test]
     async fn parks_on_the_form_and_returns_the_answer() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let (_flag, cancel) = crate::run::cancel_channel();
-        let asker = QuestionAsker::new(state.clone(), tx, cancel);
+        let cell = test_cell();
+        let asker = QuestionAsker::new(state.clone(), tx, cell.clone());
 
         let pending = tokio::spawn(async move { asker.ask(vec![spec()]).await });
         let request = loop {
@@ -144,10 +147,10 @@ mod tests {
     /// answer delivered the instant the request arrives still lands.
     #[tokio::test]
     async fn immediate_answer_on_event_receipt_lands() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let (_flag, cancel) = crate::run::cancel_channel();
-        let asker = QuestionAsker::new(state.clone(), tx, cancel);
+        let cell = test_cell();
+        let asker = QuestionAsker::new(state.clone(), tx, cell.clone());
 
         let pending = tokio::spawn(async move { asker.ask(vec![spec()]).await });
         let request = loop {
@@ -176,23 +179,23 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_dismisses_the_parked_question() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let (flag, cancel) = crate::run::cancel_channel();
-        let asker = QuestionAsker::new(state.clone(), tx, cancel);
+        let cell = test_cell();
+        let asker = QuestionAsker::new(state.clone(), tx, cell.clone());
 
         let pending = tokio::spawn(async move { asker.ask(vec![spec()]).await });
         while state.lock().await.pending_question.is_none() {
             tokio::task::yield_now().await;
         }
-        flag.set(true);
+        cell.load().cancel();
         assert!(pending.await.unwrap().dismissed);
         assert!(state.lock().await.pending_question.is_none());
     }
 
     #[tokio::test]
     async fn stale_ids_do_not_consume_the_pending_slot() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
+        let state = Arc::new(Mutex::new(ParkSlots::default()));
         let (tx, _rx) = oneshot::channel();
         state.lock().await.pending_question = Some(("current".into(), tx));
 

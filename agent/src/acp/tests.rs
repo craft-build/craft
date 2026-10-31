@@ -2,8 +2,9 @@ use super::elicitation::*;
 use super::permissions::*;
 use super::turn::*;
 use super::*;
+use crate::history;
 use crate::permissions::{PermissionAnswer, PermissionCheck, ToolKey, scope_for_call};
-use crate::run::RunOutcome;
+use crate::run;
 use crate::tools::{QuestionOption, QuestionSpec};
 use agent_client_protocol::schema::v1::{
     Content, RequestPermissionOutcome, ResourceLink, TextContent, ToolCallContent, ToolKind,
@@ -37,25 +38,7 @@ fn prompt_text_rejects_unsupported_blocks() {
 
 #[test]
 fn config_options_expose_provider_model_and_thinking() {
-    let session = Session {
-        compaction: Default::default(),
-        workspace: Workspace::new(std::env::temp_dir()).unwrap(),
-        instructions: Default::default(),
-        history: Vec::new(),
-        provider_name: "openai".into(),
-        models: vec![crate::testing::model_info_with("gpt-x", None, None)],
-        model: "gpt-x".into(),
-        context_length: Some(128_000),
-        thinking: Default::default(),
-        store: None,
-        dedup: run::shared_cache(),
-        permissions: Arc::new(PermissionManager::new(
-            crate::permissions::PermissionsConfig::default(),
-            std::env::temp_dir(),
-        )),
-        cancel: run::cancel_channel().0,
-        turn: None,
-    };
+    let session = test_session();
     let options =
         session.config_options(&Config::default(), &["openai".into(), "llamafile".into()]);
     assert_eq!(options.len(), 3);
@@ -73,23 +56,31 @@ fn mock_model() -> crate::provider::ModelHandle {
 }
 
 fn test_session() -> Session {
+    let (sink, events) = crate::harness::EventSink::new();
+    let conversation = crate::harness::ConversationBuilder::new(
+        &Config::default(),
+        &std::env::temp_dir().display().to_string(),
+        "",
+        mock_model(),
+        Workspace::new(std::env::temp_dir())
+            .expect("workspace")
+            .register(),
+        sink,
+    )
+    .build()
+    .expect("session conversation builds");
     Session {
-        compaction: Default::default(),
-        workspace: Workspace::new(std::env::temp_dir()).unwrap(),
-        instructions: Default::default(),
-        history: Vec::new(),
+        conversation,
+        events,
+        cancel_cell: Arc::new(arc_swap::ArcSwap::from_pointee(
+            animist::agent::Cancellation::default(),
+        )),
+        persister: None,
         provider_name: "openai".into(),
         models: Vec::new(),
         model: "gpt-x".into(),
         context_length: Some(128_000),
         thinking: Default::default(),
-        store: None,
-        dedup: run::shared_cache(),
-        permissions: Arc::new(PermissionManager::new(
-            crate::permissions::PermissionsConfig::default(),
-            std::env::temp_dir(),
-        )),
-        cancel: run::cancel_channel().0,
         turn: None,
     }
 }
@@ -176,7 +167,9 @@ fn in_flight_rejection_maps_to_a_json_rpc_error() {
 }
 
 #[tokio::test]
-async fn stale_turn_does_not_commit_history() {
+async fn turn_slots_are_exclusive_and_released_by_clear_turn() {
+    // History commits live in the conversation now; what the session
+    // still arbitrates is the single in-flight turn slot.
     let session_id = SessionId::new("s1");
     let sessions = Mutex::new(BTreeMap::from([("s1".to_string(), test_session())]));
     sessions
@@ -186,35 +179,24 @@ async fn stale_turn_does_not_commit_history() {
         .unwrap()
         .begin_turn(1)
         .unwrap();
-    // Turn 1 is superseded by a newer accepted turn before it finishes.
-    sessions.lock().await.get_mut("s1").unwrap().turn = Some(2);
-    commit_turn(
-        &sessions,
-        &session_id,
-        1,
-        vec![history::ext::stored(history::ext::system_text("stale"))],
-    )
-    .await;
-    {
-        let map = sessions.lock().await;
-        let session = map.get("s1").unwrap();
-        assert!(session.history.is_empty(), "a stale turn must not commit");
-        assert_eq!(session.turn, Some(2), "the newer turn keeps its slot");
-    }
-    // The current turn still commits and releases the slot.
-    commit_turn(
-        &sessions,
-        &session_id,
-        2,
-        vec![history::ext::stored(history::ext::system_text("fresh"))],
-    )
-    .await;
-    {
-        let map = sessions.lock().await;
-        let session = map.get("s1").unwrap();
-        assert_eq!(session.history.len(), 1);
-        assert_eq!(session.turn, None);
-    }
+    let error = sessions
+        .lock()
+        .await
+        .get_mut("s1")
+        .unwrap()
+        .begin_turn(2)
+        .unwrap_err();
+    assert!(error.contains("in flight"), "unexpected: {error}");
+    // The settled turn releases the slot; the next prompt is accepted.
+    clear_turn(&sessions, &session_id, 1).await;
+    sessions
+        .lock()
+        .await
+        .get_mut("s1")
+        .unwrap()
+        .begin_turn(2)
+        .unwrap();
+    assert_eq!(sessions.lock().await.get("s1").unwrap().turn, Some(2));
 }
 
 #[test]
@@ -227,42 +209,41 @@ fn tool_kinds_follow_the_registered_tools() {
 }
 
 #[tokio::test]
-async fn run_turn_tools_route_task_calls_to_the_installed_launcher() {
-    struct AllowAll;
-    impl run::BeforeExecute for AllowAll {
-        fn decide(&self, _call: history::ContentBlock) -> run::BoxFuture<run::Decision> {
-            Box::pin(async { run::Decision::Run })
-        }
-    }
-
+async fn registered_tools_route_task_calls_to_the_installed_launcher() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
-    let (_flag, cancel) = run::cancel_channel();
-    // The launcher run_turn installs per turn (A.5): a `task` call with
-    // a bad subagent type reaches its spawn and fails informatively
-    // instead of degrading to the no-host availability error.
+    // The launcher the session installs (A.5): a `task` call with a bad
+    // subagent type reaches its spawn and fails informatively instead of
+    // degrading to the no-host availability error.
+    let (sink, _stream) = crate::harness::EventSink::new();
+    let cwd = dir.path().display().to_string();
+    let parent = crate::harness::ConversationBuilder::new(
+        &Config::default(),
+        &cwd,
+        "",
+        mock_model(),
+        workspace.register(),
+        sink.clone(),
+    )
+    .build()
+    .expect("parent conversation builds");
     let launcher = Arc::new(crate::subagent::SubagentLauncher {
-        parent_model: mock_model(),
-        parent_spec: "mock/mock-model".into(),
+        parent,
         provider: "mock".into(),
         providers: Default::default(),
         agent: Default::default(),
         compression: Default::default(),
         base_prompt: String::new(),
         workspace: workspace.clone(),
-        history: Vec::new(),
-        cancel: cancel.clone(),
+        cancel: Arc::new(arc_swap::ArcSwap::from_pointee(
+            animist::agent::Cancellation::default(),
+        )),
         cancels: Arc::new(run::cancel::CancelMap::new()),
-        emit: Arc::new(|_| {}),
+        sink,
         before: None,
+        cwd,
     });
-    let tools = turn_tools(
-        workspace,
-        Arc::new(crate::tools::DismissAsk),
-        launcher,
-        Arc::new(AllowAll),
-        run::shared_cache(),
-    );
+    let tools = workspace.with_subagents(launcher).register();
     let call = || history::ContentBlock::ToolUse {
         id: "1".into(),
         name: "task".into(),
@@ -351,40 +332,58 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
         crate::testing::model_info("scripted", 200_000, 8_192, false, false),
     ));
     let tools = Workspace::new(dir.path()).unwrap().register();
-    let (_, cancel) = run::cancel_channel();
-    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut history = Vec::new();
-    let outcome = run::run(
-        &model,
-        &run::RunParams::default(),
-        &tools,
-        &mut history,
+    let (sink, stream) = crate::harness::EventSink::new();
+    let conversation = crate::harness::ConversationBuilder::new(
+        &Config::parse("").expect("default config"),
+        &dir.path().display().to_string(),
+        "",
+        model,
+        tools,
+        sink,
+    )
+    .build()
+    .expect("conversation builds");
+    let outcome = crate::harness::run_turn(
+        &conversation,
         "read, search, edit, delete",
-        &cancel,
-        &|event| events.lock().unwrap().push(event),
+        &[],
+        animist::agent::Cancellation::default(),
     )
     .await;
-    assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply == "done"));
+    assert!(matches!(outcome, crate::harness::TurnOutcome::Done { ref reply } if reply == "done"));
     let mut results = Vec::new();
-    let events = events.lock().unwrap();
-    for event in events.iter() {
-        if let run::Event::ToolDone { name, result, .. } = event {
+    let mut stream = stream;
+    // Drain through the terminal Done: every ToolFinished precedes it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while let Some(event) = stream.next().await {
+        if let crate::harness::Event::Agent(animist::agent::AgentEvent::ToolFinished {
+            ref call,
+            ref output,
+        }) = event
+        {
             // The model-visible text and the ACP display text must match.
             let ToolCallContent::Content(Content {
                 content: ContentBlock::Text(display),
                 ..
-            }) = tool_result_content(result)
+            }) = tool_result_content(call, output)
             else {
                 panic!("ACP must display tool text");
             };
-            let history::ContentBlock::ToolResult { content, .. } = result else {
-                panic!("tool results are ToolResult blocks");
-            };
-            assert_eq!(content.0.len(), 1);
-            let model_text = history::ext::tool_content_text(content);
+            assert_eq!(output.content.0.len(), 1);
+            let model_text = history::ext::tool_content_text(&output.content);
             assert_eq!(display.text, model_text);
-            results.push((name.clone(), model_text));
+            results.push((call.name.clone(), model_text));
         }
+        if matches!(
+            event,
+            crate::harness::Event::Craft(crate::harness::CraftEvent::Done { .. })
+        ) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no terminal Done arrived"
+        );
     }
     assert_eq!(results, [
         ("read".into(), "2: \n3:     let name = \"βeta\";\n\n...\n\nTruncated lines: 4-4. Use offset=4 to read further.".into()),

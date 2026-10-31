@@ -8,20 +8,19 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use crate::mcp::{ElicitOutcome, McpServerRequest};
-use crate::run;
 use crate::tools::{QuestionOption, QuestionSpec};
 
-use super::SessionState;
+use super::SharedPark;
 use super::question::QuestionAsker;
 use crate::tui::provider::AgentEvent;
 
 /// Everything a server request needs; cloned out of [`super::LoopCtx`] so
 /// each request runs on its own task without borrowing the command loop.
 pub(super) struct ServerRequestCtx {
-    pub(super) state: Arc<Mutex<SessionState>>,
+    pub(super) park: SharedPark,
     pub(super) evt_tx: mpsc::UnboundedSender<AgentEvent>,
 }
 
@@ -60,10 +59,12 @@ async fn run_elicitation(
             ..spec.clone()
         })
         .collect();
-    // A fresh cancel channel: these asks are not part of a turn, so nothing
+    // A fresh cancellation: these asks are not part of a turn, so nothing
     // but the ask timeout or the user can end them.
-    let (_flag, cancel) = run::cancel_channel();
-    let asker = QuestionAsker::new(ctx.state.clone(), ctx.evt_tx.clone(), cancel);
+    let cancel = Arc::new(arc_swap::ArcSwap::from_pointee(
+        animist::agent::Cancellation::default(),
+    ));
+    let asker = QuestionAsker::new(ctx.park.clone(), ctx.evt_tx.clone(), cancel);
     let answer = crate::tools::AskQuestions::ask(&asker, specs).await;
     if answer.dismissed {
         return Ok(ElicitOutcome::Decline);
@@ -157,7 +158,7 @@ mod tests {
 
     fn ctx() -> ServerRequestCtx {
         ServerRequestCtx {
-            state: Arc::new(Mutex::new(SessionState::default())),
+            park: Arc::new(tokio::sync::Mutex::new(super::super::ParkSlots::default())),
             evt_tx: mpsc::unbounded_channel().0,
         }
     }
@@ -200,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn elicitation_round_trips_through_the_question_form() {
         let ctx = ctx();
-        let state = ctx.state.clone();
+        let state = ctx.park.clone();
         let schema = schema(serde_json::json!({
             "type": "object",
             "properties": {

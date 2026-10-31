@@ -198,11 +198,10 @@ pub struct Workspace {
     /// the table — taken during registration, before any post-register
     /// `ToolDispatch::with_before` could reach it — consults the gate too.
     before: Option<Arc<dyn crate::run::dispatch::BeforeExecute>>,
-    /// Phase 6: the turn's cancellation token, installed per turn like the
-    /// question seam. MCP tool calls race it so a cancelled turn tells the
-    /// server to stop. Shared cell so every clone (batch, subagents) sees
-    /// the per-turn set; `None` before a turn installs one.
-    mcp_cancel: std::sync::Arc<std::sync::RwLock<Option<crate::run::CancelToken>>>,
+    /// Phase 6: the current turn's cancellation, stored per turn by the
+    /// surface (the dispatch table is built once now). MCP tool calls race
+    /// it so a cancelled turn tells the server to stop.
+    mcp_cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
     /// Session sandbox policy (resolved from config/env at construction or
     /// installed by the surface). Turn registrations snapshot or narrow it
     /// into a frozen per-turn cell, like every other per-turn decision.
@@ -374,12 +373,19 @@ impl Workspace {
         self
     }
 
-    /// Install the turn's cancellation token (Phase 6): taken on the same
-    /// per-turn clone as the question/subagent seams, so MCP tool calls
-    /// registered from it race the turn's cancel.
-    pub fn with_cancel(self, cancel: crate::run::CancelToken) -> Self {
-        *self.mcp_cancel.write().expect("mcp cancel cell poisoned") = Some(cancel);
+    /// The per-turn cancellation cell MCP tool calls race (Phase 6): the
+    /// surface owns the cell and stores each turn's cancellation into it.
+    pub fn with_cancel(
+        mut self,
+        cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
+    ) -> Self {
+        self.mcp_cancel = cancel;
         self
+    }
+
+    /// The workspace's per-turn cancellation cell.
+    pub fn cancel_cell(&self) -> std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>> {
+        self.mcp_cancel.clone()
     }
 
     /// The session-shared reversible-compression store: request-build
@@ -526,12 +532,7 @@ impl Workspace {
             .collect();
         tools.push(dynamic(batch));
         if let Some(handle) = self.mcp() {
-            let cancel = self
-                .mcp_cancel
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            tools.extend(mcp_tools(&handle, cancel));
+            tools.extend(mcp_tools(&handle, self.mcp_cancel.clone()));
         }
         tools
     }
@@ -564,12 +565,7 @@ impl Workspace {
             tools.push(dynamic(batch.clone()));
         }
         if let Some(handle) = self.mcp() {
-            let cancel = self
-                .mcp_cancel
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            tools.extend(mcp_tools(&handle, cancel));
+            tools.extend(mcp_tools(&handle, self.mcp_cancel.clone()));
         }
         let definitions = tools.iter().map(DynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
@@ -894,7 +890,7 @@ fn argosy_tools() -> Vec<(&'static str, DynamicTool)> {
 /// name the manager's tool index is keyed by.
 fn mcp_tools(
     handle: &crate::mcp::McpHandle,
-    cancel: Option<crate::run::CancelToken>,
+    cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
 ) -> Vec<DynamicTool> {
     handle
         .tool_descriptors()
@@ -912,17 +908,13 @@ fn mcp_tools(
                     let qualified = qualified.clone();
                     let cancel = cancel.clone();
                     Box::pin(async move {
-                        // Phase 6: race the turn's cancel so a cancelled turn
-                        // stops the in-flight server call instead of parking
-                        // until it finishes or times out.
-                        let outcome = match &cancel {
-                            Some(token) => {
-                                handle
-                                    .call_tool_cancellable(&qualified, &arguments, token)
-                                    .await
-                            }
-                            None => handle.call_tool(&qualified, &arguments).await,
-                        };
+                        // Phase 6: race the current turn's cancel so a
+                        // cancelled turn stops the in-flight server call
+                        // instead of parking until it finishes or times out.
+                        let cancel = cancel.load();
+                        let outcome = handle
+                            .call_tool_cancellable(&qualified, &arguments, &cancel)
+                            .await;
                         match outcome {
                             Ok(output) => Ok(mcp_tool_output(output)),
                             Err(e) => Err(failure(e.to_string())),

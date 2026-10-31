@@ -2274,7 +2274,6 @@ async fn run_headless_query_with(
     // The context window feeds compaction thresholds; the output ceiling
     // rides the model handle's own info (per-model config, then the
     // models.dev catalog), where request shaping reads it.
-    let context_length = model.context_length();
 
     let cwd = std::env::current_dir().map_err(|e| {
         crate::error::InvalidSnafu {
@@ -2328,56 +2327,100 @@ async fn run_headless_query_with(
         _ => crate::run::AgentMode::Build,
     };
 
-    // Headless compaction (the print-mode fix): the session's shared state
-    // and the selected model's window make output caps window-clamped and
-    // give the run loop in-run overflow recovery. Without a window the
-    // stages simply never cross a threshold.
-    let compaction_state = crate::runtime::new_compaction_state(
-        crate::run::shared_cache(),
-        crate::run::shared_guardrails(),
-    );
-    let compaction_ctx = crate::runtime::compaction_ctx(compaction_state, &config, context_length);
-    let resolved = crate::runtime::ResolvedModel {
-        provider: provider_name.clone(),
-        model_id: model_id.clone(),
-        context_length,
+    // The session: one conversation, restored from the persisted entries,
+    // with the change-feed persister writing its records.
+    let session_ref = q.session_id.clone().unwrap_or_else(SessionRef::generate);
+    let model_spec = format!("{provider_name}/{model_id}");
+    let persister = match &state_dir {
+        Some(dir) => {
+            match crate::harness::Persister::open_in(
+                dir.clone(),
+                session_ref.clone(),
+                &cwd_str,
+                &model_spec,
+            )
+            .await
+            {
+                Ok(persister) => Some(Arc::new(tokio::sync::Mutex::new(persister))),
+                Err(e) => {
+                    eprintln!("session {session_ref} will not be persisted: {e}");
+                    None
+                }
+            }
+        }
+        None => None,
     };
-    let params = crate::runtime::run_policy(crate::runtime::RunPolicyInputs {
-        config: &config,
-        cwd: &cwd_str,
-        instructions_text: &env.instructions.text,
-        mode: &mode,
-        model: &resolved,
-        compaction: Some(compaction_ctx),
-        recency: None,
-        retry: crate::run::RetryCtx::default(),
-        fast: false,
-        thinking: None,
-        max_turns: crate::runtime::MaxTurns::FromConfig,
+    let history = match &persister {
+        Some(persister) => persister.lock().await.history(),
+        None => animist::history::History::new(),
+    };
+    // Per-turn cancellation cell: the MCP tools and the subagent launcher
+    // read whatever the current turn stored.
+    let cancel_cell = Arc::new(arc_swap::ArcSwap::from_pointee(
+        animist::agent::Cancellation::default(),
+    ));
+    let workspace = workspace.with_cancel(cancel_cell.clone());
+    let (sink, stream) = crate::harness::EventSink::new();
+    let conversation = crate::harness::ConversationBuilder::new(
+        &config,
+        &cwd_str,
+        &env.instructions.text,
+        model.clone(),
+        workspace.clone().register(),
+        sink,
+    )
+    .history(history)
+    .mode(mode)
+    .approval(Arc::clone(before.as_ref().expect("headless always gates")))
+    .build()?;
+    // Arm the subagent seam on the conversation (one registry rebuild at
+    // startup; headless carries no provider configs beyond the selection,
+    // so tier selection degrades to the parent model).
+    let launcher = Arc::new(crate::subagent::SubagentLauncher {
+        parent: conversation.clone(),
+        provider: provider_name.clone(),
+        providers: config.providers.clone(),
+        agent: crate::config::AgentConfig {
+            temperature: config.agent.temperature,
+            max_tokens: config.agent.max_tokens,
+            thinking: config.agent.thinking,
+            ..Default::default()
+        },
+        compression: config.compression.clone(),
+        base_prompt: format!("{}{}", config.agent.preamble, env.instructions.text),
+        workspace: workspace.clone(),
+        cancel: cancel_cell.clone(),
+        cancels: Arc::new(crate::run::cancel::CancelMap::new()),
+        sink: conversation.sink(),
+        before: before.clone(),
+        cwd: cwd_str.clone(),
     });
+    let armed = workspace.clone().with_subagents(launcher).register();
+    conversation.set_tools(armed)?;
+    let tool_names = workspace.register().names();
 
-    let model_label = params
-        .model_spec
-        .as_ref()
-        .map(|spec| spec.to_string())
-        .unwrap_or_else(|| model_id.clone());
-    let handle = crate::headless::spawn(crate::headless::HeadlessParams {
-        model,
-        model_spec: params.model_spec.clone(),
-        run: params,
-        workspace,
-        before,
-        prompt,
-        images,
-        initial_wd: cwd,
-        state_dir,
-        session_id: q.session_id,
+    let turn_cancel = animist::agent::Cancellation::default();
+    cancel_cell.store(Arc::new(turn_cancel.clone()));
+    let task = tokio::spawn({
+        let conversation = conversation.clone();
+        let prompt = prompt.clone();
+        let images = images.clone();
+        async move { crate::harness::run_turn(&conversation, &prompt, &images, turn_cancel).await }
     });
+    let run = crate::print::PrintRun {
+        stream,
+        task,
+        conversation,
+        session_id: session_ref,
+        cwd: cwd_str,
+        tool_names,
+        model_spec,
+    };
 
     // G.3 print mode: raw text or stream-json JSONL output. Unlike the
     // reference (whose print mode exits 0 on agent errors), a failed run is
     // a failure exit.
-    match crate::print::emit(handle, &q.output_format, q.verbose, &model_label).await? {
+    match crate::print::emit(run, &q.output_format, q.verbose).await? {
         Some(message) => Err(crate::error::InvalidSnafu { reason: message }.build()),
         None => Ok(()),
     }

@@ -239,10 +239,11 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
-    /// The session persister; wires the persistence layer at the chain's
-    /// tail and gives the driver its post-marker flush.
-    pub fn persist(mut self, persister: Arc<tokio::sync::Mutex<Persister>>) -> Self {
-        self.persist = Some(persister);
+    /// The session persister, when the session persists; wires the
+    /// persistence layer at the chain's tail and gives the driver its
+    /// post-marker flush.
+    pub fn persist(mut self, persister: Option<Arc<tokio::sync::Mutex<Persister>>>) -> Self {
+        self.persist = persister;
         self
     }
 

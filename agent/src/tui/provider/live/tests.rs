@@ -3,18 +3,108 @@
 //! load/resume.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
-use super::bootstrap::selection_for_spec;
+use arc_swap::ArcSwap;
+use tokio::sync::{Mutex, Notify, mpsc};
+
+use super::SessionKit;
+use super::bootstrap::{open_session, selection_for_spec};
 use super::commands::{
     PendingMessage, close_aborted_turn, drain_shell_results, handle_clear, handle_interrupt,
     handle_reset, handle_select_model, handle_send_message, maybe_send_next,
 };
 use super::resume::{handle_set_mode, load_session, persist_on_exit, resume_latest, transcript};
+use super::turn::{TurnCtx, run_turn};
 use super::*;
 use crate::history::ext;
 use crate::history::marker;
 use crate::permissions::PermissionsConfig;
 use crate::tui::provider::{LoadedMessage, Tone};
+
+/// A config with one offline-resolvable provider (openai-compatible at a
+/// dead port, manual model table): session builds resolve without touching
+/// the network.
+fn offline_config() -> Config {
+    Config::parse(
+        r#"
+        provider "mock" {
+          kind = "openai-compatible"
+          base_url = "http://127.0.0.1:9/v1"
+          model "model" { name = "Mock" }
+        }
+    "#,
+    )
+    .unwrap()
+}
+
+fn mock_selection() -> Selection {
+    Selection {
+        provider: "mock".into(),
+        model: "model".into(),
+        context_length: None,
+    }
+}
+
+/// The active texts of a session's conversation history, in order.
+async fn history_texts(state: &Arc<Mutex<SessionState>>) -> Vec<String> {
+    state
+        .lock()
+        .await
+        .conversation
+        .history()
+        .snapshot()
+        .await
+        .entries()
+        .iter()
+        .filter_map(animist::history::HistoryEntry::current)
+        .map(ext::message_text)
+        .collect()
+}
+
+/// A session state backed by a real persister over `dir`, with the scripted
+/// model standing in for the (offline-resolvable) mock provider.
+async fn persisted_state(
+    dir: &crate::storage::StateDir,
+    cwd: &str,
+) -> (Arc<Mutex<SessionState>>, crate::id::SessionRef) {
+    let session_ref = crate::id::SessionRef::generate();
+    let persister =
+        crate::harness::Persister::open_in(dir.clone(), session_ref.clone(), cwd, "mock/model")
+            .await
+            .expect("persister opens");
+    let workspace = Workspace::new(std::env::temp_dir()).expect("workspace");
+    let (sink, _stream) = crate::harness::EventSink::new();
+    let info = crate::testing::model_info_with("main", Some(128_000), None);
+    let model = crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+        &crate::testing::ScriptedProvider::new(vec![info.clone()]),
+        info,
+    ));
+    let history = persister.history();
+    let conversation = crate::harness::ConversationBuilder::new(
+        &Config::parse("").expect("default config"),
+        cwd,
+        "",
+        model,
+        workspace.register(),
+        sink,
+    )
+    .history(history)
+    .persist(Some(Arc::new(Mutex::new(persister))))
+    .build()
+    .expect("conversation builds");
+    let usage =
+        super::usage_recorder::UsageLedger::default().with_session_id(session_ref.id().to_string());
+    (
+        Arc::new(Mutex::new(SessionState {
+            thinking: crate::thinking::ThinkingConfig::default(),
+            conversation,
+            signals: super::turn::RunSignals::new(),
+            usage,
+        })),
+        session_ref,
+    )
+}
 
 /// `selection_for_spec` resolves a remembered `provider/model` against
 /// the discovered catalog, keeps a slash-bearing model id intact, and
@@ -56,11 +146,11 @@ fn selection_for_spec_resolves_against_the_catalog() {
     assert!(selection_for_spec(&catalogs, "zai/retired-model").is_none());
 }
 
-/// Bang-mode visible-run results queue and are drained into the session
-/// history exactly once, at the next `SendMessage`.
+/// Bang-mode visible-run results queue and are committed into the
+/// conversation history exactly once, at the next `SendMessage`.
 #[tokio::test]
 async fn shell_results_drain_into_history_once() {
-    let state = Arc::new(Mutex::new(SessionState::linked()));
+    let state = Arc::new(Mutex::new(SessionState::for_tests()));
     let pending: Arc<std::sync::Mutex<crate::tui::shell::ShellState>> = Arc::default();
     pending
         .lock()
@@ -68,10 +158,9 @@ async fn shell_results_drain_into_history_once() {
         .push_result(ext::stored_user_text("I ran: $ ls\n\nOutput:\nsrc"));
 
     drain_shell_results(&pending, &state).await;
-    assert_eq!(state.lock().await.history.len(), 1);
     assert_eq!(
-        ext::message_text(&state.lock().await.history[0]),
-        "I ran: $ ls\n\nOutput:\nsrc"
+        history_texts(&state).await,
+        vec!["I ran: $ ls\n\nOutput:\nsrc".to_string()]
     );
     assert!(
         pending
@@ -83,46 +172,36 @@ async fn shell_results_drain_into_history_once() {
 
     // A second drain with nothing queued is a no-op.
     drain_shell_results(&pending, &state).await;
-    assert_eq!(state.lock().await.history.len(), 1);
+    assert_eq!(history_texts(&state).await.len(), 1);
 }
 
 /// Quitting with queued bang-mode results persists them into the
 /// session file, instead of losing them until a next `SendMessage`.
 #[tokio::test]
 async fn bang_results_persist_on_loop_exit() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
-    let state = Arc::new(Mutex::new(SessionState::linked().with_store(
-        Some(&state_dir),
-        "/cwd",
-        "mock/model",
-    )));
-    let ctx = test_ctx(state.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+    let (state, _session_ref) = persisted_state(&state_dir, "/cwd").await;
+    let ctx = test_ctx(state.clone()).await;
     ctx.shell
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push_result(ext::stored_user_text("I ran: $ ls\n\nOutput:\nsrc"));
 
-    persist_on_exit(
-        &ctx,
-        &Selection {
-            provider: "mock".into(),
-            model: "model".into(),
-            context_length: None,
-        },
-    )
-    .await;
+    persist_on_exit(&ctx).await;
 
-    assert_eq!(state.lock().await.history.len(), 1);
-    // The store mints its own session id; discover it via the cwd list.
-    let summaries = crate::headless::StoredSession::list(Some("/cwd"), &state_dir).unwrap();
+    assert_eq!(history_texts(&ctx.state).await.len(), 1);
+    let summaries =
+        crate::storage::sessions::StoredSession::list(Some("/cwd"), &state_dir).unwrap();
     let found = summaries.first().expect("the session lists for this cwd");
-    let reloaded = crate::headless::StoredSession::load(found.id.id(), &state_dir).unwrap();
+    let reloaded =
+        crate::storage::sessions::StoredSession::load(found.id.id(), &state_dir).unwrap();
     assert!(
         reloaded
             .messages()
             .iter()
-            .any(|m| ext::message_text(m.latest()).starts_with("I ran: $ ls")),
+            .filter_map(animist::history::HistoryEntry::current)
+            .any(|m| ext::message_text(m).starts_with("I ran: $ ls")),
         "the bang-mode result reached the session file"
     );
 }
@@ -131,16 +210,8 @@ async fn bang_results_persist_on_loop_exit() {
 /// aborting the turn; the queue preserves submission order.
 #[tokio::test]
 async fn submit_mid_turn_queues_without_aborting() {
-    let state = Arc::new(Mutex::new(SessionState::linked()));
-    let ctx = LoopCtx {
-        shell: Arc::default(),
-        ..test_ctx(state)
-    };
-    let selection = Selection {
-        provider: String::new(),
-        model: String::new(),
-        context_length: None,
-    };
+    let state = Arc::new(Mutex::new(SessionState::for_tests()));
+    let ctx = test_ctx(state).await;
     // A long-running "turn": alive well past the test body.
     let mut current_turn = Some(
         tokio::spawn(async {
@@ -152,7 +223,6 @@ async fn submit_mid_turn_queues_without_aborting() {
     for text in ["first", "second"] {
         handle_send_message(
             &ctx,
-            &selection,
             &mut current_turn,
             &mut pending,
             text.to_string(),
@@ -176,7 +246,7 @@ async fn submit_mid_turn_queues_without_aborting() {
         tokio::task::yield_now().await;
     }
     current_turn = Some(aborted);
-    maybe_send_next(&ctx, &selection, &mut current_turn, &mut pending).await;
+    maybe_send_next(&ctx, &mut current_turn, &mut pending).await;
     assert_eq!(pending.len(), 1, "the first queued message was sent");
     assert_eq!(pending[0].0, "second");
     assert!(
@@ -189,19 +259,10 @@ async fn submit_mid_turn_queues_without_aborting() {
 /// a launch with no follow-up turn still reuses the choice.
 #[tokio::test]
 async fn selecting_a_model_persists_it_to_the_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
-    let session_ref = crate::id::SessionRef::generate();
-    let store = crate::headless::SessionStore::open_in(
-        state_dir.clone(),
-        session_ref.clone(),
-        "/cwd",
-        "zai/glm-5.3",
-    )
-    .unwrap();
-    let mut state = SessionState::linked();
-    state.store = Some(store);
-    let mut ctx = test_ctx(Arc::new(Mutex::new(state)));
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+    let (state, session_ref) = persisted_state(&state_dir, "/cwd").await;
+    let mut ctx = test_ctx(state).await;
     ctx.catalogs = BTreeMap::from([(
         "anthropic".to_string(),
         vec![crate::testing::model_info_with(
@@ -210,48 +271,73 @@ async fn selecting_a_model_persists_it_to_the_session() {
             None,
         )],
     )]);
-    let mut selection = Selection {
-        provider: "zai".into(),
-        model: "glm-5.3".into(),
-        context_length: None,
-    };
 
-    handle_select_model(
-        &ctx,
-        &mut selection,
-        "anthropic".into(),
-        "claude-sonnet-4".into(),
-    )
-    .await;
+    handle_select_model(&ctx, "anthropic".into(), "claude-sonnet-4".into()).await;
 
+    let selection = ctx.kit.selection.load_full();
     assert_eq!(selection.provider, "anthropic");
-    let loaded = crate::headless::StoredSession::load(session_ref.id(), &state_dir).unwrap();
-    assert_eq!(loaded.model, "anthropic/claude-sonnet-4");
+    let reloaded =
+        crate::storage::sessions::StoredSession::load(session_ref.id(), &state_dir).unwrap();
+    assert_eq!(reloaded.model, "anthropic/claude-sonnet-4");
 }
 
-/// A minimal LoopCtx for the queue/persist tests: only `state`,
-/// ``shell`, and `wake` are exercised.
-fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
+/// A minimal LoopCtx for the queue/persist tests: only `state`, `shell`,
+/// and `wake` are exercised; the kit's offline-resolvable provider lets
+/// session rebuilds succeed where tests trigger them.
+async fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
     LoopCtx {
-        catalog: Arc::new(animist::catalog::Catalog::default()),
         state,
-        files: Files::default(),
-        cancel_flag: run::cancel_channel().0,
-        subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
+        kit: SessionKit {
+            config: Arc::new(offline_config()),
+            workspace: Workspace::new(std::env::temp_dir()).unwrap(),
+            instructions_text: String::new(),
+            permissions: Arc::new(PermissionManager::new(
+                PermissionsConfig::default(),
+                std::path::PathBuf::new(),
+            )),
+            cancel_cell: Arc::new(ArcSwap::from_pointee(
+                animist::agent::Cancellation::default(),
+            )),
+            subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
+            park: Arc::new(Mutex::new(ParkSlots::default())),
+            evt_tx: mpsc::unbounded_channel().0,
+            files: Files::default(),
+            selection: Arc::new(ArcSwap::from_pointee(mock_selection())),
+            cwd: "/cwd".into(),
+            state_dir: None,
+        },
         shell: Arc::default(),
+        catalogs: BTreeMap::new(),
+        catalog: Arc::new(animist::catalog::Catalog::default()),
+        wake: Arc::new(Notify::new()),
+    }
+}
+
+/// The kit a session (re)build resolves against: offline provider config
+/// plus its catalog row, and an optional state dir to persist through.
+fn offline_kit(
+    config: Config,
+    state_dir: Option<crate::storage::StateDir>,
+    evt_tx: mpsc::UnboundedSender<AgentEvent>,
+) -> SessionKit {
+    SessionKit {
+        config: Arc::new(config),
+        workspace: Workspace::new(std::env::temp_dir()).unwrap(),
+        instructions_text: String::new(),
         permissions: Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             std::path::PathBuf::new(),
         )),
-        config: Arc::new(Config::default()),
-        workspace: Workspace::new(std::env::temp_dir()).unwrap(),
-        instructions_text: String::new(),
-        catalogs: BTreeMap::new(),
-        snapshots: crate::snapshot::SnapshotManager::new(std::env::temp_dir()),
-        state_dir: None,
+        cancel_cell: Arc::new(ArcSwap::from_pointee(
+            animist::agent::Cancellation::default(),
+        )),
+        subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
+        park: Arc::new(Mutex::new(ParkSlots::default())),
+        evt_tx,
+        files: Files::default(),
+        selection: Arc::new(ArcSwap::from_pointee(mock_selection())),
         cwd: "/cwd".into(),
-        evt_tx: mpsc::unbounded_channel().0,
-        wake: Arc::new(Notify::new()),
+        state_dir,
     }
 }
 
@@ -260,78 +346,73 @@ fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
 #[tokio::test]
 async fn thinking_changes_persist_across_clear_and_new_session() {
     use crate::thinking::ThinkingConfig;
-    let dir = tempfile::tempdir().unwrap();
-    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
-    let state = Arc::new(Mutex::new(SessionState::linked().with_store(
-        Some(&state_dir),
-        "/cwd",
-        "mock/model",
-    )));
-    let mut ctx = test_ctx(state.clone());
-    ctx.state_dir = Some(state_dir.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
     let (tx, mut rx) = mpsc::unbounded_channel();
-    ctx.evt_tx = tx;
-    let selection = Selection {
-        provider: "mock".into(),
-        model: "model".into(),
-        context_length: None,
+    let kit = offline_kit(offline_config(), Some(state_dir.clone()), tx);
+    let state = open_session(&kit, ThinkingConfig::default(), None)
+        .await
+        .expect("session builds offline");
+    let ctx = LoopCtx {
+        state: state.clone(),
+        kit,
+        shell: Arc::default(),
+        catalogs: BTreeMap::from([("mock".to_owned(), {
+            let mut info = crate::testing::model_info_with("model", None, None);
+            info.features.thinking.supported = true;
+            vec![info]
+        })]),
+        catalog: Arc::new(animist::catalog::Catalog::default()),
+        wake: Arc::new(Notify::new()),
     };
-    super::commands::handle_set_thinking(&ctx, &selection, ThinkingConfig::Budget(4096)).await;
+
+    super::commands::handle_set_thinking(&ctx, ThinkingConfig::Budget(4096)).await;
     assert_eq!(state.lock().await.thinking, ThinkingConfig::Budget(4096));
+    async fn stored(state: &Arc<Mutex<SessionState>>) -> Option<Option<ThinkingConfig>> {
+        match state.lock().await.conversation.persister() {
+            Some(persister) => Some(persister.lock().await.store().thinking()),
+            None => None,
+        }
+    }
     assert_eq!(
-        state.lock().await.store.as_ref().unwrap().thinking(),
-        Some(ThinkingConfig::Budget(4096))
+        stored(&state).await,
+        Some(Some(ThinkingConfig::Budget(4096)))
     );
     assert!(matches!(
         rx.try_recv(),
         Ok(AgentEvent::ThinkingChanged(ThinkingConfig::Budget(4096)))
     ));
+
     let mut current_turn = None;
-    super::commands::handle_clear(&ctx, &selection, &mut current_turn).await;
+    super::commands::handle_clear(&ctx, &mut current_turn).await;
     assert_eq!(state.lock().await.thinking, ThinkingConfig::Budget(4096));
     assert_eq!(
-        state.lock().await.store.as_ref().unwrap().thinking(),
-        Some(ThinkingConfig::Budget(4096))
+        stored(&state).await,
+        Some(Some(ThinkingConfig::Budget(4096)))
     );
-    super::commands::handle_reset(&ctx, &selection, &mut current_turn).await;
+    super::commands::handle_reset(&ctx, &mut current_turn).await;
     assert_eq!(state.lock().await.thinking, ThinkingConfig::Budget(4096));
     assert_eq!(
-        state.lock().await.store.as_ref().unwrap().thinking(),
-        Some(ThinkingConfig::Budget(4096))
+        stored(&state).await,
+        Some(Some(ThinkingConfig::Budget(4096)))
     );
 }
 
 #[tokio::test]
 async fn unsupported_thinking_is_reconciled_in_session_and_badge() {
     use crate::thinking::{Effort, ThinkingConfig};
-    let state = Arc::new(Mutex::new(SessionState::linked()));
-    let mut ctx = test_ctx(state.clone());
-    ctx.config = Arc::new(
-        crate::config::Config::parse(
-            r#"
-        provider "mock" {
-          kind = "openai"
-          model "plain" { supports_thinking = false }
-        }
-    "#,
-        )
-        .unwrap(),
-    );
+    let state = Arc::new(Mutex::new(SessionState::for_tests()));
+    let ctx = test_ctx(state.clone()).await;
+    let mut ctx = ctx;
     // The catalogs row as discovery + the manual-table merge produce it.
     ctx.catalogs = BTreeMap::from([("mock".to_owned(), {
-        let mut info = crate::testing::model_info_with("plain", None, None);
+        let mut info = crate::testing::model_info_with("model", None, None);
         info.features.thinking.supported = false;
         vec![info]
     })]);
-    let selection = Selection {
-        provider: "mock".into(),
-        model: "plain".into(),
-        context_length: None,
-    };
     let (tx, mut rx) = mpsc::unbounded_channel();
-    ctx.evt_tx = tx;
-    super::commands::handle_set_thinking(&ctx, &selection, ThinkingConfig::Effort(Effort::High))
-        .await;
+    ctx.kit.evt_tx = tx;
+    super::commands::handle_set_thinking(&ctx, ThinkingConfig::Effort(Effort::High)).await;
     assert_eq!(state.lock().await.thinking, ThinkingConfig::Off);
     assert!(matches!(
         rx.try_recv(),
@@ -347,56 +428,70 @@ async fn unsupported_thinking_is_reconciled_in_session_and_badge() {
 }
 
 /// W10: a persisted session is listed by `/sessions`, and loading it
-/// repopulates the history plus the conversation view.
+/// repopulates the conversation plus the transcript view.
 #[tokio::test]
 async fn loading_a_persisted_session_repopulates_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
     // Persist a session the way a committed turn does.
     let session_ref = crate::id::SessionRef::generate();
-    let mut store = crate::headless::SessionStore::open_in(
+    #[allow(unused_mut)]
+    let mut persister = crate::harness::Persister::open_in(
         state_dir.clone(),
         session_ref.clone(),
         "/cwd",
         "mock/model",
     )
+    .await
     .unwrap();
-    let history = vec![
-        ext::stored_user_text("hello there"),
-        ext::stored(ext::assistant_text("hi — how can I help?")),
-    ];
-    store.set_thinking(crate::thinking::ThinkingConfig::Budget(4096));
-    store.checkpoint_draft("unsent draft");
-    store.set_mode(true);
-    store.checkpoint_now();
-    store.record_turn(&history, "mock/model".into());
+    {
+        let history = persister.history();
+        history
+            .add_stored(ext::stored_user_text("hello there"))
+            .await;
+        history
+            .add_stored(ext::stored(ext::assistant_text("hi — how can I help?")))
+            .await;
+        persister
+            .store_mut()
+            .set_thinking(crate::thinking::ThinkingConfig::Budget(4096));
+        persister.store_mut().checkpoint_draft("unsent draft");
+        persister.store_mut().set_mode(true);
+        persister.store_mut().checkpoint_now();
+        persister.checkpoint().await.unwrap();
+    }
 
     // The record exists in the state dir and lists for this cwd.
-    let summaries = crate::headless::StoredSession::list(Some("/cwd"), &state_dir).unwrap();
+    let summaries =
+        crate::storage::sessions::StoredSession::list(Some("/cwd"), &state_dir).unwrap();
     assert!(summaries.iter().any(|s| s.id == session_ref));
-
-    // Loading it repopulates the history and emits the rebuilt transcript.
-    let state = Arc::new(Mutex::new(SessionState::default()));
-    let files = Files::default();
+    // Loading it repopulates the conversation and emits the rebuilt transcript.
     let (tx, mut rx) = mpsc::unbounded_channel();
-    load_session(
-        &state,
-        &files,
-        session_ref.as_str(),
-        Some(&state_dir),
-        "/cwd",
-        "mock/model",
-        &tx,
-    )
-    .await;
+    let kit = offline_kit(offline_config(), Some(state_dir.clone()), tx.clone());
+    let state = open_session(&kit, crate::thinking::ThinkingConfig::default(), None)
+        .await
+        .expect("session builds offline");
+    let ctx = LoopCtx {
+        state,
+        kit,
+        shell: Arc::default(),
+        catalogs: BTreeMap::new(),
+        catalog: Arc::new(animist::catalog::Catalog::default()),
+        wake: Arc::new(Notify::new()),
+    };
+    load_session(&ctx, session_ref.as_str()).await;
 
-    assert_eq!(state.lock().await.history, history);
     assert_eq!(
-        state.lock().await.thinking,
+        history_texts(&ctx.state).await,
+        vec![
+            "hello there".to_string(),
+            "hi — how can I help?".to_string()
+        ]
+    );
+    assert_eq!(
+        ctx.state.lock().await.thinking,
         crate::thinking::ThinkingConfig::Budget(4096)
     );
-    // The store rebinds to the loaded id so future turns resume it.
-    assert!(state.lock().await.store.is_some());
     let mut loaded = None;
     let mut loaded_draft = String::new();
     let mut loaded_mode = None;
@@ -434,32 +529,48 @@ async fn loading_a_persisted_session_repopulates_history() {
 /// loaded; nothing persisted keeps the fresh session untouched.
 #[tokio::test]
 async fn resume_latest_picks_the_newest_session_for_cwd() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
-    let persist = |text: &str| {
-        let session_ref = crate::id::SessionRef::generate();
-        let mut store = crate::headless::SessionStore::open_in(
-            state_dir.clone(),
-            session_ref,
-            "/cwd",
-            "mock/model",
-        )
-        .unwrap();
-        store.record_turn(&[ext::stored_user_text(text)], "mock/model".into());
-    };
-    persist("older session");
-    std::thread::sleep(std::time::Duration::from_millis(1100)); // distinct updated_at seconds
-    persist("newer session");
-
-    let state = Arc::new(Mutex::new(SessionState::default()));
-    let files = Files::default();
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
     let (tx, mut rx) = mpsc::unbounded_channel();
-    resume_latest(&state, &files, Some(&state_dir), "/cwd", "mock/model", &tx).await;
+    let kit = offline_kit(offline_config(), Some(state_dir.clone()), tx);
+    let state = open_session(&kit, crate::thinking::ThinkingConfig::default(), None)
+        .await
+        .expect("session builds offline");
+    let ctx = LoopCtx {
+        state,
+        kit,
+        shell: Arc::default(),
+        catalogs: BTreeMap::new(),
+        catalog: Arc::new(animist::catalog::Catalog::default()),
+        wake: Arc::new(Notify::new()),
+    };
+    // The loop's own session lands first so the fixtures below are the
+    // newest for this cwd (resume-latest picks by updated_at).
+    let persist = |text: &str| {
+        let state_dir = state_dir.clone();
+        let text = text.to_owned();
+        async move {
+            let session_ref = crate::id::SessionRef::generate();
+            let mut persister =
+                crate::harness::Persister::open_in(state_dir, session_ref, "/cwd", "mock/model")
+                    .await
+                    .unwrap();
+            persister
+                .history()
+                .add_stored(ext::stored_user_text(&text))
+                .await;
+            persister.checkpoint().await.unwrap();
+        }
+    };
+    persist("older session").await;
+    std::thread::sleep(std::time::Duration::from_millis(1100)); // distinct updated_at seconds
+    persist("newer session").await;
 
-    assert_eq!(state.lock().await.history.len(), 1);
+    resume_latest(&ctx).await;
+
     assert_eq!(
-        ext::message_text(&state.lock().await.history[0]),
-        "newer session"
+        history_texts(&ctx.state).await,
+        vec!["newer session".to_string()]
     );
     let mut saw_load = false;
     while let Ok(event) = rx.try_recv() {
@@ -469,21 +580,29 @@ async fn resume_latest_picks_the_newest_session_for_cwd() {
     }
     assert!(saw_load, "the resumed session announces a SessionLoaded");
 
-    // No prior session in this cwd: a notice, not a crash, and the
-    // current session history stays put.
-    let state = Arc::new(Mutex::new(SessionState::default()));
-    state.lock().await.history = vec![ext::stored_user_text("keep me")];
+    // No prior session in an untouched cwd: a notice, not a crash, and the
+    // current conversation stays put. The kit reuses the same state (no new
+    // session is built, which would itself become that cwd's latest).
     let (tx, mut rx) = mpsc::unbounded_channel();
-    resume_latest(
-        &state,
-        &files,
-        Some(&state_dir),
-        "/other-cwd",
-        "mock/model",
-        &tx,
-    )
-    .await;
-    assert_eq!(state.lock().await.history.len(), 1);
+    let ctx = LoopCtx {
+        state: ctx.state.clone(),
+        kit: {
+            let mut kit = ctx.kit.clone();
+            kit.cwd = "/other-cwd".into();
+            kit.evt_tx = tx;
+            kit
+        },
+        shell: Arc::default(),
+        catalogs: BTreeMap::new(),
+        catalog: Arc::new(animist::catalog::Catalog::default()),
+        wake: Arc::new(Notify::new()),
+    };
+    resume_latest(&ctx).await;
+    assert_eq!(
+        history_texts(&ctx.state).await,
+        vec!["newer session".to_string()],
+        "the current conversation stays put"
+    );
     assert!(
         matches!(
             rx.try_recv(),
@@ -519,23 +638,30 @@ fn transcript_skips_tool_blocks() {
 /// An unparseable id keeps the current session and warns.
 #[tokio::test]
 async fn load_with_unknown_id_keeps_the_session_and_warns() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
-    let state = Arc::new(Mutex::new(SessionState::default()));
-    state.lock().await.history = vec![ext::stored_user_text("keep me")];
-    let files = Files::default();
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
     let (tx, mut rx) = mpsc::unbounded_channel();
-    load_session(
-        &state,
-        &files,
-        "bogus",
-        Some(&state_dir),
-        "/cwd",
-        "mock/model",
-        &tx,
-    )
-    .await;
-    assert_eq!(state.lock().await.history.len(), 1);
+    let kit = offline_kit(offline_config(), Some(state_dir), tx);
+    let state = open_session(&kit, crate::thinking::ThinkingConfig::default(), None)
+        .await
+        .expect("session builds offline");
+    state
+        .lock()
+        .await
+        .conversation
+        .history()
+        .add_stored(ext::stored_user_text("keep me"))
+        .await;
+    let ctx = LoopCtx {
+        state: state.clone(),
+        kit,
+        shell: Arc::default(),
+        catalogs: BTreeMap::new(),
+        catalog: Arc::new(animist::catalog::Catalog::default()),
+        wake: Arc::new(Notify::new()),
+    };
+    load_session(&ctx, "bogus").await;
+    assert_eq!(history_texts(&state).await, vec!["keep me".to_string()]);
     let event = rx.try_recv().expect("a warning notice");
     assert!(
         matches!(event, AgentEvent::Notice { tone: Tone::Warning, ref text }
@@ -550,22 +676,24 @@ async fn load_with_unknown_id_keeps_the_session_and_warns() {
 #[tokio::test]
 async fn clear_and_reset_zero_the_context_counter() {
     for clear in [true, false] {
-        let state = Arc::new(Mutex::new(SessionState::linked()));
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let kit = offline_kit(offline_config(), None, tx);
+        let state = open_session(&kit, crate::thinking::ThinkingConfig::default(), None)
+            .await
+            .expect("session builds offline");
         let ctx = LoopCtx {
-            evt_tx: tx,
-            ..test_ctx(state)
-        };
-        let selection = Selection {
-            provider: "mock".into(),
-            model: "model".into(),
-            context_length: None,
+            state,
+            kit,
+            shell: Arc::default(),
+            catalogs: BTreeMap::new(),
+            catalog: Arc::new(animist::catalog::Catalog::default()),
+            wake: Arc::new(Notify::new()),
         };
         let mut current_turn = None;
         if clear {
-            handle_clear(&ctx, &selection, &mut current_turn).await;
+            handle_clear(&ctx, &mut current_turn).await;
         } else {
-            handle_reset(&ctx, &selection, &mut current_turn).await;
+            handle_reset(&ctx, &mut current_turn).await;
         }
 
         let mut zeroed = false;
@@ -586,17 +714,23 @@ async fn clear_and_reset_zero_the_context_counter() {
 /// store, or the old plan lingers until the next `todo_write` overwrites it.
 #[tokio::test]
 async fn clear_and_reset_drop_the_previous_todo_plan() {
-    use rig_core::tool::PortableTool;
-
     for clear in [true, false] {
-        let state = Arc::new(Mutex::new(SessionState::linked()));
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let kit = offline_kit(offline_config(), None, tx);
+        let state = open_session(&kit, crate::thinking::ThinkingConfig::default(), None)
+            .await
+            .expect("session builds offline");
         let ctx = LoopCtx {
-            evt_tx: tx,
-            ..test_ctx(state)
+            state,
+            kit,
+            shell: Arc::default(),
+            catalogs: BTreeMap::new(),
+            catalog: Arc::new(animist::catalog::Catalog::default()),
+            wake: Arc::new(Notify::new()),
         };
         // Seed the todo store the way a turn's `todo_write` call would.
-        crate::tools::TodoWrite(ctx.workspace.clone())
+        use rig_core::tool::PortableTool;
+        crate::tools::TodoWrite(ctx.kit.workspace.clone())
             .call(crate::tools::TodoWriteArgs {
                 todos: vec![crate::tools::Todo {
                     id: "T1".into(),
@@ -608,18 +742,13 @@ async fn clear_and_reset_drop_the_previous_todo_plan() {
             })
             .await
             .unwrap();
-        assert_eq!(ctx.workspace.todos().len(), 1);
+        assert_eq!(ctx.kit.workspace.todos().len(), 1);
 
-        let selection = Selection {
-            provider: "mock".into(),
-            model: "model".into(),
-            context_length: None,
-        };
         let mut current_turn = None;
         if clear {
-            handle_clear(&ctx, &selection, &mut current_turn).await;
+            handle_clear(&ctx, &mut current_turn).await;
         } else {
-            handle_reset(&ctx, &selection, &mut current_turn).await;
+            handle_reset(&ctx, &mut current_turn).await;
         }
 
         let mut plan_cleared = false;
@@ -633,7 +762,7 @@ async fn clear_and_reset_drop_the_previous_todo_plan() {
             "clear={clear}: the reset must clear the plan panel"
         );
         assert!(
-            ctx.workspace.todos().is_empty(),
+            ctx.kit.workspace.todos().is_empty(),
             "clear={clear}: the reset must clear the todo store"
         );
     }
@@ -643,82 +772,89 @@ async fn clear_and_reset_drop_the_previous_todo_plan() {
 /// so a later load (resume) restores it — mirroring the draft checkpoint.
 #[tokio::test]
 async fn set_mode_checkpoints_the_session_meta() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
-    let state = Arc::new(Mutex::new(SessionState::linked().with_store(
-        Some(&state_dir),
-        "/cwd",
-        "mock/model",
-    )));
-    let ctx = test_ctx(state);
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+    let (state, _session_ref) = persisted_state(&state_dir, "/cwd").await;
+    let ctx = test_ctx(state).await;
 
     handle_set_mode(&ctx, true).await;
-    let id = crate::headless::StoredSession::list(Some("/cwd"), &state_dir)
+    let id = crate::storage::sessions::StoredSession::list(Some("/cwd"), &state_dir)
         .unwrap()
         .pop()
         .expect("set_mode wrote a session record")
         .id
         .id();
-    let loaded = crate::headless::StoredSession::load(id, &state_dir).unwrap();
+    let loaded = crate::storage::sessions::StoredSession::load(id, &state_dir).unwrap();
     assert_eq!(loaded.meta.mode.as_deref(), Some("plan"));
 
     // Flipping back writes build, not a cleared field.
     handle_set_mode(&ctx, false).await;
-    let loaded = crate::headless::StoredSession::load(id, &state_dir).unwrap();
+    let loaded = crate::storage::sessions::StoredSession::load(id, &state_dir).unwrap();
     assert_eq!(loaded.meta.mode.as_deref(), Some("build"));
 }
 
-/// The interrupt abort fallback must not lose the turn: the prompt staged
-/// at turn start stays in the session, and the aborted turn is closed with
-/// the same cancel marker a cooperative cancel would have added — exactly
-/// once.
+/// The interrupt abort fallback must not lose the turn: whatever the run
+/// committed stays in the conversation, and the aborted turn is closed
+/// with the same cancel marker a cooperative cancel would have added —
+/// exactly once.
 #[tokio::test(start_paused = true)]
-async fn interrupt_grace_abort_keeps_the_staged_prompt() {
-    let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::linked()));
-    let ctx = test_ctx(state.clone());
-    // A turn stuck on an await that never observes the cancel flag.
+async fn interrupt_grace_abort_keeps_the_committed_turn() {
+    let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::for_tests()));
+    let ctx = test_ctx(state.clone()).await;
+    // A turn stuck on an await that never observes cancellation.
     let stuck = tokio::spawn(std::future::pending::<()>());
     let current_turn = Some(stuck.abort_handle());
-    // The prompt `run_turn` stages before the run owns it.
+    // What the aborted run had already committed.
     state
         .lock()
         .await
-        .history
-        .push(crate::run::prompt_message("keep me", &[]));
+        .conversation
+        .history()
+        .add_stored(ext::stored_user_text("keep me"))
+        .await;
 
     handle_interrupt(&ctx, &current_turn);
     // Paused time jumps to the grace deadline; the fallback aborts the
-    // stuck task and salvages the session.
+    // stuck task and closes the conversation.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     assert!(stuck.is_finished());
-    let history = state.lock().await.history.clone();
-    assert_eq!(history.len(), 2, "prompt + cancel marker, nothing dropped");
-    assert_eq!(ext::message_text(&history[0]), "keep me");
-    assert!(marker::is(&history[1], marker::CANCEL));
-    assert_eq!(ext::message_text(&history[1]), crate::run::CANCEL_MARKER);
+    let texts = history_texts(&state).await;
+    assert_eq!(texts.len(), 2, "prompt + cancel marker, nothing dropped");
+    assert_eq!(texts[0], "keep me");
+    assert_eq!(texts[1], crate::harness::driver::CANCEL_MARKER);
 
     // Interrupting again on the already-closed turn adds no second marker.
     handle_interrupt(&ctx, &current_turn);
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    assert_eq!(state.lock().await.history.len(), 2);
+    assert_eq!(history_texts(&state).await.len(), 2);
 }
 
 /// `close_aborted_turn` is idempotent at the history tail: an interrupted
 /// session never accumulates marker spam.
 #[tokio::test]
 async fn close_aborted_turn_appends_one_marker() {
-    let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::linked()));
+    let state: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::for_tests()));
     state
         .lock()
         .await
-        .history
-        .push(crate::run::prompt_message("q", &[]));
+        .conversation
+        .history()
+        .add_stored(ext::stored_user_text("q"))
+        .await;
     close_aborted_turn(&state).await;
     close_aborted_turn(&state).await;
-    let history = state.lock().await.history.clone();
-    assert_eq!(history.len(), 2);
-    assert!(marker::is(&history[1], marker::CANCEL));
-    assert_eq!(ext::message_text(&history[1]), crate::run::CANCEL_MARKER);
+    let conversation = state.lock().await.conversation.clone();
+    let all = conversation.history().snapshot().await.entries().to_vec();
+    assert_eq!(all.len(), 2);
+    let last = all
+        .last()
+        .and_then(animist::history::HistoryEntry::current)
+        .unwrap();
+    assert!(marker::is(last, marker::CANCEL));
+    assert_eq!(
+        ext::message_text(last),
+        crate::harness::driver::CANCEL_MARKER
+    );
 }
 
 /// A one-shot local SSE server echoing OpenAI chat.completion chunks (the
@@ -793,44 +929,37 @@ async fn run_turn_sends_the_resolved_preamble_exactly_once() {
                \"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\
                \"completion_tokens\":1,\"total_tokens\":2}}\n\n\
                data: [DONE]\n\n";
-    unsafe { std::env::set_var("CRAFT_TEST_KEY", "test-key") };
     let (base, server) = capture_server(sse);
     let mut config = Config::parse(&format!(
         "provider \"test\" {{\n  kind = \"openai-compatible\"\n  base_url = \"{base}/v1\"\n  \
-         api_key_env = \"CRAFT_TEST_KEY\"\n  model \"manual\" {{ name = \"Manual model\" }}\n}}",
+         model \"manual\" {{ name = \"Manual model\" }}\n}}",
     ))
     .unwrap();
-    config
-        .providers
-        .get_mut("test")
-        .unwrap()
-        .set_discover_models(false);
     // The resolved preamble, as `main`'s `apply_prompt_overrides` leaves it.
     config.agent.preamble = "BASELINE-PREAMBLE\n\nMARKER".into();
 
     let dir = tempfile::tempdir().unwrap();
     let (tx, _rx) = mpsc::unbounded_channel();
-    let ctx = super::turn::TurnCtx {
-        config: Arc::new(config),
-        workspace: Workspace::new(dir.path()).unwrap(),
-        instructions_text: String::new(),
-        selection: Selection {
-            provider: "test".into(),
-            model: "manual".into(),
-            context_length: None,
+    let mut kit = offline_kit(config, None, tx);
+    kit.selection = Arc::new(ArcSwap::from_pointee(Selection {
+        provider: "test".into(),
+        model: "manual".into(),
+        context_length: None,
+    }));
+    kit.cwd = dir.path().display().to_string();
+    let state = open_session(&kit, crate::thinking::ThinkingConfig::default(), None)
+        .await
+        .expect("session builds against the capture server");
+    run_turn(
+        TurnCtx {
+            kit,
+            state,
+            mode: crate::run::AgentMode::Build,
         },
-        state: Arc::new(Mutex::new(SessionState::linked())),
-        files: Files::default(),
-        cancel: run::cancel_channel().0.token(),
-        subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
-        tx,
-        permissions: Arc::new(PermissionManager::new(
-            PermissionsConfig::default(),
-            std::path::PathBuf::new(),
-        )),
-        mode: crate::run::AgentMode::Build,
-    };
-    super::turn::run_turn(ctx, "hi".into(), Vec::new()).await;
+        "hi".into(),
+        Vec::new(),
+    )
+    .await;
 
     let captured = server.join().unwrap();
     let (_, body) = captured.split_once("\r\n\r\n").unwrap();

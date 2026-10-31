@@ -148,10 +148,12 @@ impl SessionStore {
         self.session.messages()
     }
 
-    /// Persist the post-turn history and the model that served it, deriving
-    /// the title from the first user message when it is still the default.
-    /// The whole-history rewrite path for surfaces still on the old loop;
-    /// the change-feed persister replaces it as the surfaces cut over.
+    /// Persist a whole-history snapshot and the model that served it,
+    /// deriving the title from the first user message when it is still the
+    /// default. Production persistence rides the change feed
+    /// ([`crate::harness::Persister`]); this whole-history rewrite survives
+    /// as the test-fixture writer.
+    #[cfg(test)]
     pub fn record_turn(&mut self, messages: &[crate::history::StoredMessage], model_spec: String) {
         self.session
             .replace_messages(crate::history::ext::entries(messages.to_vec()));

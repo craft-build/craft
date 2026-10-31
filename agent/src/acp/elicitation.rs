@@ -191,7 +191,9 @@ pub(super) fn answer_from_response(raw: &serde_json::Value) -> QuestionAnswer {
 pub(super) struct ElicitationAsker {
     pub(super) connection: ConnectionTo<AcpClient>,
     pub(super) session_id: SessionId,
-    pub(super) cancel: run::CancelToken,
+    /// The session's per-turn cancellation cell; each ask races whatever
+    /// turn is current.
+    pub(super) cancel: std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
     pub(super) caps: ClientCapabilities,
 }
 
@@ -220,11 +222,10 @@ impl ElicitationAsker {
             return dismissed;
         };
         let sent = self.connection.send_request(RawElicitationRequest(request));
-        let mut cancel_rx = self.cancel.subscribe();
+        let cancel = (*self.cancel.load_full()).clone();
         tokio::select! {
             biased;
-            changed = cancel_rx.changed() => {
-                let _ = changed;
+            () = cancel.cancelled() => {
                 dismissed
             }
             response = tokio::time::timeout(ASK_TIMEOUT, sent.block_task()) => match response {

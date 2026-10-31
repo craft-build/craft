@@ -1,13 +1,12 @@
-//! Cost/billing accounting (`served_spec`, the priced `by_model` ledger)
-//! and the output-token clamp.
+//! Cost/billing accounting (the priced `by_model` ledger on the terminal
+//! Done) and the output-token clamp.
 
 use super::*;
-use crate::run::*;
-use std::collections::HashMap;
 
 /// The clamp mirrors the reference `clamped_output_tokens` table.
 #[test]
 fn clamps_output_tokens_to_the_remaining_window() {
+    use crate::run::{MIN_OUTPUT_TOKENS, clamped_max_tokens};
     const WINDOW: u32 = 262_144;
     let big_cap = 100_000u64;
     let small_cap = 2_048u64;
@@ -41,130 +40,89 @@ fn clamps_output_tokens_to_the_remaining_window() {
 }
 
 #[tokio::test]
-async fn done_by_model_carries_priced_and_unpriced_models() {
-    async fn collect_by_model(spec: &str) -> HashMap<String, crate::usage::StoredTokenUsage> {
-        let (model, _provider) = stream_turns(vec![crate::testing::text_turn("hi")]);
-        let tools = crate::tools::Workspace::new(std::env::temp_dir())
-            .unwrap()
-            .register();
-        let (_, cancel) = cancel_channel();
-        let mut history = Vec::new();
-        let params = RunParams {
-            model_spec: Some(spec.into()),
-            ..RunParams::default()
-        };
-        let by_model = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let sink = std::sync::Arc::clone(&by_model);
-        run(
-            &model,
-            &params,
-            &tools,
-            &mut history,
-            "hello",
-            &cancel,
-            &|event| {
-                if let Event::Done { by_model, .. } = event {
-                    *sink.lock().unwrap() = Some(by_model);
-                }
-            },
-        )
-        .await;
-        sink.lock().unwrap().take().unwrap()
-    }
-
-    let priced = collect_by_model("anthropic/claude-sonnet-5").await;
-    let usage = priced
-        .get("anthropic/claude-sonnet-5")
-        .expect("priced model recorded");
-    assert!(usage.cost.is_some_and(|c| c > 0.0));
-    assert!(usage.input + usage.output > 0);
-
-    let unpriced = collect_by_model("mock/no-such-model").await;
-    let usage = unpriced
-        .get("mock/no-such-model")
-        .expect("unpriced model still counts tokens");
+async fn done_by_model_counts_the_served_model_without_a_price() {
+    // The scripted provider's spec resolves to no priced model, so the
+    // ledger counts its tokens and shows no cost — never "$0.000".
+    let provider = script(vec![crate::testing::text_turn("hi")]);
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, mut stream) = workspace_conversation(&dir, &provider).await;
+    let outcome = run_turn(&conversation, "hello").await;
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let done = events_until_done(&mut stream)
+        .await
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Craft(crate::harness::CraftEvent::Done { by_model, cost, .. }) => {
+                Some((by_model, cost))
+            }
+            _ => None,
+        })
+        .expect("a terminal Done");
+    let (by_model, cost) = done;
+    assert_eq!(cost, None, "an unpriced run shows no cost");
+    let usage = by_model
+        .get(&conversation.model_spec())
+        .expect("the served model is recorded");
     assert_eq!(usage.cost, None);
-    assert!(usage.input + usage.output > 0);
-}
-
-#[cfg(test)]
-mod served_spec_tests {
-    use crate::run::served_spec;
-
-    #[test]
-    fn bare_ids_borrow_the_primary_provider_full_specs_do_not() {
-        let primary = "anthropic/claude-sonnet-5";
-        assert_eq!(
-            served_spec(Some(primary), Some("claude-opus-5".to_owned()), None),
-            Some("anthropic/claude-opus-5".into())
-        );
-        assert_eq!(
-            served_spec(Some(primary), Some("openai/gpt-5.6-sol".to_owned()), None),
-            Some("openai/gpt-5.6-sol".into())
-        );
-        assert_eq!(
-            served_spec(None, Some("claude-opus-5".to_owned()), None),
-            None
-        );
-        assert_eq!(
-            served_spec(Some(primary), None, None),
-            Some("anthropic/claude-sonnet-5".into())
-        );
-    }
+    assert!(usage.input + usage.output > 0, "tokens still counted");
 }
 
 /// The output-cap clamp runs on the overhead-inclusive estimate: with the
-/// tool schemas riding along, the window must reserve room for them, not
-/// just the messages.
+/// tool schemas and system prompt riding along, the window must reserve
+/// room for them, not just the messages.
 #[tokio::test]
 async fn output_cap_clamp_counts_request_overhead() {
-    let (model, provider) = stream_turns(vec![crate::testing::text_turn("ok")]);
+    let provider = script(vec![crate::testing::text_turn("ok")]);
     let dir = tempfile::tempdir().unwrap();
-    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
-    let overhead =
-        crate::compaction::RequestOverhead::from_parts(None, &tools.definitions()).tokens();
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let dispatch = workspace.register();
+    let cwd = dir.path().display().to_string();
+    // The system bytes the request layer will send, mirrored from its own
+    // construction so the overhead below is the one the clamp sees.
+    let system = crate::prompt::build_system_prompt(
+        &crate::prompt::Vars::new()
+            .set("{cwd}", cwd.as_str())
+            .set("{platform}", std::env::consts::OS)
+            .set("{date}", crate::prompt::today_utc()),
+        "",
+        &crate::prompt::ResolvedSlots::default(),
+        None,
+    );
+    let overhead = crate::compaction::RequestOverhead::from_parts(
+        Some(system.as_str()),
+        &dispatch.definitions(),
+    )
+    .tokens();
     assert!(overhead > 0, "the builtin tool table carries schemas");
-    let shared: SharedCompactionState = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::compaction::CompactionState::default(),
-    ));
-    let params = |context_length: Option<u32>| {
-        RunParams {
-            max_tokens: Some(100_000),
-            model_spec: Some("mock/x".into()),
-            ..RunParams::default()
-        }
-        .with_compaction(CompactionCtx {
-            state: shared.clone(),
-            stages: Vec::new(),
-            buffer: crate::config::CompactionBuffer::Percent(20),
-            context_length,
-        })
-    };
-    let (_, cancel) = cancel_channel();
     // The prompt is the only history: its estimate is the message-structure
     // cost alone, far under the overhead.
     let prompt_tokens =
         crate::compaction::estimate_tokens(&[crate::history::ext::stored_user_text("hi")]);
     let margin: u64 = 50_000;
     let window = (prompt_tokens + overhead + margin) as u32;
-    // A history-only estimate would leave margin + overhead of window;
-    // counting the overhead must clamp to exactly `margin`.
-    let mut history = Vec::new();
-    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sink = std::sync::Arc::clone(&events);
-    run(
-        &model,
-        &params(Some(window)),
-        &tools,
-        &mut history,
-        "hi",
-        &cancel,
-        &|event| sink.lock().unwrap().push(event),
+    let (sink, _stream) = EventSink::new();
+    let handle = ModelHandle::scripted(crate::testing::scripted_model(
+        &provider,
+        crate::testing::model_info("mock/x", window, 8_192, false, false),
+    ));
+    let conversation = ConversationBuilder::new(
+        &Config::parse("agent { max_tokens = 100000 }").unwrap(),
+        &cwd,
+        "",
+        handle,
+        dispatch,
+        sink,
     )
-    .await;
-    assert_eq!(provider.requests().len(), 1);
+    .build()
+    .unwrap();
+
+    let outcome = run_turn(&conversation, "hi").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
     assert_eq!(
-        provider.requests()[0].options.max_output_tokens,
+        requests[0].options.max_output_tokens,
         Some(margin as u32),
         "the clamp reserves the window for history + request overhead"
     );
@@ -174,51 +132,43 @@ async fn output_cap_clamp_counts_request_overhead() {
 /// never triggers (pre-change behavior preserved).
 #[tokio::test]
 async fn unknown_window_leaves_the_cap_and_skips_compaction() {
-    let (model, provider) = stream_turns(vec![crate::testing::text_turn("ok")]);
+    let provider = script(vec![crate::testing::text_turn("ok")]);
     let dir = tempfile::tempdir().unwrap();
-    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
-    let shared: SharedCompactionState = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::compaction::CompactionState::default(),
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let (sink, stream) = EventSink::new();
+    let handle = ModelHandle::scripted(crate::testing::scripted_model(
+        &provider,
+        crate::testing::model_info_with("mock/x", None, None),
     ));
-    let params = RunParams {
-        max_tokens: Some(100_000),
-        model_spec: Some("mock/x".into()),
-        ..RunParams::default()
-    }
-    .with_compaction(CompactionCtx {
-        state: shared.clone(),
-        stages: vec![crate::config::CompactionConfig {
-            kind: crate::config::CompactionKind::Vcc,
-            context: 0.1,
-        }],
-        buffer: crate::config::CompactionBuffer::Percent(20),
-        context_length: None,
-    });
-    let (_, cancel) = cancel_channel();
-    let mut history = Vec::new();
-    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sink = std::sync::Arc::clone(&events);
-    run(
-        &model,
-        &params,
-        &tools,
-        &mut history,
-        "hi",
-        &cancel,
-        &|event| sink.lock().unwrap().push(event),
+    let conversation = ConversationBuilder::new(
+        &Config::parse("agent { max_tokens = 100000 }").unwrap(),
+        &dir.path().display().to_string(),
+        "",
+        handle,
+        workspace.register(),
+        sink,
     )
-    .await;
+    .build()
+    .unwrap();
+    let mut stream = stream;
+
+    let outcome = run_turn(&conversation, "hi").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let requests = provider.requests();
     assert_eq!(
-        provider.requests()[0].options.max_output_tokens,
+        requests[0].options.max_output_tokens,
         Some(100_000),
         "no window: the configured cap is untouched"
     );
     assert!(
-        !events
-            .lock()
-            .unwrap()
+        !events_until_done(&mut stream)
+            .await
             .iter()
-            .any(|e| matches!(e, Event::AutoCompacting { .. })),
+            .any(|event| matches!(
+                event,
+                Event::Craft(crate::harness::CraftEvent::AutoCompacting { .. })
+            )),
         "no window: compaction never triggers"
     );
 }

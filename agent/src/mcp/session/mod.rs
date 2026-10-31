@@ -138,7 +138,7 @@ pub trait McpSession: Send + Sync {
         &'a self,
         name: &'a str,
         args: &'a Value,
-        cancel: &'a crate::run::CancelToken,
+        cancel: &'a animist::agent::Cancellation,
     ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
         race_call_cancel(self, name, args, cancel)
     }
@@ -192,13 +192,13 @@ pub(crate) fn race_call_cancel<'a, S: McpSession + ?Sized>(
     session: &'a S,
     name: &'a str,
     args: &'a Value,
-    cancel: &'a crate::run::CancelToken,
+    cancel: &'a animist::agent::Cancellation,
 ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
     Box::pin(async move {
         let call = session.call_tool(name, args);
         tokio::select! {
             result = call => result,
-            _ = cancel.wait() => Err(McpError::Cancelled {
+            _ = cancel.cancelled() => Err(McpError::Cancelled {
                 server: session.server_name().to_string(),
             }),
         }
@@ -240,7 +240,7 @@ mod tests {
                 &'a self,
                 name: &'a str,
                 args: &'a Value,
-                cancel: &'a crate::run::CancelToken,
+                cancel: &'a animist::agent::Cancellation,
             ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
                 race_call_cancel(self, name, args, cancel)
             }
@@ -260,14 +260,14 @@ mod tests {
         }
 
         let session = HangingSession;
-        let (flag, token) = crate::run::cancel_channel();
+        let cancel = animist::agent::Cancellation::default();
         let args = serde_json::json!({});
-        let call = session.call_tool_cancellable("tool", &args, &token);
+        let call = session.call_tool_cancellable("tool", &args, &cancel);
         tokio::pin!(call);
         // Give the call a beat to park on the (never-answering) session,
         // then cancel the turn.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        flag.set(true);
+        cancel.cancel();
         let result = tokio::time::timeout(Duration::from_secs(2), &mut call)
             .await
             .expect("cancelled call resolves promptly");

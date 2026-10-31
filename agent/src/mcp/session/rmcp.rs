@@ -811,7 +811,7 @@ impl McpSession for RmcpSession {
         &'a self,
         name: &'a str,
         args: &'a Value,
-        cancel: &'a crate::run::CancelToken,
+        cancel: &'a animist::agent::Cancellation,
     ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
         Box::pin(async move {
             if self.is_dead() {
@@ -856,7 +856,7 @@ impl McpSession for RmcpSession {
                         }),
                     }
                 }
-                _ = cancel.wait() => {
+                _ = cancel.cancelled() => {
                     let _ = peer
                         .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
                             Some(id),
@@ -1310,13 +1310,13 @@ for line in sys.stdin:
             .await
             .expect("connect mock server");
 
-        let (flag, token) = crate::run::cancel_channel();
+        let cancel = animist::agent::Cancellation::default();
         let args = serde_json::json!({});
-        let call = session.call_tool_cancellable("hang", &args, &token);
+        let call = session.call_tool_cancellable("hang", &args, &cancel);
         tokio::pin!(call);
         // Let the request reach the server before cancelling the turn.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        flag.set(true);
+        cancel.cancel();
         let result = tokio::time::timeout(Duration::from_secs(5), &mut call)
             .await
             .expect("cancelled call resolves promptly");

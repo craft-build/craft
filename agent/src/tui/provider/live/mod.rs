@@ -1,12 +1,12 @@
 //! CraftProvider: the TUI's real backend, driving the shared run loop the
 //! ACP server uses.
 //!
-//! Turn semantics mirror `acp::run_turn`: a per-turn provider rebuild, the
-//! configured compaction stages ahead of the model call, cancellation through
-//! the run loop's `CancelToken`, and history committed only on a successful
-//! run. Edit-family tools are gated behind the UI's approve/reject seam via
-//! the dispatch `BeforeExecute` hook: no workspace mutation runs without an
-//! explicit user decision.
+//! The session owns one long-lived [`Conversation`] built at loop start
+//! (and rebuilt on `/sessions` load): a session-long forwarder task maps
+//! its event stream into TUI [`AgentEvent`]s, and each turn drives
+//! `harness::run_turn` on it. Edit-family tools are gated behind the UI's
+//! approve/reject seam via the policy layer's approval hook: no workspace
+//! mutation runs without an explicit user decision.
 
 mod approval;
 mod bootstrap;
@@ -23,15 +23,19 @@ mod tests;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, Notify, mpsc};
+use arc_swap::ArcSwap;
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 
 use crate::config::Config;
-use crate::permissions::PermissionManager;
+use crate::harness::Conversation;
+use crate::permissions::{PermissionAnswer, PermissionManager};
 use crate::run;
-use crate::tools::Workspace;
+use crate::tools::{QuestionAnswer, Workspace};
+use animist::agent::Cancellation;
 use animist::provider::ModelInfo;
 
 use bootstrap::catalog_choices;
+use turn::RunSignals;
 use usage_recorder::UsageLedger;
 
 use super::cards::Files;
@@ -46,76 +50,90 @@ pub(super) fn report(error: crate::error::Error) -> String {
     snafu::Report::from_error(error).to_string()
 }
 
-/// Session shared between the command loop and the (single) running turn.
+/// Tool-call parking slots shared by the approval/question gates and the
+/// command loop that answers them. Split from the session state so the
+/// gates can be built with a conversation before the state exists.
 #[derive(Default)]
-struct SessionState {
-    thinking: crate::thinking::ThinkingConfig,
-    history: Vec<crate::history::StoredMessage>,
-    /// Shared with the run loop for in-run overflow recovery.
-    compaction: crate::run::SharedCompactionState,
-    /// Session-wide tool dedup cache, shared by the dispatcher and cleared
-    /// by the compaction engine.
-    dedup: crate::run::SharedDedupCache,
-    /// Session-wide guardrail counters, shared by the dispatcher and reset
-    /// by the compaction engine.
-    guardrails: crate::run::SharedGuardrails,
+pub(super) struct ParkSlots {
     /// Edit-family call awaiting the user's decision, by tool-call id.
-    pending_approval: Option<(
-        String,
-        tokio::sync::oneshot::Sender<crate::permissions::PermissionAnswer>,
-    )>,
+    pub(super) pending_approval: Option<(String, oneshot::Sender<PermissionAnswer>)>,
     /// Parked `question` tool call, by question-request id (A.5).
-    pending_question: Option<(
-        String,
-        tokio::sync::oneshot::Sender<crate::tools::QuestionAnswer>,
-    )>,
-    /// Per-model usage totals and the cost ledger they feed.
-    usage: UsageLedger,
-    /// Persisted session (history + usage), the same store headless uses.
-    /// `None` when the state dir is unavailable: the run is not persisted.
-    store: Option<crate::headless::SessionStore>,
+    pub(super) pending_question: Option<(String, oneshot::Sender<QuestionAnswer>)>,
 }
 
+/// The gates' handle on the parking slots.
+pub(super) type SharedPark = Arc<Mutex<ParkSlots>>;
+
+/// Session shared between the command loop and the (single) running turn.
+/// The conversation (history, model, tools, layers, persister) lives here;
+/// everything else the surfaces need is reached through it.
+struct SessionState {
+    thinking: crate::thinking::ThinkingConfig,
+    conversation: Conversation,
+    /// Turn-level sync with the session forwarder: the streamed-reply
+    /// flags and the terminal-Done generation each run settles on.
+    signals: RunSignals,
+    /// Per-model usage totals and the cost ledger they feed.
+    usage: UsageLedger,
+}
+
+#[cfg(test)]
 impl SessionState {
-    /// Link the compaction state to this session's dedup cache so a
-    /// compaction run clears it. Persistence is opt-in via
-    /// [`Self::with_store`] so tests never touch the state dir.
-    fn linked() -> Self {
-        let dedup = crate::run::shared_cache();
-        let guardrails = crate::run::shared_guardrails();
+    /// A scripted-conversation session for tests that exercise the loop
+    /// seams without a provider: no persister, empty history, no ledger.
+    pub(super) fn for_tests() -> Self {
+        let workspace = Workspace::new(std::env::temp_dir()).expect("workspace");
+        let (sink, _stream) = crate::harness::EventSink::new();
+        let info = crate::testing::model_info_with("main", Some(128_000), None);
+        let model = crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+            &crate::testing::ScriptedProvider::new(vec![info.clone()]),
+            info,
+        ));
+        let conversation = crate::harness::ConversationBuilder::new(
+            &crate::config::Config::parse("").expect("default config"),
+            &std::env::temp_dir().display().to_string(),
+            "",
+            model,
+            workspace.register(),
+            sink,
+        )
+        .build()
+        .expect("conversation builds");
         Self {
-            compaction: crate::runtime::new_compaction_state(dedup.clone(), guardrails.clone()),
-            dedup,
-            guardrails,
-            usage: UsageLedger::open(),
-            ..Self::default()
+            thinking: crate::thinking::ThinkingConfig::default(),
+            conversation,
+            signals: RunSignals::new(),
+            usage: UsageLedger::default(),
         }
     }
+}
 
-    /// Bind a freshly minted persisted session; its id also names this
-    /// session's `cost.jsonl` records. `dir` is the resolved state dir;
-    /// `None` disables persistence.
-    fn with_store(
-        mut self,
-        dir: Option<&crate::storage::StateDir>,
-        cwd: &str,
-        model_spec: &str,
-    ) -> Self {
-        let session_ref = crate::id::SessionRef::generate();
-        self.usage = self.usage.with_session_id(session_ref.id().to_string());
-        self.store = dir.and_then(|dir| {
-            crate::headless::SessionStore::open_in(dir.clone(), session_ref, cwd, model_spec).ok()
-        });
-        if let Some(store) = &mut self.store {
-            store.set_thinking(self.thinking);
-        }
-        self
-    }
-
-    fn with_thinking(mut self, thinking: crate::thinking::ThinkingConfig) -> Self {
-        self.thinking = thinking;
-        self
-    }
+/// The loop-lifetime pieces every session (re)build and every turn needs:
+/// config, the clean workspace, the seams (gates' parking slots, the
+/// per-turn cancellation cell), and the UI channels. Immutable once the
+/// command loop starts.
+#[derive(Clone)]
+pub(super) struct SessionKit {
+    pub(super) config: Arc<Config>,
+    pub(super) workspace: Workspace,
+    pub(super) instructions_text: String,
+    pub(super) permissions: Arc<PermissionManager>,
+    /// The session's per-turn cancellation cell: each turn stores its
+    /// cancellation here, and the gates/tools linked to the cell observe
+    /// whatever turn is current. `Command::Interrupt` cancels through it.
+    pub(super) cancel_cell: Arc<ArcSwap<Cancellation>>,
+    /// Per-tool-call subagent cancellation (task 96), shared with every
+    /// session's task-tool launcher; `Command::CancelSubagent` fires here.
+    pub(super) subagent_cancels: Arc<run::cancel::CancelMap<String>>,
+    /// The gates' parking slots; answers land here from the command loop.
+    pub(super) park: SharedPark,
+    pub(super) evt_tx: mpsc::UnboundedSender<AgentEvent>,
+    pub(super) files: Files,
+    /// The current model selection, shared with the forwarder (context
+    /// labels) and every turn (model resolution).
+    pub(super) selection: Arc<ArcSwap<Selection>>,
+    pub(super) cwd: String,
+    pub(super) state_dir: Option<crate::storage::StateDir>,
 }
 
 /// Immutable-by-loop shared state for the command loop's handlers: the
@@ -124,24 +142,12 @@ impl SessionState {
 /// the loop and are passed as `&mut`.
 struct LoopCtx {
     state: Arc<Mutex<SessionState>>,
-    files: Files,
-    cancel_flag: run::CancelFlag,
-    /// Per-tool-call subagent cancellation (task 96): shared with every
-    /// turn's task-tool launcher; `Command::CancelSubagent` fires here.
-    subagent_cancels: Arc<run::cancel::CancelMap<String>>,
+    kit: SessionKit,
     /// Bang-mode bookkeeping (task 96): run ids, in-flight cancel
     /// triggers, and visible-run results waiting for the next turn.
     shell: Arc<std::sync::Mutex<crate::tui::shell::ShellState>>,
-    permissions: Arc<PermissionManager>,
-    config: Arc<Config>,
-    workspace: Workspace,
-    instructions_text: String,
     catalogs: BTreeMap<String, Vec<ModelInfo>>,
     catalog: Arc<animist::catalog::Catalog>,
-    snapshots: crate::snapshot::SnapshotManager,
-    state_dir: Option<crate::storage::StateDir>,
-    cwd: String,
-    evt_tx: mpsc::UnboundedSender<AgentEvent>,
     /// Signals the loop when a running turn settles, so messages queued
     /// behind it drain even with no further user command.
     wake: Arc<Notify>,
@@ -154,15 +160,15 @@ impl LoopCtx {
         format!("{}/{}", selection.provider, selection.model)
     }
 
-    /// Flat model menu rows across all usable providers, with the
-    /// current selection's index.
+    /// Flat model menu rows across all usable providers, with the current
+    /// selection's index.
     fn catalog_choices(&self, selection: &Selection) -> (Vec<ModelChoice>, usize) {
-        catalog_choices(&self.config, &self.catalog, &self.catalogs, selection)
+        catalog_choices(&self.kit.config, &self.catalog, &self.catalogs, selection)
     }
 }
 
 #[derive(Clone)]
-struct Selection {
+pub(super) struct Selection {
     provider: String,
     model: String,
     context_length: Option<u32>,

@@ -690,7 +690,7 @@ async fn persisted_conversation(
         sink,
     )
     .history(history)
-    .persist(Arc::new(tokio::sync::Mutex::new(persister)))
+    .persist(Some(Arc::new(tokio::sync::Mutex::new(persister))))
     .build()
     .expect("conversation builds")
 }
@@ -853,7 +853,7 @@ async fn a_checkpoint_failure_surfaces_an_event_and_never_fails_the_run() {
         sink,
     )
     .history(history)
-    .persist(Arc::new(tokio::sync::Mutex::new(persister)))
+    .persist(Some(Arc::new(tokio::sync::Mutex::new(persister))))
     .build()
     .unwrap();
     let mut stream = stream;

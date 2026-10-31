@@ -7,11 +7,16 @@ use animist::history::{ContentBlock, Message, Role, ToolContent};
 use animist::provider::Tool;
 
 use crate::compression::{self, CompressionConfig};
-use crate::history::{self, StoredMessage};
+#[cfg(test)]
+use crate::history::StoredMessage;
+use crate::history::{self};
 
 /// The stored history as wire messages, unshaped: the request rewrites
 /// (read lifecycle, compression) apply to this view before protocol
-/// shaping, mirroring the order the provider edge always used.
+/// shaping, mirroring the order the provider edge always used. The
+/// request layer maps history itself now; only the test-facing
+/// [`request_messages`] convenience still reads it.
+#[cfg(test)]
 pub(crate) fn plain_messages(history: &[StoredMessage]) -> Vec<Message> {
     history
         .iter()

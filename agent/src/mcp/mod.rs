@@ -383,7 +383,7 @@ impl McpHandle {
         &self,
         qualified_name: &str,
         args: &Value,
-        cancel: &crate::run::CancelToken,
+        cancel: &animist::agent::Cancellation,
     ) -> Result<McpToolOutput, McpError> {
         let (raw_name, session) = {
             let idx = self.index.load();

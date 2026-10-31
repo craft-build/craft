@@ -93,7 +93,7 @@ impl McpSession for FakeSession {
         &'a self,
         name: &'a str,
         args: &'a Value,
-        cancel: &'a crate::run::CancelToken,
+        cancel: &'a animist::agent::Cancellation,
     ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
         super::session::race_call_cancel(self, name, args, cancel)
     }
@@ -166,7 +166,7 @@ impl McpSession for RefreshableSession {
         &'a self,
         name: &'a str,
         args: &'a Value,
-        cancel: &'a crate::run::CancelToken,
+        cancel: &'a animist::agent::Cancellation,
     ) -> BoxFuture<'a, Result<McpToolOutput, McpError>> {
         super::session::race_call_cancel(self, name, args, cancel)
     }

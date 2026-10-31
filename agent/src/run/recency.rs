@@ -83,16 +83,6 @@ pub fn attach_recency_tail(
     Some(out)
 }
 
-/// Collect this turn's facts and attach them, if any.
-pub(crate) fn recency_view(
-    source: &Arc<dyn RecencySource>,
-    messages: &[StoredMessage],
-    turn: u32,
-) -> Option<Vec<StoredMessage>> {
-    let facts = source.collect(&RecencyCtx { turn });
-    attach_recency_tail(messages, &facts)
-}
-
 /// Attach the rendered tail to the last user message of a wire view, in
 /// place; a no-op when there is nothing to inject or no user message to
 /// carry it.
@@ -112,6 +102,19 @@ pub(crate) fn attach_recency_tail_wire(
     messages[last_user]
         .content
         .push(ContentBlock::Text { text: tail });
+}
+
+/// Collect this turn's facts and attach them, if any. The request layer
+/// attaches through `attach_recency_tail_wire` now; this whole-message
+/// convenience survives for the facts-collection test.
+#[cfg(test)]
+pub(crate) fn recency_view(
+    source: &Arc<dyn RecencySource>,
+    messages: &[StoredMessage],
+    turn: u32,
+) -> Option<Vec<StoredMessage>> {
+    let facts = source.collect(&RecencyCtx { turn });
+    attach_recency_tail(messages, &facts)
 }
 
 #[cfg(test)]

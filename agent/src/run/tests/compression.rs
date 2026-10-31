@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::history::{ContentBlock, Role, ext};
-use crate::run::*;
 
 #[tokio::test]
 async fn recency_tail_rides_the_request_but_not_history() {
@@ -15,32 +14,34 @@ async fn recency_tail_rides_the_request_but_not_history() {
             facts
         }
     }
-    let (model, provider) = stream_turns(vec![crate::testing::text_turn("ok")]);
-    let (_, cancel) = cancel_channel();
-    let params = RunParams {
-        recency: Some(std::sync::Arc::new(Turns)),
-        ..RunParams::default()
-    };
-    let mut history = Vec::new();
-    let outcome = run(
-        &model,
-        &params,
-        &ToolDispatch::default(),
-        &mut history,
-        "go",
-        &cancel,
-        &|_| {},
+    let provider = script(vec![crate::testing::text_turn("ok")]);
+    let dir = tempfile::tempdir().unwrap();
+    let (sink, _stream) = EventSink::new();
+    let conversation = ConversationBuilder::new(
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        "",
+        model(&provider),
+        crate::run::ToolDispatch::default(),
+        sink,
     )
-    .await;
-    assert!(matches!(outcome, RunOutcome::Done { .. }));
+    .recency(std::sync::Arc::new(Turns))
+    .build()
+    .unwrap();
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
     let requests = provider.requests();
     let sent = &requests[0].messages;
+    // The request layer numbers prepares from 1 within a turn.
     assert!(
-        ext::text(&sent[0]).contains("<turn-context>\n\nturn 0"),
+        ext::text(&sent[0]).contains("<turn-context>\n\nturn 1"),
         "tail must ride the request"
     );
+    let messages = stored(&conversation).await;
     assert!(
-        !ext::message_text(&history[0]).contains("turn-context"),
+        !ext::message_text(&messages[0]).contains("turn-context"),
         "tail must not be committed to history"
     );
 }
@@ -50,7 +51,7 @@ async fn read_lifecycle_marks_request_view_only() {
     // read → write the same file, with enough later read turns that the
     // early read falls outside the working-set lookback. The model's
     // later requests must see the stale marker; history keeps the raw text.
-    let (model, provider) = stream_turns(vec![
+    let provider = script(vec![
         crate::testing::tool_turn(vec![tool_event(
             "t1",
             "read",
@@ -90,22 +91,14 @@ async fn read_lifecycle_marks_request_view_only() {
     for name in ["f.txt", "g.txt", "h.txt", "i.txt", "j.txt"] {
         std::fs::write(dir.path().join(name), &long).unwrap();
     }
-    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
-    let (_, cancel) = cancel_channel();
-    let mut history = Vec::new();
-    let outcome = run(
-        &model,
-        &RunParams::default(),
-        &tools,
-        &mut history,
-        "go",
-        &cancel,
-        &|_| {},
-    )
-    .await;
-    assert!(matches!(outcome, RunOutcome::Done { .. }));
+    let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
     // Committed history keeps the raw read.
-    let raw_message = history[2].message();
+    let messages = stored(&conversation).await;
+    let raw_message = messages[2].message();
     assert_eq!(raw_message.role, Role::User, "first read result message");
     let ContentBlock::ToolResult {
         content: raw_content,
@@ -140,7 +133,7 @@ async fn read_lifecycle_marks_request_view_only() {
 
 #[tokio::test]
 async fn read_output_stays_verbatim_on_wire() {
-    let (model, provider) = stream_turns(vec![
+    let provider = script(vec![
         crate::testing::tool_turn(vec![tool_event(
             "t1",
             "read",
@@ -153,43 +146,24 @@ async fn read_output_stays_verbatim_on_wire() {
         .map(|i| format!("filler line number {i} for size\n"))
         .collect();
     std::fs::write(dir.path().join("big.txt"), body).unwrap();
-    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
-    let (_, cancel) = cancel_channel();
-    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut history = Vec::new();
-    let outcome = run(
-        &model,
-        &RunParams::default(),
-        &tools,
-        &mut history,
-        "go",
-        &cancel,
-        &|event| events.lock().unwrap().push(event),
-    )
-    .await;
-    assert!(matches!(outcome, RunOutcome::Done { .. }));
-    // Committed history and the ToolDone event keep the raw result.
-    let raw_message = history[2].message();
-    assert_eq!(raw_message.role, Role::User, "tool result message");
-    let ContentBlock::ToolResult {
-        content: raw_content,
-        ..
-    } = &raw_message.content[0]
-    else {
-        panic!("tool result block");
-    };
-    let raw_text = ext::tool_content_text(raw_content);
+    let (conversation, mut stream) = workspace_conversation(&dir, &provider).await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    // Committed history and the finished-call event keep the raw result.
+    let results = tool_results(&conversation).await;
+    assert_eq!(results.len(), 1);
+    let raw_text = result_text(&results[0]);
     assert!(raw_text.len() >= crate::compression::MIN_COMPRESS_LEN);
     assert!(!raw_text.contains("lines omitted"));
-    assert!(
-        events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, Event::ToolDone {
-            result: ContentBlock::ToolResult { content, .. }, ..
-        } if !ext::tool_content_text(content).contains("lines omitted")))
-    );
+    assert!(events_until_done(&mut stream).await.iter().any(|event| {
+        matches!(
+            event,
+            Event::Agent(animist::agent::AgentEvent::ToolFinished { output, .. })
+                if !ext::tool_content_text(&output.content).contains("lines omitted")
+        )
+    }));
     // `read` output is caller-selected and must reach the model verbatim,
     // even though its `N: ` numbering looks like code to the detector.
     let requests = provider.requests();
@@ -232,7 +206,10 @@ fn compress_request_view_skips_verbatim_tools_but_compresses_the_rest() {
         ext::tool_result("c3", Some("retrieve"), raw_retrieve.clone(), false),
         ext::tool_result("c4", Some("bash"), raw_bash.clone(), false),
     ])];
-    compress_request_view(&mut full, &CompressionConfig::default());
+    crate::run::view::compress_request_view(
+        &mut full,
+        &crate::compression::CompressionConfig::default(),
+    );
     let content = &full[0].content;
     let text = |i: usize| {
         let ContentBlock::ToolResult { content, .. } = &content[i] else {
@@ -251,7 +228,7 @@ fn compress_request_view_skips_verbatim_tools_but_compresses_the_rest() {
 
 #[tokio::test]
 async fn compression_disabled_sends_raw_output() {
-    let (model, provider) = stream_turns(vec![
+    let provider = script(vec![
         crate::testing::tool_turn(vec![tool_event(
             "t1",
             "read",
@@ -264,35 +241,23 @@ async fn compression_disabled_sends_raw_output() {
         .map(|i| format!("filler line number {i} for size\n"))
         .collect();
     std::fs::write(dir.path().join("big.txt"), body).unwrap();
-    let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
-    let (_, cancel) = cancel_channel();
-    let params = RunParams {
-        compression: CompressionConfig {
-            enabled: false,
-            ..CompressionConfig::default()
-        },
-        ..RunParams::default()
-    };
-    let mut history = Vec::new();
-    let _ = run(
-        &model,
-        &params,
-        &tools,
-        &mut history,
-        "go",
-        &cancel,
-        &|_| {},
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let (conversation, _stream) = conversation_over(
+        &provider,
+        &Config::parse("compression { enabled = false }").unwrap(),
+        &dir.path().display().to_string(),
+        workspace.register(),
+        None,
     )
     .await;
-    let raw_message = history[2].message();
-    assert_eq!(raw_message.role, Role::User, "tool result message");
-    let ContentBlock::ToolResult {
-        content: raw_content,
-        ..
-    } = &raw_message.content[0]
-    else {
-        panic!("tool result block");
-    };
+
+    let _ = run_turn(&conversation, "go").await;
+
+    let results = tool_results(&conversation).await;
+    assert_eq!(results.len(), 1);
+    let raw_text = result_text(&results[0]);
+    // With compression off even a non-verbatim tool's output goes raw; the
+    // read here only proves the pipeline never touches its bytes.
     let requests = provider.requests();
     let sent = &requests[1].messages;
     let wire_message = &sent[2];
@@ -307,8 +272,5 @@ async fn compression_disabled_sends_raw_output() {
     else {
         panic!("tool result block on the wire");
     };
-    assert_eq!(
-        ext::tool_content_text(result),
-        ext::tool_content_text(raw_content)
-    );
+    assert_eq!(ext::tool_content_text(result), raw_text);
 }

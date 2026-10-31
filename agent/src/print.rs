@@ -19,12 +19,14 @@ use serde_json::{Value, json};
 
 use crate::cli::OutputFormat;
 use crate::error::{InvalidSnafu, Result};
-use crate::headless::HeadlessHandle;
+use crate::harness::{Conversation, CraftEvent, DoneReason, Event, EventStream};
+use crate::history::ContentBlock;
 use crate::history::ext::{self, ImageMedia};
-use crate::history::{ContentBlock, Message};
 use crate::id::SessionRef;
-use crate::run::{DoneReason, Event};
 use crate::usage::TokenUsage;
+
+use animist::agent::AgentEvent;
+use animist::provider::ProviderEvent;
 
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -81,7 +83,6 @@ fn stop_reason(reason: DoneReason) -> &'static str {
         DoneReason::MaxTokens => "max_tokens",
         DoneReason::Cancelled => "cancelled",
         DoneReason::Error => "error",
-        DoneReason::DoomStop => "doom_stop",
     }
 }
 
@@ -210,6 +211,19 @@ impl WireOut {
     }
 }
 
+/// One print-mode run: the conversation's event stream, its task, and the
+/// pieces the `init` line and post-run bookkeeping need.
+pub struct PrintRun {
+    pub stream: EventStream,
+    pub task: tokio::task::JoinHandle<crate::harness::TurnOutcome>,
+    pub conversation: Conversation,
+    pub session_id: SessionRef,
+    pub cwd: String,
+    pub tool_names: Vec<String>,
+    /// `provider/model` recorded in the session header on completion.
+    pub model_spec: String,
+}
+
 /// Folds the run's event stream into the print-mode outputs. `observe`
 /// returns `true` on the terminal event (`Done` or `Error`).
 struct PrintState {
@@ -260,8 +274,8 @@ impl PrintState {
     }
 
     /// The assistant message content for the in-flight turn, rebuilt from
-    /// the streamed deltas and tool calls (our `TurnComplete` carries usage
-    /// only, not the message).
+    /// the streamed deltas and tool calls; the step's assembled message
+    /// replaces it at `StepFinished`.
     fn turn_content(&mut self) -> Vec<Value> {
         let mut content = Vec::new();
         if !self.turn_text.is_empty() {
@@ -274,23 +288,23 @@ impl PrintState {
 
     fn observe(&mut self, event: Event) -> Result<bool> {
         match event {
-            Event::StreamClosed => {}
-            Event::TextDelta(text) => {
+            Event::Agent(AgentEvent::Provider {
+                event: ProviderEvent::TextDelta { text },
+                ..
+            }) => {
                 self.turn_text.push_str(&text);
                 self.result_text.push_str(&text);
             }
-            Event::ToolStart {
-                id,
-                name,
-                arguments,
-            } => self
-                .turn_tools
-                .push(json!({"type": "tool_use", "id": id, "name": name, "input": arguments})),
-            Event::Retry {
+            Event::Agent(AgentEvent::ToolStarted { call, .. }) => {
+                self.turn_tools.push(json!({
+                    "type": "tool_use", "id": call.id, "name": call.name, "input": call.input
+                }));
+            }
+            Event::Craft(CraftEvent::Retry {
                 attempt,
                 message,
                 delay_ms,
-            } => {
+            }) => {
                 self.out.emit(&RetryEvent {
                     event_type: "system",
                     subtype: "api_retry",
@@ -300,8 +314,13 @@ impl PrintState {
                     session_id: &self.session_id,
                 })?;
             }
-            Event::TurnComplete { usage, .. } => {
+            Event::Agent(AgentEvent::StepFinished { message, usage, .. }) => {
                 let content = self.turn_content();
+                let content = if content.is_empty() {
+                    message_content_blocks(&message.content)
+                } else {
+                    content
+                };
                 self.out.emit(&AssistantEvent {
                     event_type: "assistant",
                     message: AssistantMessage {
@@ -313,23 +332,23 @@ impl PrintState {
                     session_id: &self.session_id,
                 })?;
             }
-            Event::ToolResultsSubmitted { message } => {
+            Event::Agent(AgentEvent::ToolFinished { call, output }) => {
                 self.out.emit(&UserEvent {
                     event_type: "user",
                     message: UserMessage {
                         role: "user",
-                        content: message_content(&message),
+                        content: json!([tool_result_json(&call, &output)]),
                     },
                     session_id: &self.session_id,
                 })?;
             }
-            Event::Done {
+            Event::Craft(CraftEvent::Done {
                 usage,
                 num_turns,
                 reason,
                 cost,
                 ..
-            } => {
+            }) => {
                 self.num_turns = num_turns;
                 self.usage = usage;
                 // The run's own ledger also counts compaction spend, which
@@ -338,12 +357,12 @@ impl PrintState {
                 self.stop_reason = Some(stop_reason(reason));
                 return Ok(true);
             }
-            Event::Error(message) => {
+            Event::Craft(CraftEvent::Error(message)) => {
                 self.error = Some(message.clone());
                 self.result_text = message;
                 return Ok(true);
             }
-            Event::AdvisorNote { severity, message } => {
+            Event::Craft(CraftEvent::AdvisorNote { severity, message }) => {
                 self.out.emit(&SystemEvent {
                     event_type: "system",
                     subtype: "advisor_note",
@@ -396,42 +415,67 @@ impl PrintState {
 /// Serialize the tool-results wave in animist's block shape (not Claude
 /// Code's): the transcript is for debugging and tooling, and the history
 /// encoding is the lossless form.
-fn message_content(message: &Message) -> Value {
-    let content = if crate::history::ext::is_user(message) {
-        serde_json::to_value(&message.content)
-    } else {
-        serde_json::to_value(crate::history::ext::text(message))
-    };
-    content.unwrap_or_else(|_| json!([]))
+fn message_content_blocks(content: &[ContentBlock]) -> Vec<Value> {
+    serde_json::to_value(content)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
 }
 
-/// Consume a headless run's events to completion and print the output for
+/// The wire form of one finished tool call, matching the blocks the old
+/// per-wave user events carried (tool results serialize in animist's block
+/// shape: `tool_use_id`, `content`, `is_error`).
+fn tool_result_json(
+    call: &animist::agent::tool::ToolCall,
+    output: &animist::agent::tool::ToolOutput,
+) -> Value {
+    let mut value = json!({
+        "type": "tool_result",
+        "tool_use_id": call.id,
+        "content": serde_json::to_value(&output.content).unwrap_or_else(|_| json!([])),
+    });
+    if output.is_error {
+        value["is_error"] = json!(true);
+    }
+    value
+}
+
+/// Consume a print-mode run's events to completion and print the output for
 /// `format`. Returns the agent error message, if any, so the caller can exit
 /// nonzero (the reference's known bug, deliberately not ported).
-pub async fn emit(
-    handle: HeadlessHandle,
-    format: &OutputFormat,
-    verbose: bool,
-    model: &str,
-) -> Result<Option<String>> {
-    let HeadlessHandle {
-        events,
-        tool_names,
+pub async fn emit(run: PrintRun, format: &OutputFormat, verbose: bool) -> Result<Option<String>> {
+    let PrintRun {
+        stream,
+        task,
+        conversation,
         session_id,
         cwd,
-        task,
-        ..
-    } = handle;
+        tool_names,
+        model_spec,
+    } = run;
     let start = Instant::now();
-    let mut events = events;
-    let mut state = PrintState::new(session_id.clone(), model.to_string(), format, verbose);
+    let mut stream = stream;
+    let mut state = PrintState::new(session_id.clone(), model_spec.clone(), format, verbose);
     state.init(&cwd, &tool_names)?;
-    while let Some(envelope) = events.next().await {
-        if state.observe(envelope.event)? {
+    let mut done_by_model = Default::default();
+    while let Some(event) = stream.next().await {
+        if let Event::Craft(CraftEvent::Done { by_model, .. }) = &event {
+            done_by_model = by_model.clone();
+        }
+        if state.observe(event)? {
             break;
         }
     }
     let _ = tokio::time::timeout(AGENT_SHUTDOWN_TIMEOUT, task).await;
+    // Session bookkeeping on the turn's ledger, then the explicit teardown
+    // every exit path owes the conversation.
+    if let Some(persister) = conversation.persister() {
+        let mut persister = persister.lock().await;
+        let fast = conversation.settings().fast;
+        persister.store_mut().record_cost(&done_by_model, fast);
+        persister.store_mut().set_model(model_spec.clone());
+    }
+    let _ = tokio::time::timeout(AGENT_SHUTDOWN_TIMEOUT, conversation.shutdown()).await;
     state.finish(format, start.elapsed().as_millis())
 }
 
@@ -513,6 +557,53 @@ mod tests {
         }
     }
 
+    /// A streamed text delta, as the run's provider stream would emit it.
+    fn text_delta(text: &str) -> Event {
+        Event::Agent(AgentEvent::Provider {
+            run_id: 1,
+            step: 1,
+            attempt: 1,
+            event: ProviderEvent::TextDelta { text: text.into() },
+        })
+    }
+
+    /// One tool call starting.
+    fn tool_started(id: &str, name: &str) -> Event {
+        Event::Agent(AgentEvent::ToolStarted {
+            call: animist::agent::tool::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                input: json!({"path": "a.rs"}),
+            },
+            parent_call_id: None,
+        })
+    }
+
+    /// One completed model step with the turn's usage.
+    fn step_finished(usage: TokenUsage) -> Event {
+        Event::Agent(AgentEvent::StepFinished {
+            message: crate::history::ext::assistant_text("ok"),
+            usage,
+            stop_reason: None,
+        })
+    }
+
+    /// One tool call finishing with `text` as its model-visible output.
+    fn tool_finished(id: &str, name: &str, text: &str) -> Event {
+        Event::Agent(AgentEvent::ToolFinished {
+            call: animist::agent::tool::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                input: json!({}),
+            },
+            output: animist::agent::tool::ToolOutput::builder()
+                .content(crate::history::ToolContents(vec![
+                    crate::history::ToolContent::Text { text: text.into() },
+                ]))
+                .build(),
+        })
+    }
+
     fn transcript() -> PrintState {
         PrintState::new(sid(), "mock/model".into(), &OutputFormat::Text, true)
     }
@@ -522,7 +613,6 @@ mod tests {
         assert_eq!(stop_reason(DoneReason::Stop), "end_turn");
         assert_eq!(stop_reason(DoneReason::MaxTurns), "max_turns");
         assert_eq!(stop_reason(DoneReason::Cancelled), "cancelled");
-        assert_eq!(stop_reason(DoneReason::DoomStop), "doom_stop");
     }
 
     #[test]
@@ -530,46 +620,28 @@ mod tests {
         let mut state = transcript();
         state.init("/project", &["read".into()]).unwrap();
 
-        state.observe(Event::TextDelta("fixing".into())).unwrap();
+        state.observe(text_delta("fixing")).unwrap();
+        state.observe(tool_started("t1", "read")).unwrap();
         state
-            .observe(Event::ToolStart {
-                id: "t1".into(),
-                name: "read".into(),
-                arguments: json!({"path": "a.rs"}),
-            })
+            .observe(step_finished(TokenUsage {
+                input: 10,
+                output: 5,
+                cache_creation: 0,
+                cache_read: 0,
+                cost: None,
+            }))
             .unwrap();
+        state.observe(tool_finished("t1", "read", "ok")).unwrap();
         state
-            .observe(Event::TurnComplete {
-                usage: TokenUsage {
-                    input: 10,
-                    output: 5,
-                    cache_creation: 0,
-                    cache_read: 0,
-                    cost: None,
-                },
-                context_size: 20,
-            })
-            .unwrap();
-        state
-            .observe(Event::ToolResultsSubmitted {
-                message: crate::history::ext::observation(vec![crate::history::ext::tool_result(
-                    "t1",
-                    Some("read"),
-                    "ok",
-                    false,
-                )]),
-            })
-            .unwrap();
-        state
-            .observe(Event::Retry {
+            .observe(Event::Craft(CraftEvent::Retry {
                 attempt: 1,
                 message: "rate_limit".into(),
                 delay_ms: 500,
-            })
+            }))
             .unwrap();
-        assert!(!state.observe(Event::TextDelta("done".into())).unwrap());
+        assert!(!state.observe(text_delta("done")).unwrap());
         let terminal = state
-            .observe(Event::Done {
+            .observe(Event::Craft(CraftEvent::Done {
                 usage: TokenUsage {
                     input: 25,
                     output: 9,
@@ -583,7 +655,7 @@ mod tests {
                 reason: DoneReason::Stop,
                 cost: Some(0.01),
                 by_model: Default::default(),
-            })
+            }))
             .unwrap();
         assert!(terminal);
 
@@ -620,7 +692,7 @@ mod tests {
         let mut state = transcript();
         assert!(
             state
-                .observe(Event::Error("provider exploded".into()))
+                .observe(Event::Craft(CraftEvent::Error("provider exploded".into(),)))
                 .unwrap()
         );
         assert_eq!(state.error.as_deref(), Some("provider exploded"));
@@ -640,33 +712,19 @@ mod tests {
     fn denied_run_transcript_carries_the_deny_and_still_succeeds() {
         let mut state = transcript();
         state.init("/project", &["bash".into()]).unwrap();
+        state.observe(tool_started("t1", "bash")).unwrap();
+        state.observe(step_finished(TokenUsage::default())).unwrap();
         state
-            .observe(Event::ToolStart {
-                id: "t1".into(),
-                name: "bash".into(),
-                arguments: json!({"command": "rm -rf /"}),
-            })
-            .unwrap();
-        state
-            .observe(Event::TurnComplete {
-                usage: TokenUsage::default(),
-                context_size: 10,
-            })
-            .unwrap();
-        state
-            .observe(Event::ToolResultsSubmitted {
-                message: crate::history::ext::observation(vec![crate::history::ext::tool_result(
-                    "t1",
-                    Some("bash"),
-                    "Permission denied for `bash` (`rm -rf /`). User guidance: \
+            .observe(tool_finished(
+                "t1",
+                "bash",
+                "Permission denied for `bash` (`rm -rf /`). User guidance: \
                          this headless run has no interactive approver.",
-                    false,
-                )]),
-            })
+            ))
             .unwrap();
         assert!(
             state
-                .observe(Event::Done {
+                .observe(Event::Craft(CraftEvent::Done {
                     usage: TokenUsage::default(),
                     context_size: 10,
                     context_window: 0,
@@ -674,7 +732,7 @@ mod tests {
                     reason: DoneReason::Stop,
                     cost: None,
                     by_model: Default::default(),
-                })
+                }))
                 .unwrap()
         );
 

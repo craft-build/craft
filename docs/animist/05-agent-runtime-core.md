@@ -303,4 +303,165 @@ driven only by tests.
 
 ## Completion note
 
-_(fill in when done)_
+Commits: `8594378b` (Phase A: conversation/driver/layers on `animist::agent::Agent`),
+`e76d6a42` (Phase B: change-feed persister), Phase C (surfaces + deletion, this diff).
+
+### Behaviour changes, with their tests
+
+1. **Every surface drives one `Conversation` per session** through
+   `harness::driver::run_turn` (TUI `bootstrap::build_session_state` +
+   session-long forwarder; ACP `build_session`; headless/print `cli.rs`;
+   subagent child conversations). The per-turn provider rebuild, per-turn
+   tool registry, and per-surface commit-on-success are gone — the driver
+   and layers own those. *Tests:* `harness/tests.rs` (16),
+   `run_tests` (43 live), `tui::provider::live` (55), `acp::tests` (27),
+   `subagent::tests` (14), `tools/tests/integration.rs` (2 ported).
+2. **Cancellation** is `animist::agent::Cancellation` stored per turn into
+   an `Arc<ArcSwap<Cancellation>>` cell that gates, MCP tools, and the
+   subagent launcher read at call time. `run::cancel` survives only for
+   bang-mode shell runs and the launcher's per-call `CancelMap`. *Tests:*
+   harness cancel mid-stream / mid-tool (replay into the same
+   conversation), `run_tests::overflow::cancel_mid_stream…`,
+   `approval::tests::a_new_turns_cancellation_does_not_cancel_a_parked_approval`.
+3. **Failed runs now commit the failed turn** with a `[Run failed: …]`
+   observation (the old loop restored a pristine snapshot). *Tests:*
+   `run_tests::turns::failed_run_*` (3).
+4. **Pre-cancelled input is not admitted**: a turn cancelled before its
+   first model call commits the cancel marker only (the old loop's staged
+   prompt made the input visible). *Test:*
+   `run_tests::turns::cancel_before_the_first_model_call_commits_the_marker_only`.
+5. **`Decision::Stop` at the policy boundary maps to
+   `TurnOutcome::Failed("Layer stopped the run: …")`** + FAILED marker —
+   interim 05 behaviour; 07 revisits stop-vs-cancel identity. *Test:*
+   `run_tests::turns::stop_decision_at_the_dispatch_boundary…`.
+6. **Dedup replays carry no `[cached]` prefix** at the harness level (the
+   `GuardrailLayer` responds with the cached bytes verbatim); the
+   dispatch-level `cached_result` path keeps it. *Tests:*
+   `run_tests::dispatch` dedup suite.
+7. **Model switch compares the full `provider/model` spec**, not the id
+   alone (two providers can share an id). *Tests:* harness
+   `model_switch_between_turns…`, TUI `run_turn_sends_the_resolved_preamble…`.
+8. **TUI session state holds no loop handles**; a session-long forwarder
+   maps events, folds `Done` usage into the ledgers, and publishes a
+   generation each turn settles on (bounded 5 s, so a dead forwarder
+   degrades instead of hanging). *Tests:* `turn::tests::settle_returns…`,
+   renderer mapping tests.
+9. **`Conversation::shutdown()` runs on every exit path**: TUI loop end,
+   ACP `session/close`, print/headless end, and all three subagent spawn
+   exits. *Test:* harness `shutdown_is_idempotent_and_terminal`.
+10. **MaxTokens replies no longer chain continuations** (09); `/compact`
+    and pre-turn compaction return an info notice (08).
+
+Two bugs found by the cutover's tests, both fixed and pinned:
+
+- `SubagentLauncher::spawn`'s cancel/failure path awaited the child event
+  forwarder without dropping the child conversation first — the stream's
+  last sender never went away, hanging every cancelled subagent. All three
+  exits now `shutdown` + `drop(conversation)` before `forwarder.await`.
+- `StoredSession::save_to` rewrote the session file (tmp + rename) behind
+  the persister's append handle, which kept writing into the unlinked old
+  inode: checkpointed messages "appended ok" into a dead file and any
+  session that changed model/thinking/mode mid-run lost history on reload.
+  `save_to` now bumps the `rewrites` counter, voiding outstanding append
+  cursors; the next checkpoint diverges and self-heals with a full
+  rewrite. *Test:* `tui…loading_a_persisted_session_repopulates_history`
+  (set-thinking-then-checkpoint is the production ordering).
+
+### Ignored tests (28, all in `run_tests`)
+
+- `restored in 07` (4): guardrail warn-then-block, doom grace, doom
+  hard-stop, identical-calls-blocked-as-doom-loop.
+- `restored in 08` (4): overflow-recovers-compacts-and-retries,
+  declined-compaction…, failed-run-after-overflow…,
+  overflow-body-without-a-prompt-size….
+- `restored in 09` (19): MaxTokens-continuation family (7, `turns.rs`),
+  retry/rate-limit/reauth family (8, `overflow.rs`), advisor family (4).
+- `restored in 06` (1): `independent_calls_run_concurrently` — parallel
+  tool claims return with 06's native tools. (Deviation from the
+  07/08/09-only naming rule, kept honest to where the behaviour returns.)
+
+Three run_tests cases were deleted as dead machinery with no future home
+(git preserves them): `tool_call_ids_stay_unique_across_model_streams`
+(driver-side id re-minting is animist's now), `never_parallel_classification`
+(`is_never_parallel` went with the wave dispatcher), and
+`served_spec_tests::bare_ids_borrow_the_primary_provider…` (run-policy
+accounting internals). The priced-`by_model` half of the spec test is
+unportable until a test-priced provider exists (scripted runs always bill
+`scripted/<id>`).
+
+### System-prompt strategy
+
+`RequestLayer::turn_start` builds the system bytes once per run via
+`prompt::build_system_prompt` with exactly `run_policy`'s old inputs
+(cwd/platform/date vars, `config.agent.preamble + instructions`, plan
+path) — byte-identical, not re-derived per surface. Pinned by
+`harness::request::tests::system_prompt_bytes_match_the_old_policy_output`
+and, end-to-end, by the TUI's capture-server preamble test (one
+`BASELINE-PREAMBLE`, one `MARKER`).
+
+### Event mapping and derived events
+
+`harness::Event = Agent(animist AgentEvent) | Craft(CraftEvent)`. Surfaces
+match animist events directly; `CraftEvent` holds only craft-only variants
+(Retry, AutoCompacting, CompactionDone, Nudge, StagnationDetected,
+AuthRequired, AdvisorNote, AutoReview\*, PersistenceFailed, Subagent,
+Done). Derived events:
+
+- `TextDelta`/`ThinkingDelta` → TUI deltas (+ the streamed flags the
+  settle handshake reads); ACP message/thought chunks; print stream-json.
+- `ToolStarted` → TUI card (+ `Status::Running` once per run); ACP
+  `ToolCall` update.
+- `ToolFinished` → TUI done card, `FilesSet` (touched files),
+  `PlanSet` (`todo_write`), `SubagentFinished` (`task`); ACP completed
+  update; print `user` tool-result event.
+- `StepFinished{usage}` → TUI `TokenUsage` label; ACP `UsageUpdate`;
+  print assistant usage block.
+- `CraftEvent::Done` is consumed by the surface, never rendered: TUI —
+  usage rows + `cost.jsonl` + store `record_cost` + the settle bump; ACP —
+  responder stop-reason; print — the terminal `result` event.
+- `CraftEvent::Subagent` wraps filtered child events, tagged with the
+  spawning call's id (task 96).
+
+### Indirection rows closed (harness-design inventory)
+
+`run::run`/`run_with_images`/`RunOutcome` plumbing; `RunParams` +
+`runtime::{run_policy, RunPolicyInputs, compaction_ctx,
+new_compaction_state}` + `CompactionCtx` (values single-sourced into
+`ConversationBuilder` + layer inputs); per-surface turn orchestration
+(TUI/ACP compaction copies, shared-handle wiring, per-turn rebuild);
+`SessionState.{compaction,dedup,guardrails}`; `run::Event` re-encoding;
+`HarnessExecutor` (never built — `SnapshotLayer` is the tail);
+`headless::SessionStore` → `storage::sessions` (Phase B); the two
+`ResolvedModel` types (runtime's deleted; `model_selection`'s remains).
+`CancelToken`-per-run is gone; `CancelMap` kept for
+`Command::CancelSubagent`, `CancelToken` kept for bang-mode shell runs.
+Still open: `ToolDispatch`/`BeforeExecute` seam (06–07), `ReauthHook`
+(09), `impl_tool!`/`Workspace::run` (06), `SharedCompressionStore` (08),
+`RecencySource` trait (kept: one real implementation + the test fake).
+
+### Driver extras beyond its listed job
+
+- **Empty-reply continuation** lives in the surfaces (TUI loop,
+  `MAX_EMPTY_CONTINUATIONS`), not the driver: it is a surface-level
+  rendering/budget concern and 09 moves it into recovery.
+- **`emit_done` pricing** (billed cost per model, `settle_session`) runs in
+  the driver because only it sees the settled `RunReport`; surfaces read
+  `by_model` off the event.
+- **`commit_cancelled` validates the interrupted attempt's prefix** with
+  `validate_replay` before committing (drops it on mismatch): the driver
+  owns history admission.
+- **The post-marker `conversation.flush()`** rides the driver because
+  terminal markers are driver-written and the flush must order after them.
+
+### Test-inventory diff
+
+`2005 → 1918` listed tests. Removed: unit tests of deleted modules
+(`run::{advisor,nudge,overflow,stream,events,task_set,stats}`,
+`runtime::run_policy`, `run::retry`'s stream driver — its state-machine
+test is kept), `headless`'s deleted spawn/interactive API (8), the
+reauth-hook tests (09), 3 documented run_tests deletions, and renames
+whose replacements are in the added list (acp turn-tools/slot tests, TUI
+interrupt/approval-cell/turn-mapping tests, provider cache tests
+restored). Added: 16 harness tests, the ported run_tests suite, policy /
+request-layer pins, and the TUI forwarder/settle tests. Ignored: 28
+(must be zero after 09; the one `restored in 06` clears with 06).

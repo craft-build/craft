@@ -13,8 +13,15 @@ use crate::error::{InvalidSnafu, Result};
 use crate::provider::ProviderHandle;
 use animist::provider::ModelInfo;
 
+use super::approval::ApprovalGate;
 use super::cards;
-use super::{AgentEvent, CraftProvider, ModelChoice, Selection, Tone, report};
+use super::question::QuestionAsker;
+use super::turn::{RunSignals, resolve_model, start_forwarder};
+use super::usage_recorder::UsageLedger;
+use super::{
+    AgentEvent, CraftProvider, LoopCtx, ModelChoice, Selection, SessionKit, SessionState, Tone,
+    report,
+};
 
 /// Resolve a persisted `provider/model` spec (from `--model`, a tier
 /// default, or a prior session's header) against the discovered catalogs.
@@ -268,4 +275,174 @@ impl CraftProvider {
         };
         Ok(self)
     }
+}
+
+/// A persisted session being restored into a fresh conversation: the
+/// persister owns the loaded history and the session's on-disk identity.
+pub(super) struct RestoredSession {
+    pub(super) persister: Arc<tokio::sync::Mutex<crate::harness::Persister>>,
+}
+
+/// Assemble one session's [`SessionState`]: resolve the model, open (or
+/// reuse) the persister, wire the approval/question seams and the subagent
+/// launcher into the conversation, and pair the event stream the caller
+/// forwards. The state is not installed yet; [`install_session`] does that.
+pub(super) async fn build_session_state(
+    kit: &SessionKit,
+    selection: &Selection,
+    restore: Option<RestoredSession>,
+    thinking: crate::thinking::ThinkingConfig,
+) -> Result<(SessionState, crate::harness::EventStream), String> {
+    let model = resolve_model(&kit.config, selection).await?;
+    let (session_ref, persister) = match restore {
+        Some(restored) => {
+            let id = restored.persister.lock().await.store().session().id.clone();
+            (id, Some(restored.persister))
+        }
+        None => {
+            let session_ref = crate::id::SessionRef::generate();
+            let persister = match &kit.state_dir {
+                Some(dir) => Some(Arc::new(tokio::sync::Mutex::new(
+                    crate::harness::Persister::open_in(
+                        dir.clone(),
+                        session_ref.clone(),
+                        &kit.cwd,
+                        &LoopCtx::model_spec(selection),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?,
+                ))),
+                None => None,
+            };
+            (session_ref, persister)
+        }
+    };
+    // The persister's history is the conversation's history (the same
+    // change feed); a non-persisting session starts a fresh one.
+    let history = match &persister {
+        Some(persister) => persister.lock().await.history(),
+        None => animist::history::History::new(),
+    };
+
+    // The approval gate is shared by the tool table and every subagent, so
+    // children cannot bypass approvals.
+    let approval = Arc::new(ApprovalGate::new(
+        kit.park.clone(),
+        kit.evt_tx.clone(),
+        kit.cancel_cell.clone(),
+        kit.permissions.clone(),
+        Some(crate::auto_review::reviewer_for(model.clone())),
+    ));
+    // The question seam (A.5) parks on the same slots the loop answers.
+    let asker = Arc::new(QuestionAsker::new(
+        kit.park.clone(),
+        kit.evt_tx.clone(),
+        kit.cancel_cell.clone(),
+    ));
+    let (sink, stream) = crate::harness::EventSink::new();
+    let workspace = kit.workspace.clone().with_cancel(kit.cancel_cell.clone());
+    // Phase 3: register MCP tool annotations once the tool set is settled
+    // so the gate consults the same hints as the turn path.
+    if let Some(mcp) = workspace.mcp() {
+        kit.permissions.sync_mcp_annotations(&mcp);
+    }
+    let conversation = crate::harness::ConversationBuilder::new(
+        &kit.config,
+        &kit.cwd,
+        &kit.instructions_text,
+        model,
+        workspace.register(),
+        sink,
+    )
+    .history(history)
+    .thinking(thinking)
+    .approval(approval.clone())
+    .persist(persister.clone())
+    .build()
+    .map_err(report)?;
+    // Two-phase arming: the launcher needs the built conversation, the
+    // conversation's tool set needs the launcher — one registry rebuild.
+    let launcher = Arc::new(crate::subagent::SubagentLauncher {
+        parent: conversation.clone(),
+        provider: selection.provider.clone(),
+        providers: kit.config.providers.clone(),
+        agent: crate::config::AgentConfig {
+            thinking: Some(thinking),
+            ..Default::default()
+        },
+        compression: kit.config.compression.clone(),
+        base_prompt: format!("{}{}", kit.config.agent.preamble, kit.instructions_text),
+        workspace: workspace.clone(),
+        cancel: kit.cancel_cell.clone(),
+        cancels: kit.subagent_cancels.clone(),
+        sink: conversation.sink(),
+        before: Some(approval),
+        cwd: kit.cwd.clone(),
+    });
+    let armed = workspace
+        .clone()
+        .with_questions(asker)
+        .with_subagents(launcher)
+        .register();
+    conversation
+        .set_tools(armed)
+        .map_err(|error| error.to_string())?;
+    if let Some(persister) = &persister {
+        persister.lock().await.store_mut().set_thinking(thinking);
+    }
+    let usage = UsageLedger::open().with_session_id(session_ref.id().to_string());
+    Ok((
+        SessionState {
+            thinking,
+            conversation,
+            signals: RunSignals::new(),
+            usage,
+        },
+        stream,
+    ))
+}
+
+/// Open the loop's first session: build the state, wrap it in its shared
+/// cell, and start the conversation's forwarder. Later rebuilds go through
+/// [`install_session`] instead.
+pub(super) async fn open_session(
+    kit: &SessionKit,
+    thinking: crate::thinking::ThinkingConfig,
+    restore: Option<RestoredSession>,
+) -> Result<Arc<tokio::sync::Mutex<SessionState>>, String> {
+    let selection = Arc::unwrap_or_clone(kit.selection.load_full());
+    let (session, stream) = build_session_state(kit, &selection, restore, thinking).await?;
+    let state = Arc::new(tokio::sync::Mutex::new(session));
+    let signals = start_forwarder(
+        stream,
+        state.clone(),
+        kit.evt_tx.clone(),
+        kit.files.clone(),
+        kit.selection.clone(),
+    );
+    state.lock().await.signals = signals;
+    Ok(state)
+}
+
+/// Build and install one session: assemble the state, start the new
+/// conversation's forwarder, and swap the state in — dropping the previous
+/// conversation ends its forwarder. Errors leave the current session
+/// untouched.
+pub(super) async fn install_session(
+    kit: &SessionKit,
+    state: &Arc<tokio::sync::Mutex<SessionState>>,
+    thinking: crate::thinking::ThinkingConfig,
+    restore: Option<RestoredSession>,
+) -> Result<(), String> {
+    let selection = Arc::unwrap_or_clone(kit.selection.load_full());
+    let (session, stream) = build_session_state(kit, &selection, restore, thinking).await?;
+    let signals = start_forwarder(
+        stream,
+        state.clone(),
+        kit.evt_tx.clone(),
+        kit.files.clone(),
+        kit.selection.clone(),
+    );
+    *state.lock().await = SessionState { signals, ..session };
+    Ok(())
 }

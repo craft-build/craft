@@ -1604,7 +1604,7 @@ mod fixtures {
                 "[Run failed: provider exploded]",
                 "[The turn ended here; the run was cut short.]",
                 crate::run::doom::GRACE_CALL_PROMPT,
-                crate::run::NUDGE_PROMPT,
+                crate::storage::sessions::legacy_messages::LEGACY_NUDGE_PROMPT,
             ]
         );
         let tags: Vec<Option<&str>> = session

@@ -51,8 +51,8 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::{
-    config::Config, history, model_selection::CatalogModel, permissions::PermissionManager,
-    provider::ProviderHandle, run, tools::Workspace,
+    config::Config, model_selection::CatalogModel, permissions::PermissionManager,
+    provider::ProviderHandle, tools::Workspace,
 };
 
 pub const PROVIDER_OPTION_ID: &str = "provider";
@@ -60,27 +60,22 @@ pub const MODEL_OPTION_ID: &str = "model";
 pub const THINKING_OPTION_ID: &str = "thinking";
 
 struct Session {
-    workspace: Workspace,
-    /// Instruction files (AGENTS.md and friends) discovered at session open.
-    instructions: crate::instructions::Instructions,
-    history: Vec<history::StoredMessage>,
+    /// The session's conversation: history, model, layers, and the event
+    /// sink, all outliving every turn.
+    conversation: crate::harness::Conversation,
+    /// The conversation's single event stream, lent to the in-flight turn.
+    events: crate::harness::EventStream,
+    /// The per-turn cancellation cell: each prompt stores its cancellation
+    /// here, and the gate, asker, MCP tools, and subagent launcher race it.
+    cancel_cell: Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
+    /// Loaded sessions persist through the change feed; fresh ones do not
+    /// (matching the old store rule).
+    persister: Option<Arc<tokio::sync::Mutex<crate::harness::Persister>>>,
     provider_name: String,
     models: Vec<animist::provider::ModelInfo>,
     model: String,
     context_length: Option<u32>,
     thinking: crate::thinking::ThinkingConfig,
-    /// Loaded sessions keep their persisted settings/history in sync.
-    store: Option<crate::headless::SessionStore>,
-    /// Effectiveness state for the configured compaction stages, shared
-    /// with the run loop for in-run overflow recovery.
-    compaction: run::SharedCompactionState,
-    /// Session-wide tool dedup cache, shared by the dispatcher and cleared
-    /// by the compaction engine.
-    dedup: run::SharedDedupCache,
-    /// Session-lifetime permission engine; the ACP gate prompts the client
-    /// where the TUI gate prompts the user (G.5).
-    permissions: Arc<PermissionManager>,
-    cancel: run::CancelFlag,
     /// In-flight turn id; `Some` while a `session/prompt` turn is running.
     /// Claimed and released under the `sessions` lock, so no atomic is
     /// needed; a second prompt is rejected rather than queued.
@@ -225,7 +220,13 @@ impl AppState {
         Ok((provider, models))
     }
 
-    async fn open_session(&self, cwd: &Path) -> std::result::Result<Session, String> {
+    async fn open_session(
+        &self,
+        cwd: &Path,
+        connection: ConnectionTo<AcpClient>,
+        session_id: SessionId,
+        client_caps: ClientCapabilities,
+    ) -> std::result::Result<Session, String> {
         let (instructions, workspace, permissions) = self.open_workspace(cwd).await?;
         let provider_name = self
             .config
@@ -240,16 +241,21 @@ impl AppState {
             Some(r) => (r.model, r.context_length),
             None => (String::new(), None),
         };
-        Ok(self.build_session(
+        self.build_session(BuildInputs {
             workspace,
             instructions,
             permissions,
-            Vec::new(),
+            persister: None,
             provider_name,
             models,
             model,
             context_length,
-        ))
+            cwd: cwd.display().to_string(),
+            connection,
+            session_id,
+            client_caps,
+        })
+        .await
     }
 
     /// Resume a persisted session (G.5 `session/load`): history, provider,
@@ -260,18 +266,28 @@ impl AppState {
         &self,
         cwd: &Path,
         stored_id: &str,
+        connection: ConnectionTo<AcpClient>,
+        session_id: SessionId,
+        client_caps: ClientCapabilities,
     ) -> std::result::Result<Session, String> {
         use crate::storage::StateDir;
         let session_ref = stored_id
             .parse::<crate::id::SessionRef>()
             .map_err(|_| format!("invalid session id {stored_id:?}"))?;
         let dir = StateDir::resolve().map_err(|e| e.to_string())?;
-        let stored = crate::headless::StoredSession::load(session_ref.id(), &dir)
-            .map_err(|e| format!("session {stored_id:?} could not be loaded: {e}"))?;
+        let persister = crate::harness::Persister::open_in(
+            dir,
+            session_ref,
+            &cwd.display().to_string(),
+            "unknown",
+        )
+        .await
+        .map_err(|e| format!("session {stored_id:?} could not be loaded: {e}"))?;
+        let stored_model = persister.store().session().model.clone();
+        let stored_thinking = persister.store().session().meta.thinking;
         let (instructions, workspace, permissions) = self.open_workspace(cwd).await?;
         // The stored model spec is `{provider}/{model}` (see `run_turn`).
-        let stored_model = stored.model.clone();
-        let (provider_name, model) = match stored_model.split_once('/') {
+        let (provider_name, model): (String, Option<String>) = match stored_model.split_once('/') {
             Some((provider, model))
                 if !self.config.providers.contains_key(provider) || model.is_empty() =>
             {
@@ -286,26 +302,30 @@ impl AppState {
             Some(r) => (r.model, r.context_length),
             None => (String::new(), None),
         };
-        let mut session = self.build_session(
-            workspace,
-            instructions,
-            permissions,
-            crate::history::ext::stored_of_entries(stored.messages()),
-            provider_name,
-            models,
-            model,
-            context_length,
-        );
-        session.thinking = stored.meta.thinking.unwrap_or(session.thinking);
+        let mut session = self
+            .build_session(BuildInputs {
+                workspace,
+                instructions,
+                permissions,
+                persister: Some(Arc::new(tokio::sync::Mutex::new(persister))),
+                provider_name,
+                models,
+                model,
+                context_length,
+                cwd: cwd.display().to_string(),
+                connection,
+                session_id,
+                client_caps,
+            })
+            .await?;
+        if let Some(thinking) = stored_thinking {
+            session.thinking = thinking;
+        }
         session.thinking =
             crate::thinking::reconcile_for(session.thinking, session.model_info(&session.model));
-        session.store = crate::headless::SessionStore::open_in(
-            dir,
-            session_ref,
-            &cwd.display().to_string(),
-            &stored_model,
-        )
-        .ok();
+        session
+            .conversation
+            .update_settings(|settings| settings.thinking = session.thinking);
         Ok(session)
     }
 
@@ -343,20 +363,38 @@ impl AppState {
         Ok((env.instructions, env.workspace, env.permissions))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn build_session(
-        &self,
-        workspace: Workspace,
-        instructions: crate::instructions::Instructions,
-        permissions: Arc<PermissionManager>,
-        history: Vec<history::StoredMessage>,
-        provider_name: String,
-        models: Vec<animist::provider::ModelInfo>,
-        model: String,
-        context_length: Option<u32>,
-    ) -> Session {
-        let (cancel, _) = run::cancel_channel();
-        let dedup = run::shared_cache();
+    async fn build_session(&self, inputs: BuildInputs) -> std::result::Result<Session, String> {
+        let BuildInputs {
+            workspace,
+            instructions,
+            permissions,
+            persister,
+            provider_name,
+            models,
+            model,
+            context_length,
+            cwd,
+            connection,
+            session_id,
+            client_caps,
+        } = inputs;
+        // The conversation needs a resolved model handle; the catalog's
+        // first entry stands in when nothing is selected yet.
+        let model = if model.is_empty() {
+            models
+                .first()
+                .and_then(|info| info.ids.first().cloned())
+                .ok_or_else(|| "provider has no models".to_string())?
+        } else {
+            model
+        };
+        let (provider, _models) = self.provider_catalog(&provider_name).await?;
+        let provider_config = &self.config.providers[&provider_name];
+        let handle = provider
+            .model(provider_config, None, &model)
+            .await
+            .map_err(report)?;
+
         let preference = self
             .config
             .always_thinking
@@ -364,31 +402,104 @@ impl AppState {
             .unwrap_or_default();
         let info = models
             .iter()
-            .find(|info| info.ids.first().is_some_and(|id| id.as_str() == model))
-            .cloned();
-        let thinking = crate::thinking::reconcile_for(preference, info.as_ref());
-        Session {
-            workspace,
-            instructions,
-            history,
+            .find(|info| info.ids.first().is_some_and(|id| id.as_str() == model));
+        let thinking = crate::thinking::reconcile_for(preference, info);
+
+        let cancel_cell = Arc::new(arc_swap::ArcSwap::from_pointee(
+            animist::agent::Cancellation::default(),
+        ));
+        let gate = Arc::new(crate::acp::permissions::AcpPermissionGate {
+            connection: connection.clone(),
+            session_id: session_id.clone(),
+            cancel: cancel_cell.clone(),
+            permissions: Arc::clone(&permissions),
+        });
+        let asker = Arc::new(crate::acp::elicitation::ElicitationAsker {
+            connection: connection.clone(),
+            session_id: session_id.clone(),
+            cancel: cancel_cell.clone(),
+            caps: client_caps,
+        });
+        let (sink, events) = crate::harness::EventSink::new();
+        let history = match &persister {
+            Some(persister) => persister.lock().await.history(),
+            None => animist::history::History::new(),
+        };
+        let workspace = workspace.with_cancel(cancel_cell.clone());
+        // Phase 3: register MCP tool annotations once the tool set is
+        // settled so the gate consults the same hints as the TUI.
+        if let Some(mcp) = workspace.mcp() {
+            permissions.sync_mcp_annotations(&mcp);
+        }
+        let conversation = crate::harness::ConversationBuilder::new(
+            &self.config,
+            &cwd,
+            &instructions.text,
+            handle.clone(),
+            workspace.clone().register(),
+            sink,
+        )
+        .history(history)
+        .max_turns(crate::harness::MaxTurns::Unbounded)
+        .thinking(thinking)
+        .approval(gate.clone())
+        .persist(persister.clone())
+        .build()
+        .map_err(report)?;
+
+        let launcher = Arc::new(crate::subagent::SubagentLauncher {
+            parent: conversation.clone(),
+            provider: provider_name.clone(),
+            providers: self.config.providers.clone(),
+            agent: crate::config::AgentConfig {
+                thinking: Some(thinking),
+                ..Default::default()
+            },
+            compression: self.config.compression.clone(),
+            base_prompt: format!("{}{}", self.config.agent.preamble, instructions.text),
+            workspace: workspace.clone(),
+            cancel: cancel_cell.clone(),
+            cancels: Arc::new(crate::run::cancel::CancelMap::new()),
+            sink: conversation.sink(),
+            before: Some(gate),
+            cwd: cwd.clone(),
+        });
+        let armed = workspace
+            .clone()
+            .with_questions(asker)
+            .with_subagents(launcher)
+            .register();
+        conversation.set_tools(armed).map_err(|e| e.to_string())?;
+
+        Ok(Session {
+            conversation,
+            events,
+            cancel_cell,
+            persister,
             provider_name,
             models,
             model,
             context_length,
             thinking,
-            store: None,
-            // The ACP dispatcher does not consult guardrails yet; the link
-            // keeps the shared construction identical across surfaces.
-            compaction: crate::runtime::new_compaction_state(
-                dedup.clone(),
-                run::shared_guardrails(),
-            ),
-            dedup,
-            permissions,
-            cancel,
             turn: None,
-        }
+        })
     }
+}
+
+/// The inputs [`AppState::build_session`] assembles.
+struct BuildInputs {
+    workspace: Workspace,
+    instructions: crate::instructions::Instructions,
+    permissions: Arc<PermissionManager>,
+    persister: Option<Arc<tokio::sync::Mutex<crate::harness::Persister>>>,
+    provider_name: String,
+    models: Vec<animist::provider::ModelInfo>,
+    model: String,
+    context_length: Option<u32>,
+    cwd: String,
+    connection: ConnectionTo<AcpClient>,
+    session_id: SessionId,
+    client_caps: ClientCapabilities,
 }
 
 /// Serve the Craft agent loop over ACP on stdin/stdout until the client disconnects.
@@ -435,8 +546,29 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
         .on_receive_request(
             async move |request: NewSessionRequest,
                         responder: Responder<NewSessionResponse>,
-                        _connection: ConnectionTo<AcpClient>| {
-                let session = match new_state.open_session(&request.cwd).await {
+                        connection: ConnectionTo<AcpClient>| {
+                // The id is minted first: the session's conversation is
+                // built with the gate and asker bound to it.
+                let id = format!(
+                    "{}-{}",
+                    std::process::id(),
+                    new_state.next_session.fetch_add(1, Ordering::Relaxed),
+                );
+                let client_caps = new_state
+                    .client_caps
+                    .lock()
+                    .await
+                    .clone()
+                    .unwrap_or_default();
+                let session = match new_state
+                    .open_session(
+                        &request.cwd,
+                        connection.clone(),
+                        SessionId::new(id.clone()),
+                        client_caps,
+                    )
+                    .await
+                {
                     Ok(session) => session,
                     Err(message) => return respond_setup_error(responder, message),
                 };
@@ -444,11 +576,6 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                 // is ported.
                 let options =
                     session.config_options(&new_state.config, &new_state.provider_names());
-                let id = format!(
-                    "{}-{}",
-                    std::process::id(),
-                    new_state.next_session.fetch_add(1, Ordering::Relaxed),
-                );
                 let response =
                     NewSessionResponse::new(SessionId::new(id.clone())).config_options(options);
                 new_state.sessions.lock().await.insert(id, session);
@@ -459,10 +586,25 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
         .on_receive_request(
             async move |request: LoadSessionRequest,
                         responder: Responder<LoadSessionResponse>,
-                        _connection: ConnectionTo<AcpClient>| {
+                        connection: ConnectionTo<AcpClient>| {
                 // The loaded session keeps the stored id as its ACP id.
                 let stored_id = request.session_id.0.to_string();
-                let session = match load_state.load_session(&request.cwd, &stored_id).await {
+                let client_caps = load_state
+                    .client_caps
+                    .lock()
+                    .await
+                    .clone()
+                    .unwrap_or_default();
+                let session = match load_state
+                    .load_session(
+                        &request.cwd,
+                        &stored_id,
+                        connection.clone(),
+                        request.session_id.clone(),
+                        client_caps,
+                    )
+                    .await
+                {
                     Ok(session) => session,
                     Err(message) => return respond_setup_error(responder, message),
                 };
@@ -538,9 +680,15 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     session.thinking,
                     session.model_info(&session.model),
                 );
-                if let Some(store) = &mut session.store {
-                    store.set_thinking(session.thinking);
-                    store.set_model(format!("{}/{}", session.provider_name, session.model));
+                session
+                    .conversation
+                    .update_settings(|settings| settings.thinking = session.thinking);
+                if let Some(persister) = &session.persister {
+                    let mut persister = persister.lock().await;
+                    persister.store_mut().set_thinking(session.thinking);
+                    persister
+                        .store_mut()
+                        .set_model(format!("{}/{}", session.provider_name, session.model));
                 }
                 let options =
                     session.config_options(&set_state.config, &set_state.provider_names());
@@ -562,7 +710,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Ok(text) => text,
                     Err(message) => return respond_setup_error(responder, message),
                 };
-                let (workspace, history, provider_name, model, permissions, cancel_rx, turn_id) = {
+                let (conversation, mut events, provider_name, model, turn_cancel, turn_id) = {
                     let mut sessions = prompt_state.sessions.lock().await;
                     let Some(session) = sessions.get_mut(request.session_id.0.as_ref()) else {
                         drop(sessions);
@@ -570,50 +718,53 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     };
                     // Fail closed: a second prompt while one is in flight is
                     // rejected rather than queued, so the turns can never
-                    // clobber the shared history buffer or re-arm each
-                    // other's cancellation flag.
+                    // interleave on the conversation or re-arm each other's
+                    // cancellation.
                     let turn_id = prompt_state.next_turn.fetch_add(1, Ordering::Relaxed);
                     if let Err(message) = session.begin_turn(turn_id) {
                         drop(sessions);
                         return responder.respond_with_error(invalid_request(message));
                     }
-                    // Re-arm the session-wide cancellation flag for this turn.
-                    session.cancel.set(false);
+                    // A fresh cancellation for this turn, visible to the
+                    // gate, asker, MCP tools, and subagents through the cell.
+                    let turn_cancel = animist::agent::Cancellation::default();
+                    session.cancel_cell.store(Arc::new(turn_cancel.clone()));
                     (
-                        session.workspace.clone(),
-                        session.history.clone(),
+                        session.conversation.clone(),
+                        std::mem::replace(&mut session.events, crate::harness::EventSink::new().1),
                         session.provider_name.clone(),
                         session.model.clone(),
-                        session.permissions.clone(),
-                        session.cancel.token(),
+                        turn_cancel,
                         turn_id,
                     )
                 };
-                let client_caps = prompt_state
-                    .client_caps
-                    .lock()
-                    .await
-                    .clone()
-                    .unwrap_or_default();
                 let run_state = prompt_state.clone();
-                let session_id = request.session_id.clone();
+                let prompt_session_id = request.session_id.clone();
+                let return_state = prompt_state.clone();
+                let return_session_id = prompt_session_id.clone();
                 tokio::spawn(async move {
                     run_turn(
                         run_state,
                         connection,
-                        session_id,
+                        prompt_session_id,
                         text,
-                        history,
-                        workspace,
+                        conversation,
+                        &mut events,
                         provider_name,
                         model,
-                        permissions,
-                        client_caps,
-                        cancel_rx,
+                        turn_cancel,
                         turn_id,
                         responder,
                     )
                     .await;
+                    // Return the stream to the session for the next turn.
+                    let mut sessions = return_state.sessions.lock().await;
+                    if let Some(session) = sessions.get_mut(return_session_id.0.as_ref())
+                        && session.turn == Some(turn_id)
+                    {
+                        session.events = events;
+                        session.turn = None;
+                    }
                 });
                 Ok(())
             },
@@ -623,11 +774,16 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
             async move |request: CloseSessionRequest,
                         responder: Responder<CloseSessionResponse>,
                         _connection: ConnectionTo<AcpClient>| {
-                close_state
+                let session = close_state
                     .sessions
                     .lock()
                     .await
                     .remove(request.session_id.0.as_ref());
+                // Release the conversation's resources before the session
+                // goes away (async cleanup cannot run in `Drop`).
+                if let Some(session) = session {
+                    let _ = session.conversation.shutdown().await;
+                }
                 responder.respond(CloseSessionResponse::new())
             },
             on_receive_request!(),
@@ -636,7 +792,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
             async move |notification: CancelNotification, _connection| {
                 let sessions = cancel_state.sessions.lock().await;
                 if let Some(session) = sessions.get(notification.session_id.0.as_ref()) {
-                    session.cancel.set(true);
+                    session.cancel_cell.load().cancel();
                 }
                 Ok(())
             },
@@ -670,33 +826,6 @@ fn invalid_request(message: impl Into<String>) -> Error {
     error
 }
 
-/// Commit a finished turn's history only while `turn_id` is still the
-/// session's in-flight turn, then release the slot. A stale (superseded or
-/// canceled) turn commits nothing, so it cannot overwrite history committed
-/// by a newer accepted turn.
-async fn commit_turn(
-    sessions: &Mutex<BTreeMap<String, Session>>,
-    session_id: &SessionId,
-    turn_id: u64,
-    history: Vec<history::StoredMessage>,
-) {
-    let mut sessions = sessions.lock().await;
-    if let Some(session) = sessions.get_mut(session_id.0.as_ref())
-        && session.turn == Some(turn_id)
-    {
-        session.history = history;
-        if let Some(store) = &mut session.store {
-            store.record_turn(
-                &session.history,
-                format!("{}/{}", session.provider_name, session.model),
-            );
-        }
-        session.turn = None;
-    }
-}
-
-/// Release the in-flight slot for `turn_id` without touching history
-/// (cancelled/failed turns leave session history untouched).
 async fn clear_turn(
     sessions: &Mutex<BTreeMap<String, Session>>,
     session_id: &SessionId,
