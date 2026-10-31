@@ -532,6 +532,21 @@ mod tests {
         ext::entry(stored(text))
     }
 
+    /// The persister's failed-checkpoint rollback exists because applying
+    /// a record is NOT idempotent: the same entry record applied twice
+    /// duplicates the entry. This pins that property so the rollback
+    /// cannot be "simplified" away.
+    #[test]
+    fn applying_the_same_record_twice_duplicates_the_entry() {
+        let record = Record::Entry {
+            entry: entry("once"),
+        };
+        let mut entries = Vec::new();
+        apply_record(&mut entries, &record).unwrap();
+        apply_record(&mut entries, &record).unwrap();
+        assert_eq!(entries.len(), 2, "record application is not idempotent");
+    }
+
     #[test]
     fn replay_covers_every_record_kind() {
         let mut entries = vec![entry("one"), entry("two")];

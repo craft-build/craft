@@ -395,6 +395,21 @@ where
         self.rewrite_messages();
     }
 
+    /// The message collection behind its `Arc`, for callers that may need
+    /// to restore it (the persister's failed-checkpoint rollback) without
+    /// a deep copy on every checkpoint.
+    pub fn messages_arc(&self) -> Arc<Vec<M>> {
+        Arc::clone(&self.messages)
+    }
+
+    /// Restore the message collection from a [`Self::messages_arc`]
+    /// snapshot; rewrites like `replace_messages` so append cursors
+    /// diverge conservatively.
+    pub fn restore_messages_arc(&mut self, messages: Arc<Vec<M>>) {
+        self.messages = messages;
+        self.rewrite_messages();
+    }
+
     pub fn truncate_messages(&mut self, len: usize) {
         if len >= self.messages.len() {
             return;

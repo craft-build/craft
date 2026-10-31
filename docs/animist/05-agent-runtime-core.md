@@ -476,12 +476,14 @@ Still open: `ToolDispatch`/`BeforeExecute` seam (06–07), `ReauthHook`
 - **`Conversation::shutdown`** reports through its own
   `ShutdownConversation` error variant (was `BuildConversation`).
 - **TUI empty-reply continuation vs 09's `ContinuationLayer`** (review
-  P2): the surface-level continuation (`MAX_EMPTY_CONTINUATIONS`) is
-  old-loop parity, kept so the TUI does not dead-stop on empty terminal
-  replies; it nudges only terminal emptiness, not the run-level
-  after-tool-call stall (those tests are `restored in 09`). When 09 lands
-  `ContinuationLayer`, the surface loop must be removed or the TUI will
-  nudge twice.
+  P2): the surface-level continuation (`MAX_EMPTY_CONTINUATIONS`) is a
+  TUI-only addition, not old-loop parity — the old loop ended the turn on
+  an empty terminal reply (`empty_reply_without_recent_tool_results_ends
+  the_run`, still live) and nudged only the after-tool-call stall (those
+  tests are `restored in 09`). The TUI now nudges exactly the
+  terminal-emptiness case, committing a synthetic user message. When 09
+  lands `ContinuationLayer`, the surface loop must be removed or the TUI
+  will nudge twice.
 - **Unbounded conversation sink** (review P2, accepted): the sink is
   single-reader per conversation and every surface drains it — the TUI
   forwarder for the session's life, ACP during the turn, print to
@@ -501,7 +503,10 @@ Still open: `ToolDispatch`/`BeforeExecute` seam (06–07), `ReauthHook`
 
 ### Test-inventory diff
 
-`2005 → 1918` listed tests. Removed: unit tests of deleted modules
+`2005 → 1922` listed tests (1918 at the Phase C commit plus the four
+review-pass additions: two `runtime::workspace_env` tests, the
+responded-call rendering test, and the record-application
+non-idempotence pin). Removed: unit tests of deleted modules
 (`run::{advisor,nudge,overflow,stream,events,task_set,stats}` — the
 run-level behaviours they tested live on as the ported-and-ignored
 run_tests shapes; `runtime::run_policy`, with `workspace_env`'s two

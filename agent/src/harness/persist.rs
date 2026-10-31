@@ -105,9 +105,10 @@ impl Persister {
         }
         // The in-memory mirror must not keep a batch the file rejected:
         // `apply_record` is not idempotent, so a retry after a failed
-        // append would duplicate every entry. Snapshot, apply, and roll
-        // the mirror back unless the append landed.
-        let mirror_before = self.store.session().messages().to_vec();
+        // append would duplicate every entry. Snapshot (an `Arc` bump, not
+        // a copy), apply, and roll the mirror back unless the append
+        // landed.
+        let mirror_before = self.store.session().messages_arc();
         self.store.session_mut().apply_changes(changes.changes());
         self.store.session_mut().update_title_if_default();
         let appended = match &mut self.log {
@@ -121,7 +122,7 @@ impl Persister {
             }
             Err(SessionError::LogDiverged { .. }) => self.full_rewrite().await,
             Err(error) => {
-                self.store.session_mut().replace_messages(mirror_before);
+                self.store.session_mut().restore_messages_arc(mirror_before);
                 Err(error)
             }
         }
