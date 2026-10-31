@@ -309,6 +309,55 @@ async fn cross_agent_same_file_writes_serialize_through_the_path_lock() {
     );
 }
 
+/// Cross-agent safety: a recursive delete of a directory excludes a
+/// concurrent directory walk — the tree delete holds the workspace-wide
+/// lock, so the walk either finishes before it or runs after the tree is
+/// gone.
+#[tokio::test]
+async fn tree_delete_excludes_a_concurrent_directory_walk() {
+    let (_dir, workspace) = workspace();
+    std::fs::create_dir_all(workspace.root().join("tree")).unwrap();
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        std::fs::write(workspace.root().join("tree").join(name), "x\n").unwrap();
+    }
+    let walker = workspace.clone();
+    let (delete_out, walk_out) = tokio::join!(
+        async {
+            let mut harness = animist::agent::testing::ToolHarness::builder()
+                .build()
+                .unwrap();
+            harness
+                .call(
+                    Delete(workspace),
+                    json!({"files": ["tree"], "recursive": true}),
+                )
+                .await
+        },
+        async {
+            let mut harness = animist::agent::testing::ToolHarness::builder()
+                .build()
+                .unwrap();
+            harness
+                .call(Grep(walker), json!({"path": "tree", "pattern": "x"}))
+                .await
+        },
+    );
+    assert!(!delete_out.expect("delete outcome").is_error);
+    let walk = walk_out.expect("walk outcome");
+    let text = crate::history::ext::tool_content_text(&walk.content);
+    // Whatever the interleaving, the walk reports a consistent snapshot:
+    // every file or none — never a torn tree.
+    let files: Vec<&str> = text
+        .lines()
+        .filter(|line| line.ends_with(".rs:"))
+        .map(|line| line.trim_end_matches(':'))
+        .collect();
+    assert!(
+        files.len() == 3 || files.is_empty(),
+        "torn walk between delete waves: {text}"
+    );
+}
+
 /// Cancellation during a long foreground bash kills the process group and
 /// reports the partial output with the cancel note.
 #[tokio::test]

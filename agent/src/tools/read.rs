@@ -177,6 +177,7 @@ async fn read_argosy(rest: &str, workspace: &Workspace, args: &ReadArgs) -> Resu
     let uri = format!("argosy://{rest}");
     let root = workspace.root().to_path_buf();
     let target = uri.clone();
+    // The in-process argosy service is a sync API.
     let body = tokio::task::spawn_blocking(move || {
         crate::knowledge::ArgosyService::global().read_resource(&root, &target)
     })

@@ -75,15 +75,15 @@ impl Delete {
         // files beneath it, so it takes the workspace-wide guard (matching
         // its exclusive scheduling claim).
         let tree_target = Self::has_directory_target(workspace, &args.files);
-        // A tree delete claims the root key exclusively: that excludes every
+        // A tree delete holds the workspace-wide lock: it excludes every
         // reader and writer keyed under the workspace, matching the
-        // exclusive scheduling claim.
-        let keys = if tree_target {
-            vec![workspace.normalized_root()]
+        // exclusive scheduling claim. File deletes take per-key guards.
+        let keys = claims::write_keys(workspace.root_key().as_deref(), &args.files);
+        let (_tree_guard, _file_guard) = if tree_target {
+            (Some(workspace.locks().workspace_write(cancel).await?), None)
         } else {
-            claims::write_keys(workspace.root_key().as_deref(), &args.files)
+            (None, Some(workspace.locks().write(&keys, cancel).await?))
         };
-        let _guard = workspace.locks().write(&keys, cancel).await?;
 
         for file in &args.files {
             // Our guard set stays: resolve rejects `..`, outside paths, Git
@@ -121,6 +121,14 @@ impl Delete {
             if metadata.is_dir() && !recursive {
                 skipped.push(format!("{display} (is a directory; set recursive=true)"));
                 continue;
+            }
+            // The classification stats targets before the guard; a target
+            // that became a directory in between would recurse under a
+            // claim that named no write beneath it. Fail closed.
+            if metadata.is_dir() && !tree_target {
+                return Err(invalid(format!(
+                    "{display} became a directory before the delete; retry"
+                )));
             }
 
             // Capture pre-delete contents so `/undo` can restore them.

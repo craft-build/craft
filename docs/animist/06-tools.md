@@ -178,4 +178,149 @@ Delete 05's rig bridge and the `rig-core` dependency.
 
 ## Completion note
 
-_(fill in when done)_
+**2026-10-31 · commits `4911907b` + `b3f1996f` + `4c1a2e0d` (review fixes) ·
+`cargo test -p craft`: 1890 passed, 3 failed (the three pre-existing recipe
+render fixed points), 29 ignored · reviewer verdict: clean after two
+iterations (P1×2 P3×3 then P1×1 P2×2, all addressed) · clippy at the 01
+baseline (zero new warnings), `cargo fmt --check` clean.**
+
+### Claim table per tool
+
+| Tool | Claim |
+| --- | --- |
+| `read`, `view_image` | `reads: [norm(path)]` (resource URLs claim the normalized URI string) |
+| `grep`, `glob`, `list` | `reads: [norm(start dir)]` |
+| `write`, `edit`, `edit_lines`, `insert_lines`, `multiedit` | `writes: [norm(path) + ancestor dirs up to and including the root]` |
+| `apply_patch` | writes of every parsed `patch_paths` target + ancestors |
+| `delete` | same shape as write; **exclusive** when any target is a directory (or unreadable — fail closed), because file-level claims cannot cover a recursive removal |
+| `move` (`move_file`) | exclusive (import rewrite touches any file); workspace-wide lock |
+| `bash`, `bash_status`, `bash_watch`, `bash_kill` | exclusive |
+| `question` | exclusive (parks on the host seam) |
+| `task`, `review` | exclusive (child agents touch anything) |
+| `batch` | exclusive (required by `dispatch_all`) |
+| `todo_write` | `writes: ["todos"]` |
+| `retrieve`, `skill`, `sessions`, `list_tools` | independent (empty resources) |
+| `webfetch`, `websearch` | independent (network-only) |
+| argosy knowledge tools | `reads: [norm(root)]` — they overlap reads and each other (the service serializes its own mutations internally) and exclude writers |
+| MCP tools | independent when the server asserts `read_only_hint: true`; exclusive otherwise |
+
+### Key scheme
+
+Keys are `normalize_write_path_with_root(root, p)` — the same normalization
+the dedup cache uses, so claims, the cross-agent path locks, and dedup
+invalidation can never disagree (claims and locks share
+`claims::write_keys`). Readers claim their exact path or start directory;
+writers claim each target **plus every ancestor directory up to and
+including the workspace root**. Consequences (all pinned by
+`claim_scheme_conflicts_match_the_documented_cases`): two reads overlap;
+same-path write/read and write/write serialize; a directory walk conflicts
+with any write beneath it; and — deliberately — **every write shares the
+root ancestor, so writes serialize workspace-wide** (the prompt's
+alternative "conservative workspace-wide key" collapses to this same
+shape). Targets outside the root (the plan file) claim the target alone.
+
+Cross-agent safety: `tools/locks.rs` — a per-workspace
+`tokio::sync` lock table (shared root RwLock + per-key RwLocks, acquired
+root-first then sorted keys; writers hold exclusive key guards under a
+shared root guard; `move` and tree deletes hold the root exclusively).
+Acquisition races the run's cancellation. Pinned by
+`cross_agent_same_file_writes_serialize_through_the_path_lock`,
+`tree_delete_excludes_a_concurrent_directory_walk`, and
+`cancellation_during_a_path_lock_wait_returns_promptly`.
+
+### Error-text decision
+
+Every model-correctable failure (validation, denial, not-found, io, seam
+errors) returns `Ok(ToolOutput { is_error: true, content: <exact legacy
+text> })` — model-visible strings are byte-identical to the rig
+dispatcher's; `Error::Io` keeps the io error as its snafu source with
+`display("{source}")`. `Err` is reserved for machinery faults
+(`Blocking`, `LockCancelled`), which animist renders with its
+`Tool execution failed: ` prefix. Three intentional, pinned text changes:
+argument-decode failures now read animist's `Invalid tool arguments: …`
+(was `invalid arguments: …`), unknown tools read animist's
+`Unknown tool: {name}` (was craft's longer hint — the hint survives on
+`list_tools`' unknown-detail path), and batch dispatch failures read
+`batch dispatch failed: …` (pinned by
+`dispatch_failure_is_reported_with_our_wording`). Machinery-fault
+wording is animist-composed and left unpinned except the batch string.
+
+### Remaining `spawn_blocking` sites (each with a reason comment)
+
+grep (ignore walker + regex scan, one bounded unit) · glob (ignore
+walker) · move_file (walker + import rewrites) · view_image (image
+decode/downscale/re-encode) · edit (CPU-bound fuzzy match) ·
+`Workspace::note_snapshot` (sync snapshot store) · `stage` (tempfile +
+fsync) · read's `argosy://` (sync argosy service) · read's `skill://`
+(sync discovery walk) — plus the pre-existing non-tool sites
+(auto-review decide, runtime env, knowledge, mcp manager, snapshot, TUI
+cards/resume/usage). `similar`-diff rendering stays sync: it runs in the
+sync output-conversion path (`IntoToolResult`), as it did under rig.
+
+### Test-inventory diff
+
+`1922 → 1922` listed tests (1890 pass; 29 ignored = 28 prior + the
+restored-for-07 `children_feed_guardrail_counters`; the three failures
+are the pre-existing recipe fixed points). 19 removed / 19 added:
+
+- `run::dispatch::plan_mode_tests` (6) — plan gating lives in
+  `PolicyLayer`; covered by `harness/policy.rs`'s gate tests and
+  `run/tests/cli_policy`.
+- `run::dispatch::result_content_tests` (2) — rig content mapping died
+  with rig; pretty-JSON-to-text stays pinned by `task`'s
+  `json_result_is_pretty_printed`.
+- `after_execute_transform_rewrites_results`,
+  `dedup_replays_through_after_hook` → `post_exec_layer_transforms_results`
+  (layer `post_tool_exec`, exercised through a batch child since root
+  harness calls bypass layers); the replay half is
+  `dedup_replays_identical_read_calls` (the `[cached]` marker was a
+  dispatch-path artifact that 05's agent path never had).
+- `never_parallel_tool_waits_for_earlier_calls` → `exclusive_tool_waits_for_earlier_calls`.
+- `unknown_tool_becomes_recoverable_error_result` → folded into
+  `unknown_tool_surfaces_error_and_run_continues` (pins animist's wording).
+- `children_go_through_the_approval_gate` → `approval_gate_reaches_batch_children`.
+- `children_go_through_the_after_hook` → `post_exec_layer_transforms_results`.
+- `children_feed_guardrail_counters` → restored `#[ignore = "restored in 07"]`
+  (the counters move into the GuardrailLayer's post-hook in 07).
+- `registered_in_the_workspace_dispatch_table` → `registered_in_the_workspace_registry`.
+- `concurrent_edits_share_one_workspace_lock` → `concurrent_edits_share_one_path_lock`.
+- `plan_mode_sandbox_cell…` / `build_mode_and_general_subagents_share_the_session_cell`
+  — the mode-frozen sandbox cells were unreachable since 05 (every surface
+  registered Build); the surviving freeze is pinned by
+  `read_only_workers_get_a_frozen_read_only_cell`.
+- Added beyond the replacements: the claims suite (table, mirrored
+  `conflicts` rule citing animist's `pub(crate)` source, scheme cases,
+  MCP hint shapes), the end-to-end scheduling tests the prompt requires
+  (overlapping reads, same-path serialization, exclusive barrier, dir
+  walk vs write), the cross-agent and cancellation tests, the tree-delete
+  exclusion test, and `independent_calls_run_concurrently` restored from
+  its 06 ignore (barrier probes through the conversation).
+
+### Indirection rows closed
+
+`PortableTool`/`DynamicTool`/`impl_tool!`/`dynamic()`/`tool_name()`/
+`animist_definitions()` (rig adapters) · `Workspace::run` (global
+`std::sync::Mutex` under `spawn_blocking`) · `harness/rig_bridge.rs` ·
+`run::dispatch::{ToolDispatch, SharedDispatch, AfterExecute,
+DispatchOutcome, CURRENT_CALL_ID, call_parts}` · `Workspace::{before,
+with_before, mcp_cancel, with_cancel, register, register_with_mode,
+register_subagent, register_reviewer, tool_definitions,
+turn_sandbox_cell}` · `batch`'s `SharedDispatch` back-reference ·
+`dedup::normalize_write_path`'s process-global `OnceLock` root (the
+root is always explicit now).
+
+### Surviving tool-side traits, and why
+
+- `AskQuestions` (question.rs): four real implementations — TUI
+  `QuestionAsker` (parks on the shared park + question form), ACP
+  `ElicitationAsker` (client elicitation), headless `DismissAsk`
+  (default), and the test `Scripted`.
+- `SpawnSubagent` (task.rs): `SubagentLauncher` (TUI/ACP/headless) and
+  `NoSubagents` (default).
+- `BeforeExecute`/`Decision` (now in `run`): the approval seam with the
+  TUI `ApprovalGate`, ACP `AcpPermissionGate`, headless `HeadlessGate`,
+  and the auto-review compound gate; consumed by `PolicyLayer`.
+- `IntoToolResult` (tools/error.rs): renders each tool's typed output
+  into its model-visible `ToolOutput` (animist's `IntoToolOutput` is
+  async-futured and Result-returning; the tools' rendering is sync and
+  infallible).
