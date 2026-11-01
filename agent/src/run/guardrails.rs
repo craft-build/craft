@@ -242,6 +242,10 @@ pub(crate) struct GuardrailInner {
     /// Call ids answered without execution this run; `post_tool_exec` skips
     /// counter and cache bookkeeping for them. Cleared at `turn_start`.
     pub(crate) answered: HashSet<String>,
+    /// Set by the driver before a follow-up run (advisor and overflow
+    /// re-runs continue the same turn): `turn_start` skips the volatile
+    /// doom reset and consumes the mark.
+    follow_up: bool,
 }
 
 impl std::fmt::Debug for GuardrailState {
@@ -261,6 +265,7 @@ impl GuardrailState {
                 guardrails: ToolGuardrails::new(),
                 dedup: ToolDedupCache::with_root(write_root),
                 answered: HashSet::new(),
+                follow_up: false,
             }),
         }
     }
@@ -297,6 +302,18 @@ impl GuardrailState {
             inner.dedup.clear();
             inner.answered.clear();
         });
+    }
+
+    /// Mark the next run as a driver follow-up (advisor and overflow
+    /// re-runs continue the same turn): the layer's `turn_start` skips the
+    /// volatile doom reset and consumes the mark.
+    pub fn mark_follow_up(&self) {
+        self.with(|inner| inner.follow_up = true);
+    }
+
+    /// Take the follow-up mark, if set.
+    pub(crate) fn take_follow_up(&self) -> bool {
+        self.with(|inner| std::mem::take(&mut inner.follow_up))
     }
 
     /// Record that `id` was answered without executing (a policy or

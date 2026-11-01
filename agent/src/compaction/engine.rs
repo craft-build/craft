@@ -108,9 +108,17 @@ impl CompactionState {
     }
 
     /// Record the provider-measured prompt size of the last completed
-    /// stream; the fill check treats it as a floor.
+    /// stream; the fill check treats it as a floor. Zero is the sentinel
+    /// for "no measurement" — overflow recovery clears it because the
+    /// pre-compaction measurement no longer describes the compacted
+    /// context.
     pub fn set_measured_prompt(&mut self, tokens: u64) {
         self.measured_prompt = tokens;
+    }
+
+    /// The provider-measured prompt floor, zero when unmeasured.
+    pub fn measured_prompt(&self) -> u64 {
+        self.measured_prompt
     }
 
     /// The overhead-inclusive estimate the engine's thresholds run against,
@@ -125,8 +133,9 @@ impl CompactionState {
     /// effectiveness score and the `CompactionDone` gauge. The floor is the
     /// last request's size — roughly the *pre*-compaction size — so flooring
     /// the after-side would score every effective pass as a no-op and
-    /// disarm the stage for the rest of the session.
-    fn scaled_estimate_unfloored(&self, history: &[StoredMessage]) -> u64 {
+    /// disarm the stage for the rest of the session. Recovery's doom score
+    /// reads the same currency.
+    pub(crate) fn scaled_estimate_unfloored(&self, history: &[StoredMessage]) -> u64 {
         self.estimator
             .scale(estimate_tokens(history).saturating_add(self.request_overhead))
     }

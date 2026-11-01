@@ -341,6 +341,25 @@ mod reveal_tests {
     }
 
     #[test]
+    fn superseded_attempt_text_is_not_duplicated_into_the_next_reply() {
+        // The continuation layer's retry abandons an attempt mid-stream:
+        // the model must close that buffer (the renderer maps
+        // `AttemptInterrupted` to `AssistantEnd`) so the retried attempt's
+        // deltas start a fresh message instead of concatenating.
+        let now = Instant::now();
+        let mut chat = Conversation::new();
+        chat.apply_at(AgentEvent::AssistantDelta("abandoned ".into()), now);
+        chat.apply_at(AgentEvent::AssistantEnd, now);
+        chat.apply_at(AgentEvent::AssistantDelta("fresh".into()), now);
+        assert_eq!(chat.messages.len(), 2, "two separate replies");
+        assert!(
+            matches!(&chat.messages[0], Message::Assistant(text) if text == "abandoned "),
+            "the superseded text stays on screen, unmodified"
+        );
+        assert!(matches!(&chat.messages[1], Message::Assistant(text) if text == "fresh"));
+    }
+
+    #[test]
     fn reasoning_transition_and_end_flush_received_text() {
         let now = Instant::now();
         let mut chat = Conversation::new();

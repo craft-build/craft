@@ -542,10 +542,11 @@ async fn durable_alters_match_old_view_bytes_without_mid_run_prefix_mutations() 
 /// unanswered prompt away.
 #[tokio::test]
 async fn failed_turns_input_survives_a_forced_compaction() {
-    // The 500 fails the turn; the extra turn serves the forced
-    // compaction's summarizer.
+    // A fatal 400 fails the turn (a 500 would now be retried by the
+    // recovery layer); the extra turn serves the forced compaction's
+    // summarizer.
     let provider = script(vec![
-        crate::testing::http_error(500, "server exploded"),
+        crate::testing::http_error(400, "invalid api key"),
         crate::testing::text_turn("summary"),
     ]);
     let dir = tempfile::tempdir().unwrap();

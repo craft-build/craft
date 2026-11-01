@@ -140,6 +140,75 @@ async fn cache_is_fresh(path: &std::path::Path) -> bool {
 
 // --- Side completions -----------------------------------------------------------
 
+/// Production E.10 reauth hook (see [`harness::ReauthHook`]): waits for the
+/// provider credential to be refreshed, then rebuilds the provider and
+/// returns the model for the run to retry with. A process's environment
+/// only changes in-process, so this serves flows that update credentials
+/// while craft runs (plugins, config reloads, the future H.5 auth flow).
+#[expect(
+    clippy::result_large_err,
+    reason = "the crate error type is deliberately unboxed"
+)]
+pub async fn reauth_hook(
+    config: &ProviderConfig,
+    id: &str,
+) -> crate::error::Result<Arc<dyn crate::harness::ReauthHook>> {
+    Ok(Arc::new(EnvReauth {
+        config: config.clone(),
+        id: id.to_owned(),
+    }))
+}
+
+/// How often the E.10 hook polls the credential, and how long it waits
+/// overall before giving up (the run's cancellation still ends it
+/// immediately).
+const REAUTH_POLL: Duration = Duration::from_secs(2);
+const REAUTH_MAX_WAIT: Duration = Duration::from_secs(600);
+
+struct EnvReauth {
+    config: ProviderConfig,
+    id: String,
+}
+
+#[async_trait::async_trait]
+impl crate::harness::ReauthHook for EnvReauth {
+    async fn reauth(&self, _attempt: u32) -> std::result::Result<Option<ModelHandle>, String> {
+        let env_name = self
+            .config
+            .credential_env()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                format!(
+                    "provider {} has no refreshable credential; restart after re-authenticating",
+                    config_kind_str(&self.config)
+                )
+            })?;
+        let original = std::env::var(&env_name).unwrap_or_default();
+        // tokio's clock, so a paused test runtime walks the deadline.
+        let deadline = tokio::time::Instant::now() + REAUTH_MAX_WAIT;
+        loop {
+            let current = std::env::var(&env_name).unwrap_or_default();
+            if !current.trim().is_empty() && current != original {
+                let provider = ProviderHandle::from_config(&self.config, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return provider
+                    .model(&self.config, None, &self.id)
+                    .await
+                    .map(Some)
+                    .map_err(|e| e.to_string());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "credentials in {env_name} were not refreshed within {}s; set a new value and retry",
+                    REAUTH_MAX_WAIT.as_secs()
+                ));
+            }
+            tokio::time::sleep(REAUTH_POLL).await;
+        }
+    }
+}
+
 /// One no-tools completion for auxiliary callers (compaction summaries,
 /// auto-review, the advisor, memory extraction): maps the messages onto
 /// the wire, drains the exchange ignoring deltas, and returns the
@@ -897,6 +966,75 @@ mod tests {
         assert!(
             !path.exists(),
             "an empty catalog would poison the next session against a working refresh"
+        );
+    }
+
+    // --- env reauth hook ---
+
+    fn reauth_provider_config(var: &str) -> ProviderConfig {
+        let config = crate::config::Config::parse(&format!(
+            "provider \"t\" {{ kind = \"openai-compatible\"\n base_url = \"http://127.0.0.1:9/v1\"\n api_key_env = \"{var}\" }}",
+        ))
+        .expect("test provider config parses");
+        config.providers.get("t").cloned().expect("provider row")
+    }
+
+    /// The hook waits for the env credential to change, then rebuilds the
+    /// provider and hands back the model to retry with. Paused time walks
+    /// the 2 s poll instantly.
+    #[tokio::test(start_paused = true)]
+    async fn env_reauth_rebuilds_when_the_credential_changes() {
+        let var = "CRAFT_TEST_REAUTH_REFRESH";
+        unsafe { std::env::set_var(var, "original") };
+        let config = reauth_provider_config(var);
+        let hook = reauth_hook(&config, "m").await.expect("hook builds");
+        let task = tokio::spawn(async move { hook.reauth(1).await });
+        // Let the hook take its baseline reading and park in the poll.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        unsafe { std::env::set_var(var, "refreshed") };
+        let model = task
+            .await
+            .expect("hook task joins")
+            .expect("refresh succeeds")
+            .expect("rebuilt model");
+        assert_eq!(model.model.id, "m");
+        unsafe { std::env::remove_var(var) };
+    }
+
+    /// No refresh within the deadline: the hook reports failure with the
+    /// variable name, and the run surfaces it.
+    #[tokio::test(start_paused = true)]
+    async fn env_reauth_times_out_when_nothing_changes() {
+        let var = "CRAFT_TEST_REAUTH_STALE";
+        unsafe { std::env::set_var(var, "stale") };
+        let config = reauth_provider_config(var);
+        let hook = reauth_hook(&config, "m").await.expect("hook builds");
+        let outcome = hook.reauth(1).await;
+        let Err(message) = &outcome else {
+            panic!("an unchanged credential must time out")
+        };
+        assert!(
+            message.contains(var) && message.contains("were not refreshed"),
+            "the deadline reports the variable name: {message}"
+        );
+        unsafe { std::env::remove_var(var) };
+    }
+
+    /// A provider with no refreshable credential (AWS chain) fails the
+    /// wait immediately with an actionable message.
+    #[tokio::test(start_paused = true)]
+    async fn env_reauth_rejects_providers_without_a_credential_env() {
+        let config = crate::config::Config::parse("provider \"b\" { kind = \"amazon-bedrock\" }")
+            .expect("bedrock config parses");
+        let entry = config.providers.get("b").expect("provider row");
+        let hook = reauth_hook(entry, "m").await.expect("hook builds");
+        let outcome = hook.reauth(1).await;
+        let Err(message) = &outcome else {
+            panic!("a credential-less provider must refuse")
+        };
+        assert!(
+            message.contains("no refreshable credential"),
+            "the hook refuses immediately: {message}"
         );
     }
 

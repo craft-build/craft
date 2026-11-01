@@ -119,8 +119,13 @@ pub(super) async fn run_turn(
                     *ledger.lock().expect("usage ledger unpoisoned") = Some(by_model);
                     return true;
                 }
-                // The remaining craft events have no ACP translation yet
-                // (compaction, retry, subagents) until 07–10.
+                // The remaining events have no ACP translation: craft
+                // events (compaction, retry, subagents) until 10–11, and
+                // `AttemptInterrupted`, whose superseded text ACP cannot
+                // express — `AgentMessageChunk`s are an append-only stream,
+                // so an abandoned attempt's text stays interleaved with the
+                // retry's (the TUI closes the buffer instead; today's ACP
+                // dropped the retry events too).
                 _ => return false,
             };
             // A dead connection stops the notifications but not the turn; the

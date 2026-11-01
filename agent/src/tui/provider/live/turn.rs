@@ -142,6 +142,18 @@ impl TurnRenderer {
                     .store(true, Ordering::Relaxed);
                 let _ = self.tx.send(AgentEvent::ReasoningDelta(text));
             }
+            Event::Agent(RuntimeEvent::AttemptInterrupted { .. }) => {
+                // An abandoned attempt's streamed text is superseded, never
+                // concatenated into the next attempt's reply (the retry
+                // notice below already separates them visually; closing the
+                // streaming buffer keeps the buffers separate even when no
+                // notice lands in between). On cancellation the partial is
+                // real — the driver commits it — and closing the buffer is
+                // still correct: the turn is over. The streamed flags stay
+                // set: the user did see that text, so the outcome renderer
+                // must not re-emit it.
+                let _ = self.tx.send(AgentEvent::AssistantEnd);
+            }
             Event::Agent(RuntimeEvent::ToolStarted { call, .. }) => {
                 if !self.signals.tools_started.swap(true, Ordering::Relaxed) {
                     let _ = self.tx.send(AgentEvent::StatusChanged(Status::Running));
@@ -795,6 +807,46 @@ mod tests {
             text.contains("attempt 2") && text.contains("stream reset") && text.contains("1.5s"),
             "{text}"
         );
+    }
+
+    /// An abandoned attempt closes the streaming buffer so its text stands
+    /// superseded, separate from the next attempt's reply.
+    #[test]
+    fn attempt_interrupted_closes_the_streaming_buffer() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(Event::Agent(RuntimeEvent::Provider {
+            run_id: 0,
+            step: 0,
+            attempt: 0,
+            event: ProviderEvent::TextDelta {
+                text: "abandoned prefix".into(),
+            },
+        }));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentEvent::AssistantDelta(text)) if text == "abandoned prefix"
+        ));
+        renderer.map(Event::Agent(RuntimeEvent::AttemptInterrupted {
+            run_id: 0,
+            step: 0,
+            attempt: 0,
+        }));
+        assert!(
+            matches!(rx.try_recv(), Ok(AgentEvent::AssistantEnd)),
+            "the abandoned buffer closes before the next attempt streams"
+        );
+        renderer.map(Event::Agent(RuntimeEvent::Provider {
+            run_id: 0,
+            step: 0,
+            attempt: 1,
+            event: ProviderEvent::TextDelta {
+                text: "fresh start".into(),
+            },
+        }));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentEvent::AssistantDelta(text)) if text == "fresh start"
+        ));
     }
 
     #[test]

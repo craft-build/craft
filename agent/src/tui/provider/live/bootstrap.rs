@@ -347,6 +347,16 @@ pub(super) async fn build_session_state(
     if let Some(mcp) = workspace.mcp() {
         kit.permissions.sync_mcp_annotations(&mcp);
     }
+    // E.10 reauth hook over the session provider's credential.
+    let reauth = crate::provider::reauth_hook(
+        kit.config
+            .providers
+            .get(&selection.provider)
+            .ok_or_else(|| format!("provider {} is not configured", selection.provider))?,
+        &selection.model,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let conversation = crate::harness::ConversationBuilder::new(
         &kit.config,
         &kit.cwd,
@@ -362,6 +372,10 @@ pub(super) async fn build_session_state(
     .history(history)
     .thinking(thinking)
     .policy(policy.clone())
+    // E.10: a 401 parks the run on the env-credential reauth hook instead
+    // of failing the turn (the TUI's env is refreshed by plugins and
+    // config reloads while it runs).
+    .reauth(reauth)
     .workspace(workspace.clone())
     .persist(persister.clone())
     .build()

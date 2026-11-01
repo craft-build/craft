@@ -25,16 +25,19 @@ use animist::agent::tool::ToolRegistry;
 
 use crate::run::AgentMode;
 use crate::run::GuardrailState;
+use crate::run::RetryCtx;
 use crate::run::SharedCompactionState;
 use crate::run::recency::RecencySource;
 use crate::snapshot::SnapshotManager;
 use crate::thinking::ThinkingConfig;
 
+use super::continuation::{ContinuationHandle, ContinuationLayer, DEFAULT_MAX_CONTINUATION_TURNS};
 use super::events::{CraftEvent, EventSink};
 use super::guardrail::GuardrailLayer;
 use super::persist::Persister;
 use super::persist_layer::PersistLayer;
 use super::policy::{PolicyLayer, PolicyLayerInputs};
+use super::recovery::{ReauthHook, RecoveryHandle, RecoveryLayer};
 use super::request::{RequestLayer, RequestLayerInputs};
 use super::snapshot_layer::SnapshotLayer;
 
@@ -60,22 +63,27 @@ pub struct TurnSettings {
 }
 
 /// The layer instances, kept as handles so every `Agent` rebuild reuses the
-/// same state (dedup cache, snapshot manager) on the same history. Never
-/// shared between conversations: run ids are per agent, so a shared layer
-/// would collide and corrupt per-run state.
+/// same state (dedup cache, snapshot manager, recovery budgets) on the same
+/// history. Never shared between conversations: run ids are per agent, so a
+/// shared layer would collide and corrupt per-run state.
 struct LayerSet {
     policy: Layer,
     guardrail: Layer,
     request: Layer,
+    recovery: Layer,
+    continuation: Layer,
     snapshot: Layer,
     persist: Option<Layer>,
 }
 
 impl LayerSet {
-    /// The chain head: policy → guardrail → request → snapshot (→ persist),
-    /// so a denial short-circuits everything after it, the snapshot layer
-    /// only sees calls that will really run, and persistence observes the
-    /// committed results of both.
+    /// The chain head, the settled order: policy → guardrail → request →
+    /// recovery → continuation → snapshot (→ persist). A denial
+    /// short-circuits everything after it; the request layer prepares every
+    /// attempt (retries included) so it owns the fallback model; a step's
+    /// observations append in a stable order (grace before continuation);
+    /// the snapshot layer only sees calls that will really run; persistence
+    /// observes the committed results of all of it.
     fn chain(&self) -> AgentLayer {
         let tail = match &self.persist {
             Some(persist) => AgentLayer::builder()
@@ -94,7 +102,17 @@ impl LayerSet {
                     .next(Box::new(
                         AgentLayer::builder()
                             .layer(self.request.clone())
-                            .next(Box::new(tail))
+                            .next(Box::new(
+                                AgentLayer::builder()
+                                    .layer(self.recovery.clone())
+                                    .next(Box::new(
+                                        AgentLayer::builder()
+                                            .layer(self.continuation.clone())
+                                            .next(Box::new(tail))
+                                            .build(),
+                                    ))
+                                    .build(),
+                            ))
                             .build(),
                     ))
                     .build(),
@@ -115,12 +133,21 @@ struct Inner {
     /// The guardrail state's typed handle: 08's compaction resets it when a
     /// run rewrites history.
     guardrails: Arc<GuardrailState>,
+    /// The recovery state's typed handle (09): the driver charges the
+    /// overflow budget, swaps the serving model, and marks follow-up runs.
+    recovery: RecoveryHandle,
+    /// The continuation state's typed handle (09): the driver marks
+    /// follow-up runs.
+    continuation: ContinuationHandle,
     compaction: SharedCompactionState,
     /// The compaction engine (08), driven by the driver between runs and by
     /// 09's overflow recovery inside `recover`.
     engine: crate::compaction::CompactionEngine,
     /// The compression settings the durable alteration passes run under.
     compression: crate::compression::CompressionConfig,
+    /// The advisor configuration (09): the driver runs the post-turn
+    /// review between runs when it is enabled.
+    advisor: crate::config::AdvisorConfig,
     /// The workspace write root, anchoring the read-lifecycle path keying.
     write_root: Option<String>,
     snapshots: SnapshotManager,
@@ -159,6 +186,13 @@ pub struct ConversationBuilder<'a> {
     fast: bool,
     policy: Option<PolicyLayerInputs>,
     recency: Option<Arc<dyn RecencySource>>,
+    /// Retry inputs for the recovery layer: the key-rotation hook and the
+    /// fallback model chain. Defaults reproduce single-model behavior.
+    retry: RetryCtx,
+    /// The surface's reauth hook (the TUI and ACP wire one).
+    reauth: Option<Arc<dyn ReauthHook>>,
+    /// Bound on continuations of truncated replies per turn.
+    max_continuation_turns: usize,
     snapshots: Option<SnapshotManager>,
     persist: Option<Arc<tokio::sync::Mutex<Persister>>>,
     /// The session workspace: anchors write-path normalization and owns
@@ -192,6 +226,9 @@ impl<'a> ConversationBuilder<'a> {
             fast: false,
             policy: None,
             recency: None,
+            retry: RetryCtx::default(),
+            reauth: None,
+            max_continuation_turns: DEFAULT_MAX_CONTINUATION_TURNS,
             snapshots: None,
             persist: None,
             workspace: None,
@@ -245,6 +282,26 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
+    /// Retry inputs for the recovery layer (key rotation, fallback chain).
+    pub fn retry(mut self, retry: RetryCtx) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// The surface's reauth hook; without it a 401 fails the run with the
+    /// provider's error.
+    pub fn reauth(mut self, reauth: Arc<dyn ReauthHook>) -> Self {
+        self.reauth = Some(reauth);
+        self
+    }
+
+    /// Bound on continuations of truncated replies per turn; 0 disables
+    /// them (a truncated reply ends the run `MaxTokens` at once).
+    pub fn max_continuation_turns(mut self, max: usize) -> Self {
+        self.max_continuation_turns = max;
+        self
+    }
+
     /// The workspace's snapshot manager driving `/undo`.
     pub fn snapshots(mut self, snapshots: SnapshotManager) -> Self {
         self.snapshots = Some(snapshots);
@@ -286,6 +343,9 @@ impl<'a> ConversationBuilder<'a> {
             fast,
             policy,
             recency,
+            retry,
+            reauth,
+            max_continuation_turns,
             snapshots,
             persist,
             workspace,
@@ -310,16 +370,26 @@ impl<'a> ConversationBuilder<'a> {
             temperature: config.agent.temperature,
             max_tokens: config.agent.max_tokens,
         }));
+        // Step budget (README decision 12): `agent.max_turns` bounds the
+        // productive model calls, and each `step_end` continuation (a
+        // `MaxTokens` continuation or a nudge) consumes a step of its own,
+        // so their budgets ride on top. Unbounded stays unbounded.
+        let continuation_headroom = u32::try_from(
+            max_continuation_turns + crate::harness::continuation::MAX_NUDGES as usize,
+        )
+        .unwrap_or(u32::MAX);
         let agent_config = AgentConfig::builder()
-            // 05 keeps the bound the old loop had: every model call counts,
-            // continuations included. 09 extends the budget when step-boundary
-            // continuations land.
-            .max_steps(match max_turns {
-                MaxTurns::FromConfig => config.agent.max_turns.unwrap_or(u32::MAX),
-                MaxTurns::Unbounded => u32::MAX,
-            })
-            // Retry, fallback and reauth are 09's `recover` hooks.
-            .max_retries(0_u32)
+            .max_steps(
+                match max_turns {
+                    MaxTurns::FromConfig => config.agent.max_turns,
+                    MaxTurns::Unbounded => Some(u32::MAX),
+                }
+                .unwrap_or(u32::MAX)
+                .saturating_add(continuation_headroom),
+            )
+            // The recovery layer owns the retry policy (per-kind caps and
+            // rearm); animist's run-wide counter just paces it.
+            .max_retries(super::recovery::retry_budget())
             .max_concurrent_tools(config.agent.max_concurrent_tools)
             .max_tool_calls(u64::MAX)
             .max_child_calls(u64::MAX)
@@ -337,6 +407,12 @@ impl<'a> ConversationBuilder<'a> {
         let engine = crate::compaction::CompactionEngine::new(config.compaction.clone())
             .with_buffer(config.compaction_buffer);
         let model_cell = Arc::new(ArcSwap::from_pointee(model));
+        let recovery_state = Arc::new(std::sync::Mutex::new(
+            super::recovery::RecoveryRunState::default(),
+        ));
+        let continuation_state = Arc::new(std::sync::Mutex::new(
+            super::continuation::ContinuationRunState::default(),
+        ));
         let layers = LayerSet {
             policy: Layer::new(PolicyLayer::new(
                 policy,
@@ -349,6 +425,7 @@ impl<'a> ConversationBuilder<'a> {
             request: Layer::new(RequestLayer::new(RequestLayerInputs {
                 model: Arc::clone(&model_cell),
                 settings: Arc::clone(&settings),
+                recovery: Arc::clone(&recovery_state),
                 recency,
                 write_root: write_root
                     .as_deref()
@@ -358,6 +435,21 @@ impl<'a> ConversationBuilder<'a> {
                 preamble_base: format!("{}{instructions_text}", config.agent.preamble),
                 cwd: cwd.to_owned(),
             })),
+            recovery: Layer::new(RecoveryLayer::new(
+                retry,
+                reauth,
+                Arc::clone(&recovery_state),
+                Arc::clone(&compaction),
+                engine.clone(),
+                Arc::clone(&guardrails),
+                Arc::clone(&model_cell),
+                sink.clone(),
+            )),
+            continuation: Layer::new(ContinuationLayer::new(
+                max_continuation_turns,
+                Arc::clone(&continuation_state),
+                sink.clone(),
+            )),
             snapshot: Layer::new(SnapshotLayer::new(snapshots.clone())),
             persist: persist
                 .clone()
@@ -376,9 +468,12 @@ impl<'a> ConversationBuilder<'a> {
             layers,
             sink,
             guardrails,
+            recovery: recovery_state,
+            continuation: continuation_state,
             compaction,
             engine,
             compression: config.compression.clone(),
+            advisor: config.agent.advisor.clone(),
             write_root: write_root
                 .as_deref()
                 .map(|path| path.to_string_lossy().into_owned()),
@@ -464,6 +559,18 @@ impl Conversation {
         self.inner.compaction.clone()
     }
 
+    /// The recovery state's typed handle (09): the driver reads the serving
+    /// model, charges the overflow budget, and marks follow-up runs on it.
+    pub(crate) fn recovery(&self) -> RecoveryHandle {
+        Arc::clone(&self.inner.recovery)
+    }
+
+    /// The continuation state's typed handle (09): the driver marks
+    /// follow-up runs on it.
+    pub(crate) fn continuation(&self) -> ContinuationHandle {
+        Arc::clone(&self.inner.continuation)
+    }
+
     /// The session's compaction engine, run by the driver between runs and
     /// by 09's overflow recovery.
     pub fn compaction_engine(&self) -> crate::compaction::CompactionEngine {
@@ -473,6 +580,12 @@ impl Conversation {
     /// The compression settings the durable alteration passes run under.
     pub(crate) fn compression_config(&self) -> crate::compression::CompressionConfig {
         self.inner.compression.clone()
+    }
+
+    /// The advisor configuration; the driver runs the post-turn review
+    /// between runs when it is enabled.
+    pub(crate) fn advisor_config(&self) -> crate::config::AdvisorConfig {
+        self.inner.advisor.clone()
     }
 
     /// The workspace write root anchoring read-lifecycle path keying.

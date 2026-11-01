@@ -157,10 +157,10 @@ async fn snapshots_commit_on_done_and_undo_restores_files() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
 async fn truncated_reply_continues_then_finishes() {
     // Truncated, truncated, then a clean stop: the run continues the
-    // truncated replies and ends Done with the final text.
+    // truncated replies behind continuation observations and ends Done
+    // with the final text.
     let provider = script(vec![
         crate::testing::max_tokens_turn("part one "),
         crate::testing::max_tokens_turn("part two "),
@@ -174,14 +174,22 @@ async fn truncated_reply_continues_then_finishes() {
         "{outcome:?}"
     );
     assert_eq!(provider.requests().len(), 3);
-    // prompt + three assistant messages, all committed
+    // prompt + three assistant replies + the two continuation
+    // observations between them, all committed inside one run.
     let messages = stored(&conversation).await;
-    assert_eq!(messages.len(), 4);
+    assert_eq!(messages.len(), 6);
     assert_eq!(ext::message_text(&messages[1]), "part one ");
+    assert!(crate::history::marker::is(
+        &messages[2],
+        crate::history::marker::CONTINUATION
+    ));
+    assert!(crate::history::marker::is(
+        &messages[4],
+        crate::history::marker::CONTINUATION
+    ));
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
 async fn truncation_gives_up_after_the_continuation_budget() {
     // Every reply truncates: after `max_continuation_turns` continuations
     // the run ends MaxTokens with the truncated tail committed.
@@ -202,17 +210,27 @@ async fn truncation_gives_up_after_the_continuation_budget() {
     assert_eq!(provider.requests().len(), 4);
     assert_eq!(
         stored(&conversation).await.len(),
-        5,
-        "truncated tail committed"
+        8,
+        "prompt + four truncated replies + three continuation observations"
     );
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
 async fn continuation_budget_is_configurable_to_zero() {
     let provider = script(vec![crate::testing::max_tokens_turn("cut off")]);
     let dir = tempfile::tempdir().unwrap();
-    let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let (conversation, _stream) = conversation_tuned(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
+        None,
+        |builder| builder.max_continuation_turns(0),
+    )
+    .await;
     let outcome = run_turn(&conversation, "go").await;
     assert!(
         matches!(outcome, TurnOutcome::MaxTokens { .. }),
@@ -221,18 +239,31 @@ async fn continuation_budget_is_configurable_to_zero() {
     assert_eq!(provider.requests().len(), 1);
 }
 
+/// Decision 12 sizes `max_steps` from `max_turns` plus the continuation
+/// and nudge budgets, so a continuation never eats the productive budget;
+/// a continuation with no step budget left ends the run `StepLimit`, which
+/// the driver maps to today's exhausted-budget outcome — and the appended
+/// marker stays durable.
 #[tokio::test]
-#[ignore = "restored in 09"]
-async fn continuations_respect_the_turn_budget() {
-    // One clean turn budget, a truncated first reply: the continuation
-    // counts against `max_turns` and the run ends MaxTurns sanitized.
-    let provider = script(vec![
-        crate::testing::max_tokens_turn("a"),
-        crate::testing::max_tokens_turn("b"),
-    ]);
+async fn continuation_with_no_step_budget_left_ends_step_limit() {
+    // max_turns = 1, continuation budget = 1 ⇒ max_steps = 1 + 1 + 20 = 22.
+    // Twenty-one varied productive steps exhaust the loop; the truncated
+    // 22nd appends its continuation marker, and the run ends StepLimit.
     let dir = tempfile::tempdir().unwrap();
+    let big = "line\n".repeat(64);
+    std::fs::write(dir.path().join("f.txt"), big).unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
-    let (conversation, _stream) = conversation_over(
+    let mut script_turns = vec![];
+    for i in 0..21u32 {
+        script_turns.push(crate::testing::tool_turn(vec![tool_event(
+            &format!("t{i}"),
+            "read",
+            serde_json::json!({"path":"f.txt","offset": i, "limit": 1}),
+        )]));
+    }
+    script_turns.push(crate::testing::max_tokens_turn("cut off"));
+    let provider = script(script_turns);
+    let (conversation, _stream) = conversation_tuned(
         &provider,
         &Config::parse("agent { max_turns = 1 }").unwrap(),
         &dir.path().display().to_string(),
@@ -240,30 +271,47 @@ async fn continuations_respect_the_turn_budget() {
             .registry(&animist::history::History::new())
             .unwrap(),
         None,
+        |builder| builder.max_continuation_turns(1),
     )
     .await;
     let outcome = run_turn(&conversation, "go").await;
     assert!(matches!(outcome, TurnOutcome::MaxTurns), "{outcome:?}");
-    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 22);
     let messages = stored(&conversation).await;
-    assert_eq!(
-        ext::message_text(messages.last().unwrap()),
-        crate::harness::driver::END_MARKER
+    let last = messages.last().unwrap();
+    assert_eq!(ext::message_text(last), crate::harness::driver::END_MARKER);
+    assert!(
+        crate::history::marker::is(
+            &messages[messages.len() - 2],
+            crate::history::marker::CONTINUATION
+        ),
+        "the appended continuation observation stays durable past the step limit"
     );
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
 async fn empty_truncated_reply_is_committed_as_max_tokens() {
     // A truncation with zero visible text is not an empty-and-stalled
     // turn: the cut-off (empty) assistant message is committed and the
-    // run ends MaxTokens instead of firing the nudge path.
+    // run ends MaxTokens instead of firing the nudge path. The
+    // continuation budget is 0, as in the old loop's version of this pin.
     let provider = script(vec![crate::testing::max_tokens_turn("")]);
     let dir = tempfile::tempdir().unwrap();
-    let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let (conversation, _stream) = conversation_tuned(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
+        None,
+        |builder| builder.max_continuation_turns(0),
+    )
+    .await;
     let outcome = run_turn(&conversation, "go").await;
     assert!(
-        matches!(outcome, TurnOutcome::MaxTokens { .. }),
+        matches!(&outcome, TurnOutcome::MaxTokens { .. }),
         "{outcome:?}"
     );
     assert_eq!(provider.requests().len(), 1, "no nudge was sent");
@@ -576,18 +624,22 @@ async fn turn_complete_reports_a_nonzero_context_size() {
 
 #[tokio::test]
 async fn max_turns_bound_commits_sanitized_partial_history() {
-    let turns: Vec<Attempt> = (0..3)
+    // Decision 12 sizes the step budget at max_turns plus the continuation
+    // and nudge budgets (2 + 3 + 20 = 25), so a tool-looping run stops at
+    // the 25th model call — not the second — and commits its sanitized
+    // partial history with the end marker.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f"), "x\n".repeat(64)).unwrap();
+    let turns: Vec<Attempt> = (0..25)
         .map(|i| {
             crate::testing::tool_turn(vec![tool_event(
                 &format!("t{i}"),
                 "read",
-                serde_json::json!({"path":"f"}),
+                serde_json::json!({"path":"f", "offset": i, "limit": 1}),
             )])
         })
         .collect();
     let provider = script(turns);
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("f"), "x\n").unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
     let (conversation, _stream) = conversation_over(
         &provider,
@@ -601,10 +653,10 @@ async fn max_turns_bound_commits_sanitized_partial_history() {
     .await;
     let outcome = run_turn(&conversation, "loop").await;
     assert!(matches!(outcome, TurnOutcome::MaxTurns), "{outcome:?}");
-    // Prompt + 2x(assistant+result) + end marker; the third call never ran.
-    assert_eq!(provider.requests().len(), 2);
+    // Prompt + 25x(assistant+result) + end marker; the 26th call never ran.
+    assert_eq!(provider.requests().len(), 25);
     let messages = stored(&conversation).await;
-    assert_eq!(messages.len(), 6);
+    assert_eq!(messages.len(), 52);
     assert_eq!(
         ext::message_text(messages.last().unwrap()),
         crate::harness::driver::END_MARKER
@@ -795,7 +847,6 @@ async fn argument_fragments_accumulate_into_one_call() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
 async fn empty_reply_after_tool_call_is_nudged_to_continue() {
     // Tool call, then a completely empty reply, then recovery.
     let provider = script(vec![
@@ -815,8 +866,20 @@ async fn empty_reply_after_tool_call_is_nudged_to_continue() {
         matches!(&outcome, TurnOutcome::Done { reply } if reply == "all better now"),
         "nudged model must recover: {outcome:?}"
     );
-    // prompt, tool call, result, empty marker, nudge prompt, final reply
-    assert_eq!(stored(&conversation).await.len(), 6);
+    // prompt, tool call, result, the committed empty reply, the empty
+    // marker, the nudge prompt, final reply
+    let messages = stored(&conversation).await;
+    assert_eq!(messages.len(), 7);
+    assert!(crate::history::marker::is(
+        &messages[4],
+        crate::history::marker::NUDGE
+    ));
+    assert_eq!(ext::message_text(&messages[4]), "(empty)");
+    assert_eq!(
+        ext::message_text(&messages[5]),
+        "You just executed tool calls but returned an empty response. \
+         Please process the tool results above and continue with the task."
+    );
     assert!(
         events_until_done(&mut stream)
             .await
@@ -842,23 +905,29 @@ async fn empty_reply_without_recent_tool_results_ends_the_run() {
     assert_eq!(provider.requests().len(), 1);
 }
 
+/// The nudge budget runs out: after `MAX_NUDGES` stalled replies the next
+/// stall ends the turn empty-handed instead of nudging again. (Decision 12
+/// retired the old "a nudge eats the turn budget" accounting; the budget
+/// itself is the pin.)
 #[tokio::test]
-#[ignore = "restored in 09"]
-async fn empty_reply_counts_against_the_turn_budget() {
-    let provider = script(vec![
-        crate::testing::tool_turn(vec![tool_event(
-            "t1",
-            "read",
-            serde_json::json!({"path":"f"}),
-        )]),
-        crate::testing::text_turn(""),
-    ]);
+async fn nudge_budget_runs_out_after_max_nudges() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f"), "body\n").unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
-    let (conversation, _stream) = conversation_over(
+    let mut script_turns = vec![crate::testing::tool_turn(vec![tool_event(
+        "t1",
+        "read",
+        serde_json::json!({"path":"f"}),
+    )])];
+    // Twenty empty replies spend the nudge budget; the twenty-first stalls
+    // with nothing left.
+    for _ in 0..21 {
+        script_turns.push(crate::testing::text_turn(""));
+    }
+    let provider = script(script_turns);
+    let (conversation, mut stream) = conversation_over(
         &provider,
-        &Config::parse("agent { max_turns = 2 }").unwrap(),
+        &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
         workspace
             .registry(&animist::history::History::new())
@@ -867,14 +936,18 @@ async fn empty_reply_counts_against_the_turn_budget() {
     )
     .await;
     let outcome = run_turn(&conversation, "go").await;
-    assert!(matches!(outcome, TurnOutcome::MaxTurns), "{outcome:?}");
-    assert_eq!(provider.requests().len(), 2, "nudged retry still ran");
-    // The sanitized tail closes with the end marker.
-    let messages = stored(&conversation).await;
-    assert_eq!(
-        ext::message_text(messages.last().unwrap()),
-        crate::harness::driver::END_MARKER
+    assert!(
+        matches!(&outcome, TurnOutcome::Done { reply } if reply.is_empty()),
+        "{outcome:?}"
     );
+    // 1 tool round + 21 stalled replies: the last one fires no nudge.
+    assert_eq!(provider.requests().len(), 22);
+    let nudges = events_until_done(&mut stream)
+        .await
+        .into_iter()
+        .filter(|event| matches!(event, Event::Craft(crate::harness::CraftEvent::Nudge)))
+        .count();
+    assert_eq!(nudges, 20);
 }
 
 #[tokio::test]

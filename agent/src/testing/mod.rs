@@ -444,6 +444,24 @@ pub fn http_error(status: u16, body: &str) -> Attempt {
     )
 }
 
+/// One failed attempt: Bedrock answered HTTP `status` — the shape animist's
+/// Bedrock provider surfaces after its own bounded retries, so recovery
+/// must fail over instead of stacking a same-model backoff.
+pub fn bedrock_http_error(status: u16) -> Attempt {
+    Attempt::new(
+        Vec::new(),
+        Err(ProviderError::Bedrock {
+            source: animist::provider::bedrock::BedrockError::Http {
+                status,
+                request_id: None,
+                error_type: None,
+                body: Vec::new(),
+                backtrace: snafu::Backtrace::generate(),
+            },
+        }),
+    )
+}
+
 /// One failed attempt: the transport timed out.
 ///
 /// Connects to a loopback listener that never answers, so nothing leaves the
@@ -471,6 +489,28 @@ pub fn context_overflow() -> Attempt {
     Attempt::new(
         Vec::new(),
         response(Vec::new(), StopReason::ContextWindowExceeded),
+    )
+}
+
+/// [`context_overflow`] whose usage reports a real prompt size, as a
+/// provider that answers the request before refusing to continue does:
+/// recovery recalibrates the estimator from it.
+pub fn context_overflow_measured(input: u32) -> Attempt {
+    Attempt::new(
+        Vec::new(),
+        Ok(StreamResponse::builder()
+            .message(assistant(Vec::new()))
+            .usage(
+                TokenUsage::builder()
+                    .input(input)
+                    .output(2_u32)
+                    .cache_creation(0_u32)
+                    .cache_read(0_u32)
+                    .build(),
+            )
+            .stop_reason(StopReason::ContextWindowExceeded)
+            .input_transformations(Vec::new())
+            .build()),
     )
 }
 

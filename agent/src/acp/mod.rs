@@ -433,6 +433,11 @@ impl AppState {
         if let Some(mcp) = workspace.mcp() {
             permissions.sync_mcp_annotations(&mcp);
         }
+        // E.10 reauth hook over the session provider's credential; a 401
+        // parks the run for the refresh instead of failing the turn.
+        let reauth = crate::provider::reauth_hook(provider_config, &model)
+            .await
+            .map_err(report)?;
         let conversation = crate::harness::ConversationBuilder::new(
             &self.config,
             &cwd,
@@ -449,6 +454,7 @@ impl AppState {
         .max_turns(crate::harness::MaxTurns::Unbounded)
         .thinking(thinking)
         .policy(policy.clone())
+        .reauth(reauth)
         .workspace(workspace.clone())
         .persist(persister.clone())
         .build()

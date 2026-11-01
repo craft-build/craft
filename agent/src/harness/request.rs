@@ -22,16 +22,21 @@ use crate::provider::ModelHandle;
 use crate::run::SharedCompactionState;
 use crate::run::read_lifecycle;
 use crate::run::recency::{self, RecencySource};
+use crate::run::retry::hop_max_tokens;
 use crate::run::view;
 use crate::thinking::ThinkingConfig;
 
 use super::conversation::TurnSettings;
+use super::recovery::RecoveryHandle;
 
 /// Inputs fixed for the conversation's lifetime; everything here would
 /// otherwise be re-read from config on every request.
 pub(crate) struct RequestLayerInputs {
     pub model: Arc<ArcSwap<ModelHandle>>,
     pub settings: Arc<ArcSwap<TurnSettings>>,
+    /// The recovery state: its model override (a fallback hop or a reauth
+    /// swap) serves requests while set (09).
+    pub recovery: RecoveryHandle,
     pub recency: Option<Arc<dyn RecencySource>>,
     /// The workspace root as a display string, anchoring read-lifecycle
     /// path normalization.
@@ -54,9 +59,6 @@ struct RequestRunState {
     /// arrived pre-altered from history, so the in-run request rewrites
     /// (read lifecycle, compression) only touch the suffix.
     run_start: usize,
-    /// Measured input tokens from the last completed stream; feeds the
-    /// output-token clamp a number better than the chars/4 estimate.
-    measured_prompt_tokens: u64,
 }
 
 pub(crate) struct RequestLayer {
@@ -72,7 +74,6 @@ impl RequestLayer {
                 system: String::new(),
                 prepares: 0,
                 run_start: 0,
-                measured_prompt_tokens: 0,
             }),
         }
     }
@@ -110,7 +111,6 @@ impl LayerImpl for RequestLayer {
         run.system = system;
         run.prepares = 0;
         run.run_start = run_start;
-        run.measured_prompt_tokens = 0;
         Ok(message.clone())
     }
 
@@ -121,16 +121,25 @@ impl LayerImpl for RequestLayer {
         mut request: StepRequest,
     ) -> Result<StepRequest> {
         let settings = self.inputs.settings.load_full();
-        let handle = self.inputs.model.load_full();
-        let (system, prepares, measured, run_start) = {
+        // The recovery layer's model override (a fallback hop or a reauth
+        // swap) serves the request while set; otherwise the conversation's
+        // model. Every attempt re-prepares, so a hop struck between
+        // attempts takes effect on the very next request.
+        let (serving, hop) = {
+            let state = self
+                .inputs
+                .recovery
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            (state.model_override.clone(), state.is_fallback_hop)
+        };
+        let handle = serving
+            .clone()
+            .unwrap_or_else(|| Arc::unwrap_or_clone(self.inputs.model.load_full()));
+        let (system, prepares, run_start) = {
             let mut run = self.run.lock().unwrap_or_else(|poison| poison.into_inner());
             run.prepares += 1;
-            (
-                run.system.clone(),
-                run.prepares,
-                run.measured_prompt_tokens,
-                run.run_start,
-            )
+            (run.system.clone(), run.prepares, run.run_start)
         };
         request.system = system;
         // Volatile recency facts ride only this request.
@@ -149,21 +158,30 @@ impl LayerImpl for RequestLayer {
         );
         // Request overhead (preamble + tool schemas) is fixed per run, and
         // both gauges must measure the rewritten view before protocol
-        // shaping, the way the estimator always has.
+        // shaping, the way the estimator always has. The measured prompt
+        // floor lives in the compaction state, so overflow recovery's
+        // post-compaction clear reaches it.
         let overhead = RequestOverhead::from_parts(Some(request.system.as_str()), &request.tools);
-        self.inputs
-            .compaction
-            .lock()
-            .await
-            .set_request_overhead(overhead.tokens());
+        let measured = {
+            let mut compaction = self.inputs.compaction.lock().await;
+            compaction.set_request_overhead(overhead.tokens());
+            compaction.measured_prompt()
+        };
         let estimate = crate::compaction::estimate::estimate_messages(&request.messages);
         let prompt_tokens = estimate.saturating_add(overhead.tokens()).max(measured);
+        request.model = handle.model.clone();
         request.messages = view::shape_messages(request.messages, handle.relocates_tool_images());
-        let clamped = crate::run::clamped_max_tokens(
-            handle.context_length(),
-            prompt_tokens,
-            settings.max_tokens,
-        );
+        // A serving hop carries its own budgets (hardening/06); the primary
+        // and a same-model reauth swap keep the plain window clamp.
+        let clamped = if hop {
+            hop_max_tokens(settings.max_tokens, &handle, prompt_tokens)
+        } else {
+            crate::run::clamped_max_tokens(
+                handle.context_length(),
+                prompt_tokens,
+                settings.max_tokens,
+            )
+        };
         request.options = request_options(
             &handle,
             settings.thinking,
@@ -183,12 +201,8 @@ impl LayerImpl for RequestLayer {
         // Zero is the missing-report sentinel, kept at the previous value.
         let measured = u64::from(response.usage.input) + u64::from(response.usage.cache_read);
         if measured > 0 {
-            self.run
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .measured_prompt_tokens = measured;
             // The provider's own count of the prompt is the best floor the
-            // compaction fill check can have.
+            // clamp and the compaction fill check can have.
             self.inputs
                 .compaction
                 .lock()

@@ -139,8 +139,11 @@ impl LayerImpl for GuardrailLayer {
         // A new user turn resets the volatile doom signals (the score and
         // the grace flag) while the recent-call window survives, so a loop
         // that spans prompts is still detected. The guardrail counters and
-        // the dedup cache are conversation state and stay.
-        self.state.reset_for_turn();
+        // the dedup cache are conversation state and stay. A driver
+        // follow-up continues the same turn, so its doom score carries.
+        if !self.state.take_follow_up() {
+            self.state.reset_for_turn();
+        }
         for set in [&self.responded, &self.pre_warned, &self.doom_blocked] {
             set.lock()
                 .unwrap_or_else(|poison| poison.into_inner())

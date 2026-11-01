@@ -1,23 +1,23 @@
 //! The run's supporting modules: request-view shaping, dedup, guardrails,
-//! cancellation, the approval seam, and the mode taxonomy.
+//! cancellation, the approval seam, the advisor, and the mode taxonomy.
 //!
 //! The multi-turn loop itself moved to the animist `Agent` behind
 //! `harness::Conversation` (docs/animist/05); what remains here are the
-//! pieces every surface and layer still share. Recovery and overflow
-//! handling return with their layers in 09.
+//! pieces every surface and layer still share. The advisor is driven by
+//! the harness driver (09).
 
+pub mod advisor;
 pub mod approval;
 pub mod cancel;
 pub mod dedup;
 // The doom tracker lives in the guardrail state from 07 on; the retry
-// classification stays unwired until 09's recovery layer.
+// substrate is driven by 09's recovery layer.
 pub(crate) mod doom;
 pub mod guardrails;
 pub mod mode;
 pub(crate) mod read_lifecycle;
 pub mod recency;
-#[allow(dead_code)]
-mod retry;
+pub(crate) mod retry;
 pub mod view;
 
 pub use approval::{Approval, ApprovalAsk, ApprovalResponder};

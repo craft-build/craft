@@ -674,14 +674,17 @@ async fn shutdown_is_idempotent_and_terminal() {
 
 #[tokio::test]
 async fn max_turns_budget_ends_with_the_end_marker() {
+    // Decision 12 sizes the step budget at max_turns plus the continuation
+    // and nudge budgets (2 + 3 + 20 = 25), so the loop stops on the 25th
+    // model call, not the second.
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+    std::fs::write(dir.path().join("f.txt"), "x\n".repeat(64)).unwrap();
     let scripted = ScriptedProvider::new(Vec::new());
-    for id in ["t1", "t2"] {
+    for i in 0..25 {
         scripted.push(testing::tool_turn(vec![(
-            id.into(),
+            format!("t{i}"),
             "read".into(),
-            serde_json::json!({ "path": "f.txt" }),
+            serde_json::json!({ "path": "f.txt", "offset": i, "limit": 1 }),
         )]));
     }
     let workspace = Workspace::new(dir.path()).unwrap();

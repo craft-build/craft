@@ -1,6 +1,6 @@
-//! The retry taxonomy: budget bounds, the rotation seam, and the linear
-//! backoff state machine. The streaming retry driver went with the old run
-//! loop; 09's recovery layer rewires this substrate behind `Agent` layers.
+//! The retry substrate: budget bounds, the rotation seam, and the linear
+//! backoff state machine, driven by 09's recovery layer behind `Agent`
+//! hooks.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,42 +14,28 @@ pub(crate) const MAX_TIMEOUT_RETRIES: u32 = 10;
 /// transport): the last hop otherwise retries forever, which keeps a
 /// headless run alive against a permanently failing provider.
 pub(crate) const MAX_TRANSIENT_RETRIES: u32 = 8;
-/// Run-wide ceiling shared by every model call's retry machine: without it,
-/// an unbounded run could spend a full per-call budget on each turn forever.
+/// Run-wide ceiling shared by every model call's retries: without it, an
+/// unbounded run could spend a full per-call budget on each turn forever.
 pub(crate) const MAX_RUN_TRANSIENT_RETRIES: u32 = 16;
-
-/// Run-scoped tally of transient retries, charged by every retryable
-/// non-timeout failure across all of a run's `stream_with_retry` calls.
-#[derive(Default, Clone)]
-pub(crate) struct TransientBudget {
-    spent: Arc<std::sync::atomic::AtomicU32>,
-}
-
-impl TransientBudget {
-    fn charge(&self) -> u32 {
-        self.spent
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1
-    }
-}
-/// Cap on key rotations per run so a hook that keeps "succeeding" without
-/// changing the active key cannot hot-loop the provider.
-const MAX_ROTATIONS: u32 = 4;
+/// Cap on key rotations per failure streak so a hook that keeps
+/// "succeeding" without changing the active key cannot hot-loop the
+/// provider.
+pub(crate) const MAX_ROTATIONS: u32 = 4;
 // Linear backoff band and rotation pacing (reference `RETRY_DELAY`,
 // `MAX_DELAY`, `ROTATION_DELAY`); shrunk under cfg(test) so the state
 // machine's tests stay fast. 09's recovery layer drives them.
 #[cfg(not(test))]
-const RETRY_DELAY: Duration = Duration::from_secs(2);
+pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
-const MAX_DELAY: Duration = Duration::from_secs(8);
+pub(crate) const MAX_DELAY: Duration = Duration::from_secs(8);
 #[cfg(not(test))]
-const ROTATION_DELAY: Duration = Duration::from_millis(500);
+pub(crate) const ROTATION_DELAY: Duration = Duration::from_millis(500);
 #[cfg(test)]
-const RETRY_DELAY: Duration = Duration::from_millis(20);
+pub(crate) const RETRY_DELAY: Duration = Duration::from_millis(20);
 #[cfg(test)]
-const MAX_DELAY: Duration = Duration::from_millis(80);
+pub(crate) const MAX_DELAY: Duration = Duration::from_millis(80);
 #[cfg(test)]
-const ROTATION_DELAY: Duration = Duration::from_millis(5);
+pub(crate) const ROTATION_DELAY: Duration = Duration::from_millis(5);
 
 /// Consulted when a rate limit exhausts the current API key; returns whether
 /// a different key became active. The provider layer owns key pools (model
@@ -99,6 +85,23 @@ impl RetryState {
         );
         (self.attempt, half + jitter)
     }
+}
+
+/// Rebudge the request's output cap for a fallback hop (hardening/06):
+/// never above the hop's own `max_output` or what remains of its window,
+/// floored at [`super::MIN_OUTPUT_TOKENS`] exactly like the primary clamp.
+/// `None` limits everywhere leave the request untouched.
+pub(crate) fn hop_max_tokens(
+    request_max_tokens: Option<u64>,
+    hop: &ModelHandle,
+    prompt_tokens: u64,
+) -> Option<u64> {
+    let max_output = hop.max_output().map(u64::from);
+    let configured = match (request_max_tokens, max_output) {
+        (Some(request), Some(hop_cap)) => Some(request.min(hop_cap)),
+        (request, hop_cap) => request.or(hop_cap),
+    };
+    super::clamped_max_tokens(hop.context_length(), prompt_tokens, configured)
 }
 
 #[cfg(test)]

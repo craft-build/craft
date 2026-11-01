@@ -1,6 +1,6 @@
-//! C.12 advisor: the post-turn review that may continue the run with a
-//! committed note. The review machinery returns with 09's recovery layers;
-//! until then the advisor never runs, which the first test pins.
+//! The post-turn advisor (C.12): a review rides the same script after a
+//! terminal reply, its note may continue the run as a driver follow-up,
+//! and a failure never fails the run.
 
 use super::*;
 use crate::history::ext;
@@ -21,6 +21,24 @@ fn notes(events: &[Event]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A conversation with the advisor configured from `config`.
+async fn advisor_conversation(
+    dir: &tempfile::TempDir,
+    provider: &crate::testing::ScriptedProvider,
+    config: &Config,
+) -> (Conversation, EventStream) {
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let history = animist::history::History::default();
+    conversation_over(
+        provider,
+        config,
+        &dir.path().display().to_string(),
+        workspace.registry(&history).unwrap(),
+        Some(history),
+    )
+    .await
+}
+
 /// Without the advisor wired, a plain turn makes exactly one request and
 /// surfaces no notes.
 #[tokio::test]
@@ -35,8 +53,7 @@ async fn disabled_advisor_makes_no_extra_calls() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
-async fn note_at_threshold_continues_the_run() {
+async fn advisor_note_continues_the_run_with_a_followup() {
     let provider = script(vec![
         done_turn("first reply"),
         done_turn("concern: fix X"),
@@ -44,7 +61,12 @@ async fn note_at_threshold_continues_the_run() {
         done_turn("ok"),
     ]);
     let dir = tempfile::tempdir().unwrap();
-    let (conversation, mut stream) = workspace_conversation(&dir, &provider).await;
+    let (conversation, mut stream) = advisor_conversation(
+        &dir,
+        &provider,
+        &Config::parse("agent { advisor { enabled = true } }").unwrap(),
+    )
+    .await;
     let outcome = run_turn(&conversation, "do the thing").await;
     assert!(
         matches!(&outcome, TurnOutcome::Done { reply } if reply == "fixed reply"),
@@ -55,7 +77,7 @@ async fn note_at_threshold_continues_the_run() {
         vec![("concern".to_string(), "fix x".to_string())]
     );
     // Two advisor reviews rode the same script: the run's reply, the
-    // review, the follow-up, the next review.
+    // review, the follow-up run, the next review.
     assert_eq!(provider.requests().len(), 4);
     assert!(
         stored(&conversation).await.iter().any(|m| {
@@ -67,11 +89,15 @@ async fn note_at_threshold_continues_the_run() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
 async fn below_threshold_note_stops_but_surfaces() {
     let provider = script(vec![done_turn("first reply"), done_turn("nit: tiny thing")]);
     let dir = tempfile::tempdir().unwrap();
-    let (conversation, mut stream) = workspace_conversation(&dir, &provider).await;
+    let (conversation, mut stream) = advisor_conversation(
+        &dir,
+        &provider,
+        &Config::parse("agent { advisor { enabled = true } }").unwrap(),
+    )
+    .await;
     let outcome = run_turn(&conversation, "do the thing").await;
     assert!(
         matches!(&outcome, TurnOutcome::Done { reply } if reply == "first reply"),
@@ -92,7 +118,6 @@ async fn below_threshold_note_stops_but_surfaces() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
 async fn continuation_cap_stops_after_max_act_turns() {
     let provider = script(vec![
         done_turn("first"),
@@ -101,7 +126,12 @@ async fn continuation_cap_stops_after_max_act_turns() {
         done_turn("concern: fix Y"),
     ]);
     let dir = tempfile::tempdir().unwrap();
-    let (conversation, mut stream) = workspace_conversation(&dir, &provider).await;
+    let (conversation, mut stream) = advisor_conversation(
+        &dir,
+        &provider,
+        &Config::parse("agent { advisor { enabled = true\n max_act_turns = 1 } }").unwrap(),
+    )
+    .await;
     let outcome = run_turn(&conversation, "do the thing").await;
     assert!(
         matches!(&outcome, TurnOutcome::Done { reply } if reply == "second"),
@@ -112,19 +142,23 @@ async fn continuation_cap_stops_after_max_act_turns() {
         2,
         "both notes surface"
     );
-    // 2 stream turns + 2 advisor reviews, then the cap stops the loop.
+    // 2 run turns + 2 advisor reviews, then the cap stops the loop.
     assert_eq!(provider.requests().len(), 4, "cap stops the loop");
 }
 
 #[tokio::test]
-#[ignore = "restored in 09"]
 async fn advisor_failure_never_fails_the_run() {
     let provider = script(vec![
         done_turn("done"),
         crate::testing::http_error(429, "rate limited"),
     ]);
     let dir = tempfile::tempdir().unwrap();
-    let (conversation, mut stream) = workspace_conversation(&dir, &provider).await;
+    let (conversation, mut stream) = advisor_conversation(
+        &dir,
+        &provider,
+        &Config::parse("agent { advisor { enabled = true } }").unwrap(),
+    )
+    .await;
     let outcome = run_turn(&conversation, "do the thing").await;
     assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
     assert!(notes(&events_until_done(&mut stream).await).is_empty());

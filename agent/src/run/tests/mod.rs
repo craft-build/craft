@@ -80,6 +80,21 @@ async fn conversation_over(
     tools: ToolRegistry,
     history: Option<History>,
 ) -> (Conversation, EventStream) {
+    conversation_tuned(scripted, config, cwd, tools, history, |builder| builder).await
+}
+
+/// [`conversation_over`] with extra builder wiring (reauth hook, retry
+/// chain, continuation budget) for the recovery and continuation tests.
+async fn conversation_tuned(
+    scripted: &ScriptedProvider,
+    config: &Config,
+    cwd: &str,
+    tools: ToolRegistry,
+    history: Option<History>,
+    edit: impl FnOnce(
+        crate::harness::ConversationBuilder<'_>,
+    ) -> crate::harness::ConversationBuilder<'_>,
+) -> (Conversation, EventStream) {
     let (sink, stream) = EventSink::new();
     let handle = ModelHandle::scripted(crate::testing::scripted_model(
         scripted,
@@ -89,7 +104,7 @@ async fn conversation_over(
     if let Some(history) = history {
         builder = builder.history(history);
     }
-    let conversation = builder.build().expect("conversation builds");
+    let conversation = edit(builder).build().expect("conversation builds");
     (conversation, stream)
 }
 
