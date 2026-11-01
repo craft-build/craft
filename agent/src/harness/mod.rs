@@ -20,7 +20,7 @@ mod snapshot_layer;
 mod tests;
 
 pub use conversation::{Conversation, ConversationBuilder, MaxTurns, TurnSettings};
-pub use driver::{TurnOutcome, run_turn};
+pub use driver::{TurnOutcome, compact_between_runs, run_turn};
 pub use events::{CraftEvent, DoneReason, Event, EventSink, EventStream};
 #[cfg(test)]
 pub(crate) use guardrail::GuardrailLayer;

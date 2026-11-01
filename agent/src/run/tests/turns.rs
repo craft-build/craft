@@ -25,7 +25,9 @@ async fn multi_turn_tool_round_trip_commits_history() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         None,
     )
     .await;
@@ -129,7 +131,9 @@ async fn snapshots_commit_on_done_and_undo_restores_files() {
         &dir.path().display().to_string(),
         "",
         model(&provider),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         sink,
     )
     .snapshots(snapshots.clone())
@@ -232,7 +236,9 @@ async fn continuations_respect_the_turn_budget() {
         &provider,
         &Config::parse("agent { max_turns = 1 }").unwrap(),
         &dir.path().display().to_string(),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         None,
     )
     .await;
@@ -353,7 +359,10 @@ async fn failed_run_preserves_prior_history_and_commits_the_turn() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        Workspace::new(dir.path()).unwrap().registry().unwrap(),
+        Workspace::new(dir.path())
+            .unwrap()
+            .registry(&animist::history::History::new())
+            .unwrap(),
         Some(history),
     )
     .await;
@@ -546,7 +555,10 @@ async fn turn_complete_reports_a_nonzero_context_size() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        Workspace::new(dir.path()).unwrap().registry().unwrap(),
+        Workspace::new(dir.path())
+            .unwrap()
+            .registry(&animist::history::History::new())
+            .unwrap(),
         Some(history),
     )
     .await;
@@ -581,7 +593,9 @@ async fn max_turns_bound_commits_sanitized_partial_history() {
         &provider,
         &Config::parse("agent { max_turns = 2 }").unwrap(),
         &dir.path().display().to_string(),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         None,
     )
     .await;
@@ -640,7 +654,10 @@ async fn failed_run_commits_sanitized_partial_history() {
         &provider,
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
-        Workspace::new(dir.path()).unwrap().registry().unwrap(),
+        Workspace::new(dir.path())
+            .unwrap()
+            .registry(&animist::history::History::new())
+            .unwrap(),
         Some(history),
     )
     .await;
@@ -692,7 +709,9 @@ async fn stop_decision_at_the_dispatch_boundary_commits_the_interrupted_call() {
         &dir.path().display().to_string(),
         "",
         model(&provider),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         sink,
     )
     .policy(crate::harness::PolicyLayerInputs::new(
@@ -841,7 +860,9 @@ async fn empty_reply_counts_against_the_turn_budget() {
         &provider,
         &Config::parse("agent { max_turns = 2 }").unwrap(),
         &dir.path().display().to_string(),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         None,
     )
     .await;

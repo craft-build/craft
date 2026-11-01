@@ -341,10 +341,13 @@ impl SubagentLauncher {
         config.agent.advisor = self.agent.advisor.clone();
         config.compression = self.compression.clone();
 
+        // The child's own history: retrieve reads the child's entry
+        // sources, seeded from the parent snapshot below.
+        let history = animist::history::History::from_entries(ext::entries(seeded));
         let tools = match kind {
-            SubagentKind::General => self.workspace.subagent_registry(true),
-            SubagentKind::Research => self.workspace.subagent_registry(false),
-            SubagentKind::Reviewer => self.workspace.reviewer_registry(),
+            SubagentKind::General => self.workspace.subagent_registry(true, &history),
+            SubagentKind::Research => self.workspace.subagent_registry(false, &history),
+            SubagentKind::Reviewer => self.workspace.reviewer_registry(&history),
         }
         .map_err(|e| e.to_string())?;
         // A child conversation with its own layer instances — never the
@@ -354,9 +357,7 @@ impl SubagentLauncher {
         let (sink, stream) = crate::harness::EventSink::new();
         let mut builder =
             crate::harness::ConversationBuilder::new(&config, &self.cwd, "", model, tools, sink)
-                .history(animist::history::History::from_entries(ext::entries(
-                    seeded,
-                )))
+                .history(history)
                 .max_turns(crate::harness::MaxTurns::Unbounded)
                 .workspace(self.workspace.clone());
         builder = builder.policy(self.policy.clone());
@@ -799,7 +800,10 @@ mod tests {
             &cwd,
             "",
             model,
-            workspace.clone().registry().unwrap(),
+            workspace
+                .clone()
+                .registry(&animist::history::History::new())
+                .unwrap(),
             sink.clone(),
         )
         .build()
@@ -1033,8 +1037,16 @@ mod tests {
                 .map(|definition| definition.name)
                 .collect::<Vec<_>>()
         };
-        let research = registry_names(&workspace.subagent_registry(false).unwrap());
-        let general = registry_names(&workspace.subagent_registry(true).unwrap());
+        let research = registry_names(
+            &workspace
+                .subagent_registry(false, &animist::history::History::new())
+                .unwrap(),
+        );
+        let general = registry_names(
+            &workspace
+                .subagent_registry(true, &animist::history::History::new())
+                .unwrap(),
+        );
         for banned in ["task", "question", "sessions"] {
             assert!(
                 !research.contains(&banned.to_string()),

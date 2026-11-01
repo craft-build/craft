@@ -57,6 +57,7 @@ fn mock_model() -> crate::provider::ModelHandle {
 
 fn test_session() -> Session {
     let (sink, events) = crate::harness::EventSink::new();
+    let history = animist::history::History::new();
     let conversation = crate::harness::ConversationBuilder::new(
         &Config::default(),
         &std::env::temp_dir().display().to_string(),
@@ -64,10 +65,11 @@ fn test_session() -> Session {
         mock_model(),
         Workspace::new(std::env::temp_dir())
             .expect("workspace")
-            .registry()
+            .registry(&history)
             .unwrap(),
         sink,
     )
+    .history(history)
     .build()
     .expect("session conversation builds");
     Session {
@@ -218,14 +220,16 @@ async fn registered_tools_route_task_calls_to_the_installed_launcher() {
     // degrading to the no-host availability error.
     let (sink, _stream) = crate::harness::EventSink::new();
     let cwd = dir.path().display().to_string();
+    let history = animist::history::History::new();
     let parent = crate::harness::ConversationBuilder::new(
         &Config::default(),
         &cwd,
         "",
         mock_model(),
-        workspace.registry().unwrap(),
+        workspace.registry(&history).unwrap(),
         sink.clone(),
     )
+    .history(history)
     .build()
     .expect("parent conversation builds");
     let launcher = Arc::new(crate::subagent::SubagentLauncher {
@@ -250,7 +254,10 @@ async fn registered_tools_route_task_calls_to_the_installed_launcher() {
         ),
         cwd,
     });
-    let tools = workspace.with_subagents(launcher).registry().unwrap();
+    let tools = workspace
+        .with_subagents(launcher)
+        .registry(&animist::history::History::new())
+        .unwrap();
     let call = || {
         serde_json::json!({
             "description": "probe",
@@ -267,7 +274,10 @@ async fn registered_tools_route_task_calls_to_the_installed_launcher() {
 
     // Counterfactual (the pre-fix ACP behavior): without an installed
     // launcher the same registered call only gets the availability error.
-    let bare = Workspace::new(dir.path()).unwrap().registry().unwrap();
+    let bare = Workspace::new(dir.path())
+        .unwrap()
+        .registry(&animist::history::History::new())
+        .unwrap();
     let output = invoke_task(&bare, call()).await;
     let text = history::ext::tool_content_text(&output.content);
     assert!(
@@ -336,7 +346,11 @@ async fn streamed_filesystem_results_match_model_and_acp_text() {
         &provider,
         crate::testing::model_info("scripted", 200_000, 8_192, false, false),
     ));
-    let tools = Workspace::new(dir.path()).unwrap().registry().unwrap();
+    let history = animist::history::History::new();
+    let tools = Workspace::new(dir.path())
+        .unwrap()
+        .registry(&history)
+        .unwrap();
     let (sink, stream) = crate::harness::EventSink::new();
     let conversation = crate::harness::ConversationBuilder::new(
         &Config::parse("").expect("default config"),

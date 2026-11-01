@@ -86,7 +86,7 @@ async fn persisted_state(
         cwd,
         "",
         model,
-        workspace.registry().unwrap(),
+        workspace.registry(&history).unwrap(),
         sink,
     )
     .history(history)

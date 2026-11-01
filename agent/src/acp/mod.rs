@@ -438,7 +438,7 @@ impl AppState {
             &cwd,
             &instructions.text,
             handle.clone(),
-            workspace.clone().registry().map_err(|error| {
+            workspace.clone().registry(&history).map_err(|error| {
                 report(crate::error::Error::Invalid {
                     reason: format!("building tool registry: {error}"),
                 })
@@ -475,7 +475,7 @@ impl AppState {
             .clone()
             .with_questions(asker)
             .with_subagents(launcher)
-            .registry()
+            .registry(&conversation.history())
             .map_err(|e| e.to_string())?;
         conversation.set_tools(armed).map_err(|e| e.to_string())?;
 

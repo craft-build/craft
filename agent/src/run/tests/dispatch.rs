@@ -95,7 +95,9 @@ async fn responder_denial_reports_reason_to_model() {
         &dir.path().display().to_string(),
         "",
         model(&provider),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         sink,
     )
     .policy(crate::harness::PolicyLayerInputs::new(
@@ -147,7 +149,11 @@ async fn post_exec_layer_transforms_results() {
     std::fs::write(dir.path().join("f"), "body\n").unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
     let mut harness = animist::agent::testing::ToolHarness::builder()
-        .tools(workspace.registry().unwrap())
+        .tools(
+            workspace
+                .registry(&animist::history::History::new())
+                .unwrap(),
+        )
         .layers(
             animist::agent::AgentLayer::builder()
                 .layer(Layer::new(Upper))
@@ -209,7 +215,9 @@ async fn policy_reaches_batch_children() {
         &dir.path().display().to_string(),
         "",
         model(&provider),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         sink,
     )
     .policy(crate::harness::PolicyLayerInputs::new(
@@ -254,7 +262,7 @@ async fn dedup_replays_identical_read_calls() {
     let outcome = run_turn(&conversation, "go").await;
 
     assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
-    let results = tool_results(&conversation).await;
+    let results = raw_tool_results(&conversation).await;
     assert_eq!(results.len(), 2);
     assert_eq!(result_text(&results[0]), "1: body");
     assert_eq!(
@@ -300,7 +308,7 @@ async fn dedup_invalidated_by_write_to_same_path() {
     std::fs::write(dir.path().join("f"), "old\n").unwrap();
     let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
     let _ = run_turn(&conversation, "go").await;
-    let texts: Vec<String> = tool_results(&conversation)
+    let texts: Vec<String> = raw_tool_results(&conversation)
         .await
         .iter()
         .map(result_text)
@@ -343,7 +351,7 @@ async fn dedup_invalidated_by_multiedit_top_level_path() {
     std::fs::write(dir.path().join("f"), "old\n").unwrap();
     let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
     let _ = run_turn(&conversation, "go").await;
-    let texts: Vec<String> = tool_results(&conversation)
+    let texts: Vec<String> = raw_tool_results(&conversation)
         .await
         .iter()
         .map(result_text)
@@ -384,7 +392,7 @@ async fn dedup_invalidated_by_batch_child_write() {
     std::fs::write(dir.path().join("f"), "old\n").unwrap();
     let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
     let _ = run_turn(&conversation, "go").await;
-    let texts: Vec<String> = tool_results(&conversation)
+    let texts: Vec<String> = raw_tool_results(&conversation)
         .await
         .iter()
         .map(result_text)
@@ -427,7 +435,7 @@ async fn dedup_cleared_by_bash() {
     std::fs::write(dir.path().join("f"), "old\n").unwrap();
     let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
     let _ = run_turn(&conversation, "go").await;
-    let texts: Vec<String> = tool_results(&conversation)
+    let texts: Vec<String> = raw_tool_results(&conversation)
         .await
         .iter()
         .map(result_text)
@@ -895,7 +903,9 @@ async fn policy_conversation(
         &dir.path().display().to_string(),
         "",
         model(provider),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         sink,
     )
     .policy(crate::harness::PolicyLayerInputs::new(
@@ -1158,7 +1168,7 @@ async fn dedup_hit_serves_after_the_policy_pass_without_executing() {
     let outcome = run_turn(&conversation, "go").await;
 
     assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
-    let results = tool_results(&conversation).await;
+    let results = raw_tool_results(&conversation).await;
     assert_eq!(result_text(&results[0]), "1: body");
     assert_eq!(result_text(&results[1]), "1: body");
     assert_eq!(

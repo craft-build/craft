@@ -1,9 +1,11 @@
 //! Request layer: the per-step request-view pipeline, in the order the old
-//! loop applied it — recency tail, read lifecycle, output compression,
-//! protocol shaping, the output-token clamp, and the sampling options. The
-//! system prompt rides here too, so its bytes stay exactly the preamble the
-//! surfaces always built. Stored history is never touched: every rewrite
-//! exists because the protocol rejects the shape animist passes through.
+//! loop applied it — recency tail, in-run read lifecycle and output
+//! compression, protocol shaping, the output-token clamp, and the sampling
+//! options. The system prompt rides here too, so its bytes stay exactly the
+//! preamble the surfaces always built. Stored history is never touched:
+//! every rewrite exists because the protocol rejects the shape animist
+//! passes through, or covers results the current run produced (everything
+//! older arrives pre-altered from history, 08).
 
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +18,6 @@ use animist::provider::{RequestOptions, StreamResponse};
 
 use crate::compaction::estimate::RequestOverhead;
 use crate::compression::CompressionConfig;
-use crate::compression::store::SharedCompressionStore;
 use crate::provider::ModelHandle;
 use crate::run::SharedCompactionState;
 use crate::run::read_lifecycle;
@@ -32,7 +33,6 @@ pub(crate) struct RequestLayerInputs {
     pub model: Arc<ArcSwap<ModelHandle>>,
     pub settings: Arc<ArcSwap<TurnSettings>>,
     pub recency: Option<Arc<dyn RecencySource>>,
-    pub compression_store: Option<SharedCompressionStore>,
     /// The workspace root as a display string, anchoring read-lifecycle
     /// path normalization.
     pub write_root: Option<String>,
@@ -50,6 +50,10 @@ struct RequestRunState {
     system: String,
     /// Requests served this run; the recency tail's turn counter.
     prepares: u32,
+    /// Where this run started in the history view: messages before it
+    /// arrived pre-altered from history, so the in-run request rewrites
+    /// (read lifecycle, compression) only touch the suffix.
+    run_start: usize,
     /// Measured input tokens from the last completed stream; feeds the
     /// output-token clamp a number better than the chars/4 estimate.
     measured_prompt_tokens: u64,
@@ -67,6 +71,7 @@ impl RequestLayer {
             run: Mutex::new(RequestRunState {
                 system: String::new(),
                 prepares: 0,
+                run_start: 0,
                 measured_prompt_tokens: 0,
             }),
         }
@@ -91,15 +96,20 @@ impl RequestLayer {
 impl LayerImpl for RequestLayer {
     async fn turn_start(
         &self,
-        _agent: &Agent,
+        agent: &Agent,
         _run: &RunContext,
         message: &StoredMessage,
     ) -> Result<StoredMessage> {
         let settings = self.inputs.settings.load_full();
         let system = Self::system_prompt(&settings, &self.inputs.preamble_base, &self.inputs.cwd);
+        // The run's own messages start after the current view (the input is
+        // admitted after this hook); everything before it arrived
+        // pre-altered from history by the between-runs passes.
+        let run_start = agent.history().current().await.len();
         let mut run = self.run.lock().unwrap_or_else(|poison| poison.into_inner());
         run.system = system;
         run.prepares = 0;
+        run.run_start = run_start;
         run.measured_prompt_tokens = 0;
         Ok(message.clone())
     }
@@ -112,29 +122,40 @@ impl LayerImpl for RequestLayer {
     ) -> Result<StepRequest> {
         let settings = self.inputs.settings.load_full();
         let handle = self.inputs.model.load_full();
-        let (system, prepares, measured) = {
+        let (system, prepares, measured, run_start) = {
             let mut run = self.run.lock().unwrap_or_else(|poison| poison.into_inner());
             run.prepares += 1;
-            (run.system.clone(), run.prepares, run.measured_prompt_tokens)
+            (
+                run.system.clone(),
+                run.prepares,
+                run.measured_prompt_tokens,
+                run.run_start,
+            )
         };
         request.system = system;
         // Volatile recency facts ride only this request.
         if let Some(source) = &self.inputs.recency {
             recency::attach_recency_tail_wire(&mut request.messages, source, prepares);
         }
-        read_lifecycle::apply_to_request(
+        read_lifecycle::apply_to_request_from(
             &mut request.messages,
-            self.inputs.compression_store.as_ref(),
             self.inputs.write_root.as_deref(),
+            run_start,
         );
-        view::compress_request_view(&mut request.messages, &self.inputs.compression);
+        view::compress_request_view_from(
+            &mut request.messages,
+            &self.inputs.compression,
+            run_start,
+        );
         // Request overhead (preamble + tool schemas) is fixed per run, and
         // both gauges must measure the rewritten view before protocol
         // shaping, the way the estimator always has.
         let overhead = RequestOverhead::from_parts(Some(request.system.as_str()), &request.tools);
-        if let Ok(mut guard) = self.inputs.compaction.lock() {
-            guard.set_request_overhead(overhead.tokens());
-        }
+        self.inputs
+            .compaction
+            .lock()
+            .await
+            .set_request_overhead(overhead.tokens());
         let estimate = crate::compaction::estimate::estimate_messages(&request.messages);
         let prompt_tokens = estimate.saturating_add(overhead.tokens()).max(measured);
         request.messages = view::shape_messages(request.messages, handle.relocates_tool_images());
@@ -166,6 +187,13 @@ impl LayerImpl for RequestLayer {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .measured_prompt_tokens = measured;
+            // The provider's own count of the prompt is the best floor the
+            // compaction fill check can have.
+            self.inputs
+                .compaction
+                .lock()
+                .await
+                .set_measured_prompt(measured);
         }
         Ok(response)
     }

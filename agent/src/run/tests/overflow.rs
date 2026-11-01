@@ -7,7 +7,11 @@ use crate::history::{ext, marker};
 use animist::agent::{AgentEvent, Cancellation};
 use animist::provider::ProviderEvent;
 
-// --- Context-overflow recovery (C.5, restored in 08) ---
+// --- Context-overflow recovery (C.5, restored in 09) ---
+// The in-run half (retry, compaction inside `recover`) is 09's
+// `RecoveryLayer`; 08 built the compactors it will call, so these stay
+// 09-tagged. One premise also flips with README decision 11: a failed run
+// KEEPS any compaction it did.
 fn overflow_error_turn() -> Attempt {
     // The body must name a size beyond the run's overhead-inclusive
     // estimate (history + tool schemas) for recalibration to trigger.
@@ -71,15 +75,16 @@ async fn overflow_conversation(
         provider,
         crate::testing::model_info("scripted", overflow_window(), 8_192, false, false),
     ));
+    let history = seeded_history(overflow_history()).await;
     let conversation = ConversationBuilder::new(
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.registry().unwrap(),
+        workspace.registry(&history).unwrap(),
         sink,
     )
-    .history(seeded_history(overflow_history()).await)
+    .history(history)
     .build()
     .expect("conversation builds");
     (conversation, stream)
@@ -98,7 +103,7 @@ fn auth_event_count(events: &[Event]) -> usize {
 }
 
 #[tokio::test]
-#[ignore = "restored in 08"]
+#[ignore = "restored in 09"]
 async fn overflow_recovers_compacts_and_retries() {
     let provider = script(vec![overflow_error_turn(), done_turn("recovered")]);
     let (conversation, mut stream) = overflow_conversation(&provider).await;
@@ -125,7 +130,7 @@ async fn overflow_recovers_compacts_and_retries() {
         conversation
             .compaction()
             .lock()
-            .unwrap()
+            .await
             .estimator
             .multiplier()
             > 1.0,
@@ -205,8 +210,9 @@ async fn fatal_errors_fail_immediately() {
 
 #[tokio::test]
 async fn overflow_without_compaction_context_fails_as_before() {
-    // Until 08 wires compaction into the turn, an overflow is an honest
-    // failure: the provider's error surfaces unchanged.
+    // Until 09 wires recovery into the turn, an overflow is an honest
+    // failure: the provider's error surfaces unchanged (the between-runs
+    // engine of 08 runs before the turn, not inside it).
     let provider = script(vec![overflow_error_turn()]);
     let dir = tempfile::tempdir().unwrap();
     let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
@@ -422,7 +428,7 @@ async fn failing_responder_fails_the_run() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 08"]
+#[ignore = "restored in 09"]
 async fn declined_compaction_fails_without_a_blind_retry() {
     // Overflow, then a scripted success waiting: with no compaction stage
     // able to run, the run must fail with the provider's error instead of
@@ -458,7 +464,7 @@ async fn declined_compaction_fails_without_a_blind_retry() {
 }
 
 #[tokio::test]
-#[ignore = "restored in 08"]
+#[ignore = "restored in 09"]
 async fn failed_run_after_overflow_compaction_restores_prefix_and_commits_turn() {
     // Overflow → compact → retry overflows again → budget spent → the
     // run fails. The compaction ran on the history in place; a failed run
@@ -466,7 +472,7 @@ async fn failed_run_after_overflow_compaction_restores_prefix_and_commits_turn()
     // must not leak, but what already happened stays.
     let provider = script(vec![overflow_error_turn(), overflow_error_turn()]);
     let (conversation, _stream) = overflow_conversation(&provider).await;
-    conversation.compaction().lock().unwrap().protect_from(3);
+    conversation.compaction().lock().await.protect_from(3);
     let before = stored(&conversation).await;
     let outcome = run_turn(&conversation, "continue").await;
     assert!(matches!(outcome, TurnOutcome::Failed(_)), "{outcome:?}");
@@ -482,7 +488,7 @@ async fn failed_run_after_overflow_compaction_restores_prefix_and_commits_turn()
         "compaction must not leak into the history"
     );
     assert_eq!(
-        conversation.compaction().lock().unwrap().carry_from(),
+        conversation.compaction().lock().await.carry_from(),
         Some(3),
         "the unanswered-input anchor must not follow the rolled-back history"
     );
@@ -493,7 +499,7 @@ async fn failed_run_after_overflow_compaction_restores_prefix_and_commits_turn()
 }
 
 #[tokio::test]
-#[ignore = "restored in 08"]
+#[ignore = "restored in 09"]
 async fn overflow_body_without_a_prompt_size_leaves_the_estimator_alone() {
     // Recovery still works when the body names no size; the estimator
     // simply does not recalibrate to a bogus value.
@@ -511,7 +517,7 @@ async fn overflow_body_without_a_prompt_size_leaves_the_estimator_alone() {
         conversation
             .compaction()
             .lock()
-            .unwrap()
+            .await
             .estimator
             .multiplier(),
         1.0,

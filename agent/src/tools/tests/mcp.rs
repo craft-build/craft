@@ -22,7 +22,9 @@ async fn read_routes_mcp_resources_and_rejects_unknown_pairs() {
     workspace.set_mcp(Some(crate::mcp::test_support::stub_handle_with_resources(
         vec![published],
     )));
-    let registry = workspace.registry().unwrap();
+    let registry = workspace
+        .registry(&animist::history::History::new())
+        .unwrap();
     assert!(
         !registry.definitions().iter().any(|d| d.name == "mcp_read"),
         "mcp_read is merged into read, not a separate tool"
@@ -89,7 +91,9 @@ async fn mcp_tools_register_dispatch_and_clear() {
         "srv.echo",
         "Echo through MCP",
     )])));
-    let registry = workspace.registry().unwrap();
+    let registry = workspace
+        .registry(&animist::history::History::new())
+        .unwrap();
 
     let definitions = registry.definitions();
     let echo = definitions
@@ -107,7 +111,9 @@ async fn mcp_tools_register_dispatch_and_clear() {
     assert!(text.contains("unknown MCP tool"), "got: {text}");
 
     workspace.set_mcp(None);
-    let cleared = workspace.registry().unwrap();
+    let cleared = workspace
+        .registry(&animist::history::History::new())
+        .unwrap();
     assert!(
         cleared.definitions().iter().all(|d| d.name != "srv__echo"),
         "clearing the handle removes MCP tools"

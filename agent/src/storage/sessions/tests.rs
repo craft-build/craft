@@ -133,7 +133,8 @@ fn legacy_json_session_loads_converted() {
 
     let loaded = StoredSession::load_from(id, dir).unwrap();
     assert_eq!(message_texts(loaded.messages()), ["hi", "hello"]);
-    assert!(loaded.tool_outputs().contains_key("t1"));
+    // Legacy `tool_outputs` payloads stay unread until 11's loader folds
+    // them into entry sources.
     assert_eq!(
         message_texts(&loaded.subagent_messages()["call-7"]),
         ["do things"]
@@ -223,12 +224,6 @@ fn prune_orphans_drops_unreachable_tool_state() {
     session.set_subagent_messages("task-live".into(), vec![entry_with_call("sub-tool")]);
     session.set_subagent_messages("task-stale".into(), vec![entry_with_call("stale-sub-tool")]);
     session.set_subagents(vec![subagent("task-live"), subagent("task-stale")]);
-    for id in ["task-live", "sub-tool", "stale-sub-tool", "orphan"] {
-        session.insert_tool_output(
-            id.into(),
-            Arc::new(ext::tool_result(id, Some("read"), "x", false)),
-        );
-    }
 
     session.prune_orphans(tool_ids);
 
@@ -242,9 +237,6 @@ fn prune_orphans_drops_unreachable_tool_state() {
         .map(|sa| sa.tool_use_id.as_str())
         .collect();
     assert_eq!(subagent_ids, ["task-live"]);
-    let mut outputs: Vec<_> = session.tool_outputs().keys().cloned().collect();
-    outputs.sort();
-    assert_eq!(outputs, ["sub-tool", "task-live"]);
 }
 
 #[test]
@@ -320,12 +312,6 @@ fn roundtrip_jsonl_incremental() {
 
     session.push_message(assistant_entry("reply"));
     session.push_message(user_entry("second"));
-    // `tool_outputs` is not written; inserting one must not affect the
-    // persisted log.
-    session.insert_tool_output(
-        "tool-1".into(),
-        Arc::new(ext::tool_result("tool-1", Some("read"), "ok", false)),
-    );
     session.set_subagent_messages("sub-1".into(), vec![user_entry("sub-prompt")]);
     log.append(&session).unwrap();
 
@@ -338,10 +324,6 @@ fn roundtrip_jsonl_incremental() {
 
     let loaded = StoredSession::load_from(session.id.id(), dir).unwrap();
     assert_eq!(loaded.messages().len(), 3);
-    assert!(
-        loaded.tool_outputs().is_empty(),
-        "tool outputs are no longer persisted"
-    );
     assert_eq!(loaded.subagent_messages()["sub-1"].len(), 2);
     assert_eq!(loaded.subagent_messages()["sub-2"].len(), 1);
 }
@@ -393,7 +375,7 @@ fn shrinking_a_legacy_format_log_still_archives() {
 /// Raw tool-output copies are never written, but records already on
 /// disk (from older saves, in their animist block shape) must still load.
 #[test]
-fn out_records_on_disk_stay_readable() {
+fn out_records_on_disk_are_skipped_since_08() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
     let mut session = StoredSession::new("m", "/project");
@@ -410,8 +392,10 @@ fn out_records_on_disk_stay_readable() {
     file.write_all(out.as_bytes()).unwrap();
     file.write_all(b"\n").unwrap();
 
+    // The record parses but is retired: raw outputs live in entry sources,
+    // so loading skips it without failing the file.
     let loaded = StoredSession::load_from(session.id.id(), dir).unwrap();
-    assert!(loaded.tool_outputs().contains_key("t1"));
+    assert_eq!(message_texts(loaded.messages()), ["first"]);
 }
 
 #[test]
@@ -1352,7 +1336,7 @@ fn snapshot_adoption_does_not_erase_a_local_rewrite() {
 }
 
 #[test]
-fn crash_recovery_preserves_tool_outputs_around_corrupt_line() {
+fn crash_recovery_skips_retired_out_records_around_corrupt_line() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
     let mut session = StoredSession::new("m", "/project");
@@ -1374,7 +1358,6 @@ fn crash_recovery_preserves_tool_outputs_around_corrupt_line() {
 
     let loaded = StoredSession::load_from(session.id.id(), dir).unwrap();
     assert_eq!(loaded.messages().len(), 2);
-    assert!(loaded.tool_outputs().contains_key("t1"));
 }
 
 #[test]

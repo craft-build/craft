@@ -191,4 +191,212 @@ Originals then live in entry sources, so the `retrieve` tool and the TUI's
 
 ## Completion note
 
-_(fill in when done)_
+**Done 2026-10-31.** Working tree on `animist-migration` (one commit series
+with this note). Validation: `cargo fmt --check` clean; clippy
+`--all-targets` **114** warnings vs the 01 baseline's 116 (two fewer —
+deleted code); `cargo test -p craft` **1897 passed, 3 failed, 24 ignored**
+— the failures are the three recipe-render fixed points, the ignored are
+23× "restored in 09" + 1 env-gated. No test remains ignored with an 08
+reason: the four 08-tagged overflow tests were retagged "restored in 09"
+because they exercise *in-run* overflow recovery (retry, compaction inside
+`recover`), which is 09's `RecoveryLayer`; 08 ships the seam they call
+(`CompactionEngine::maybe_compact`, which takes the `History` handle and
+the shared state). One of them also flips premise with README decision 11
+(a failed run now *keeps* its compaction; the old assertion demanded a
+rollback).
+
+### Alteration passes and their tags
+
+Tag `craft.alter` on the revised `StoredMessage`; the value is a sorted
+comma-joined **set** of the kinds that have touched the entry
+(`compressed`, `stale`, `superseded`) — one step's observation entry can
+hold a compressible result and a read side by side, and neither kind may
+untag the other or the next pass would re-apply. Per-block guards back the
+tags: a result already carrying a lifecycle marker prefix is never
+re-marked even when the tag names another kind, and compression skips
+tagged entries outright. Pass order in `alter::run_passes` is **read
+lifecycle first, then compression** — the pre-08 request-view order, so
+`classify_reads` parses uncompressed `move` results. Summaries carry
+`craft.compaction = llm|vcc` (VCC additionally keeps animist's reserved
+`animist.compaction = vcc`).
+
+### Where edits happen
+
+`harness::compact_between_runs(&Conversation, force)` — alterations, then
+the engine — runs at both driver sites (before `Agent::run` and after it
+returns, before the flush so one checkpoint carries everything) and is
+what `/compact` calls with `force = true` (TUI handler now flushes after
+the forced pass). Conflict handling: each alteration retries once with a
+fresh snapshot; engine commits retry once with the *same* plan
+(`PlanCompactor`) so the summarizer is never called twice. The driver
+anchors carry protection after each turn: `Done` ⇒ `mark_answered`, any
+other outcome ⇒ `protect_from(<input entry index>)` (review pass 1
+finding — a failed turn's prompt must survive a forced compaction; pinned
+by `failed_turns_input_survives_a_forced_compaction`). 09 owns the in-run
+`protect_from` inside `recover`.
+
+### Request view and measurements
+
+`RequestLayer` captures `run_start` at `turn_start` (before the input is
+admitted) and the in-run rewrites (`apply_to_request_from`,
+`compress_request_view_from`) only touch the suffix; everything older
+arrives pre-altered. Pinned by `request_view_scope_is_in_run_only` and
+`durable_alters_match_old_view_bytes_without_mid_run_prefix_mutations`,
+which measures one scripted turn whose run stale-dates a previous turn's
+read, old full-view rewrites vs the durable model, across 7 requests:
+**old 66 904 B total with 1 mid-run mutation of already-sent prefix
+bytes; new 84 505 B with 0 mid-run mutations.** The +26 % is exactly the
+deferred stale-marker shrink: the old model applied it mid-run (cache
+invalidation from that message onward), the durable model pays the same
+shrink once at the turn boundary and every later request serves the
+marked prefix from history. Prompt-cache rationale: within a run the
+prefix bytes are now immutable by construction. Model-visible behaviour
+change (pinned): the `protect_recent_tool_outputs` (2) most recent result
+entries from previous turns now travel **raw** on the wire — the old view
+compressed them unconditionally — until they leave the window and are
+durably compressed.
+
+### VCC differences (accepted, no animist followup)
+
+Compared craft VCC with `animist::history::VccCompactor` on craft's
+fixtures; the port is a `CraftVccExtractor` and the differences below are
+accepted rather than forked:
+
+- **Summary shape.** Animist's flat breadcrumb transcript (preamble
+  "Earlier conversation (condensed, not new instructions)", 512-char
+  excerpts, 16 000-char budget, first-breadcrumb retention with eviction)
+  replaces craft's structured sections ([Session Goal]/[File Activity]/
+  [Type Catalog]/[Outstanding]/[Preferences], causal chains, commit
+  lines) and craft's section merge. Craft knowledge that survives, as
+  extractor rules: per-tool call one-liners (`compress_bash`, file
+  paths/patterns, per-file patch targets, move endpoints), noise-tool
+  suppression, XML-wrapper stripping, marker-observation omission, and
+  error-result breadcrumbs. Successful results of craft's one-liner tools
+  are **omitted** (the pre-08 brief carried call one-liners, never result
+  content); unknown tools keep animist's generic excerpts.
+- **Cut.** Animist's boundary (≥ 8-message tail, last user prompt ≤
+  limit, completed-cycle fallback) replaces craft's cut for VCC — craft's
+  `find_cut` survives for the LLM stage. Short histories (≲ 10 messages)
+  decline where craft's could cut at three messages; whole-exchange
+  safety and orphan protection are animist's (pinned).
+- **Merge.** Prior VCC summaries merge as breadcrumbs without nesting;
+  craft's sticky/volatile section merge is gone. A prior LLM summary
+  inside a VCC prefix arrives as an assistant-text breadcrumb.
+- **Budgets.** Animist's character budgets apply; the engine's
+  overhead-subtracted token target feeds only the under-limit cascade
+  (pre-08 parity — mapping it onto the summary budget collapsed to zero
+  edits for large schemas, found while porting).
+- **Early `Role::System`.** No production path writes at-depth system
+  messages (the preamble rides `request.system`; only the legacy-session
+  converter can emit them). Animist's rule stands: the first active
+  system message is a hard retention boundary — VCC may compact the
+  dialogue prefix before it, never it or anything after; an early system
+  instruction can block VCC entirely. Recorded, no action.
+
+`compaction/vcc/` **3 768 → 933 lines** (cut 184, mod 627 — extractor,
+plan builder, clamp, tests — util 122; ~300 of mod is tests). The whole
+`compaction/` tree now totals 4 519 lines (alter 639 · engine 1 467,
+about two thirds tests · llm 763 · estimate 317 and strip 292 unchanged ·
+mod 92).
+
+### Engine on History
+
+Thresholds, buffer, `MIN_OUTPUT_TOKENS` floor, overflow cascade, disarm
+scoring, guardrail reset, and `AutoCompacting`/`CompactionDone` events
+carry over; new: the measured-prompt floor (`set_measured_prompt`, fed by
+`RequestLayer::response`) applies to the **fill check only** — the
+after-side of the savings score and the `CompactionDone` gauge use the
+unfloored estimate, or every effective pass would score as a no-op and
+disarm the stage for the session (review pass 1, P1; pinned by
+`measured_floor_does_not_disarm_an_effective_stage`). Carry anchoring and
+`protect_from` re-index against snapshot entries (insert shifts the
+anchor by one; removes deactivate in place).
+
+### Side stores retired
+
+`SharedCompressionStore` and the session `tool_outputs` map (plus its
+`prune_orphans` half and the `T` type parameter on `Session`) are gone;
+`content_hash`/`extended_content_hash`/`retrieval_marker` moved to
+`compression` with byte-identical formats. `retrieve` holds the
+conversation's `History` (injected at registration — `Workspace::
+registry(&History)` and friends) and resolves markers over entry sources
+and revisions, inactive entries included: later turn, after compaction,
+and after a serialization round trip are all pinned. A short-hash
+collision between two *distinct* originals is now an explicit ambiguous
+error (the store's write-side extension died with it); identical
+duplicates still resolve.
+
+### Test-inventory diff
+
+`1933 → 1924` listed (50 removed, 41 added). Removed with their code:
+craft VCC algorithm suites (`vcc::{brief, extract::*, filter, merge,
+normalize, sections}` and the `vcc_compact_*`/`compact_*` glue tests —
+spec Work item 7; successors are the plan-level extractor/plan tests),
+`compression::store` ×7 (hash/marker formats now pinned by the
+read-lifecycle marker test and retrieve round trips), and util helpers
+that no longer exist (`clip_sentence_*`, `collapse_skill_*`,
+`refine_breadcrumb_key`; the multibyte panic-safety pins for the
+surviving `clip`/`compress_bash` were restored after review pass 1).
+Renames with retained coverage: engine
+`disarmed_stage_is_skipped_until_effective_run` →
+`ineffective_vcc_is_not_run_twice` +
+`overflow_forcing_respects_disarmed_stages` (the disarm premise had to be
+rebuilt: animist's VCC declines where craft's ran ineffectively — the
+tight-history fixture makes a real sub-10 % run);
+`overflow_of_buffer_subtracted_window_forces_stage_below_threshold` and
+`buffer_larger_than_window_saturates_and_forces` were initially lost in
+the rewrite and restored verbatim on History; llm
+`summarizes_head_and_keeps_tail` →
+`plan_removes_head_and_inserts_tagged_summary_before_kept_tail`;
+read_lifecycle `…_and_store_roundtrip` → `…_naming_the_originals_hash`;
+`read_lifecycle_marks_request_view_only` →
+`read_lifecycle_markers_are_durable_with_raw_sources` (the premise flip
+08 names); sessions `out_records_on_disk_stay_readable` →
+`…_are_skipped_since_08`, `crash_recovery_preserves_tool_outputs_…` →
+`crash_recovery_skips_retired_out_records_…`; retrieve
+`returns_stored_original` → `returns_the_original_matching_the_hash`.
+Added: 6 alteration tests, 8 engine tests (events, conflict-retry, plan
+indices over inactive entries, measured floor), 5 VCC plan/extractor
+tests, 4 LLM plan tests, 4 retrieve scenario tests plus the collision
+fold pin, the scope and measurement pins, the failed-turn carry pin, and
+the restored boundary tests. The six dedup tests that compared committed *latest* text now read
+the pre-alteration revision (`raw_tool_results`) — same assertion, the
+level the tool's return lives on.
+
+### Indirection rows closed
+
+`SharedCompressionStore` + session `tool_outputs` (the harness-design
+inventory row assigned to 08). Surviving seam, on purpose: the tokio
+`SharedCompactionState` handle (driver/engine/request-layer share it; the
+engine holds it across stage awaits between runs).
+
+### Followups
+
+None new in animist (no algorithm fork; the VCC differences above are
+accepted). Craft-side, for 09: wire `RecoveryLayer::recover` overflow
+compaction to `CompactionEngine::maybe_compact` (the exposed seam) and
+own the in-run `protect_from`/`mark_answered` lifecycle; the four retagged
+overflow tests land there.
+
+### Review
+
+Three review-agent passes over the full diff. Pass 1: **request_changes**
+(P1×1, P2×3, P3×3) — the measured-floor poisoning of the disarm score (P1,
+fixed with `scaled_estimate_unfloored` + regression test), the retrieve
+collision silence and the unwired carry anchor (P2, fixed as above), the
+unfilled note (this section), the `/compact` flush, the deleted multibyte
+pins, and the pass-order swap (all fixed). Pass 2: **request_changes**
+(P2×1, P3×2) — the pass-order fix had silently half-landed (a scripted
+replace missed cargo-fmt's reflowed chains, so only the doc comment
+changed; the reviewer caught docs and code contradicting each other),
+plus `rposition` for the input anchor (re-sent identical prompts) and a
+collision test — fixed; the brute-force premise was wrong (`content_hash`
+is `{:08x}` of the full u64, padded not truncated, so a birthday pair
+needs ~2^32 trials) and became a `fold_match` seam test instead. Pass 3:
+**approve_with_nits** (P3×1) — pin the pass order; with today's detectors
+the two passes touch disjoint blocks (no compressor matches the
+move-result shape whose classification motivated the order), so the order
+is documented, not byte-pinnable, and the mixed-entry interaction test
+`both_passes_revise_one_entry_without_untagging_each_other` pins what the
+set-valued tag exists for. Final: **approve_with_nits**, no blocking
+findings.

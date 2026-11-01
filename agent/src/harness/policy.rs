@@ -372,7 +372,9 @@ mod tests {
             &dir.path().display().to_string(),
             "",
             model(&scripted),
-            workspace.registry().unwrap(),
+            workspace
+                .registry(&animist::history::History::new())
+                .unwrap(),
             sink,
         )
         .policy(policy)

@@ -1,3 +1,4 @@
+pub mod alter;
 pub mod engine;
 pub mod estimate;
 pub mod llm;

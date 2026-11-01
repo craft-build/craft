@@ -22,6 +22,43 @@ pub(crate) const END_MARKER: &str = "[The turn ended here; the run was cut short
 /// in the [`marker::CANCEL`] tag.
 pub(crate) const CANCEL_MARKER: &str = "[Cancelled by user]";
 
+/// Between-runs history edits (08): the durable alteration passes first,
+/// then the compaction engine's stages. The driver owns the sequencing —
+/// this never runs concurrently with `Agent::run` — so a `Conflict` from a
+/// pass means an unexpected writer won the race; each edit is retried once
+/// with a fresh snapshot and never re-runs summarizer work implicitly.
+/// `/compact` calls this with `force = true`; the pre-turn and post-turn
+/// sites call it with `false`.
+pub async fn compact_between_runs(conversation: &Conversation, force: bool) -> bool {
+    let history = conversation.history();
+    let (compression, root) = (conversation.compression_config(), conversation.write_root());
+    if let Err(error) =
+        crate::compaction::alter::run_passes(&history, &compression, root.as_deref()).await
+    {
+        tracing::warn!("alteration pass conflicted ({error}); retrying once");
+        if let Err(error) =
+            crate::compaction::alter::run_passes(&history, &compression, root.as_deref()).await
+        {
+            tracing::warn!("alteration pass conflicted twice; edits skipped: {error}");
+        }
+    }
+    let engine = conversation.compaction_engine();
+    let (state, model, sink) = (
+        conversation.compaction(),
+        conversation.model(),
+        conversation.sink(),
+    );
+    if force {
+        engine
+            .force_compact(&state, &model, &history, model.context_length(), &sink)
+            .await
+    } else {
+        engine
+            .maybe_compact(&state, &model, &history, model.context_length(), &sink)
+            .await
+    }
+}
+
 /// Bounded per-run animist event channel; drained concurrently into the
 /// sink so backpressure never stalls the run.
 const RUN_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -73,7 +110,10 @@ pub async fn run_turn(
 ) -> TurnOutcome {
     let sink = conversation.sink();
     let input = input_message(prompt, images);
-    // 08: pre-turn compaction runs here, once the Compactor plans land.
+    let anchor_input = input.clone();
+    // Between-runs history edits (08): alterations, then the engine's
+    // stages, before the run builds its first request on top of them.
+    compact_between_runs(conversation, false).await;
     let agent = conversation.agent();
     let (events, event_stream) = flume::bounded::<AgentEvent>(RUN_EVENT_CHANNEL_CAPACITY);
     let options = RunOptions::builder()
@@ -114,6 +154,31 @@ pub async fn run_turn(
             None,
         ),
     };
+    // Carry anchoring (Craft's `carry_from`): a turn that did not complete
+    // leaves its input unanswered — everything from it on must stay out of
+    // any summary until a later turn answers it. A completed turn answers
+    // its input.
+    match &outcome {
+        TurnOutcome::Done { .. } => {
+            conversation.compaction().lock().await.mark_answered();
+        }
+        _ => {
+            let entries = conversation.history().snapshot().await;
+            // The last match: re-sent identical prompt text must anchor at
+            // the entry this run admitted, not an answered duplicate.
+            if let Some(index) = entries
+                .entries()
+                .iter()
+                .rposition(|entry| entry.verbatim().message() == anchor_input.message())
+            {
+                conversation.compaction().lock().await.protect_from(index);
+            }
+        }
+    }
+    // The other between-runs site: the finished turn's results are durable
+    // alteration candidates, and the engine may need to run before the next
+    // prompt. Both precede the flush so one checkpoint carries them.
+    compact_between_runs(conversation, false).await;
     // One more flush after the terminal markers; `turn_end` has already run
     // inside the agent.
     conversation.flush().await;

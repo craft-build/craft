@@ -352,7 +352,7 @@ pub(super) async fn build_session_state(
         &kit.cwd,
         &kit.instructions_text,
         model,
-        workspace.clone().registry().map_err(|error| {
+        workspace.clone().registry(&history).map_err(|error| {
             report(crate::error::Error::BuildConversation {
                 source: Box::new(error),
             })
@@ -389,7 +389,7 @@ pub(super) async fn build_session_state(
         .clone()
         .with_questions(asker)
         .with_subagents(launcher)
-        .registry()
+        .registry(&conversation.history())
         .map_err(|error| error.to_string())?;
     conversation
         .set_tools(armed)

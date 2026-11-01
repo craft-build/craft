@@ -140,7 +140,22 @@ pub(crate) fn relocate_tool_result_images(messages: Vec<Message>) -> Vec<Message
 /// Only the wire view is affected: `turn` and `history` keep raw results.
 /// Request-time compression is unconditional (per the reference);
 /// `protect_recent_tool_outputs` is a compaction-stage knob, not ours.
+///
+/// Since 08 this is the in-run half of the durable compression alteration:
+/// results before `from` (where the run started in the view) already
+/// arrived compressed from history, so only the suffix is rewritten. The
+/// compressed bytes are the same either way — the pass is deterministic —
+/// but the prefix keeps its durable revision untouched.
+#[cfg(test)]
 pub(crate) fn compress_request_view(full: &mut [Message], config: &CompressionConfig) {
+    compress_request_view_from(full, config, 0)
+}
+
+pub(crate) fn compress_request_view_from(
+    full: &mut [Message],
+    config: &CompressionConfig,
+    from: usize,
+) {
     let names_by_id: std::collections::HashMap<String, String> = full
         .iter()
         .flat_map(history::ext::tool_calls)
@@ -149,8 +164,8 @@ pub(crate) fn compress_request_view(full: &mut [Message], config: &CompressionCo
             _ => None,
         })
         .collect();
-    for message in full {
-        if !history::ext::is_user(message) {
+    for (index, message) in full.iter_mut().enumerate() {
+        if index < from || !history::ext::is_user(message) {
             continue;
         }
         for block in &mut message.content {

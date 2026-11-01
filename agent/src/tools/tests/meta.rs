@@ -55,7 +55,7 @@ async fn clear_todos_drops_the_previous_sessions_plan() {
 async fn list_tools_lists_and_details_registered_tools() {
     let (_dir, workspace) = workspace();
     let definitions: Vec<_> = workspace
-        .registry()
+        .registry(&animist::history::History::new())
         .unwrap()
         .definitions()
         .into_iter()

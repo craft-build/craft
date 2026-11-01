@@ -59,12 +59,15 @@ async fn workspace_conversation(
     scripted: &ScriptedProvider,
 ) -> (Conversation, EventStream) {
     let workspace = Workspace::new(dir.path()).expect("workspace");
+    // The registry's retrieve reads the same history the conversation runs
+    // on, so retrieval works end to end in these tests.
+    let history = History::default();
     conversation_over(
         scripted,
         &Config::parse("").expect("default config"),
         &dir.path().display().to_string(),
-        workspace.registry().expect("registry"),
-        None,
+        workspace.registry(&history).expect("registry"),
+        Some(history),
     )
     .await
 }
@@ -144,6 +147,32 @@ async fn stored(conversation: &Conversation) -> Vec<StoredMessage> {
         .await
         .iter()
         .filter_map(HistoryEntry::current)
+        .cloned()
+        .collect()
+}
+
+/// Every tool result committed to history as the tool returned it: the
+/// latest revision craft's durable alterations have not touched (08 may
+/// have marked or compressed the newest one; the agent's squash keeps the
+/// interrupted placeholder as the source, so the verbatim entry is not the
+/// tool's return).
+async fn raw_tool_results(conversation: &Conversation) -> Vec<ContentBlock> {
+    entries(conversation)
+        .await
+        .iter()
+        .flat_map(|entry| {
+            let stored = entry
+                .revisions()
+                .iter()
+                .rev()
+                .find(|stored| {
+                    !stored
+                        .tags()
+                        .contains_key(crate::compaction::alter::ALTER_TAG)
+                })
+                .unwrap_or_else(|| entry.verbatim());
+            crate::history::ext::tool_results(stored.message())
+        })
         .cloned()
         .collect()
 }

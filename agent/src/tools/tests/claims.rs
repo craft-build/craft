@@ -183,7 +183,7 @@ fn claim_table_matches_the_documented_scheme() {
         claim(&Webfetch, json!({"url": "https://example.com"})),
         claim(&Websearch, json!({"query": "q"})),
         claim(
-            &Retrieve(crate::compression::store::shared_store()),
+            &Retrieve(animist::history::History::new()),
             json!({"hash": "h"}),
         ),
         claim(

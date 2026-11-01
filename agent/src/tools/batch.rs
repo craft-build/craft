@@ -196,7 +196,11 @@ mod tests {
         args: BatchArgs,
     ) -> animist::agent::tool::ToolOutput {
         let mut harness = animist::agent::testing::ToolHarness::builder()
-            .tools(workspace.registry().expect("registry"))
+            .tools(
+                workspace
+                    .registry(&animist::history::History::new())
+                    .expect("registry"),
+            )
             .build()
             .expect("harness");
         harness
@@ -286,7 +290,11 @@ mod tests {
         let guardrails = std::sync::Arc::new(crate::run::GuardrailState::new(None));
         let (sink, _stream) = crate::harness::EventSink::new();
         let mut harness = animist::agent::testing::ToolHarness::builder()
-            .tools(workspace.registry().expect("registry"))
+            .tools(
+                workspace
+                    .registry(&animist::history::History::new())
+                    .expect("registry"),
+            )
             .layers(
                 animist::agent::AgentLayer::builder()
                     .layer(animist::agent::Layer::new(
@@ -323,7 +331,11 @@ mod tests {
             .map(|_| entry(json!({"tool": "list", "parameters": {"path": "."}})))
             .collect();
         let mut harness = animist::agent::testing::ToolHarness::builder()
-            .tools(workspace.registry().expect("registry"))
+            .tools(
+                workspace
+                    .registry(&animist::history::History::new())
+                    .expect("registry"),
+            )
             .config(
                 animist::agent::AgentConfig::builder()
                     .max_child_calls(2_u64)

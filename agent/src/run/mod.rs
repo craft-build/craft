@@ -64,10 +64,11 @@ pub(crate) fn clamped_max_tokens(
     }
 }
 
-/// The session's compaction state shared with the request layer: surfaces
-/// and layers read and write the same estimator/effectiveness state (08
-/// drives it).
-pub type SharedCompactionState = Arc<std::sync::Mutex<crate::compaction::CompactionState>>;
+/// The session's compaction state shared with the request layer and the
+/// compaction engine: the engine holds the lock across its stage awaits
+/// (compaction runs between runs), so the handle is a tokio mutex and the
+/// request layer's per-step updates take it briefly.
+pub type SharedCompactionState = Arc<tokio::sync::Mutex<crate::compaction::CompactionState>>;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 

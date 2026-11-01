@@ -90,9 +90,13 @@ pub(super) enum Record {
 enum LegacyRecord {
     #[serde(rename = "msg")]
     Msg { d: LegacyMessage },
+    // Retired with the session `tool_outputs` map (08): still parsed so
+    // old lines load, never read.
     #[serde(rename = "out")]
     Out {
+        #[expect(dead_code)]
         id: String,
+        #[expect(dead_code)]
         d: legacy_messages::ToolResult,
     },
     #[serde(rename = "sub_msg")]
@@ -245,7 +249,7 @@ fn parse_line(line: &[u8]) -> Result<Parsed, serde_json::Error> {
 pub(super) fn load_jsonl(
     data: &[u8],
     display_path: &str,
-) -> Result<Session<HistoryEntry, StoredTokenUsage, ContentBlock>, SessionError> {
+) -> Result<Session<HistoryEntry, StoredTokenUsage>, SessionError> {
     let mut line_count = 0usize;
 
     let mut id: Option<SessionRef> = None;
@@ -253,7 +257,6 @@ pub(super) fn load_jsonl(
     let mut cwd = String::new();
     let mut created_at = 0u64;
     let mut messages: Vec<HistoryEntry> = Vec::new();
-    let mut tool_outputs: HashMap<String, Arc<ContentBlock>> = HashMap::new();
     let mut subagent_messages: HashMap<String, Vec<HistoryEntry>> = HashMap::new();
     let mut title = DEFAULT_TITLE.to_string();
     let mut token_usage = StoredTokenUsage::default();
@@ -321,9 +324,10 @@ pub(super) fn load_jsonl(
                         );
                     }
                 }
-                Record::Out { id, d } => {
-                    tool_outputs.insert(id.clone(), Arc::new(d.clone()));
-                }
+                // `Record::Out` raw tool outputs are gone since 08:
+                // originals live in entry sources. Records already on disk
+                // stay unread until 11's loader folds them into entries.
+                Record::Out { .. } => {}
                 Record::SubEntry { sub, entry } => {
                     subagent_messages
                         .entry(sub.clone())
@@ -361,9 +365,7 @@ pub(super) fn load_jsonl(
                                 .map(crate::history::ext::entry),
                         );
                     }
-                    LegacyRecord::Out { id, d } => {
-                        tool_outputs.insert(id, Arc::new(legacy_messages::tool_result_block(&d)));
-                    }
+                    LegacyRecord::Out { .. } => {}
                     LegacyRecord::SubMsg { sub, d } => {
                         subagent_messages.entry(sub).or_default().extend(
                             legacy_messages::to_stored(std::slice::from_ref(&d), timestamp)
@@ -403,7 +405,6 @@ pub(super) fn load_jsonl(
         model,
         messages: Arc::new(messages),
         token_usage,
-        tool_outputs,
         subagent_messages: subagent_messages
             .into_iter()
             .map(|(id, msgs)| (id, Arc::new(msgs)))
@@ -422,7 +423,7 @@ pub(super) fn load_jsonl(
 
 pub(super) fn load_session_at(
     path: &Path,
-) -> Result<Session<HistoryEntry, StoredTokenUsage, ContentBlock>, SessionError> {
+) -> Result<Session<HistoryEntry, StoredTokenUsage>, SessionError> {
     let data = std::fs::read(path).map_err(StorageError::from)?;
     let mut session = if path.extension().is_some_and(|e| e == "jsonl") {
         load_jsonl(&data, &path.display().to_string())?
@@ -435,8 +436,8 @@ pub(super) fn load_session_at(
 
 /// Reject a session whose format version this build cannot read.
 fn check_version(
-    session: Session<HistoryEntry, StoredTokenUsage, ContentBlock>,
-) -> Result<Session<HistoryEntry, StoredTokenUsage, ContentBlock>, SessionError> {
+    session: Session<HistoryEntry, StoredTokenUsage>,
+) -> Result<Session<HistoryEntry, StoredTokenUsage>, SessionError> {
     if session.version != SESSION_VERSION {
         return Err(SessionError::VersionMismatch {
             found: session.version,
@@ -449,17 +450,13 @@ fn check_version(
 /// The pre-jsonl single-file shape: the same session wrapper around the
 /// pre-animist message and tool-result enums, converted on load the way the
 /// jsonl loader converts legacy records. The current shape loads directly.
-fn load_json(
-    data: &[u8],
-) -> Result<Session<HistoryEntry, StoredTokenUsage, ContentBlock>, SessionError> {
+fn load_json(data: &[u8]) -> Result<Session<HistoryEntry, StoredTokenUsage>, SessionError> {
     // Same policy as the jsonl reader: try the current shape first, then
     // decode the pre-animist one and convert.
-    if let Ok(session) =
-        serde_json::from_slice::<Session<HistoryEntry, StoredTokenUsage, ContentBlock>>(data)
-    {
+    if let Ok(session) = serde_json::from_slice::<Session<HistoryEntry, StoredTokenUsage>>(data) {
         return check_version(session);
     }
-    let legacy: Session<legacy_messages::Message, StoredTokenUsage, legacy_messages::ToolResult> =
+    let legacy: Session<legacy_messages::Message, StoredTokenUsage> =
         serde_json::from_slice(data).map_err(StorageError::from)?;
     if legacy.version != SESSION_VERSION {
         return Err(SessionError::VersionMismatch {
@@ -487,16 +484,8 @@ fn load_json(
             )
         })
         .collect();
-    let tool_outputs = legacy
-        .tool_outputs
-        .iter()
-        .map(|(id, output)| {
-            (
-                id.clone(),
-                Arc::new(legacy_messages::tool_result_block(output)),
-            )
-        })
-        .collect();
+    // Legacy `tool_outputs` payloads stay unread until 11's loader folds
+    // them into entry sources.
     Ok(Session {
         version: SESSION_VERSION,
         id: legacy.id,
@@ -505,7 +494,6 @@ fn load_json(
         model: legacy.model,
         messages: Arc::new(messages),
         token_usage: legacy.token_usage,
-        tool_outputs,
         subagent_messages,
         subagents: legacy.subagents,
         usage_by_model: legacy.usage_by_model,

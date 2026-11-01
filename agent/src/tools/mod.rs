@@ -161,7 +161,6 @@ pub struct Workspace {
     locks: locks::PathLocks,
     loaded_instructions: crate::instructions::LoadedInstructions,
     todos: todo_write::TodoStore,
-    compression_store: crate::compression::store::SharedCompressionStore,
     snapshots: crate::snapshot::SnapshotManager,
     bash_jobs: bash::BashJobs,
     /// Resolved once so the `sessions` tool lists without re-walking XDG.
@@ -201,7 +200,6 @@ impl Workspace {
             root: Arc::new(root.clone()),
             loaded_instructions: crate::instructions::LoadedInstructions::new(),
             todos: Default::default(),
-            compression_store: crate::compression::store::shared_store(),
             snapshots: crate::snapshot::SnapshotManager::new(root.clone()),
             bash_jobs: Default::default(),
             state_dir: crate::storage::StateDir::resolve().ok(),
@@ -360,12 +358,6 @@ impl Workspace {
         self
     }
 
-    /// The session-shared reversible-compression store: request-build
-    /// markers and the `retrieve` tool both use this instance.
-    pub fn compression_store(&self) -> &crate::compression::store::SharedCompressionStore {
-        &self.compression_store
-    }
-
     /// The session-shared snapshot manager backing `/undo`.
     pub fn snapshots(&self) -> &crate::snapshot::SnapshotManager {
         &self.snapshots
@@ -404,9 +396,17 @@ impl Workspace {
         clippy::result_large_err,
         reason = "AgentError is animist's public error type and cannot be boxed here"
     )]
-    pub fn registry(&self) -> std::result::Result<ToolRegistry, animist::agent::AgentError> {
+    pub fn registry(
+        &self,
+        history: &animist::history::History,
+    ) -> std::result::Result<ToolRegistry, animist::agent::AgentError> {
         let mut registry = ToolRegistry::default();
-        self.register_builtins(&mut registry, self.sandbox_cell(), BUILTIN_TOOL_NAMES)?;
+        self.register_builtins(
+            &mut registry,
+            self.sandbox_cell(),
+            BUILTIN_TOOL_NAMES,
+            history,
+        )?;
         registry.register(Batch)?;
         // The full registry serves every argosy native; the subagent and
         // reviewer budgets filter by their allowed lists.
@@ -427,6 +427,7 @@ impl Workspace {
     pub fn subagent_registry(
         &self,
         general: bool,
+        history: &animist::history::History,
     ) -> std::result::Result<ToolRegistry, animist::agent::AgentError> {
         let allowed: &[&str] = if general {
             crate::subagent::GENERAL_TOOLS
@@ -442,7 +443,7 @@ impl Workspace {
         } else {
             self.frozen_read_only_cell()
         };
-        self.register_builtins(&mut registry, sandbox, allowed)?;
+        self.register_builtins(&mut registry, sandbox, allowed, history)?;
         if allowed.contains(&"batch") {
             registry.register(Batch)?;
         }
@@ -461,11 +462,17 @@ impl Workspace {
     )]
     pub fn reviewer_registry(
         &self,
+        history: &animist::history::History,
     ) -> std::result::Result<ToolRegistry, animist::agent::AgentError> {
         let allowed = crate::subagent::REVIEWER_TOOLS;
         let mut registry = ToolRegistry::default();
         // The reviewer never writes.
-        self.register_builtins(&mut registry, self.frozen_read_only_cell(), allowed)?;
+        self.register_builtins(
+            &mut registry,
+            self.frozen_read_only_cell(),
+            allowed,
+            history,
+        )?;
         self.register_argosy(&mut registry, Some(allowed))?;
         self.register_list_tools(&mut registry)?;
         Ok(registry)
@@ -498,6 +505,7 @@ impl Workspace {
         registry: &mut ToolRegistry,
         sandbox: crate::sandbox::SandboxPolicyCell,
         allowed: &[&str],
+        history: &animist::history::History,
     ) -> std::result::Result<(), animist::agent::AgentError> {
         if allowed.contains(&"read") {
             registry.register(Read(self.clone()))?;
@@ -551,7 +559,7 @@ impl Workspace {
             registry.register(TodoWrite(self.clone()))?;
         }
         if allowed.contains(&"retrieve") {
-            registry.register(Retrieve(self.compression_store.clone()))?;
+            registry.register(Retrieve(history.clone()))?;
         }
         if allowed.contains(&"skill") {
             registry.register(Skill::new(self.root().to_path_buf()))?;

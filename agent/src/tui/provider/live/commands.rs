@@ -544,9 +544,9 @@ async fn handle_fetch_usage(ctx: &LoopCtx, usage_gen: &Arc<std::sync::atomic::At
     });
 }
 
-/// `Command::Compact`: refuse while a turn is running. The compaction
-/// engine itself is reworked in 08; until then the command reports that
-/// instead of silently doing nothing.
+/// `Command::Compact`: refuse while a turn is running, then force the
+/// between-runs history edits (alteration passes, then every armed
+/// compaction stage) through the same driver function the turn loop uses.
 async fn handle_compact(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
     if current_turn.is_some() {
         let _ = ctx.kit.evt_tx.send(AgentEvent::Notice {
@@ -555,9 +555,21 @@ async fn handle_compact(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
         });
         return;
     }
+    let conversation = ctx.state.lock().await.conversation.clone();
+    let ran = crate::harness::compact_between_runs(&conversation, true).await;
+    // Land the rewrite on disk now (the driver orders its between-runs
+    // edits before its flush; a quit right after /compact must not lose
+    // them). Persistence errors surface through the session stream.
+    conversation.flush().await;
+    // Compaction events (AutoCompacting/CompactionDone) ride the session's
+    // own stream; the command answers with a terminal verdict either way.
     let _ = ctx.kit.evt_tx.send(AgentEvent::Notice {
-        tone: Tone::Info,
-        text: "context compaction returns in 08; auto-compaction included.".into(),
+        tone: if ran { Tone::Success } else { Tone::Info },
+        text: if ran {
+            "context compacted.".to_owned()
+        } else {
+            "nothing to compact: the context is already tight.".to_owned()
+        },
     });
 }
 

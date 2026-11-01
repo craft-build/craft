@@ -1,20 +1,24 @@
 //! LLM-powered compaction: one summarization call replaces the conversation
 //! head; the recent tail is preserved verbatim (ported from Craft's
-//! `compaction/llm.rs`, simplified to craft-acp's caller-owned history).
+//! `compaction/llm.rs`, rebuilt on `Compactor` plans since 08 — the head is
+//! `Remove`d and the summary `Insert`ed before the first kept entry, and the
+//! original entries stay in the snapshot as inactive sources).
 //!
-//! D.8 adds the two Craft refinements: a targeted summary prompt embedding
+//! D.8 keeps the two Craft refinements: a targeted summary prompt embedding
 //! the top relevance-scored topics, and an overflow retry ladder that prunes
 //! the request (collapse tool results → drop the oldest round → strip tool
 //! results by progressive ratio) before giving up and falling back to a
-//! static summary.
+//! static summary. The ladder works on the summarizer's *request copy* and
+//! never touches the plan.
 
-use crate::provider::ModelHandle;
+use animist::history::{CompactionEdit, CompactionPlan, HistorySnapshot, StoredMessage};
+use async_trait::async_trait;
 use snafu::ResultExt;
 
-use crate::history::{Message, Role, StoredMessage, ext};
+use crate::history::{Message, Role, ext};
 use crate::prompt::{COMPACTION_SYSTEM, COMPACTION_TARGETED_USER, COMPACTION_USER};
+use crate::provider::ModelHandle;
 
-use super::estimate::estimate_tokens;
 use super::strip::{
     collapse_tool_results, remove_orphaned_tool_results, strip_thinking,
     strip_tool_results_by_ratio, truncate_oldest_round,
@@ -22,9 +26,14 @@ use super::strip::{
 use super::vcc::find_cut;
 use crate::error::{Result, SummarizeSnafu};
 
-/// Marker identifying an LLM compaction summary in history. Distinct from the
-/// VCC summary prefix so each strategy recognizes only its own summaries.
+/// Marker identifying an LLM compaction summary in history. Distinct from
+/// the VCC summary preamble so each strategy recognizes only its own
+/// summaries.
 pub(crate) const LLM_SUMMARY_PREFIX: &str = "Summary of the conversation so far:";
+
+/// Tag marking a summary this stage generated (README decision 5).
+pub(crate) const COMPACTION_TAG: &str = "craft.compaction";
+pub(crate) const COMPACTION_LLM: &str = "llm";
 
 const TARGETED_TOPICS_COUNT: usize = 10;
 const TARGETED_MIN_SCORE: f32 = 0.5;
@@ -35,43 +44,73 @@ const MAX_OVERFLOW_RETRIES: usize = 3;
 /// plain summary prompt is used.
 pub type RelevanceScores<'a> = &'a [(usize, f32)];
 
-/// LLM compaction of `history`. The head is summarized (via `model`, with a
-/// static fallback if the call fails) and the tail is kept verbatim. The last
-/// `carry_len` messages are held out of the summary and re-appended after it,
-/// so input no turn has answered yet survives compaction verbatim (Craft's
-/// carry-protection). Returns whether the compacted history fits within
-/// `token_limit`.
-pub async fn llm_compact(
-    model: &ModelHandle,
-    history: &mut Vec<StoredMessage>,
-    token_limit: u64,
-    carry_len: usize,
-    relevance_scores: Option<RelevanceScores<'_>>,
-) -> Result<bool> {
-    if history.len() <= 2 {
-        return Ok(false);
-    }
-    let live = history.clone();
-    // Summarization stops where the protected (unanswered) input begins.
-    let summarize_end = live.len().saturating_sub(carry_len);
-    let tail_start = find_cut(&live)
-        .map_or(0, |cut| cut.tail_start.min(live.len()))
-        .min(summarize_end);
-    let head = &live[..tail_start];
-    if head.is_empty() {
-        return Ok(false);
-    }
+/// The active entries of a snapshot, as `(snapshot index, stored message)`
+/// pairs — the coordinate system every plan edit indexes.
+pub(crate) type Active<'a> = Vec<(usize, &'a StoredMessage)>;
 
-    let summary = match summarize(model, head, relevance_scores).await {
+pub(crate) fn active_entries(snapshot: &HistorySnapshot) -> Active<'_> {
+    snapshot
+        .entries()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.current().map(|stored| (index, stored)))
+        .collect()
+}
+
+/// LLM compaction of the snapshot: the head is summarized (via `model`, with
+/// a static fallback if the call fails) and the tail is kept verbatim.
+/// Entries from `summarize_end` (an index into `active`, the first protected
+/// entry) are held out of the summary and kept as-is, so input no turn has
+/// answered yet survives compaction verbatim (Craft's carry protection).
+/// Returns `None` when the stage declines (nothing compactable ahead of the
+/// protected tail); errors from the summarizer never abort the plan — the
+/// static fallback covers them.
+pub(crate) async fn build_llm_plan(
+    model: &ModelHandle,
+    snapshot: &HistorySnapshot,
+    summarize_end: usize,
+    relevance_scores: Option<RelevanceScores<'_>>,
+) -> Option<CompactionPlan> {
+    let active = active_entries(snapshot);
+    if active.len() <= 2 {
+        return None;
+    }
+    let summarize_end = summarize_end.min(active.len());
+    // The boundary finder sees the whole active view (matching the pre-08
+    // stage); the protection then clamps it.
+    let tail_start = find_cut(&active_messages(&active))
+        .map_or(0, |cut| cut.tail_start.min(active.len()))
+        .min(summarize_end);
+    if tail_start == 0 {
+        return None;
+    }
+    let head: Vec<&StoredMessage> = active[..tail_start].iter().map(|(_, m)| *m).collect();
+
+    let summary = match summarize(model, &head, relevance_scores).await {
         Ok(text) if !text.trim().is_empty() => text,
-        _ => build_static_summary(head),
+        _ => build_static_summary(&head),
     };
 
-    let mut new_history = Vec::with_capacity(1 + (live.len() - tail_start));
-    new_history.push(summary_message(summary));
-    new_history.extend(live.into_iter().skip(tail_start));
-    *history = new_history;
-    Ok(estimate_tokens(history) <= token_limit)
+    // Compact-all cuts keep nothing: the summary appends at the snapshot
+    // length instead of inserting before a kept entry.
+    let before = active
+        .get(tail_start)
+        .map(|(index, _)| *index)
+        .unwrap_or(snapshot.entries().len());
+    let mut edits: Vec<CompactionEdit> = active[..tail_start]
+        .iter()
+        .map(|(index, _)| CompactionEdit::Remove { index: *index })
+        .collect();
+    edits.push(CompactionEdit::Insert {
+        before,
+        message: summary_message(summary),
+    });
+    Some(CompactionPlan::builder().edits(edits).build())
+}
+
+/// The active view as a flat message list, for the boundary finder.
+fn active_messages(active: &[(usize, &StoredMessage)]) -> Vec<StoredMessage> {
+    active.iter().map(|(_, stored)| (*stored).clone()).collect()
 }
 
 /// The targeted prompt names the messages the semantic module scored most
@@ -131,12 +170,12 @@ fn message_text(stored: &StoredMessage) -> Option<String> {
     }
 }
 
-/// Provider request-field names that signal an oversized *output* cap, not an
-/// oversized prompt: an overflow retry ladder cannot fix those.
+/// Provider request-field names that signal an oversized *output* cap, not
+/// an oversized prompt: an overflow retry ladder cannot fix those.
 const OUTPUT_CAP_FIELDS: [&str; 3] = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
 
 /// The single shared context-overflow classifier: compaction's retry
-/// ladder and `run::stream::classify_string` both consult it.
+/// ladder and 09's recovery classification both consult it.
 /// Detects context-window overflow in a provider error string across
 /// providers (ported from Craft's `craft-providers::error`):
 /// - Anthropic:  413 "prompt is too long"
@@ -180,13 +219,17 @@ fn is_context_overflow(error: &crate::error::Error) -> bool {
 /// pruned copy of it: first the tool-result tail is collapsed and the oldest
 /// round dropped, then tool results are stripped by ratio, and only when the
 /// ladder is exhausted does the caller's static fallback apply.
+#[expect(
+    clippy::result_large_err,
+    reason = "the crate error type is deliberately unboxed"
+)]
 async fn summarize(
     model: &ModelHandle,
-    head: &[StoredMessage],
+    head: &[&StoredMessage],
     relevance_scores: Option<RelevanceScores<'_>>,
 ) -> Result<String> {
     let mut request_messages: Vec<Message> =
-        head.iter().map(StoredMessage::message).cloned().collect();
+        head.iter().map(|stored| stored.message().clone()).collect();
     strip_thinking(&mut request_messages);
     remove_orphaned_tool_results(&mut request_messages);
     collapse_tool_results(&mut request_messages, super::RECENT_TOOL_RESULT_BUDGET);
@@ -227,14 +270,18 @@ async fn summarize(
 }
 
 fn summary_message(summary: String) -> StoredMessage {
-    ext::stored(ext::assistant_text(format!(
+    let mut stored = ext::stored(ext::assistant_text(format!(
         "{LLM_SUMMARY_PREFIX}\n\n{summary}"
-    )))
+    )));
+    stored
+        .tags_mut()
+        .insert(COMPACTION_TAG.to_owned(), COMPACTION_LLM.to_owned());
+    stored
 }
 
 /// Deterministic fallback when the summarization call fails: a terse digest
 /// of user prompts and assistant text in the head.
-pub(crate) fn build_static_summary(head: &[StoredMessage]) -> String {
+pub(crate) fn build_static_summary(head: &[&StoredMessage]) -> String {
     let mut lines = Vec::new();
     for stored in head {
         let message = stored.message();
@@ -256,12 +303,35 @@ pub(crate) fn build_static_summary(head: &[StoredMessage]) -> String {
     lines.join("\n")
 }
 
+/// Commits a precomputed plan through `History::compact`, so the commit runs
+/// under the generation check like any other compaction. The plan's indices
+/// name the snapshot they were computed from; the only writer that can
+/// interleave between plan and commit is an append (the driver owns
+/// between-runs sequencing), which never shifts existing indices.
+pub(crate) struct PlanCompactor {
+    plan: CompactionPlan,
+}
+
+impl PlanCompactor {
+    pub(crate) fn new(plan: CompactionPlan) -> Self {
+        Self { plan }
+    }
+}
+
+#[async_trait]
+impl animist::history::Compactor for PlanCompactor {
+    async fn call(&self, _history: &HistorySnapshot) -> Result<CompactionPlan, animist::Error> {
+        Ok(self.plan.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compaction::test_support::{
         stored_assistant_text, stored_assistant_tool, stored_tool_result_of, stored_user,
     };
+    use crate::history::ext;
 
     const OVERFLOW: &str = "prompt is too long";
 
@@ -290,6 +360,13 @@ mod tests {
         }
         messages.push(user("prompt"));
         messages
+    }
+
+    /// A snapshot over seeded entries.
+    async fn snapshot(messages: &[StoredMessage]) -> animist::history::HistorySnapshot {
+        animist::history::History::from_entries(ext::entries(messages.to_vec()))
+            .snapshot()
+            .await
     }
 
     /// A model over the scripted replies, and its request recorder.
@@ -352,17 +429,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summarizes_head_and_keeps_tail() {
+    async fn plan_removes_head_and_inserts_tagged_summary_before_kept_tail() {
         let (model, provider) = script(vec![crate::testing::text_turn("condensed summary")]);
-        let mut messages = history();
-        let under = llm_compact(&model, &mut messages, u64::MAX, 0, None)
+        let messages = history();
+        let snap = snapshot(&messages).await;
+        let plan = build_llm_plan(&model, &snap, messages.len(), None)
             .await
-            .unwrap();
-        assert!(under);
-        let summary = ext::message_text(&messages[0]);
-        assert!(summary.contains(LLM_SUMMARY_PREFIX));
-        assert!(summary.contains("condensed summary"));
-        assert!(messages.len() > 1, "tail must be preserved");
+            .expect("plan");
+        let removes = plan
+            .edits
+            .iter()
+            .filter(|edit| matches!(edit, CompactionEdit::Remove { .. }))
+            .count();
+        let insert = plan
+            .edits
+            .iter()
+            .find_map(|edit| match edit {
+                CompactionEdit::Insert { before, message } => Some((*before, message.clone())),
+                _ => None,
+            })
+            .expect("one summary insert");
+        // The cut keeps a tail: only the head is removed.
+        assert!(removes > 0 && removes < messages.len());
+        // The summary lands before the first kept entry, which the active
+        // view's message at that snapshot index names.
+        assert_eq!(messages[insert.0].message().role, Role::User);
+        assert_eq!(
+            ext::message_text(&insert.1),
+            "Summary of the conversation so far:\n\ncondensed summary"
+        );
+        assert_eq!(
+            insert.1.tags().get(COMPACTION_TAG).map(String::as_str),
+            Some(COMPACTION_LLM)
+        );
         assert_eq!(provider.requests().len(), 1);
         let request = &provider.requests()[0];
         // The preamble travels as the request's preamble field.
@@ -374,19 +473,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn carry_protection_clamps_the_summarized_head() {
+        let (model, provider) = script(vec![crate::testing::text_turn("summary")]);
+        let messages = history();
+        let snap = snapshot(&messages).await;
+        // Protect everything from message 10 on: the head is messages 0..10.
+        let plan = build_llm_plan(&model, &snap, 10, None).await.expect("plan");
+        for edit in &plan.edits {
+            match edit {
+                CompactionEdit::Remove { index } => assert!(*index < 10),
+                CompactionEdit::Insert { before, .. } => assert!(*before <= 10),
+                CompactionEdit::Replace { .. } => panic!("the LLM stage never replaces"),
+            }
+        }
+        // The summarizer never saw the carried messages.
+        let last = request_texts(&provider)[0].clone();
+        assert!(
+            !last.contains("task 5"),
+            "carried input must not be summarized"
+        );
+    }
+
+    #[tokio::test]
+    async fn fully_protected_history_declines() {
+        let (model, provider) = script(vec![crate::testing::text_turn("never")]);
+        let messages = history();
+        let snap = snapshot(&messages).await;
+        assert!(
+            build_llm_plan(&model, &snap, 0, None).await.is_none(),
+            "nothing compactable ahead of the protection"
+        );
+        assert!(provider.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn short_history_declines() {
+        let (model, _provider) = script(vec![crate::testing::text_turn("x")]);
+        let messages = vec![user("hi"), user("there")];
+        let snap = snapshot(&messages).await;
+        assert!(
+            build_llm_plan(&model, &snap, messages.len(), None)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn falls_back_to_static_summary_on_empty_response() {
         let (model, _provider) = script(vec![crate::testing::text_turn("")]);
-        let mut messages = history();
-        let under = llm_compact(&model, &mut messages, u64::MAX, 0, None)
+        let messages = history();
+        let snap = snapshot(&messages).await;
+        let plan = build_llm_plan(&model, &snap, messages.len(), None)
             .await
-            .unwrap();
-        assert!(under);
-        assert!(ext::message_text(&messages[0]).contains("task 0"));
+            .expect("plan");
+        let insert = plan.edits.iter().find_map(|edit| match edit {
+            CompactionEdit::Insert { message, .. } => Some(message.clone()),
+            _ => None,
+        });
+        assert!(ext::message_text(&insert.unwrap()).contains("task 0"));
     }
 
     #[test]
     fn static_summary_lists_roles() {
-        let summary = build_static_summary(&history());
+        let history = history();
+        let stored: Vec<&StoredMessage> = history.iter().collect();
+        let summary = build_static_summary(&stored);
         assert!(summary.contains("- user: task 0"));
         assert!(summary.contains("- assistant: working on task"));
     }
@@ -394,11 +545,12 @@ mod tests {
     #[tokio::test]
     async fn targeted_prompt_embeds_top_topics() {
         let (model, provider) = script(vec![crate::testing::text_turn("summary")]);
-        let mut messages = history();
+        let messages = history();
+        let snap = snapshot(&messages).await;
         let scores: Vec<(usize, f32)> = (0..15).map(|i| (i, 0.9)).collect();
-        llm_compact(&model, &mut messages, u64::MAX, 0, Some(&scores))
+        build_llm_plan(&model, &snap, messages.len(), Some(&scores))
             .await
-            .unwrap();
+            .expect("plan");
         let last = request_texts(&provider)[0].clone();
         assert!(last.contains("msg#0 (relevance: 0.90)"));
         assert!(last.contains("msg#9 (relevance: 0.90)"), "top ten kept");
@@ -409,11 +561,12 @@ mod tests {
     #[tokio::test]
     async fn low_scores_fall_back_to_plain_prompt() {
         let (model, provider) = script(vec![crate::testing::text_turn("summary")]);
-        let mut messages = history();
+        let messages = history();
+        let snap = snapshot(&messages).await;
         let scores = vec![(0usize, 0.4f32), (1, 0.5)];
-        llm_compact(&model, &mut messages, u64::MAX, 0, Some(&scores))
+        build_llm_plan(&model, &snap, messages.len(), Some(&scores))
             .await
-            .unwrap();
+            .expect("plan");
         let last = request_texts(&provider)[0].clone();
         assert!(last.contains(COMPACTION_USER));
         assert!(!last.contains("relevance"));
@@ -426,10 +579,11 @@ mod tests {
             overflow_turn(),
             crate::testing::text_turn("made it"),
         ]);
-        let mut messages = tool_history();
-        llm_compact(&model, &mut messages, u64::MAX, 0, None)
+        let messages = tool_history();
+        let snap = snapshot(&messages).await;
+        let plan = build_llm_plan(&model, &snap, messages.len(), None)
             .await
-            .unwrap();
+            .expect("plan");
 
         let requests = request_texts(&provider);
         assert_eq!(requests.len(), 3, "collapse, truncate, then success");
@@ -440,7 +594,19 @@ mod tests {
         assert!(!requests[1].contains("xxxx"));
         // Attempt 3 dropped the oldest round entirely.
         assert!(!requests[2].contains("tool result: [tool result]"));
-        assert!(ext::message_text(&messages[0]).contains("made it"));
+        assert!(
+            ext::message_text(
+                &plan
+                    .edits
+                    .iter()
+                    .find_map(|edit| match edit {
+                        CompactionEdit::Insert { message, .. } => Some(message.clone()),
+                        _ => None,
+                    })
+                    .unwrap()
+            )
+            .contains("made it")
+        );
     }
 
     #[tokio::test]
@@ -449,15 +615,24 @@ mod tests {
             .take(3 + super::super::PROGRESSIVE_TOOL_REMOVAL_RATIOS.len() + 1)
             .collect::<Vec<_>>();
         let (model, provider) = script(turns);
-        let mut messages = tool_history();
-        llm_compact(&model, &mut messages, u64::MAX, 0, None)
+        let messages = tool_history();
+        let snap = snapshot(&messages).await;
+        let plan = build_llm_plan(&model, &snap, messages.len(), None)
             .await
-            .unwrap();
+            .expect("plan");
         // One collapse + one truncate (which drains the whole tool middle,
         // leaving a single message), then 4 ratio no-ops, then the failure.
         assert_eq!(provider.requests().len(), 7);
+        let summary = plan
+            .edits
+            .iter()
+            .find_map(|edit| match edit {
+                CompactionEdit::Insert { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .unwrap();
         assert!(
-            ext::message_text(&messages[0]).contains("user"),
+            ext::message_text(&summary).contains("user"),
             "static fallback summarizes the head"
         );
     }
@@ -465,12 +640,21 @@ mod tests {
     #[tokio::test]
     async fn non_overflow_error_falls_back_without_retry() {
         let (model, provider) = script(vec![crate::testing::http_error(429, "rate limited")]);
-        let mut messages = tool_history();
-        llm_compact(&model, &mut messages, u64::MAX, 0, None)
+        let messages = tool_history();
+        let snap = snapshot(&messages).await;
+        let plan = build_llm_plan(&model, &snap, messages.len(), None)
             .await
-            .unwrap();
+            .expect("plan");
         assert_eq!(provider.requests().len(), 1, "only errors are not retried");
-        assert!(ext::message_text(&messages[0]).contains("user"));
+        let summary = plan
+            .edits
+            .iter()
+            .find_map(|edit| match edit {
+                CompactionEdit::Insert { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(ext::message_text(&summary).contains("user"));
     }
 
     /// Provider overflow messages ported verbatim from Craft's error-classifier

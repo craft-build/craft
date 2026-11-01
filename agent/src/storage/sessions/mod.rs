@@ -48,7 +48,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use animist::history::{ContentBlock, HistoryEntry};
+use animist::history::HistoryEntry;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
@@ -81,7 +81,7 @@ const MAX_TITLE_LEN: usize = 60;
 /// The session file's concrete message, usage and tool-output types: entry
 /// lists, the priced usage ledger, and read-only raw tool-output copies
 /// in their animist block shape.
-pub type StoredSession = Session<HistoryEntry, StoredTokenUsage, ContentBlock>;
+pub type StoredSession = Session<HistoryEntry, StoredTokenUsage>;
 
 /// Hands out the token that tags one append-only run of a message list.
 /// Process wide, so two runs never pick the same number.
@@ -184,7 +184,7 @@ impl<M> Default for HistorySnapshot<M> {
 /// spoil. `cwd` and `model` are the exception: they live in the header record,
 /// which only a rewrite touches, so changes must go through their setters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Session<M, U, T> {
+pub struct Session<M, U> {
     pub version: u32,
     pub id: SessionRef,
     pub title: String,
@@ -192,8 +192,6 @@ pub struct Session<M, U, T> {
     pub model: String,
     pub(super) messages: Arc<Vec<M>>,
     pub token_usage: U,
-    #[serde(default = "HashMap::new")]
-    pub(super) tool_outputs: HashMap<String, Arc<T>>,
     #[serde(default = "HashMap::new", skip_serializing_if = "HashMap::is_empty")]
     pub(super) subagent_messages: HashMap<String, Arc<Vec<M>>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -301,11 +299,10 @@ fn is_jsonl(path: &Path) -> bool {
 
 // -- Session impl --
 
-impl<M, U, T> Session<M, U, T>
+impl<M, U> Session<M, U>
 where
     M: Serialize + DeserializeOwned + TitleSource + Clone,
     U: Serialize + DeserializeOwned + Default,
-    T: Serialize + DeserializeOwned,
 {
     pub fn new(model: &str, cwd: &str) -> Self {
         let now = now_epoch();
@@ -317,7 +314,6 @@ where
             model: model.into(),
             messages: Arc::default(),
             token_usage: U::default(),
-            tool_outputs: HashMap::new(),
             subagent_messages: HashMap::new(),
             subagents: Vec::new(),
             usage_by_model: HashMap::new(),
@@ -337,10 +333,6 @@ where
 
     pub fn take_messages(self) -> Vec<M> {
         Arc::unwrap_or_clone(self.messages)
-    }
-
-    pub fn tool_outputs(&self) -> &HashMap<String, Arc<T>> {
-        &self.tool_outputs
     }
 
     pub fn subagent_messages(&self) -> &HashMap<String, Arc<Vec<M>>> {
@@ -438,7 +430,6 @@ where
     ) where
         M: Clone,
         U: PartialEq + Clone,
-        T: Clone,
     {
         let history = history.filter(|h| !Arc::ptr_eq(&this.messages, &h.messages));
         if history.is_none() && this.meta == meta && this.token_usage == token_usage {
@@ -453,16 +444,6 @@ where
         }
         session.set_meta(meta);
         session.set_token_usage(token_usage);
-    }
-
-    /// A change under an existing id is not expressible as an append, so it
-    /// voids the cursors; a new id is a pure append.
-    pub fn insert_tool_output(&mut self, id: String, output: Arc<T>) {
-        if self.tool_outputs.insert(id, output).is_some() {
-            self.rewrite();
-        } else {
-            self.touch();
-        }
     }
 
     /// A change under an existing id is not expressible as an append, so it
@@ -586,14 +567,6 @@ where
         self.subagents
             .retain(|sa| main_ids.contains(&sa.tool_use_id));
 
-        let live: HashSet<String> = self
-            .subagent_messages
-            .values()
-            .flat_map(|msgs| msgs.iter())
-            .flat_map(&tool_ids)
-            .chain(main_ids)
-            .collect();
-        self.tool_outputs.retain(|id, _| live.contains(id));
         self.rewrite();
     }
 

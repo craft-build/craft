@@ -407,8 +407,10 @@ pub async fn prompt(variant: PromptVariant, plan: bool, tools: bool, names: bool
 
     if tools {
         let workspace = crate::tools::Workspace::new(&cwd).map_err(crate::error::client_error)?;
+        // Listing only reads definitions; retrieve has nothing to resolve
+        // without a conversation, so its handle is an empty history.
         let defs = workspace
-            .registry()
+            .registry(&animist::history::History::new())
             .map_err(crate::error::client_error)?
             .definitions();
         if names {

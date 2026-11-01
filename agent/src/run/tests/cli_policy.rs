@@ -37,7 +37,9 @@ async fn gated_conversation(
         &dir.display().to_string(),
         "",
         model(provider),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         sink,
     )
     .policy(policy)
@@ -177,7 +179,9 @@ async fn mcp_server_rule_denies_wire_tool_calls() {
         &dir.path().display().to_string(),
         "",
         model(&provider),
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         sink,
     )
     .policy(policy)

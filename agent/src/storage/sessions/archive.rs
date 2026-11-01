@@ -28,7 +28,7 @@ pub(super) const MSG_PREFIXES: &[&[u8]] = &[br#"{"t":"entry""#, br#"{"t":"msg""#
 /// under `archive/<id>/` first. Its own path is untouched until the rename, so
 /// [`SessionLog::rewrite`](super::SessionLog::rewrite) keeps its crash-safety
 /// promise.
-pub(super) fn archive_if_shrinking<M, U, T>(dir: &Path, session: &Session<M, U, T>) {
+pub(super) fn archive_if_shrinking<M, U>(dir: &Path, session: &Session<M, U>) {
     let path = jsonl_path(dir, session.id.id());
     let Some(old_count) = count_msg_lines(&path) else {
         return;

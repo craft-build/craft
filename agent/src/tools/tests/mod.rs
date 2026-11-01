@@ -37,9 +37,21 @@ pub(crate) fn names(registry: &animist::agent::tool::ToolRegistry) -> Vec<String
 #[test]
 fn subagent_registration_is_the_budget_filtered_builtin_table() {
     let (_dir, workspace) = workspace();
-    let full = names(&workspace.registry().unwrap());
-    let research = names(&workspace.subagent_registry(false).unwrap());
-    let general = names(&workspace.subagent_registry(true).unwrap());
+    let full = names(
+        &workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
+    );
+    let research = names(
+        &workspace
+            .subagent_registry(false, &animist::history::History::new())
+            .unwrap(),
+    );
+    let general = names(
+        &workspace
+            .subagent_registry(true, &animist::history::History::new())
+            .unwrap(),
+    );
 
     for name in &research {
         assert!(full.contains(name), "subagent-only tool {name}");

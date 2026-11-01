@@ -280,12 +280,6 @@ fn result_content(content: &ToolResultContent) -> ToolContent {
     }
 }
 
-/// The legacy `tool_outputs` payload as its animist block shape, so old raw
-/// copies stay readable until 08 moves them into entry sources.
-pub(super) fn tool_result_block(result: &ToolResult) -> ContentBlock {
-    user_block(&UserContent::ToolResult(result.clone()))
-}
-
 impl ImageMedia {
     fn as_str(&self) -> &'static str {
         match self {

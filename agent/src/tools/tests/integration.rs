@@ -117,7 +117,9 @@ async fn rejects_symlink_components_and_special_files() {
 #[test]
 fn schemas_match_strict_arguments() {
     let (_dir, workspace) = workspace();
-    let registry = workspace.registry().unwrap();
+    let registry = workspace
+        .registry(&animist::history::History::new())
+        .unwrap();
     let names = [
         "read",
         "grep",
@@ -177,7 +179,9 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
         )]),
         crate::testing::text_turn("done"),
     ]);
-    let tools = workspace.registry().unwrap();
+    let tools = workspace
+        .registry(&animist::history::History::new())
+        .unwrap();
     let (sink, _stream) = crate::harness::EventSink::new();
     let conversation = crate::harness::ConversationBuilder::new(
         &crate::config::Config::parse("").expect("default config"),
@@ -280,7 +284,9 @@ async fn dispatch_loop_preserves_permission_refusals() {
         )]),
         crate::testing::text_turn("permission denied"),
     ]);
-    let tools = workspace.registry().unwrap();
+    let tools = workspace
+        .registry(&animist::history::History::new())
+        .unwrap();
     let (sink, stream) = crate::harness::EventSink::new();
     let conversation = crate::harness::ConversationBuilder::new(
         &crate::config::Config::parse("").expect("default config"),

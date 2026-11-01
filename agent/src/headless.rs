@@ -280,7 +280,9 @@ mod tests {
             &tmp.path().display().to_string(),
             "",
             model,
-            workspace.registry().unwrap(),
+            workspace
+                .registry(&animist::history::History::new())
+                .unwrap(),
             sink,
         )
         .policy(policy)

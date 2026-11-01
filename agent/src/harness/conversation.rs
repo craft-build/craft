@@ -116,6 +116,13 @@ struct Inner {
     /// run rewrites history.
     guardrails: Arc<GuardrailState>,
     compaction: SharedCompactionState,
+    /// The compaction engine (08), driven by the driver between runs and by
+    /// 09's overflow recovery inside `recover`.
+    engine: crate::compaction::CompactionEngine,
+    /// The compression settings the durable alteration passes run under.
+    compression: crate::compression::CompressionConfig,
+    /// The workspace write root, anchoring the read-lifecycle path keying.
+    write_root: Option<String>,
     snapshots: SnapshotManager,
     /// Serializes rebuilds; runs never overlap a rebuild because both happen
     /// between runs on the surface's turn loop.
@@ -252,8 +259,8 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
-    /// The session workspace. Supplies the write-path anchor and the
-    /// compression store; without it both derive from the cwd.
+    /// The session workspace. Supplies the write-path anchor for path
+    /// normalization; without it the anchor derives from the cwd.
     pub fn workspace(mut self, workspace: crate::tools::Workspace) -> Self {
         self.workspace = Some(workspace);
         self
@@ -287,10 +294,6 @@ impl<'a> ConversationBuilder<'a> {
             .as_ref()
             .map(|workspace| PathBuf::from(workspace.root()))
             .or_else(|| Some(PathBuf::from(cwd)));
-        let compression_store = workspace
-            .as_ref()
-            .map(|workspace| workspace.compression_store().clone())
-            .unwrap_or_else(crate::compression::store::shared_store);
         let snapshots = snapshots.unwrap_or_else(|| {
             workspace
                 .as_ref()
@@ -327,10 +330,12 @@ impl<'a> ConversationBuilder<'a> {
                 .map(|path| path.to_string_lossy().into_owned())
                 .as_deref(),
         ));
-        let compaction = Arc::new(Mutex::new(
+        let compaction = Arc::new(tokio::sync::Mutex::new(
             crate::compaction::CompactionState::default()
                 .with_guardrail_state(Arc::clone(&guardrails)),
         ));
+        let engine = crate::compaction::CompactionEngine::new(config.compaction.clone())
+            .with_buffer(config.compaction_buffer);
         let model_cell = Arc::new(ArcSwap::from_pointee(model));
         let layers = LayerSet {
             policy: Layer::new(PolicyLayer::new(
@@ -345,7 +350,6 @@ impl<'a> ConversationBuilder<'a> {
                 model: Arc::clone(&model_cell),
                 settings: Arc::clone(&settings),
                 recency,
-                compression_store: Some(compression_store),
                 write_root: write_root
                     .as_deref()
                     .map(|path| path.to_string_lossy().into_owned()),
@@ -373,6 +377,11 @@ impl<'a> ConversationBuilder<'a> {
             sink,
             guardrails,
             compaction,
+            engine,
+            compression: config.compression.clone(),
+            write_root: write_root
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
             snapshots,
             rebuild: Mutex::new(()),
             persist,
@@ -453,6 +462,22 @@ impl Conversation {
     /// The session's shared compaction state (08 drives it).
     pub fn compaction(&self) -> SharedCompactionState {
         self.inner.compaction.clone()
+    }
+
+    /// The session's compaction engine, run by the driver between runs and
+    /// by 09's overflow recovery.
+    pub fn compaction_engine(&self) -> crate::compaction::CompactionEngine {
+        self.inner.engine.clone()
+    }
+
+    /// The compression settings the durable alteration passes run under.
+    pub(crate) fn compression_config(&self) -> crate::compression::CompressionConfig {
+        self.inner.compression.clone()
+    }
+
+    /// The workspace write root anchoring read-lifecycle path keying.
+    pub(crate) fn write_root(&self) -> Option<String> {
+        self.inner.write_root.clone()
     }
 
     /// The snapshot manager driving `/undo`.

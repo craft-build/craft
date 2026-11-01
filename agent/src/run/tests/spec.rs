@@ -75,7 +75,9 @@ async fn output_cap_clamp_counts_request_overhead() {
     let provider = script(vec![crate::testing::text_turn("ok")]);
     let dir = tempfile::tempdir().unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
-    let dispatch = workspace.registry().unwrap();
+    let dispatch = workspace
+        .registry(&animist::history::History::new())
+        .unwrap();
     let cwd = dir.path().display().to_string();
     // The system bytes the request layer will send, mirrored from its own
     // construction so the overhead below is the one the clamp sees.
@@ -145,7 +147,9 @@ async fn unknown_window_leaves_the_cap_and_skips_compaction() {
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.registry().unwrap(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
         sink,
     )
     .build()

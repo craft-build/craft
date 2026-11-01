@@ -256,7 +256,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let workspace = crate::tools::Workspace::new(tmp.path()).unwrap();
         let names: Vec<_> = workspace
-            .registry()
+            .registry(&animist::history::History::new())
             .unwrap()
             .definitions()
             .into_iter()

@@ -11,7 +11,6 @@ mod json;
 mod keywords;
 mod log;
 mod search;
-pub mod store;
 
 use std::sync::LazyLock;
 
@@ -189,6 +188,38 @@ pub fn compress_for_llm(text: &str, config: &CompressionConfig) -> String {
     }
     let ct = detect_content_type(text);
     compress(text, ct, config)
+}
+
+/// First 8 hex chars of a DefaultHasher pass over the content: the key a
+/// retrieval marker names. Moved from the retired in-session compression
+/// store with the same bytes, so markers written before 08 keep resolving,
+/// and `retrieve` matches them against history entry sources.
+pub fn content_hash(content: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{:08x}", hasher.finish())
+}
+
+/// Extended 12-hex hash used when the short hash collides across distinct
+/// originals: `retrieve` accepts it to disambiguate.
+pub fn extended_content_hash(content: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    let h1 = hasher.finish();
+    h1.hash(&mut hasher);
+    let h2 = hasher.finish();
+    format!("{:08x}{:04x}", h1, h2 & 0xFFFF)
+}
+
+/// Marker appended to replaced content so the model knows it can call
+/// `retrieve` with the hash to get the original back.
+pub fn retrieval_marker(original_lines: usize, compressed_lines: usize, hash: &str) -> String {
+    format!(
+        "\n\n[{} lines compressed from {}. Retrieve original: hash={}]",
+        compressed_lines, original_lines, hash,
+    )
 }
 
 #[cfg(test)]

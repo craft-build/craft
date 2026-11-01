@@ -35,14 +35,16 @@ async fn workspace_conversation(
         scripted,
         testing::model_info("main", 128_000, 4_096, false, false),
     ));
+    let history = animist::history::History::default();
     let conversation = ConversationBuilder::new(
         &Config::parse("").expect("default config"),
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.registry().expect("registry"),
+        workspace.registry(&history).expect("registry"),
         sink,
     )
+    .history(history)
     .workspace(workspace)
     .build()
     .expect("conversation builds");
@@ -397,6 +399,32 @@ async fn cancel_mid_tool_leaves_the_interrupted_result_committed() {
     ));
 }
 
+/// Every tool result committed to history as the tool returned it: the
+/// latest revision craft's durable alterations have not touched.
+async fn raw_tool_results(conversation: &Conversation) -> Vec<animist::history::ContentBlock> {
+    conversation
+        .history()
+        .snapshot()
+        .await
+        .entries()
+        .iter()
+        .flat_map(|entry| {
+            let stored = entry
+                .revisions()
+                .iter()
+                .rev()
+                .find(|stored| {
+                    !stored
+                        .tags()
+                        .contains_key(crate::compaction::alter::ALTER_TAG)
+                })
+                .unwrap_or_else(|| entry.verbatim());
+            crate::history::ext::tool_results(stored.message())
+        })
+        .cloned()
+        .collect()
+}
+
 #[tokio::test]
 async fn dedup_hit_is_served_without_executing() {
     let dir = tempfile::tempdir().unwrap();
@@ -419,7 +447,7 @@ async fn dedup_hit_is_served_without_executing() {
         crate::harness::run_turn(&conversation, "read twice", &[], Cancellation::default()).await;
 
     assert!(matches!(&outcome, TurnOutcome::Done { .. }), "{outcome:?}");
-    let results = tool_results(&conversation).await;
+    let results = raw_tool_results(&conversation).await;
     assert_eq!(results.len(), 2);
     assert_eq!(result_text(&results[0]), "1: contents");
     assert_eq!(
@@ -576,14 +604,16 @@ async fn recency_tail_rides_the_request_view_but_not_stored_history() {
         &scripted,
         testing::model_info("main", 128_000, 4_096, false, false),
     ));
+    let history = animist::history::History::default();
     let conversation = ConversationBuilder::new(
         &Config::parse("").unwrap(),
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.registry().unwrap(),
+        workspace.registry(&history).unwrap(),
         sink,
     )
+    .history(history)
     .recency(Arc::new(FixedRecency))
     .build()
     .unwrap();
@@ -660,14 +690,16 @@ async fn max_turns_budget_ends_with_the_end_marker() {
         &scripted,
         testing::model_info("main", 128_000, 4_096, false, false),
     ));
+    let history = animist::history::History::default();
     let conversation = ConversationBuilder::new(
         &Config::parse("agent { max_turns = 2 }").unwrap(),
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.registry().unwrap(),
+        workspace.registry(&history).unwrap(),
         sink,
     )
+    .history(history)
     .build()
     .unwrap();
 
@@ -716,7 +748,7 @@ async fn persisted_conversation(
         &tmp.path().display().to_string(),
         "",
         handle,
-        workspace.registry().unwrap(),
+        workspace.registry(&history).unwrap(),
         sink,
     )
     .history(history)
@@ -879,7 +911,7 @@ async fn a_checkpoint_failure_surfaces_an_event_and_never_fails_the_run() {
         &dir.path().display().to_string(),
         "",
         handle,
-        workspace.registry().unwrap(),
+        workspace.registry(&history).unwrap(),
         sink,
     )
     .history(history)

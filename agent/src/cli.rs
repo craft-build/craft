@@ -2369,7 +2369,7 @@ async fn run_headless_query_with(
         model.clone(),
         workspace
             .clone()
-            .registry()
+            .registry(&history)
             .map_err(crate::error::client_error)?,
         sink,
     )
@@ -2403,7 +2403,7 @@ async fn run_headless_query_with(
     let armed = workspace
         .clone()
         .with_subagents(launcher)
-        .registry()
+        .registry(&conversation.history())
         .map_err(crate::error::client_error)?;
     conversation.set_tools(armed)?;
     let tool_names: Vec<String> = crate::tools::native_tool_names()

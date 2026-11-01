@@ -1,18 +1,21 @@
 //! Read lifecycle: classify historical `read` results as Fresh, Stale, or
-//! Superseded and replace the stale ones with compact markers in the request
-//! view, so old file snapshots stop occupying context.
+//! Superseded and replace the stale ones with compact markers, so old file
+//! snapshots stop occupying context.
 //!
 //! - **Stale**: the file was edited/written at a later point (and is no longer
 //!   in the active working set) — the model is told to re-read before editing.
 //! - **Superseded**: a later read fully contains the same file range; the old
 //!   snapshot is redundant.
 //!
-//! Markers ride the request only: committed history, events, and the dedup
-//! cache keep the raw results, mirroring request-view compression.
+//! Since 08 the durable home for these markers is a history alteration pass
+//! (`compaction::alter`); what remains here is the in-run half, applied to
+//! the request view for results the current run produced. Everything older
+//! arrives pre-altered from history.
 //!
 //! Ported from the reference's `agent/read_lifecycle.rs` minus the semantic
-//! scorer; superseded reads carry compression-store retrieval markers (D.5)
-//! pointing at the original content held by the shared store.
+//! scorer; superseded reads carry retrieval markers (D.5) naming the hash of
+//! the original content, which `retrieve` resolves against history entry
+//! sources.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,15 +23,14 @@ use std::ops::Range;
 
 use animist::history::{ContentBlock, ToolContents};
 
-use crate::compression::store::SharedCompressionStore;
 use crate::history::{Message, ext};
 
-const STALE_MARKER_PREFIX: &str = "[Stale read: ";
-const SUPERSEDED_MARKER_PREFIX: &str = "[Superseded read: ";
+pub(crate) const STALE_MARKER_PREFIX: &str = "[Stale read: ";
+pub(crate) const SUPERSEDED_MARKER_PREFIX: &str = "[Superseded read: ";
 
 /// Number of most-recent assistant messages whose edit targets form the "working set".
 /// Reads of working-set files are not marked Stale — the model is still actively editing them.
-const WORKING_SET_LOOKBACK: usize = 4;
+pub(crate) const WORKING_SET_LOOKBACK: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpKind {
@@ -315,11 +317,13 @@ fn classification(op: &FileOperation, state: ReadState) -> ReadClassification {
 }
 
 /// Replace stale/superseded tool result content with compact markers.
-/// Returns total characters removed for observability.
+/// Returns total characters removed for observability. Only messages at
+/// index `from` on are rewritten: classification needs the whole view, but
+/// results before `from` already carry their durable alteration.
 fn apply_lifecycle(
     history: &mut [Message],
     classifications: &[ReadClassification],
-    store: Option<&SharedCompressionStore>,
+    from: usize,
 ) -> usize {
     let stale_ids: HashMap<&str, (ReadState, &str)> = classifications
         .iter()
@@ -332,8 +336,8 @@ fn apply_lifecycle(
     }
 
     let mut total_removed = 0;
-    for msg in history.iter_mut() {
-        if !ext::is_user(msg) {
+    for (index, msg) in history.iter_mut().enumerate() {
+        if index < from || !ext::is_user(msg) {
             continue;
         }
         for block in msg.content.iter_mut() {
@@ -355,8 +359,6 @@ fn apply_lifecycle(
             let original = ext::tool_content_text(content);
             let old_len = original.len();
             let original_lines = original.lines().count();
-            let hash =
-                store.and_then(|store| store.lock().ok().map(|mut guard| guard.put(&original)));
             let mut marker = match state {
                 ReadState::Stale => {
                     // Actionable stale marker: retrieving old content would be
@@ -385,13 +387,11 @@ fn apply_lifecycle(
             // Only superseded reads get a retrieval marker: their content is
             // still valid (a newer read exists). Retrieving stale content
             // would mislead the model into editing an outdated file state.
-            if matches!(state, ReadState::Superseded)
-                && let Some(hash) = hash
-            {
-                marker.push_str(&crate::compression::store::retrieval_marker(
+            if matches!(state, ReadState::Superseded) {
+                marker.push_str(&crate::compression::retrieval_marker(
                     original_lines,
                     1,
-                    &hash,
+                    &crate::compression::content_hash(&original),
                 ));
             }
             total_removed += old_len.saturating_sub(marker.len());
@@ -407,13 +407,17 @@ fn apply_lifecycle(
 /// untouched. `root` anchors the path normalizer at the workspace write root
 /// so aliased spellings key one file identically; display markers keep the
 /// spelling the model used.
-pub fn apply_to_request(
-    history: &mut [Message],
-    store: Option<&SharedCompressionStore>,
-    root: Option<&str>,
-) -> usize {
+#[cfg(test)]
+pub fn apply_to_request(history: &mut [Message], root: Option<&str>) -> usize {
+    apply_to_request_from(history, root, 0)
+}
+
+/// The in-run half of [`apply_to_request`]: only results the current run
+/// produced (`from` is where the run started in the view) are rewritten;
+/// everything older arrived pre-altered from history.
+pub fn apply_to_request_from(history: &mut [Message], root: Option<&str>, from: usize) -> usize {
     let classifications = classify_reads(history, root);
-    apply_lifecycle(history, &classifications, store)
+    apply_lifecycle(history, &classifications, from)
 }
 
 fn extract_path(input: &serde_json::Value) -> Option<String> {
@@ -684,7 +688,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let removed = apply_to_request(&mut messages, None, None);
+        let removed = apply_to_request(&mut messages, None);
         assert!(removed > 0);
         let ContentBlock::ToolResult {
             content: result, ..
@@ -706,7 +710,7 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "fresh content"),
         ];
-        let removed = apply_to_request(&mut messages, None, None);
+        let removed = apply_to_request(&mut messages, None);
         assert_eq!(removed, 0);
         let ContentBlock::ToolResult {
             content: result, ..
@@ -718,9 +722,9 @@ mod tests {
     }
 
     #[test]
-    fn superseded_read_gets_retrieval_marker_and_store_roundtrip() {
+    fn superseded_read_gets_retrieval_marker_naming_the_originals_hash() {
         let original_text = "a long superseded line of content that will be replaced by a much \
-                             shorter marker but stays recoverable through the compression store \
+                             shorter marker but stays recoverable through the entry source \
                              even after several additional sentences pad the original well past \
                              any marker the lifecycle pass could ever produce";
         let mut messages = vec![
@@ -730,8 +734,7 @@ mod tests {
             tool_use_msg("t2", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t2", original_text),
         ];
-        let store = crate::compression::store::shared_store();
-        let removed = apply_to_request(&mut messages, Some(&store), None);
+        let removed = apply_to_request(&mut messages, None);
         assert!(removed > 0);
         let ContentBlock::ToolResult {
             content: result, ..
@@ -746,13 +749,11 @@ mod tests {
             .expect("retrieval marker")
             + "Retrieve original: hash=".len();
         let hash = text[hash_start..].trim_end_matches(']').to_string();
-        assert!(
-            store
-                .lock()
-                .unwrap()
-                .get(&hash)
-                .is_some_and(|r| r == original_text),
-            "the stored original must round-trip through the hash in the marker"
+        assert_eq!(
+            hash,
+            crate::compression::content_hash(original_text),
+            "the marker names the hash of the original content, which retrieve \
+             resolves against history entry sources"
         );
     }
 
@@ -775,8 +776,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let store = crate::compression::store::shared_store();
-        apply_to_request(&mut messages, Some(&store), None);
+        apply_to_request(&mut messages, None);
         let ContentBlock::ToolResult {
             content: result, ..
         } = &messages[2].content[0]
@@ -971,7 +971,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let removed = apply_to_request(&mut messages, None, None);
+        let removed = apply_to_request(&mut messages, None);
         assert_eq!(removed, 0, "error results are left untouched");
     }
 
@@ -1048,7 +1048,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        apply_to_request(&mut messages, None, None);
+        apply_to_request(&mut messages, None);
         let ContentBlock::ToolResult {
             content: result, ..
         } = &messages[2].content[0]
