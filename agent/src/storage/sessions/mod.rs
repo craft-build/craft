@@ -456,6 +456,22 @@ where
         }
     }
 
+    /// Put a prior entry list back under `id` (or drop the id when `None`)
+    /// without voiding cursors: the rollback half of a sub-entry append
+    /// the file rejected, so a retry re-emits the records instead of the
+    /// mirror silently running ahead of the file.
+    pub fn restore_subagent_messages(&mut self, id: &str, prior: Option<Arc<Vec<M>>>) {
+        match prior {
+            Some(msgs) => {
+                self.subagent_messages.insert(id.to_owned(), msgs);
+            }
+            None => {
+                self.subagent_messages.remove(id);
+            }
+        }
+        self.touch();
+    }
+
     fn set_token_usage(&mut self, usage: U)
     where
         U: PartialEq,
@@ -477,6 +493,26 @@ where
 
     pub fn subagents(&self) -> &[StoredSubagent] {
         &self.subagents
+    }
+
+    /// One roster record per spawning call id: a later record under the
+    /// same id replaces the earlier one instead of accumulating.
+    pub fn upsert_subagent(&mut self, subagent: StoredSubagent) {
+        match self
+            .subagents
+            .iter()
+            .position(|existing| existing.tool_use_id == subagent.tool_use_id)
+        {
+            Some(index) if self.subagents[index] == subagent => {}
+            Some(index) => {
+                self.subagents[index] = subagent;
+                self.touch();
+            }
+            None => {
+                self.subagents.push(subagent);
+                self.touch();
+            }
+        }
     }
 
     pub fn set_subagents(&mut self, subagents: Vec<StoredSubagent>) {

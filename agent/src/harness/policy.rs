@@ -189,7 +189,15 @@ impl PolicyLayer {
         let call = context.call;
         let name = call.name.as_str();
         let tool = ToolKey::parse(name);
-        let (scopes, force_prompt) = scope_for_call(inputs.permissions.cwd(), name, &call.input);
+        // Scopes resolve against this conversation's write root, not the
+        // permission manager's: a worktree child shares the manager (its
+        // rules) while operating under the child root, so a relative path
+        // in a rule must join the tree the call actually touches.
+        let root = self
+            .write_root
+            .as_deref()
+            .unwrap_or_else(|| inputs.permissions.cwd());
+        let (scopes, force_prompt) = scope_for_call(root, name, &call.input);
         match inputs.permissions.check_multi(&tool, &scopes, force_prompt) {
             PermissionCheck::Allowed => Ok(None),
             PermissionCheck::Denied => {
@@ -1021,6 +1029,150 @@ mod tests {
             calls.load(Ordering::SeqCst),
             0,
             "a rules decision must never reach the reviewer"
+        );
+    }
+
+    /// A full 25-entry batch fits the conversation's child budgets (10):
+    /// every entry dispatches and succeeds, and the assembled config
+    /// carries the high child-call budget with the explicit depth cap.
+    #[tokio::test]
+    async fn a_full_batch_fits_the_child_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        // 25 distinct reads, not 25 identical calls: the doom window must
+        // see variety, not a repeat loop.
+        let entries: Vec<_> = (0..crate::tools::MAX_BATCH_SIZE)
+            .map(|index| {
+                std::fs::write(
+                    dir.path().join(format!("f{index}")),
+                    format!("file {index}"),
+                )
+                .unwrap();
+                serde_json::json!({"tool": "read", "parameters": {"path": format!("f{index}")}})
+            })
+            .collect();
+        let (conversation, _stream) = conversation_over(
+            &dir,
+            manager(dir.path()),
+            Arc::new(AllowAll::default()),
+            None,
+            vec![
+                crate::testing::tool_turn(vec![(
+                    "b".to_owned(),
+                    "batch".to_owned(),
+                    serde_json::json!({"tool_calls": entries}),
+                )]),
+                crate::testing::text_turn("done"),
+            ],
+        )
+        .await;
+        let config = conversation.agent_config_for_tests();
+        assert_eq!(config.max_child_calls, u64::MAX);
+        assert_eq!(
+            config.max_tool_depth,
+            crate::harness::conversation::MAX_TOOL_DEPTH
+        );
+        let outcome = run_one_turn(&conversation).await;
+        assert!(
+            matches!(outcome, crate::harness::TurnOutcome::Done { .. }),
+            "{outcome:?}"
+        );
+        let texts = result_texts(&conversation).await;
+        let report = texts
+            .iter()
+            .map(|(_, text)| text)
+            .find(|text| text.contains("tools executed"))
+            .expect("the batch result is committed");
+        assert!(
+            report.contains("All 25 tools executed successfully."),
+            "{report}"
+        );
+    }
+
+    /// Two gated children in one batch share the parent's approval seam,
+    /// and the seam serializes them: one ask at a time even though the
+    /// children overlap (the argosy code tools claim shared reads, so both
+    /// asks are genuinely in flight together — 07's responder rule).
+    #[tokio::test]
+    async fn two_gated_batch_children_never_show_two_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        #[derive(Clone, Default)]
+        struct Recorder {
+            slot: Arc<tokio::sync::Mutex<()>>,
+            asks: Arc<std::sync::atomic::AtomicUsize>,
+            gated: Arc<std::sync::atomic::AtomicUsize>,
+            max_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+            in_flight: Arc<std::sync::atomic::AtomicUsize>,
+            /// Gated arrivals that land while another ask is being
+            /// answered: reaching 1 proves the children genuinely
+            /// overlapped, so the serialization below is the responder's,
+            /// not the scheduler's.
+            arrivals_under_flight: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl ApprovalResponder for Recorder {
+            fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+                // The TUI/ACP responders hold their one interaction slot
+                // across the whole ask; a queued child waits instead of
+                // showing a second prompt. Only the gated children count:
+                // the batch call itself asks too.
+                if ask.name == "astgrep" {
+                    self.gated.fetch_add(1, Ordering::SeqCst);
+                    // Arrival before the slot: a sibling gated call landing
+                    // while one ask is being answered is the overlap
+                    // witness — under claim serialization it cannot happen.
+                    if self.in_flight.load(Ordering::SeqCst) > 0 {
+                        self.arrivals_under_flight.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let recorder = self.clone();
+                Box::pin(async move {
+                    let _slot = recorder.slot.lock().await;
+                    recorder.asks.fetch_add(1, Ordering::SeqCst);
+                    let now = recorder.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    recorder.max_in_flight.fetch_max(now, Ordering::SeqCst);
+
+                    // Room for a sibling ask to arrive if the seam allowed
+                    // two at once; under serialization it cannot.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    recorder.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    Approval::Allow { remember: None }
+                })
+            }
+        }
+        let recorder = Recorder::default();
+        let responder = Arc::new(Recorder::clone(&recorder));
+        let (conversation, _stream) = conversation_over(
+            &dir,
+            manager(dir.path()),
+            responder.clone(),
+            None,
+            vec![
+                crate::testing::tool_turn(vec![(
+                    "b".to_owned(),
+                    "batch".to_owned(),
+                    serde_json::json!({"tool_calls": [
+                        {"tool": "astgrep", "parameters": {}},
+                        {"tool": "astgrep", "parameters": {}},
+                    ]}),
+                )]),
+                crate::testing::text_turn("done"),
+            ],
+        )
+        .await;
+        let outcome = run_one_turn(&conversation).await;
+        assert!(
+            matches!(outcome, crate::harness::TurnOutcome::Done { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(recorder.gated.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            recorder.arrivals_under_flight.load(Ordering::SeqCst),
+            1,
+            "the second gated child must arrive while the first is answered"
+        );
+        assert_eq!(
+            recorder.max_in_flight.load(Ordering::SeqCst),
+            1,
+            "one approval prompt at a time across batch children"
         );
     }
 }

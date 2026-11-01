@@ -2,15 +2,17 @@
 //!
 //! Creates a linked git worktree so a subagent can mutate files without
 //! affecting the parent's working tree. The worktree shares object storage
-//! with the main repo (cheap), and is cleaned up when dropped. If the cwd is
-//! not a git repo (or git is unavailable), `create` returns `None` and the
-//! caller falls back to running in the parent cwd.
+//! with the main repo (cheap), and is cleaned up when dropped. Creation
+//! fails explicitly when the root is not a git repository or `git worktree
+//! add` fails: isolation must never degrade into silently editing the
+//! parent tree.
 //!
 //! Ported from the reference `craft-agent/src/tools/worktree.rs`.
 
 use std::path::PathBuf;
 use std::process::Command;
 
+use super::error::{Result, invalid};
 use tracing::{debug, warn};
 
 const WORKTREE_BRANCH_PREFIX: &str = "craft-subagent/";
@@ -26,24 +28,28 @@ impl Worktree {
         &self.path
     }
 
-    /// Create a linked worktree from the repo rooted at `cwd`. Returns `None`
-    /// (and logs) when git is missing or the dir is not a git repo.
-    pub fn create(cwd: &std::path::Path, label: &str) -> Option<Self> {
+    /// Create a linked worktree from the repo rooted at `cwd`. Fails with
+    /// the reason when git is missing, the root is not a git repo, or
+    /// `git worktree add` rejects the request — the caller must not fall
+    /// back to running an isolated subagent in the parent tree.
+    pub fn create(cwd: &std::path::Path, label: &str) -> Result<Self> {
         if !cwd.is_dir() {
-            return None;
+            return Err(invalid(format!("{} is not a directory", cwd.display())));
         }
-        let toplevel = git_out(cwd, &["rev-parse", "--show-toplevel"])?;
+        let toplevel = git_out(cwd, &["rev-parse", "--show-toplevel"])
+            .ok_or_else(|| invalid(format!("{} is not a git repository", cwd.display())))?;
         let toplevel = PathBuf::from(toplevel.trim());
 
         let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let slug = slugify(label);
         let branch = format!("{WORKTREE_BRANCH_PREFIX}{slug}-{stamp:x}");
 
         let parent = std::env::temp_dir().join("craft-worktrees");
-        let _ = std::fs::create_dir_all(&parent);
+        std::fs::create_dir_all(&parent)
+            .map_err(|e| invalid(format!("creating {}: {e}", parent.display())))?;
         let dir_name = format!("craft-{slug}-{stamp:x}");
         let path = parent.join(&dir_name);
 
@@ -55,17 +61,20 @@ impl Worktree {
             .arg(&path)
             .arg("HEAD")
             .output()
-            .ok()?;
+            .map_err(|e| invalid(format!("running git worktree add: {e}")))?;
         if !output.status.success() {
             warn!(
                 stderr = %String::from_utf8_lossy(&output.stderr),
-                "git worktree add failed; subagent will run in parent cwd"
+                "git worktree add failed"
             );
-            return None;
+            return Err(invalid(format!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
 
         debug!(worktree = %path.display(), branch = %branch, "created worktree");
-        Some(Self { path, branch })
+        Ok(Self { path, branch })
     }
 }
 
@@ -138,12 +147,16 @@ mod tests {
     }
 
     #[test]
-    fn create_returns_none_without_git_repo() {
+    fn create_fails_explicitly_without_git_repo() {
         if !git_available() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
-        assert!(Worktree::create(dir.path(), "test").is_none());
+        let error = match Worktree::create(dir.path(), "test") {
+            Err(error) => error.to_string(),
+            Ok(worktree) => panic!("expected failure, got {}", worktree.path().display()),
+        };
+        assert!(error.contains("not a git repository"), "{error}");
     }
 
     #[test]

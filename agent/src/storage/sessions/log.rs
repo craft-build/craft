@@ -197,6 +197,55 @@ impl SessionLog {
         Ok(())
     }
 
+    /// Append new subagent histories plus the trailing meta record, leaving
+    /// the main-message cursors alone: the change feed owns those records,
+    /// and sub histories are the one collection the feed cannot carry. Safe
+    /// to interleave with [`Self::append_changes`] on the same log.
+    pub fn append_sub_entries(&mut self, session: &StoredSession) -> Result<(), SessionError> {
+        self.require_same_id(session)?;
+        self.ensure_appendable(session)?;
+
+        let mut buf = Vec::new();
+        let mut new_sub_counts: Vec<(String, usize)> = Vec::new();
+        for (sub_id, msgs) in &session.subagent_messages {
+            let saved = self.saved_sub_msg_counts.get(sub_id).copied().unwrap_or(0);
+            for entry in &msgs[saved..] {
+                append_record(
+                    &mut buf,
+                    &Record::SubEntry {
+                        sub: sub_id.clone(),
+                        entry: entry.clone(),
+                    },
+                )?;
+            }
+            if msgs.len() > saved {
+                new_sub_counts.push((sub_id.clone(), msgs.len()));
+            }
+        }
+        let meta = meta_record(session)?;
+        if buf.is_empty() && meta == self.saved_meta {
+            return Ok(());
+        }
+        buf.extend_from_slice(&meta);
+
+        if let Err(e) = self
+            .file
+            .write_all(&buf)
+            .and_then(|()| self.file.sync_data())
+        {
+            let _ = self.file.set_len(self.saved_len);
+            return Err(StorageError::from(e).into());
+        }
+        self.saved_len += buf.len() as u64;
+        self.appends += 1;
+        for (sub_id, count) in new_sub_counts {
+            self.saved_sub_msg_counts.insert(sub_id, count);
+        }
+        self.saved_meta = meta;
+
+        Ok(())
+    }
+
     fn cursor_from(session: &StoredSession, file: File) -> Self {
         let saved_len = file.metadata().map(|m| m.len()).unwrap_or_default();
         Self {

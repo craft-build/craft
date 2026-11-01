@@ -48,7 +48,7 @@ pub use bash::{
     Bash, BashArgs, BashKill, BashKillArgs, BashOutput, BashStatus, BashStatusArgs, BashWatch,
     BashWatchArgs,
 };
-pub use batch::{Batch, BatchArgs, BatchOutput};
+pub use batch::{Batch, BatchArgs, BatchOutput, MAX_BATCH_SIZE};
 pub use delete::{Delete, DeleteArgs, DeleteOutput};
 pub use edit::{
     Edit, EditArgs, EditLines, EditLinesArgs, EditLinesOutput, EditOutput, InsertLines,
@@ -225,6 +225,23 @@ impl Workspace {
     pub fn with_subagents(mut self, spawn: Arc<dyn task::SpawnSubagent>) -> Self {
         self.subagents = spawn;
         self
+    }
+
+    /// A child workspace rooted at `root` for a worktree-isolated subagent
+    /// (hardening/04): tools, snapshots, bash jobs and the plan file anchor
+    /// at the child root, while the session's cross-root services —
+    /// instruction dedupe, the todo plan, MCP tools, the sandbox policy and
+    /// the cross-agent path locks — stay shared with this workspace. The
+    /// child gets no subagent seam: worktree children cannot recurse.
+    pub(crate) fn child_workspace(&self, root: impl AsRef<Path>) -> error::Result<Self> {
+        let mut child = Self::new(root)?;
+        child.loaded_instructions = self.loaded_instructions.clone();
+        child.todos = self.todos.clone();
+        child.state_dir = self.state_dir.clone();
+        child.mcp = self.mcp.clone();
+        child.sandbox = self.sandbox.clone();
+        child.locks = self.locks.clone();
+        Ok(child)
     }
 
     /// Install the session's MCP client (B.11). Call before the first turn

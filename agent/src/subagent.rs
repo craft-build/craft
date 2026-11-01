@@ -269,7 +269,7 @@ impl SubagentLauncher {
             other => return Err(format!("unknown subagent type: {other}")),
         };
         let general = kind == SubagentKind::General;
-        let (model, _child_spec) = self.resolve_model(req.model_tier.as_deref()).await?;
+        let (model, child_spec) = self.resolve_model(req.model_tier.as_deref()).await?;
 
         tracing::info!(
             description = %req.description,
@@ -295,14 +295,27 @@ impl SubagentLauncher {
             other => return Err(format!("unknown context_mode: {other}")),
         };
 
-        let worktree = match req.isolation.as_str() {
-            "none" => None,
-            "worktree" => match general {
-                true => Worktree::create(self.workspace.root(), &req.description),
-                false => {
-                    return Err("worktree isolation requires subagent_type \"general\"".into());
-                }
-            },
+        // Worktree isolation (hardening/04) roots the child's whole
+        // execution state at a fresh linked worktree: its tools, snapshots,
+        // bash cwd and claim normalization all anchor at the child root,
+        // and creation failure is an error — never a silent fall back to
+        // editing the parent tree. Every other child runs on the parent
+        // workspace as before.
+        let (worktree, workspace, cwd) = match req.isolation.as_str() {
+            "none" => (None, self.workspace.clone(), self.cwd.clone()),
+            "worktree" if !general => {
+                return Err("worktree isolation requires subagent_type \"general\"".into());
+            }
+            "worktree" => {
+                let worktree = Worktree::create(self.workspace.root(), &req.description)
+                    .map_err(|e| e.to_string())?;
+                let cwd = worktree.path().display().to_string();
+                let workspace = self
+                    .workspace
+                    .child_workspace(worktree.path())
+                    .map_err(|e| e.to_string())?;
+                (Some(worktree), workspace, cwd)
+            }
             other => return Err(format!("unknown isolation mode: {other}")),
         };
 
@@ -345,21 +358,24 @@ impl SubagentLauncher {
         // sources, seeded from the parent snapshot below.
         let history = animist::history::History::from_entries(ext::entries(seeded));
         let tools = match kind {
-            SubagentKind::General => self.workspace.subagent_registry(true, &history),
-            SubagentKind::Research => self.workspace.subagent_registry(false, &history),
-            SubagentKind::Reviewer => self.workspace.reviewer_registry(&history),
+            SubagentKind::General => workspace.subagent_registry(true, &history),
+            SubagentKind::Research => workspace.subagent_registry(false, &history),
+            SubagentKind::Reviewer => workspace.reviewer_registry(&history),
         }
         .map_err(|e| e.to_string())?;
         // A child conversation with its own layer instances — never the
         // parent's, whose per-run state would collide on run ids. The
-        // parent's approval gate governs the child's tool calls too
-        // (reference shares ctx.permissions with the spawned agent).
+        // layers are built from the parent's shared services (permission
+        // rules, approval responder, auto-review reviewer); no persistence
+        // layer, because the parent stores the child's entries when it
+        // ends. The parent's approval gate governs the child's tool calls
+        // too (reference shares ctx.permissions with the spawned agent).
         let (sink, stream) = crate::harness::EventSink::new();
         let mut builder =
-            crate::harness::ConversationBuilder::new(&config, &self.cwd, "", model, tools, sink)
+            crate::harness::ConversationBuilder::new(&config, &cwd, "", model, tools, sink)
                 .history(history)
                 .max_turns(crate::harness::MaxTurns::Unbounded)
-                .workspace(self.workspace.clone());
+                .workspace(workspace);
         builder = builder.policy(self.policy.clone());
         let conversation = builder.build().map_err(|e| e.to_string())?;
 
@@ -396,29 +412,22 @@ impl SubagentLauncher {
             })
         };
 
-        // The child cancels with its parent turn or with its own cancel-map
-        // slot; the map speaks the trigger vocabulary, so a watcher
-        // translates the slot firing into the child's cancellation.
         let child_cancel = animist::agent::Cancellation::default();
         let parent_cancel = (*self.cancel.load_full()).clone();
-        let linked = child_cancel.clone();
-        let parent_link = tokio::spawn(async move {
-            parent_cancel.cancelled().await;
-            linked.cancel();
-        });
+        // The cancel-map slot (task 96): the surface can cancel one
+        // subagent without stopping the parent turn. Retiring the slot at
+        // exit drops the trigger, which fires the token — the linked run
+        // observes both through the same select.
         let mut cancel_slot = None;
+        let mut slot_token = None;
         if !req.tool_use_id.is_empty() {
-            let (trigger, slot_token) = crate::run::cancel::cancel_pair();
+            let (trigger, token) = crate::run::cancel::cancel_pair();
             cancel_slot = Some(self.cancels.insert(req.tool_use_id.clone(), trigger));
-            let linked = child_cancel.clone();
-            tokio::spawn(async move {
-                slot_token.wait().await;
-                linked.cancel();
-            });
+            slot_token = Some(token);
         }
         // Stop the child at every exit path, whether it is owned by the
-        // cancel map (retire drops the trigger, firing the watcher) or
-        // linked only to the parent.
+        // cancel map (retire drops the trigger) or linked only to the
+        // parent.
         macro_rules! stop_child {
             () => {
                 if let Some(slot) = cancel_slot {
@@ -449,9 +458,12 @@ impl SubagentLauncher {
                 )
             };
 
-            let outcome = run_isolated(
-                || crate::harness::run_turn(&conversation, &message, &[], child_cancel.clone()),
-                worktree.as_ref(),
+            let outcome = run_linked(
+                &conversation,
+                &message,
+                &child_cancel,
+                &parent_cancel,
+                slot_token.as_ref(),
             )
             .await;
             if matches!(
@@ -468,8 +480,9 @@ impl SubagentLauncher {
                     conversation.history().snapshot().await.entries(),
                 ));
                 stop_child!();
-                parent_link.abort();
                 let _ = conversation.shutdown().await;
+                self.persist_child(req, kind, &child_spec, &conversation.history())
+                    .await;
                 // Drop the conversation (the stream's last sender) so the
                 // forwarder's drain can end; awaiting it first would hang.
                 drop(conversation);
@@ -508,16 +521,18 @@ impl SubagentLauncher {
                 }
             } else {
                 stop_child!();
-                parent_link.abort();
                 let _ = conversation.shutdown().await;
+                self.persist_child(req, kind, &child_spec, &conversation.history())
+                    .await;
                 drop(conversation);
                 let _ = forwarder.await;
                 return Ok(SubagentResult::Text(reply));
             }
         }
         stop_child!();
-        parent_link.abort();
         let _ = conversation.shutdown().await;
+        self.persist_child(req, kind, &child_spec, &conversation.history())
+            .await;
         drop(conversation);
         let _ = forwarder.await;
         drop(worktree);
@@ -527,6 +542,52 @@ impl SubagentLauncher {
             None => Err(format!(
                 "subagent did not produce schema-valid JSON: {last_error}"
             )),
+        }
+    }
+
+    /// Store the finished child's entries in the session's subagent
+    /// histories (10): the child runs no persistence layer, so the parent
+    /// records what it produced. Programmatic launches (no call id) and
+    /// unpersisted parents (no state dir) store nothing.
+    async fn persist_child(
+        &self,
+        req: &SubagentRequest,
+        kind: SubagentKind,
+        child_spec: &str,
+        history: &animist::history::History,
+    ) {
+        if req.tool_use_id.is_empty() {
+            return;
+        }
+        let Some(persister) = self.parent.persister() else {
+            return;
+        };
+        let entries = history.snapshot().await.entries().to_vec();
+        let record = crate::storage::sessions::StoredSubagent {
+            tool_use_id: req.tool_use_id.clone(),
+            name: req.description.clone(),
+            prompt: Some(req.prompt.clone()),
+            model: Some(child_spec.to_owned()),
+            lifecycle: Some(
+                match kind {
+                    SubagentKind::Research => "research",
+                    SubagentKind::General => "general",
+                    SubagentKind::Reviewer => "reviewer",
+                }
+                .to_owned(),
+            ),
+            context_mode: Some(req.context_mode.clone()),
+        };
+        let mut persister = persister.lock().await;
+        if let Err(error) = persister.record_subagent(record, entries).await {
+            tracing::warn!(
+                tool_use_id = %req.tool_use_id,
+                "subagent history persist failed: {error}"
+            );
+            self.sink
+                .craft(crate::harness::CraftEvent::PersistenceFailed(
+                    error.to_string(),
+                ));
         }
     }
 }
@@ -565,29 +626,44 @@ fn partial_text(messages: &[StoredMessage]) -> String {
         .join("\n")
 }
 
-/// Run an isolated subagent inside a linked git worktree. Because the
-/// process has a single working directory, isolated subagents are
-/// serialized on a global mutex so sibling worktrees never race on
-/// `chdir`. When `worktree` is `None`, the run proceeds normally.
-async fn run_isolated<F, Fut>(run: F, worktree: Option<&Worktree>) -> crate::harness::TurnOutcome
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = crate::harness::TurnOutcome>,
-{
-    let Some(wt) = worktree else {
-        return run().await;
+/// Run one child attempt with its cancellation linked to the parent turn's
+/// and to the spawn's cancel-map slot: whichever fires first cancels the
+/// child, and the run itself is always awaited to completion — never
+/// dropped mid-flight, so its partial results and cleanup still happen.
+async fn run_linked(
+    conversation: &crate::harness::Conversation,
+    message: &str,
+    child: &animist::agent::Cancellation,
+    parent: &animist::agent::Cancellation,
+    slot: Option<&crate::run::cancel::CancelToken>,
+) -> crate::harness::TurnOutcome {
+    // A link that already fired resolves the race at once, before the run
+    // spends a model call.
+    if parent.is_cancelled() || slot.is_some_and(|slot| slot.cancelled()) {
+        child.cancel();
+    }
+    let run = crate::harness::run_turn(conversation, message, &[], child.clone());
+    tokio::pin!(run);
+    let link = async {
+        tokio::select! {
+            biased;
+            () = parent.cancelled() => {}
+            () = async {
+                match slot {
+                    Some(slot) => slot.wait().await,
+                    None => std::future::pending().await,
+                }
+            } => {}
+        }
     };
-    static WORKTREE_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _guard = WORKTREE_GUARD.lock().await;
-    let prev = std::env::current_dir().ok();
-    if std::env::set_current_dir(wt.path()).is_err() {
-        return run().await;
+    tokio::select! {
+        biased;
+        () = link => {
+            child.cancel();
+            (&mut run).await
+        }
+        outcome = &mut run => outcome,
     }
-    let result = run().await;
-    if let Some(prev) = prev {
-        let _ = std::env::set_current_dir(prev);
-    }
-    result
 }
 
 /// Validate `value` against the structural subset of JSON Schema the
@@ -758,14 +834,24 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     fn mock(turns: Vec<crate::testing::Attempt>) -> crate::provider::ModelHandle {
+        mock_with_provider(turns).0
+    }
+
+    fn mock_with_provider(
+        turns: Vec<crate::testing::Attempt>,
+    ) -> (
+        crate::provider::ModelHandle,
+        crate::testing::ScriptedProvider,
+    ) {
         let provider = crate::testing::ScriptedProvider::new(Vec::new());
         for turn in turns {
             provider.push(turn);
         }
-        crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
+        let model = crate::provider::ModelHandle::scripted(crate::testing::scripted_model(
             &provider,
             crate::testing::model_info("mock", 200_000, 8_192, false, false),
-        ))
+        ));
+        (model, provider)
     }
 
     /// One tool-call spec for `crate::testing::tool_turn`.
@@ -808,6 +894,17 @@ mod tests {
         )
         .build()
         .expect("parent conversation builds");
+        launcher_over(parent, sink, workspace, cwd)
+    }
+
+    /// A launcher over a caller-built parent conversation.
+    fn launcher_over(
+        parent: crate::harness::Conversation,
+        sink: crate::harness::EventSink,
+        workspace: Workspace,
+        cwd: String,
+    ) -> SubagentLauncher {
+        let root = workspace.root().to_path_buf();
         SubagentLauncher {
             parent,
             provider: "anthropic".into(),
@@ -824,7 +921,7 @@ mod tests {
             policy: crate::harness::PolicyLayerInputs::new(
                 Arc::new(crate::permissions::PermissionManager::new(
                     crate::permissions::PermissionsConfig::default(),
-                    root.to_path_buf(),
+                    root,
                 )),
                 Arc::new(crate::headless::HeadlessGate),
             ),
@@ -1075,5 +1172,616 @@ mod tests {
             "the parent spec resolves even without provider configs"
         );
         let _ = model;
+    }
+
+    // ---- 10: linked cancellation, schema exhaustion, filtering ----
+
+    /// The child's model call blocks mid-stream (scripted blocked attempt);
+    /// a parent cancellation that lands mid-run must cancel the child
+    /// promptly and end the spawn, not park it forever.
+    #[tokio::test]
+    async fn parent_cancellation_mid_run_cancels_the_child_promptly() {
+        let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
+        let (model, provider) =
+            mock_with_provider(vec![crate::testing::text_turn("half a reply").blocked()]);
+        let l = launcher(model, captured.clone());
+        let cell = l.cancel.clone();
+        let spawned =
+            tokio::spawn(
+                async move { l.spawn(&SubagentRequest::research("find", "search")).await },
+            );
+        // Wait until the child is really streaming before cancelling.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while captured.0.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "child never started");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        cell.load().cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), spawned)
+            .await
+            .expect("the cancelled child returns promptly")
+            .unwrap();
+        let error = result.expect_err("a cancelled child reports an error");
+        assert!(error.contains("sub-agent"), "{error}");
+        assert!(
+            error.contains("cancelled") || error.contains("interrupted"),
+            "{error}"
+        );
+        provider.release();
+    }
+
+    /// Every schema retry spent without valid JSON ends the spawn with the
+    /// last validation error, exactly as before the animist cutover.
+    #[tokio::test]
+    async fn output_schema_exhaustion_reports_the_last_error() {
+        let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
+        let attempts = (0..=MAX_SCHEMA_RETRIES)
+            .map(|_| crate::testing::text_turn("not json at all"))
+            .collect();
+        let l = launcher(mock(attempts), captured);
+        let mut req = SubagentRequest::research("summarize", "summarize");
+        req.output_schema = Some(json!({
+            "type": "object",
+            "required": ["summary"],
+            "properties": {"summary": {"type": "string"}}
+        }));
+        let error = l.spawn(&req).await.unwrap_err();
+        assert!(
+            error.contains("did not produce schema-valid JSON"),
+            "{error}"
+        );
+        assert!(error.contains("no JSON object found"), "{error}");
+    }
+
+    /// The forwarded stream keeps tool completion (the task chat needs it)
+    /// and drops the child's terminal and progress noise: today's filter,
+    /// on the animist event names.
+    #[tokio::test]
+    async fn child_noise_events_are_filtered_and_completion_passes() {
+        let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
+        // A general child running a bash command longer than the progress
+        // cadence streams ToolProgress notes while it works.
+        let l = launcher(
+            mock(vec![
+                crate::testing::tool_turn(vec![tool_event(
+                    "b1",
+                    "bash",
+                    serde_json::json!({"command": "sleep 1; echo done"}),
+                )]),
+                crate::testing::text_turn("finished"),
+            ]),
+            captured.clone(),
+        );
+        l.policy
+            .permissions
+            .add_session_rule(crate::permissions::PermissionRule {
+                tool: crate::permissions::ToolKey::native("bash"),
+                scope: None,
+                effect: crate::permissions::Effect::Allow,
+            });
+        let mut req = SubagentRequest::research("run", "run the command");
+        req.subagent_type = "general".into();
+        let result = l.spawn(&req).await;
+        assert!(result.is_ok(), "{result:?}");
+        let forwarded = settled_events(&captured).await;
+        let mut saw_finished = false;
+        for event in &forwarded {
+            let HarnessEvent::Craft(crate::harness::CraftEvent::Subagent { event, .. }) = event
+            else {
+                panic!("every forwarded event must be tagged: {event:?}");
+            };
+            match &**event {
+                HarnessEvent::Craft(
+                    crate::harness::CraftEvent::Done { .. }
+                    | crate::harness::CraftEvent::Error(_)
+                    | crate::harness::CraftEvent::PersistenceFailed(_),
+                ) => panic!("terminal craft events are filtered: {event:?}"),
+                HarnessEvent::Agent(animist::agent::AgentEvent::ToolProgress { .. }) => {
+                    panic!("progress notes are filtered: {event:?}")
+                }
+                HarnessEvent::Agent(animist::agent::AgentEvent::Finished { .. }) => {
+                    panic!("the child's finished status is filtered: {event:?}")
+                }
+                HarnessEvent::Agent(animist::agent::AgentEvent::ToolFinished { call, .. })
+                    if call.name == "bash" =>
+                {
+                    saw_finished = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_finished,
+            "the bash completion must pass through: {forwarded:?}"
+        );
+    }
+
+    // ---- 10: layer instances are never shared ----
+
+    /// A layer instance counting `turn_start` calls: the parent's instance
+    /// counts the parent's runs and never the child's, proving the child
+    /// conversation builds its own instances from the shared services.
+    struct TurnStarts(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl animist::agent::LayerImpl for TurnStarts {
+        async fn turn_start(
+            &self,
+            _agent: &animist::agent::Agent,
+            _run: &animist::agent::RunContext,
+            message: &StoredMessage,
+        ) -> std::result::Result<StoredMessage, animist::agent::AgentError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(message.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn no_layer_instance_reaches_both_parent_and_child() {
+        let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.keep();
+        let workspace = Workspace::new(&root).unwrap();
+        let (sink, stream) = crate::harness::EventSink::new();
+        tokio::spawn(async move {
+            let mut stream = stream;
+            while let Some(event) = stream.next().await {
+                let _ = event;
+            }
+        });
+        let cwd = root.display().to_string();
+        // One script serves both: the parent turn first, then the child's.
+        let parent = crate::harness::ConversationBuilder::new(
+            &crate::config::Config::parse("").expect("default config"),
+            &cwd,
+            "",
+            mock(vec![
+                crate::testing::text_turn("parent turn"),
+                crate::testing::text_turn("child done"),
+            ]),
+            workspace
+                .clone()
+                .registry(&animist::history::History::new())
+                .unwrap(),
+            sink.clone(),
+        )
+        .test_layer(animist::agent::Layer::new(TurnStarts(Arc::clone(&turns))))
+        .build()
+        .expect("parent conversation builds");
+        let l = launcher_over(parent.clone(), sink, workspace, cwd);
+        let outcome = crate::harness::run_turn(
+            &parent,
+            "hello",
+            &[],
+            animist::agent::Cancellation::default(),
+        )
+        .await;
+        assert!(matches!(outcome, crate::harness::TurnOutcome::Done { .. }));
+        assert_eq!(
+            turns.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the parent's run counted"
+        );
+        let result = l.spawn(&SubagentRequest::research("find", "search")).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            turns.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the child's runs must never reach the parent's layer instance"
+        );
+    }
+
+    // ---- 10: worktree isolation (hardening/04) ----
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// A committed temporary repository: worktree children need a real
+    /// git root to link from.
+    fn git_repo() -> tempfile::TempDir {
+        let repo = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(git(&["init", "-q"]), "git init");
+        std::fs::write(repo.path().join("committed.txt"), "parent tree\n").unwrap();
+        assert!(git(&["add", "."]), "git add");
+        assert!(git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init"
+        ]));
+        repo
+    }
+
+    fn allow(l: &SubagentLauncher, tool: &str) {
+        l.policy
+            .permissions
+            .add_session_rule(crate::permissions::PermissionRule {
+                tool: crate::permissions::ToolKey::native(tool),
+                scope: None,
+                effect: crate::permissions::Effect::Allow,
+            });
+    }
+
+    /// The text of every tool result for `name` in a child's persisted
+    /// entries.
+    fn child_tool_results(messages: &[StoredMessage], name: &str) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|message| message.message().content.iter())
+            .filter_map(|block| match block {
+                crate::history::ContentBlock::ToolResult {
+                    name: Some(block_name),
+                    content,
+                    ..
+                } if block_name == name => Some(ext::tool_content_text(content)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The test session id derived from `id`'s two trailing hex digits.
+    fn session_ref_for(id: &str) -> crate::id::SessionRef {
+        crate::id::SessionRef::from_id(
+            format!("01965087-4c71-7f00-8000-0000000000{id}")
+                .parse()
+                .unwrap(),
+        )
+    }
+
+    /// A persisted launcher rooted at `root`: the session file records the
+    /// child histories, which is how the isolation assertions read back
+    /// what the child's tools actually saw.
+    async fn persisted_launcher(
+        root: &std::path::Path,
+        id: &str,
+        turns: Vec<crate::testing::Attempt>,
+    ) -> SubagentLauncher {
+        let session_ref = session_ref_for(id);
+        let persister = crate::harness::Persister::open_in(
+            crate::storage::StateDir::from_path(root.join("state")),
+            session_ref,
+            &root.display().to_string(),
+            "scripted/mock",
+        )
+        .await
+        .expect("persister opens");
+        let workspace = Workspace::new(root).unwrap();
+        let (sink, stream) = crate::harness::EventSink::new();
+        tokio::spawn(async move {
+            let mut stream = stream;
+            while let Some(event) = stream.next().await {
+                let _ = event;
+            }
+        });
+        let cwd = root.display().to_string();
+        let parent = crate::harness::ConversationBuilder::new(
+            &crate::config::Config::parse("").expect("default config"),
+            &cwd,
+            "",
+            mock(turns),
+            workspace
+                .clone()
+                .registry(&animist::history::History::new())
+                .unwrap(),
+            sink.clone(),
+        )
+        .history(persister.history())
+        .persist(Some(Arc::new(tokio::sync::Mutex::new(persister))))
+        .build()
+        .expect("parent conversation builds");
+        launcher_over(parent, sink, workspace, cwd)
+    }
+
+    /// Child tools operate in the worktree, not the parent checkout: bash
+    /// resolves its cwd there, writes land there, and the parent tree is
+    /// untouched after the worktree is cleaned up.
+    #[tokio::test]
+    async fn worktree_children_run_in_the_child_root() {
+        if !git_available() {
+            return;
+        }
+        let repo = git_repo();
+        let root = repo.path().to_path_buf();
+        let l = persisted_launcher(
+            &root,
+            "aa",
+            vec![
+                crate::testing::tool_turn(vec![
+                    tool_event("b1", "bash", serde_json::json!({"command": "pwd"})),
+                    tool_event(
+                        "w1",
+                        "write",
+                        serde_json::json!({"path": "child.txt", "content": "isolation works"}),
+                    ),
+                ]),
+                crate::testing::text_turn("done"),
+            ],
+        )
+        .await;
+        allow(&l, "bash");
+        allow(&l, "write");
+        let mut req = SubagentRequest::research("isolate", "work inside the worktree");
+        req.subagent_type = "general".into();
+        req.isolation = "worktree".into();
+        req.tool_use_id = "toolu_wt".into();
+        let result = l.spawn(&req).await;
+        assert!(result.is_ok(), "{result:?}");
+
+        assert!(
+            !root.join("child.txt").exists(),
+            "the parent checkout must stay untouched"
+        );
+        assert!(root.join("committed.txt").exists());
+        let entries = load_child_entries(&root, "aa", "toolu_wt");
+        let pwd = child_tool_results(&entries, "bash").join("");
+        let worktrees = std::env::temp_dir()
+            .join("craft-worktrees")
+            .display()
+            .to_string();
+        assert!(
+            pwd.contains(worktrees.as_str()),
+            "bash must run inside the worktree, got {pwd:?}"
+        );
+        assert!(
+            !pwd.contains(root.display().to_string().as_str()),
+            "not the parent root: {pwd:?}"
+        );
+    }
+
+    /// Permission scopes resolve against the child root for a worktree
+    /// child: an allow rule scoped to the parent tree must not silently
+    /// auto-approve a write inside the isolated copy (the child shares the
+    /// rules, not the root they resolve against).
+    #[tokio::test]
+    async fn worktree_children_resolve_scopes_against_the_child_root() {
+        if !git_available() {
+            return;
+        }
+        let repo = git_repo();
+        let root = repo.path().to_path_buf();
+        let l = persisted_launcher(
+            &root,
+            "cc",
+            vec![
+                crate::testing::tool_turn(vec![tool_event(
+                    "w1",
+                    "write",
+                    serde_json::json!({"path": "child.txt", "content": "isolation works"}),
+                )]),
+                crate::testing::text_turn("done"),
+            ],
+        )
+        .await;
+        // An absolute allow scoped to the parent checkout, as a user config
+        // would express it.
+        l.policy
+            .permissions
+            .add_session_rule(crate::permissions::PermissionRule {
+                tool: crate::permissions::ToolKey::native("write"),
+                scope: Some(format!("{}/child.txt", root.display())),
+                effect: crate::permissions::Effect::Allow,
+            });
+        let mut req = SubagentRequest::research("isolate", "write the file");
+        req.subagent_type = "general".into();
+        req.isolation = "worktree".into();
+        req.tool_use_id = "toolu_scopes".into();
+        let result = l.spawn(&req).await;
+        assert!(result.is_ok(), "{result:?}");
+        let entries = load_child_entries(&root, "cc", "toolu_scopes");
+        let denial = child_tool_results(&entries, "write").join("");
+        assert!(
+            denial.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+            "a parent-rooted allow must not auto-approve a worktree write: {denial:?}"
+        );
+    }
+
+    /// Isolation is explicit about failure: outside a git repository the
+    /// spawn errors instead of silently editing the parent tree.
+    #[tokio::test]
+    async fn worktree_isolation_fails_explicitly_outside_a_git_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
+        let l = launcher(
+            mock(vec![crate::testing::text_turn("done")]),
+            captured.clone(),
+        );
+        let mut req = SubagentRequest::research("isolate", "mutate things");
+        req.subagent_type = "general".into();
+        req.isolation = "worktree".into();
+        let error = l.spawn(&req).await.unwrap_err();
+        assert!(error.contains("not a git repository"), "{error}");
+        assert!(
+            !tmp.path().join("child.txt").exists(),
+            "nothing ran in the parent tree"
+        );
+        let _ = tmp;
+    }
+
+    /// Concurrent isolated children each get their own root: both spawns
+    /// run at once, report distinct worktree cwds, and leave the process
+    /// working directory where it was.
+    #[tokio::test]
+    async fn concurrent_isolated_children_get_their_own_roots() {
+        if !git_available() {
+            return;
+        }
+        let repo = git_repo();
+        let root = repo.path().to_path_buf();
+        let before = std::env::current_dir().unwrap();
+        let make = |session: &'static str, call: &'static str| {
+            let root = root.clone();
+            async move {
+                let l = persisted_launcher(
+                    &root,
+                    session,
+                    vec![
+                        crate::testing::tool_turn(vec![tool_event(
+                            "b1",
+                            "bash",
+                            serde_json::json!({"command": "pwd"}),
+                        )]),
+                        crate::testing::text_turn("done"),
+                    ],
+                )
+                .await;
+                allow(&l, "bash");
+                let mut req = SubagentRequest::research("isolate", "own root");
+                req.subagent_type = "general".into();
+                req.isolation = "worktree".into();
+                req.tool_use_id = call.into();
+                l.spawn(&req).await
+            }
+        };
+        // Distinct sessions and call ids: concurrent children are separate
+        // spawns, never two writers over one session file.
+        let (first, second) = tokio::join!(make("b1", "toolu_first"), make("b2", "toolu_second"));
+        assert!(first.is_ok(), "{first:?}");
+        assert!(second.is_ok(), "{second:?}");
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            before,
+            "the process working directory never moved"
+        );
+    }
+
+    // ---- 10: the child history lands in the session ----
+
+    fn load_child_entries(root: &std::path::Path, session: &str, id: &str) -> Vec<StoredMessage> {
+        let state = crate::storage::StateDir::from_path(root.join("state"));
+        let session =
+            crate::storage::sessions::StoredSession::load(session_ref_for(session).id(), &state)
+                .expect("session reloads");
+        ext::stored_of_entries(
+            session
+                .subagent_messages()
+                .get(id)
+                .unwrap_or_else(|| panic!("child history {id} recorded"))
+                .as_slice(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_child_history_is_persisted_when_it_succeeds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.keep();
+        let l = persisted_launcher(
+            &root,
+            "aa",
+            vec![crate::testing::text_turn("found it at src/lib.rs:3")],
+        )
+        .await;
+        let mut req = SubagentRequest::research("find", "search");
+        req.tool_use_id = "toolu_ok".into();
+        let result = l.spawn(&req).await;
+        assert!(result.is_ok(), "{result:?}");
+        let entries = load_child_entries(&root, "aa", "toolu_ok");
+        assert!(
+            entries.len() >= 2,
+            "the prompt and the reply are recorded: {:?}",
+            entries.len()
+        );
+        assert_eq!(final_text(&entries), "found it at src/lib.rs:3");
+    }
+
+    #[tokio::test]
+    async fn the_child_history_is_persisted_when_it_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.keep();
+        // A permanent request failure: the child's first model call fails.
+        let l =
+            persisted_launcher(&root, "aa", vec![crate::testing::http_error(400, "boom")]).await;
+        let mut req = SubagentRequest::research("find", "search");
+        req.tool_use_id = "toolu_err".into();
+        let error = l.spawn(&req).await.unwrap_err();
+        assert!(error.contains("sub-agent"), "{error}");
+        let entries = load_child_entries(&root, "aa", "toolu_err");
+        assert!(
+            !entries.is_empty(),
+            "a failed child still records what it admitted"
+        );
+    }
+
+    /// A programmatic launch (no call id) persists nothing.
+    #[tokio::test]
+    async fn a_call_without_an_id_persists_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.keep();
+        let l = persisted_launcher(&root, "aa", vec![crate::testing::text_turn("anon")]).await;
+        let result = l.spawn(&SubagentRequest::research("find", "search")).await;
+        assert!(result.is_ok(), "{result:?}");
+        let persister = l.parent.persister().unwrap();
+        let persister = persister.lock().await;
+        assert!(
+            persister.store().session().subagent_messages().is_empty(),
+            "no id, no record"
+        );
+    }
+
+    // ---- 10: the reviewer budget ----
+
+    #[test]
+    fn reviewer_registry_serves_exactly_the_reviewer_budget() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = Workspace::new(tmp.path()).unwrap();
+        let registry = workspace
+            .reviewer_registry(&animist::history::History::new())
+            .unwrap();
+        let mut names: Vec<String> = registry
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        names.sort();
+        let mut expected: Vec<String> =
+            REVIEWER_TOOLS.iter().map(|tool| tool.to_string()).collect();
+        expected.extend(["list_tools"].map(str::to_string));
+        expected.sort();
+        assert_eq!(names, expected);
+        for banned in ["task", "question", "sessions", "write", "bash", "batch"] {
+            assert!(
+                !names.contains(&banned.to_string()),
+                "{banned} for reviewer"
+            );
+        }
+    }
+
+    /// The vendored `.craft/agents/reviewer.md` definition and the
+    /// registry's budget cannot drift apart: every tool the definition
+    /// advertises must be servable.
+    #[test]
+    fn the_reviewer_definition_admits_only_servable_tools() {
+        let md = crate::knowledge::REVIEWER_AGENT_MD;
+        let tools = md
+            .split("tools:")
+            .nth(1)
+            .and_then(|section| section.split("---").next())
+            .expect("tools section")
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("- ").map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(!tools.is_empty(), "definition lists tools");
+        for tool in tools {
+            assert!(
+                REVIEWER_TOOLS.contains(&tool.as_str()),
+                "{tool} is in the definition but not the reviewer budget"
+            );
+        }
     }
 }

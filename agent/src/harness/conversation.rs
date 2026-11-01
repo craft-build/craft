@@ -50,6 +50,12 @@ pub enum MaxTurns {
     Unbounded,
 }
 
+/// Nesting cap for child dispatches (10): `batch` children dispatch at
+/// depth one and an exclusive child orchestrator may fan serial dispatches
+/// deeper; eight is animist's default, owned here so the child budgets the
+/// batch relies on are craft's to size.
+pub const MAX_TOOL_DEPTH: u32 = 8;
+
 /// Request-level settings that change between runs without rebuilding the
 /// agent. Layers read the cell at `turn_start`, so mid-run edits never take
 /// effect inside a step.
@@ -67,6 +73,7 @@ pub struct TurnSettings {
 /// history. Never shared between conversations: run ids are per agent, so a
 /// shared layer would collide and corrupt per-run state.
 struct LayerSet {
+    test: Option<Layer>,
     policy: Layer,
     guardrail: Layer,
     request: Layer,
@@ -94,7 +101,7 @@ impl LayerSet {
                 .build(),
             None => AgentLayer::builder().layer(self.snapshot.clone()).build(),
         };
-        AgentLayer::builder()
+        let chain = AgentLayer::builder()
             .layer(self.policy.clone())
             .next(Box::new(
                 AgentLayer::builder()
@@ -117,7 +124,14 @@ impl LayerSet {
                     ))
                     .build(),
             ))
-            .build()
+            .build();
+        match &self.test {
+            Some(test) => AgentLayer::builder()
+                .layer(test.clone())
+                .next(Box::new(chain))
+                .build(),
+            None => chain,
+        }
     }
 }
 
@@ -198,6 +212,9 @@ pub struct ConversationBuilder<'a> {
     /// The session workspace: anchors write-path normalization and owns
     /// the compression store the request layer reads from.
     workspace: Option<crate::tools::Workspace>,
+    /// Test seam (10): one extra layer at the chain's head; `None` outside
+    /// tests (the setter is test-only).
+    test_layer: Option<Layer>,
 }
 
 impl<'a> ConversationBuilder<'a> {
@@ -232,6 +249,7 @@ impl<'a> ConversationBuilder<'a> {
             snapshots: None,
             persist: None,
             workspace: None,
+            test_layer: None,
         }
     }
 
@@ -323,6 +341,14 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
+    /// Test seam (10): mount one extra layer at the chain's head so a test
+    /// can observe hook calls on a conversation's own instances.
+    #[cfg(test)]
+    pub(crate) fn test_layer(mut self, layer: Layer) -> Self {
+        self.test_layer = Some(layer);
+        self
+    }
+
     /// Assemble the layers, the settings cell, and the first `Agent`.
     #[expect(
         clippy::result_large_err,
@@ -349,6 +375,7 @@ impl<'a> ConversationBuilder<'a> {
             snapshots,
             persist,
             workspace,
+            test_layer,
         } = self;
         let write_root = workspace
             .as_ref()
@@ -392,7 +419,10 @@ impl<'a> ConversationBuilder<'a> {
             .max_retries(super::recovery::retry_budget())
             .max_concurrent_tools(config.agent.max_concurrent_tools)
             .max_tool_calls(u64::MAX)
+            // Decision 12: the budgets are high so a full `batch`
+            // (MAX_BATCH_SIZE entries, reserved upfront) always fits.
             .max_child_calls(u64::MAX)
+            .max_tool_depth(MAX_TOOL_DEPTH)
             .build();
         let guardrails = Arc::new(GuardrailState::new(
             write_root
@@ -414,6 +444,7 @@ impl<'a> ConversationBuilder<'a> {
             super::continuation::ContinuationRunState::default(),
         ));
         let layers = LayerSet {
+            test: test_layer,
             policy: Layer::new(PolicyLayer::new(
                 policy,
                 Arc::clone(&settings),
@@ -622,6 +653,13 @@ impl Conversation {
     pub(crate) fn agent(&self) -> Arc<Agent> {
         let guard = self.inner.agent.load();
         Arc::clone(&guard)
+    }
+
+    /// Test seam (10): the assembled agent config, for pinning the child
+    /// budgets a full `batch` depends on.
+    #[cfg(test)]
+    pub(crate) fn agent_config_for_tests(&self) -> &AgentConfig {
+        &self.inner.config
     }
 
     /// Swap the model and rebuild the agent between runs, keeping the

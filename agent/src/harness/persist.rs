@@ -128,6 +128,43 @@ impl Persister {
         }
     }
 
+    /// Record one finished subagent's history and roster entry (10): the
+    /// child conversation runs no persistence layer of its own, so its
+    /// parent stores what it produced when it ends. The entries land as
+    /// sub-entry records through the log's sub cursors; the roster rides
+    /// the trailing meta record. A diverged log falls back to the full
+    /// rewrite, which carries sub histories too.
+    pub async fn record_subagent(
+        &mut self,
+        subagent: crate::storage::sessions::StoredSubagent,
+        entries: Vec<HistoryEntry>,
+    ) -> std::result::Result<(), SessionError> {
+        let id = subagent.tool_use_id.clone();
+        let prior_messages = self.store.session().subagent_messages().get(&id).cloned();
+        let prior_roster = self.store.session().subagents().to_vec();
+        self.store
+            .session_mut()
+            .set_subagent_messages(id.clone(), entries);
+        self.store.session_mut().upsert_subagent(subagent);
+        match &mut self.log {
+            Some(log) => match log.append_sub_entries(self.store.session()) {
+                Ok(()) => Ok(()),
+                Err(SessionError::LogDiverged { .. }) => self.full_rewrite().await,
+                // The mirror must not keep records the file rejected (the
+                // same rule as `checkpoint`): roll back so a retry re-emits
+                // them instead of the session silently diverging.
+                Err(error) => {
+                    self.store
+                        .session_mut()
+                        .restore_subagent_messages(&id, prior_messages);
+                    self.store.session_mut().set_subagents(prior_roster);
+                    Err(error)
+                }
+            },
+            None => Ok(()),
+        }
+    }
+
     /// Rewrite the whole session (epoch bump via the session's own rewrite
     /// path) and resume the feed from the current snapshot.
     async fn full_rewrite(&mut self) -> std::result::Result<(), SessionError> {

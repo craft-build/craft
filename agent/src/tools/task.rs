@@ -69,7 +69,8 @@ pub struct TaskArgs {
     /// Isolation mode for a general subagent: "none" (default: run in the
     /// current working tree) or "worktree" (run inside a fresh linked git
     /// worktree so file mutations do not touch the parent tree). Requires
-    /// a git repo; falls back to none otherwise.
+    /// a git repository; the call fails when the worktree cannot be
+    /// created and never falls back to editing the parent tree.
     #[serde(default)]
     pub isolation: Option<String>,
 }

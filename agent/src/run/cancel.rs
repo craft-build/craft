@@ -4,8 +4,9 @@
 //! pair stays the substrate — the TUI surface, the stream select, and the
 //! epoch re-arm semantics all hang off it. This module layers the
 //! reference's richer API on top: a cancel-on-drop [`CancelTrigger`],
-//! [`CancelToken::child`] propagation, [`CancelToken::race`], and the
-//! slotted [`CancelMap`] for per-key grouped cancellation with pre-cancel.
+//! [`CancelToken::race`], and the slotted [`CancelMap`] for per-key
+//! grouped cancellation with pre-cancel. Parent↔child propagation is the
+//! caller's awaited select (see `subagent::run_linked`).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -124,33 +125,6 @@ impl CancelToken {
                 }
             }
         }
-    }
-
-    /// A token cancelled when this one cancels (but not vice versa). The
-    /// returned trigger drops to cancel the child alone. The link task
-    /// holds its own clone of the child's flag, so dropping either half
-    /// leaves the link functional; it exits as soon as either side fires.
-    pub fn child(&self) -> (CancelTrigger, CancelToken) {
-        let (flag, token) = cancel_channel();
-        if self.cancelled() {
-            flag.set(true);
-            return (CancelTrigger(flag), token);
-        }
-        let link = flag.clone();
-        let mut parent_rx = self.subscribe();
-        let mut child_rx = token.subscribe();
-        tokio::spawn(async move {
-            tokio::select! {
-                // A change (or the parent's flag dropping — drop cancels
-                // here, unlike the long-lived TUI-held flag) stops the child.
-                changed = parent_rx.changed() => {
-                    let _ = changed;
-                    link.set(true);
-                }
-                _ = child_rx.changed() => {}
-            }
-        });
-        (CancelTrigger(flag), token)
     }
 }
 
@@ -315,33 +289,6 @@ mod tests {
         });
         let result = token.race(std::future::pending::<()>()).await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn child_cancelled_by_parent() {
-        let (parent_trigger, parent_token) = cancel_pair();
-        let (_child_trigger, child_token) = parent_token.child();
-        parent_trigger.cancel();
-        child_token.wait().await;
-        assert!(child_token.cancelled());
-    }
-
-    #[tokio::test]
-    async fn child_cancelled_by_own_trigger() {
-        let (_parent_trigger, parent_token) = cancel_pair();
-        let (child_trigger, child_token) = parent_token.child();
-        child_trigger.cancel();
-        child_token.wait().await;
-        assert!(child_token.cancelled());
-        assert!(!parent_token.cancelled());
-    }
-
-    #[tokio::test]
-    async fn child_of_cancelled_parent_starts_cancelled() {
-        let (parent_trigger, parent_token) = cancel_pair();
-        parent_trigger.cancel();
-        let (_child_trigger, child_token) = parent_token.child();
-        assert!(child_token.cancelled());
     }
 
     #[test]
