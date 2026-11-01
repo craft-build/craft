@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::run::dedup;
+use crate::harness::dedup;
 
 use super::error::{Error, Result, definition, finish, invalid, io_error};
 use super::{Workspace, claims};

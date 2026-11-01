@@ -3,18 +3,13 @@
 //!
 //! Turns run on the shared [`crate::harness::Conversation`] seam;
 //! persistence lands on the JSONL
-//! [`Session`](crate::storage::sessions::Session) store behind
-//! [`SessionStore`]. MCP handles, Flow attachments, and plugin rule stores
-//! from the reference have no counterpart here (yet).
+//! [`Session`](crate::storage::sessions::Session) store behind the storage
+//! layer's [`SessionStore`](crate::storage::sessions::SessionStore). MCP
+//! handles, Flow attachments, and plugin rule stores from the reference
+//! have no counterpart here (yet).
 
 use crate::permissions::{PermissionError, ToolKey};
 use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
-
-/// The session store every surface shares; moved to the storage layer in 05.
-pub use crate::storage::sessions::SessionStore;
-/// The persisted shape of a live session: our own message/usage/tool-result
-/// domain types.
-pub use crate::storage::sessions::StoredSession;
 
 /// The headless approval responder (`--print`, `craft term run`,
 /// `craft recipe run`): where an interactive surface would prompt, headless
@@ -54,11 +49,11 @@ fn headless_deny_message(tool: &ToolKey, scopes: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::StoredSession;
     use super::*;
     use crate::id::SessionRef;
     use crate::storage::StateDir;
     use crate::storage::sessions::generate_title;
+    use crate::storage::sessions::{SessionStore, StoredSession};
     use crate::tools::Workspace;
 
     const CWD: &str = "/project";

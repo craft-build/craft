@@ -308,7 +308,7 @@ mod tests {
         std::fs::write(workspace.root().join("f"), "same\n").unwrap();
         std::fs::write(workspace.root().join("g"), "same\n").unwrap();
         let read = |file: &str| entry(json!({"tool": "read", "parameters": {"path": file}}));
-        let guardrails = std::sync::Arc::new(crate::run::GuardrailState::new(None));
+        let guardrails = std::sync::Arc::new(crate::harness::guardrails::GuardrailState::new(None));
         let (sink, _stream) = crate::harness::EventSink::new();
         let mut harness = animist::agent::testing::ToolHarness::builder()
             .tools(

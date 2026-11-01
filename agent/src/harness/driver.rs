@@ -555,7 +555,7 @@ async fn finish_error(sink: &EventSink, history: &History, error: AgentError) ->
             // an end marker recording where, replayable from there. Any
             // other stop (a client cancelling inside an approval, a failed
             // reauth) keeps the failed-run mapping 05 pinned.
-            if reason.starts_with(crate::run::doom::DOOM_STOP_PREFIX) {
+            if reason.starts_with(crate::harness::doom::DOOM_STOP_PREFIX) {
                 history
                     .add_stored(marker::observation(marker::END, END_MARKER))
                     .await;

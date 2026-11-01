@@ -9,17 +9,24 @@
 
 mod continuation;
 pub mod conversation;
+pub(crate) mod dedup;
+pub(crate) mod doom;
 pub mod driver;
 pub mod events;
 mod guardrail;
+pub(crate) mod guardrails;
 pub mod persist;
 mod persist_layer;
 mod policy;
+pub(crate) mod read_lifecycle;
 mod recovery;
+pub mod replay;
 pub(crate) mod request;
+pub(crate) mod retry;
 mod snapshot_layer;
 #[cfg(test)]
 mod tests;
+pub(crate) mod view;
 
 pub use conversation::{Conversation, ConversationBuilder, MaxTurns, TurnSettings};
 pub use driver::{TurnOutcome, compact_between_runs, run_turn};
@@ -29,3 +36,4 @@ pub(crate) use guardrail::GuardrailLayer;
 pub use persist::Persister;
 pub use policy::PolicyLayerInputs;
 pub use recovery::ReauthHook;
+pub use replay::{ReplayItem, transcript};

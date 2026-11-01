@@ -59,11 +59,11 @@ const DOOM_LOOP_THRESHOLD: usize = 3;
 pub(crate) const DOOM_LOOP_MESSAGE: &str = "You have called this tool with identical input 3 times in a row. This call was NOT executed. You are stuck in a loop. Retrying the same input will be blocked again. Stop, summarize what you have tried, and take a different approach (different arguments, a different tool, or report the blocker to the user).";
 
 /// The one-shot "summarize and stop" prompt fired at `GRACE_THRESHOLD`
-/// (reference `run/mod.rs` `GRACE_CALL_PROMPT`).
+/// (reference `doom.rs` `GRACE_CALL_PROMPT`).
 pub(crate) const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom-loop (repeated calls, errors, or stagnation). Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
 
 /// Compaction that recovers less than this fraction is "ineffective" for
-/// scoring purposes (reference `run/compaction.rs`).
+/// scoring purposes (reference the reference crate's `compaction.rs`).
 #[allow(dead_code)]
 pub(crate) const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 

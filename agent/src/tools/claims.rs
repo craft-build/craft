@@ -1,7 +1,7 @@
 //! Scheduling claims for filesystem tools.
 //!
 //! Resource keys are the normalized spellings produced by
-//! [`crate::run::dedup::normalize_write_path_with_root`], anchored at the
+//! [`crate::harness::dedup::normalize_write_path_with_root`], anchored at the
 //! workspace root so relative and absolute requests of one file claim the
 //! same key. The scheme:
 //!
@@ -20,7 +20,7 @@ use std::path::Path;
 
 use animist::agent::tool::ToolScheduling;
 
-use crate::run::dedup::normalize_write_path_with_root;
+use crate::harness::dedup::normalize_write_path_with_root;
 
 /// Reads of the given paths, normalized against the workspace root.
 pub(crate) fn reads(root: Option<&str>, paths: &[String]) -> ToolScheduling {

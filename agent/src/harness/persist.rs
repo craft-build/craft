@@ -109,7 +109,19 @@ impl Persister {
         // a copy), apply, and roll the mirror back unless the append
         // landed.
         let mirror_before = self.store.session().messages_arc();
-        self.store.session_mut().apply_changes(changes.changes());
+        let unapplied = self.store.session_mut().apply_changes(changes.changes());
+        // A record the mirror could not apply would still be appended and
+        // then fail every future load (the loader refuses out-of-range
+        // records). Recover from the live history instead: the rewrite
+        // carries what the feed actually did, file and mirror agree, and
+        // the bad batch is dropped loudly rather than poisoning the log.
+        if unapplied > 0 {
+            tracing::warn!(
+                "dropping {unapplied} change records the session mirror could not apply; \
+                 rewriting the session from the live history"
+            );
+            return self.full_rewrite().await;
+        }
         self.store.session_mut().update_title_if_default();
         let appended = match &mut self.log {
             Some(log) => log.append_changes(self.store.session(), changes.changes()),

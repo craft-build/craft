@@ -30,8 +30,8 @@ use std::collections::{HashMap, HashSet};
 use animist::history::{Alteration, ContentBlock, History, StoredMessage, ToolContents};
 
 use crate::compression::{self, CompressionConfig};
+use crate::harness::read_lifecycle::{ReadState, STALE_MARKER_PREFIX, SUPERSEDED_MARKER_PREFIX};
 use crate::history::ext;
-use crate::run::read_lifecycle::{ReadState, STALE_MARKER_PREFIX, SUPERSEDED_MARKER_PREFIX};
 
 /// Tag recording which durable alteration kinds have revised an entry.
 pub const ALTER_TAG: &str = "craft.alter";
@@ -214,7 +214,7 @@ impl ReadLifecycleAlteration {
             .filter_map(|entry| entry.current())
             .map(|stored| stored.message().clone())
             .collect();
-        let decisions = crate::run::read_lifecycle::classify_reads(&view, root)
+        let decisions = crate::harness::read_lifecycle::classify_reads(&view, root)
             .into_iter()
             .filter(|classification| classification.state != ReadState::Fresh)
             .map(|classification| {
@@ -397,7 +397,7 @@ mod tests {
             ts::stored_tool_result_of("e1", "ok"),
         ];
         // Enough later read rounds to push the edit outside the lookback.
-        for gap in 0..crate::run::read_lifecycle::WORKING_SET_LOOKBACK + 1 {
+        for gap in 0..crate::harness::read_lifecycle::WORKING_SET_LOOKBACK + 1 {
             let id = format!("gap{gap}");
             messages.push(ts::stored_assistant_tool_args(
                 &id,
@@ -653,7 +653,7 @@ mod tests {
             ext::observation(vec![ext::tool_result("e1", Some("edit"), "ok", false)]),
         ];
         // Push the edit outside the working-set lookback so the read stales.
-        for gap in 0..crate::run::read_lifecycle::WORKING_SET_LOOKBACK + 1 {
+        for gap in 0..crate::harness::read_lifecycle::WORKING_SET_LOOKBACK + 1 {
             let id = format!("g{gap}");
             messages.push(crate::history::Message {
                 role: animist::history::Role::Assistant,

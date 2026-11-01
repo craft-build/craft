@@ -21,7 +21,7 @@ fn marker_of(text: &str) -> Option<&'static str> {
         Some(marker::CANCEL)
     } else if text == crate::harness::driver::END_MARKER {
         Some(marker::END)
-    } else if text == crate::run::doom::GRACE_CALL_PROMPT {
+    } else if text == crate::harness::doom::GRACE_CALL_PROMPT {
         Some(marker::GRACE)
     } else if text == LEGACY_NUDGE_PROMPT {
         Some(marker::NUDGE)
@@ -188,6 +188,13 @@ fn convert(message: &Message, timestamp: Timestamp) -> StoredMessage {
     }
 }
 
+/// One legacy `tool_outputs` entry as an animist tool-result block: the
+/// same conversion `user_block` applies to an inline result, for the raw
+/// copies the loader folds into entry sources.
+pub(super) fn tool_result_block(result: &ToolResult) -> ContentBlock {
+    user_block(&UserContent::ToolResult(result.clone()))
+}
+
 fn user_block(block: &UserContent) -> ContentBlock {
     match block {
         UserContent::Text(Text { text }) => ContentBlock::Text { text: text.clone() },
@@ -314,7 +321,7 @@ mod tests {
             },
             Message::User {
                 content: vec![UserContent::Text(Text {
-                    text: crate::run::doom::GRACE_CALL_PROMPT.into(),
+                    text: crate::harness::doom::GRACE_CALL_PROMPT.into(),
                 })],
             },
             Message::User {

@@ -18,6 +18,12 @@ pub(crate) const RECENT_TOOL_RESULT_BUDGET: usize = 64 * 1024;
 pub(crate) const PROGRESSIVE_TOOL_REMOVAL_RATIOS: &[f32] = &[0.10, 0.20, 0.50, 1.00];
 
 pub use engine::{CompactionEngine, CompactionState};
+
+/// The session's compaction state shared with the request layer and the
+/// compaction engine: the engine holds the lock across its stage awaits
+/// (compaction runs between runs), so the handle is a tokio mutex and the
+/// request layer's per-step updates take it briefly.
+pub type SharedCompactionState = std::sync::Arc<tokio::sync::Mutex<CompactionState>>;
 pub use estimate::{RequestOverhead, TokenEstimator, estimate_prompt_tokens, estimate_tokens};
 
 /// Constructors shared by compaction tests: wire messages for request-level

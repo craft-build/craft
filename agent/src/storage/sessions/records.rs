@@ -11,13 +11,22 @@
 //! parse is decoded as a legacy record (pre-animist craft messages,
 //! `msg`/`sub_msg`/`out`) and converted, exactly like the `.json` legacy
 //! path. Load-time corruption policy: every record that fails both parses
-//! is skipped with a stderr warning, wherever it sits in the file.
+//! is skipped with a stderr warning, wherever it sits in the file, while a
+//! record whose index addresses an entry the replayed list does not have
+//! fails the load ([`SessionError::RecordOutOfRange`]) — a structurally
+//! consistent file cannot produce one, so it is corruption worth refusing,
+//! not noise worth skipping.
+//!
+//! Raw tool-output copies (`out` records here, the `tool_outputs` map of a
+//! legacy `.json` file) are folded into the matching tool-result entry's
+//! source when that entry holds no richer original, and dropped otherwise
+//! (see [`fold_tool_outputs`]).
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use animist::history::{ContentBlock, HistoryEntry, StoredMessage};
+use animist::history::{ContentBlock, HistoryEntry, StoredMessage, ToolContent};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -91,12 +100,10 @@ enum LegacyRecord {
     #[serde(rename = "msg")]
     Msg { d: LegacyMessage },
     // Retired with the session `tool_outputs` map (08): still parsed so
-    // old lines load, never read.
+    // old lines load, their payloads folding into entry sources.
     #[serde(rename = "out")]
     Out {
-        #[expect(dead_code)]
         id: String,
-        #[expect(dead_code)]
         d: legacy_messages::ToolResult,
     },
     #[serde(rename = "sub_msg")]
@@ -151,7 +158,7 @@ pub(crate) fn record_of(change: &animist::history::HistoryChange) -> Record {
 /// Apply one change record to the entry list. Indices address the list at
 /// the time of the record, as animist defines them, so replaying records in
 /// order reproduces the snapshot. An out-of-range index is a corrupt
-/// record; the caller's skip-with-warning policy applies.
+/// record: the caller fails the load with it ([`SessionError::RecordOutOfRange`]).
 pub(crate) fn apply_record(entries: &mut Vec<HistoryEntry>, record: &Record) -> Result<(), ()> {
     match record {
         Record::Entry { entry } => {
@@ -193,6 +200,152 @@ pub(crate) fn apply_record(entries: &mut Vec<HistoryEntry>, record: &Record) -> 
         | Record::Out { .. }
         | Record::SubEntry { .. }
         | Record::Meta { .. } => Ok(()),
+    }
+}
+
+/// The entry index a change record addresses, for the out-of-range error;
+/// `None` for records that carry none.
+fn record_index(record: &Record) -> Option<usize> {
+    match record {
+        Record::Insert { index, .. }
+        | Record::Revise { index, .. }
+        | Record::Deactivate { index }
+        | Record::Replace { index, .. } => Some(*index),
+        _ => None,
+    }
+}
+
+/// How much output a tool result carries: text characters and image
+/// blocks. The pre-08 writers stored the raw copy next to a possibly
+/// compressed in-message copy, so whichever side carries more content is
+/// the original.
+fn contents_richness(content: &animist::history::ToolContents) -> (usize, usize) {
+    let mut text = 0;
+    let mut images = 0;
+    for part in &content.0 {
+        match part {
+            ToolContent::Text { text: chars } => text += chars.len(),
+            ToolContent::Image { .. } => images += 1,
+        }
+    }
+    (text, images)
+}
+
+/// [`contents_richness`] of a tool-result block; `(0, 0)` for any other
+/// block shape.
+fn result_richness(block: &ContentBlock) -> (usize, usize) {
+    match block {
+        ContentBlock::ToolResult { content, .. } => contents_richness(content),
+        _ => (0, 0),
+    }
+}
+
+/// Whether the entry's source holds a tool result for `id`.
+fn holds_call(entry: &HistoryEntry, id: &str) -> bool {
+    entry.verbatim().message().content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+        )
+    })
+}
+
+/// Fold one raw tool-output copy into the matching tool-result entry's
+/// source, and return whether `id` matched an entry in this list. The entry
+/// keeps its copy when it is at least as rich (it already holds the
+/// original, or a later revision model wrote it whole); the raw copy
+/// replaces the source's block content when it carries more, keeping the
+/// entry's own call name where it has one. Only the matched entry is
+/// cloned. A call id no list knows is dropped — its result left the
+/// history before the save.
+fn fold_tool_output(
+    entries: &mut [HistoryEntry],
+    id: &str,
+    raw: &ContentBlock,
+    raw_richness: (usize, usize),
+) -> bool {
+    let ContentBlock::ToolResult {
+        content: raw_content,
+        name: raw_name,
+        is_error: raw_is_error,
+        ..
+    } = raw
+    else {
+        return false;
+    };
+    let Some(index) = entries.iter().position(|entry| holds_call(entry, id)) else {
+        return false;
+    };
+    let entry = &mut entries[index];
+    let existing = entry
+        .verbatim()
+        .message()
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == id => Some(contents_richness(content)),
+            _ => None,
+        })
+        .unwrap_or((0, 0));
+    if existing >= raw_richness {
+        // The entry already holds the equally rich or richer original.
+        return true;
+    }
+    let mut source = entry.verbatim().clone();
+    for block in source.message_mut().content.iter_mut() {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            name,
+            content,
+            is_error,
+            ..
+        } = block
+            && tool_use_id == id
+        {
+            *content = raw_content.clone();
+            if name.is_none() {
+                *name = raw_name.clone();
+            }
+            *is_error = *raw_is_error;
+            break;
+        }
+    }
+    *entry = HistoryEntry::builder()
+        .source(source)
+        .revisions(entry.revisions().to_vec())
+        .active(entry.is_active())
+        .build();
+    true
+}
+
+/// Fold every collected raw tool-output copy into the entry lists that hold
+/// their calls: the main history first, then the subagent histories (the
+/// pre-08 map was keyed by call id across both). One raw copy folds into at
+/// most one list — the first that holds the call; the same id in two lists
+/// is a cross-agent collision the pre-08 keying could not disambiguate
+/// anyway.
+fn fold_tool_outputs(
+    messages: &mut [HistoryEntry],
+    subagents: &mut HashMap<String, Vec<HistoryEntry>>,
+    raws: HashMap<String, ContentBlock>,
+) {
+    if raws.is_empty() {
+        return;
+    }
+    for (id, raw) in &raws {
+        let richness = result_richness(raw);
+        if fold_tool_output(messages, id, raw, richness) {
+            continue;
+        }
+        for entries in subagents.values_mut() {
+            if fold_tool_output(entries, id, raw, richness) {
+                break;
+            }
+        }
     }
 }
 
@@ -258,6 +411,7 @@ pub(super) fn load_jsonl(
     let mut created_at = 0u64;
     let mut messages: Vec<HistoryEntry> = Vec::new();
     let mut subagent_messages: HashMap<String, Vec<HistoryEntry>> = HashMap::new();
+    let mut tool_outputs: HashMap<String, ContentBlock> = HashMap::new();
     let mut title = DEFAULT_TITLE.to_string();
     let mut token_usage = StoredTokenUsage::default();
     let mut updated_at = 0u64;
@@ -319,15 +473,20 @@ pub(super) fn load_jsonl(
                 | Record::Deactivate { .. }
                 | Record::Replace { .. } => {
                     if let Err(()) = apply_record(&mut messages, &record) {
-                        eprintln!(
-                            "skipping out-of-range entry record at {display_path}:{line_count}"
-                        );
+                        return Err(SessionError::RecordOutOfRange {
+                            path: display_path.to_string(),
+                            line: line_count,
+                            index: record_index(&record).unwrap_or_default(),
+                            len: messages.len(),
+                        });
                     }
                 }
                 // `Record::Out` raw tool outputs are gone since 08:
-                // originals live in entry sources. Records already on disk
-                // stay unread until 11's loader folds them into entries.
-                Record::Out { .. } => {}
+                // originals live in entry sources. Copies already on disk
+                // fold into those sources at the end of the load.
+                Record::Out { id, d } => {
+                    tool_outputs.insert(id.clone(), d.clone());
+                }
                 Record::SubEntry { sub, entry } => {
                     subagent_messages
                         .entry(sub.clone())
@@ -365,7 +524,9 @@ pub(super) fn load_jsonl(
                                 .map(crate::history::ext::entry),
                         );
                     }
-                    LegacyRecord::Out { .. } => {}
+                    LegacyRecord::Out { id, d } => {
+                        tool_outputs.insert(id.clone(), legacy_messages::tool_result_block(&d));
+                    }
                     LegacyRecord::SubMsg { sub, d } => {
                         subagent_messages.entry(sub).or_default().extend(
                             legacy_messages::to_stored(std::slice::from_ref(&d), timestamp)
@@ -396,6 +557,8 @@ pub(super) fn load_jsonl(
     let id = id.ok_or(StorageError::NotFound {
         path: display_path.to_string(),
     })?;
+
+    fold_tool_outputs(&mut messages, &mut subagent_messages, tool_outputs);
 
     Ok(Session {
         version: SESSION_VERSION,
@@ -447,6 +610,36 @@ fn check_version(
     Ok(session)
 }
 
+/// The pre-jsonl single-file shape: the session wrapper around the
+/// pre-animist message and tool-result enums, mirrored field for field so
+/// the retired `tool_outputs` map deserializes too. Converted on load the
+/// way the jsonl loader converts legacy records. The current shape loads
+/// directly.
+#[derive(Deserialize)]
+struct LegacyJsonSession {
+    version: u32,
+    id: SessionRef,
+    title: String,
+    cwd: String,
+    model: String,
+    messages: Vec<LegacyMessage>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    token_usage: StoredTokenUsage,
+    /// Raw tool-output copies keyed by call id (retired in 08).
+    #[serde(default)]
+    tool_outputs: HashMap<String, legacy_messages::ToolResult>,
+    #[serde(default)]
+    subagent_messages: HashMap<String, Vec<LegacyMessage>>,
+    #[serde(default)]
+    subagents: Vec<StoredSubagent>,
+    #[serde(default)]
+    usage_by_model: HashMap<String, StoredTokenUsage>,
+    #[serde(default, flatten)]
+    meta: SessionMeta,
+    created_at: u64,
+    updated_at: u64,
+}
+
 /// The pre-jsonl single-file shape: the same session wrapper around the
 /// pre-animist message and tool-result enums, converted on load the way the
 /// jsonl loader converts legacy records. The current shape loads directly.
@@ -456,8 +649,7 @@ fn load_json(data: &[u8]) -> Result<Session<HistoryEntry, StoredTokenUsage>, Ses
     if let Ok(session) = serde_json::from_slice::<Session<HistoryEntry, StoredTokenUsage>>(data) {
         return check_version(session);
     }
-    let legacy: Session<legacy_messages::Message, StoredTokenUsage> =
-        serde_json::from_slice(data).map_err(StorageError::from)?;
+    let legacy: LegacyJsonSession = serde_json::from_slice(data).map_err(StorageError::from)?;
     if legacy.version != SESSION_VERSION {
         return Err(SessionError::VersionMismatch {
             found: legacy.version,
@@ -468,24 +660,26 @@ fn load_json(data: &[u8]) -> Result<Session<HistoryEntry, StoredTokenUsage>, Ses
     // time, so the session's created_at stands in for every message.
     let timestamp =
         Timestamp::from_second(legacy.created_at as i64).unwrap_or(Timestamp::UNIX_EPOCH);
-    let messages = ext::entries(legacy_messages::to_stored(&legacy.messages, timestamp));
-    let subagent_messages = legacy
+    let mut messages = ext::entries(legacy_messages::to_stored(&legacy.messages, timestamp));
+    let mut subagent_messages: HashMap<String, Vec<HistoryEntry>> = legacy
         .subagent_messages
         .iter()
         .map(|(id, msgs)| {
             (
                 id.clone(),
-                Arc::new(
-                    legacy_messages::to_stored(msgs, timestamp)
-                        .into_iter()
-                        .map(ext::entry)
-                        .collect::<Vec<_>>(),
-                ),
+                legacy_messages::to_stored(msgs, timestamp)
+                    .into_iter()
+                    .map(ext::entry)
+                    .collect::<Vec<_>>(),
             )
         })
         .collect();
-    // Legacy `tool_outputs` payloads stay unread until 11's loader folds
-    // them into entry sources.
+    let tool_outputs: HashMap<String, ContentBlock> = legacy
+        .tool_outputs
+        .iter()
+        .map(|(id, result)| (id.clone(), legacy_messages::tool_result_block(result)))
+        .collect();
+    fold_tool_outputs(&mut messages, &mut subagent_messages, tool_outputs);
     Ok(Session {
         version: SESSION_VERSION,
         id: legacy.id,
@@ -494,7 +688,10 @@ fn load_json(data: &[u8]) -> Result<Session<HistoryEntry, StoredTokenUsage>, Ses
         model: legacy.model,
         messages: Arc::new(messages),
         token_usage: legacy.token_usage,
-        subagent_messages,
+        subagent_messages: subagent_messages
+            .into_iter()
+            .map(|(id, msgs)| (id, Arc::new(msgs)))
+            .collect(),
         subagents: legacy.subagents,
         usage_by_model: legacy.usage_by_model,
         meta: legacy.meta,
@@ -618,9 +815,10 @@ mod tests {
             ),
             Err(())
         );
-        // A corrupt earlier record can shrink the reconstructed list, so an
-        // index that was valid at write time may point past the end: skip,
-        // never panic.
+        // An index that was valid at write time can point past a list a
+        // corrupt earlier record shrank: the replay refuses the record
+        // (never panics), and the loader turns the refusal into
+        // `RecordOutOfRange` instead of skipping it silently.
         assert_eq!(
             apply_record(
                 &mut entries,

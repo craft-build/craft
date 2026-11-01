@@ -764,7 +764,7 @@ impl Cli {
         &self,
         dir: &StateDir,
         cwd: &str,
-    ) -> Result<Option<crate::headless::StoredSession>> {
+    ) -> Result<Option<crate::storage::sessions::StoredSession>> {
         if let Some(raw) = &self.session {
             let id = parse_session_ref(raw)?;
             return load_or_invalid(raw, id.id(), dir).map(Some);
@@ -780,7 +780,7 @@ impl Cli {
         if let Some(raw) = crate::storage::sessions::indexed_latest(cwd, dir)
             && let Ok(id) = raw.parse::<SessionRef>()
         {
-            match crate::headless::StoredSession::load(id.id(), dir) {
+            match crate::storage::sessions::StoredSession::load(id.id(), dir) {
                 Ok(session) => return Ok(Some(session)),
                 // A record deleted behind our back (stale index) is not
                 // corruption; fall through to the scan. A file that exists
@@ -798,7 +798,7 @@ impl Cli {
                 }
             }
         }
-        crate::headless::StoredSession::latest(cwd, dir).map_err(|e| {
+        crate::storage::sessions::StoredSession::latest(cwd, dir).map_err(|e| {
             InvalidSnafu {
                 reason: format!("finding the latest session for {cwd}: {e}"),
             }
@@ -867,8 +867,8 @@ fn load_or_invalid(
     raw: &str,
     id: crate::id::CraftId,
     dir: &StateDir,
-) -> Result<crate::headless::StoredSession> {
-    crate::headless::StoredSession::load(id, dir).map_err(|e| {
+) -> Result<crate::storage::sessions::StoredSession> {
+    crate::storage::sessions::StoredSession::load(id, dir).map_err(|e| {
         InvalidSnafu {
             reason: format!("session {raw} could not be loaded: {e}"),
         }
@@ -888,7 +888,7 @@ fn session_file_exists(dir: &StateDir, id: crate::id::CraftId) -> bool {
 
 /// The stored `provider/model` a resume/fork restores when `--model` is
 /// absent; `unknown` and legacy records without a spec carry no model.
-fn stored_model_spec(session: &crate::headless::StoredSession) -> Option<String> {
+fn stored_model_spec(session: &crate::storage::sessions::StoredSession) -> Option<String> {
     let model = session.model.trim();
     (!model.is_empty() && model != "unknown" && model.contains('/')).then(|| model.to_string())
 }
@@ -1256,7 +1256,7 @@ mod tests {
     }
 
     fn seed_session(tmp: &tempfile::TempDir, cwd: &str, model: &str, turns: &[&str]) -> SessionRef {
-        use crate::headless::StoredSession;
+        use crate::storage::sessions::StoredSession;
         let mut session = StoredSession::new(model, cwd);
         session.title = "seeded".into();
         session.usage_by_model_mut().insert(
@@ -1379,7 +1379,7 @@ mod tests {
     /// touching the source file (H.9 acceptance).
     #[test]
     fn fork_copies_the_source_without_modifying_it() {
-        use crate::headless::StoredSession;
+        use crate::storage::sessions::StoredSession;
         let tmp = tempfile::tempdir().unwrap();
         let cwd = "/project";
         let source_id = seed_session(&tmp, cwd, "anthropic/a", &["first", "second"]);
@@ -1431,6 +1431,68 @@ mod tests {
         assert_eq!(
             std::fs::read(session_path(&tmp, &source_id)).unwrap(),
             before
+        );
+    }
+
+    /// The fork copies the source's entries whole — inactive entries and
+    /// revisions included (hardening/09: fork preserves source history) —
+    /// and the fork's persister starts from a fresh cursor: its first
+    /// checkpoint has nothing to write (11).
+    #[tokio::test]
+    async fn fork_copies_inactive_entries_and_restarts_the_persister() {
+        use crate::history::ext;
+        use crate::storage::sessions::StoredSession;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = "/project";
+        let mut source = StoredSession::new("anthropic/a", cwd);
+        // One active entry with a revision, one entry a compaction
+        // deactivated: both must survive the copy.
+        let revised = animist::history::HistoryEntry::builder()
+            .source(ext::stored_user_text("first"))
+            .revisions(vec![ext::stored_user_text("first, revised")])
+            .build();
+        let inactive = animist::history::HistoryEntry::builder()
+            .source(ext::stored_user_text("compacted away"))
+            .active(false)
+            .build();
+        source.replace_messages(vec![revised, inactive]);
+        let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+        source.save(&dir).unwrap();
+        let source_id = source.id.clone();
+
+        let cli = parse(&["-p", "-s", &source_id.to_string(), "--fork-session", "hi"]).unwrap();
+        let new_id = match cli.resolve_session_plan(&dir, cwd).unwrap() {
+            ResumePlan::Fork { new_id, .. } => new_id,
+            other => panic!("expected Fork, got {other:?}"),
+        };
+
+        // The persister the fork's run opens restores the copied entries,
+        // including the inactive one, and its fresh feed cursor leaves
+        // nothing to write on the first checkpoint.
+        let mut persister =
+            crate::harness::Persister::open_in(dir.clone(), new_id.clone(), cwd, "anthropic/a")
+                .await
+                .unwrap();
+        let restored = persister.entries();
+        assert_eq!(restored.len(), 2, "both entries copied");
+        assert!(
+            restored.iter().any(|e| !e.is_active()),
+            "the inactive entry survives the fork"
+        );
+        assert_eq!(restored[0].revisions().len(), 1);
+        let current = persister.history().current().await;
+        assert_eq!(
+            current.len(),
+            1,
+            "the current view still hides the inactive entry"
+        );
+        let file_before = std::fs::read(session_path(&tmp, &new_id)).unwrap();
+        persister.checkpoint().await.unwrap();
+        assert_eq!(
+            std::fs::read(session_path(&tmp, &new_id)).unwrap(),
+            file_before,
+            "a fresh cursor writes nothing for restored entries"
         );
     }
 

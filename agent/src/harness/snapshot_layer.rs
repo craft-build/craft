@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use animist::agent::tool::ToolContext;
 use animist::agent::{Agent, LayerImpl, Result, RunContext, RunStatus, ToolDecision};
 
-use crate::run::dedup;
+use crate::harness::dedup;
 use crate::snapshot::SnapshotManager;
 
 pub(crate) struct SnapshotLayer {

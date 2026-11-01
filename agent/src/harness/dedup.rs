@@ -19,9 +19,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
-use animist::history::{ContentBlock, ToolContent, ToolContents};
-
-use crate::history::ext;
+use animist::history::ContentBlock;
 
 const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob", "view_image", "sessions"];
 const WRITE_TOOLS: &[&str] = &[
@@ -40,7 +38,6 @@ const WRITE_TOOLS: &[&str] = &[
 /// invalidation is the whole cache. MCP tools (`server__tool`) are also in
 /// this category — their effects are opaque and they are never cacheable.
 const CACHE_CLEARING_TOOLS: &[&str] = &["bash", "task"];
-const CACHED_PREFIX: &str = "[cached] ";
 const MAX_CACHE_ENTRIES: usize = 64;
 
 /// Structural path normalizer: joins relative inputs onto a workspace root,
@@ -119,6 +116,8 @@ pub struct ToolDedupCache {
 }
 
 impl ToolDedupCache {
+    /// Test convenience; production anchors every cache at a root.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -221,49 +220,10 @@ impl ToolDedupCache {
         self.order.clear();
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
-
-/// Adapt a cached result for replay: the same content with the `[cached] `
-/// marker on the leading text block, answering this call's id.
-pub fn cached_result(cached: &ContentBlock, call_id: &str) -> ContentBlock {
-    let ContentBlock::ToolResult {
-        name,
-        content,
-        is_error,
-        ..
-    } = cached
-    else {
-        unreachable!("cache stores tool-result blocks");
-    };
-    let mut blocks = content.0.clone();
-    match blocks.first_mut() {
-        Some(ToolContent::Text { text }) => {
-            *text = format!("{CACHED_PREFIX}{text}");
-        }
-        // A leading image is never cached (image-bearing results skip the
-        // cache), but keep the prefix visible if one ever arrives.
-        Some(ToolContent::Image { .. }) | None => {
-            blocks.insert(
-                0,
-                ToolContent::Text {
-                    text: CACHED_PREFIX.trim_end().to_owned(),
-                },
-            );
-        }
-    }
-    ext::tool_result(
-        call_id,
-        name.as_deref(),
-        ToolContents::from(blocks),
-        *is_error,
-    )
 }
 
 /// The path whose contents a call reads or writes, if its arguments name one.
@@ -347,6 +307,7 @@ fn sorted(val: &Value) -> Value {
 /// filesystem so symlink aliases collapse, then case-folds on Windows.
 /// Falls back to structural normalization when nothing exists on disk yet.
 /// Not for the hot read path — callers invoke this once per write call.
+#[cfg(test)]
 pub fn normalize_write_path(path: &str) -> String {
     static ROOT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let root = ROOT.get_or_init(|| {
@@ -451,6 +412,7 @@ fn walk(val: &Value, hasher: &mut std::collections::hash_map::DefaultHasher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::ext;
 
     fn result(text: &str) -> ContentBlock {
         ext::tool_result("c1", Some("read"), text, false)
@@ -754,26 +716,6 @@ mod tests {
     }
 
     #[test]
-    fn cached_result_marks_and_rekeys() {
-        let cached = result("1: hello");
-        let replay = cached_result(&cached, "call-2");
-        let ContentBlock::ToolResult {
-            tool_use_id,
-            name,
-            content,
-            ..
-        } = &replay
-        else {
-            panic!("tool result");
-        };
-        assert_eq!(tool_use_id, "call-2");
-        assert_eq!(name.as_deref(), Some("read"));
-        assert!(result_text(&replay).starts_with("[cached] 1: hello"));
-        assert_eq!(result_text(&cached), "1: hello", "source untouched");
-        let _ = content;
-    }
-
-    #[test]
     fn reinserting_existing_key_at_capacity_evicts_nothing() {
         let mut cache = ToolDedupCache::new();
         for i in 0..MAX_CACHE_ENTRIES {
@@ -798,7 +740,6 @@ mod tests {
             cache.get(1, "read", &serde_json::json!({"i": 1})).is_some(),
             "the FIFO neighbor survives an overwrite"
         );
-        assert_eq!(cache.order.len(), cache.entries.len());
         assert_eq!(cache.order.len(), cache.entries.len());
     }
 

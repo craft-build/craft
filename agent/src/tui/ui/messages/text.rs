@@ -238,6 +238,27 @@ pub(super) fn notice_block(tone: Tone, text: &str, width: usize) -> Vec<Line<'st
         .collect()
 }
 
+/// A compaction summary replayed from history: a muted card naming the
+/// compaction kind on its header row, so what replaced the compacted-away
+/// turns stays visible in the transcript.
+pub(super) fn compaction_block(kind: &str, text: &str, width: usize) -> Vec<Line<'static>> {
+    let t = theme::current();
+    let wrap_w = width.saturating_sub(4).clamp(1, 88);
+    let header = format!("⟲ context compacted ({kind})");
+    std::iter::once(Line::from(vec![
+        Span::styled("◆ ", Style::default().fg(t.text_secondary)),
+        Span::styled(header, Style::default().fg(t.text_secondary)),
+    ]))
+    .chain(wrap_text(text, wrap_w).into_iter().map(|chunk| {
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("  ", Style::default()),
+            Span::styled(chunk, Style::default().fg(t.text_tertiary)),
+        ])
+    }))
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 //! Guardrail layer (07): the doom loop, the per-tool guardrails and the
 //! dedup cache sit here, behind the conversation's
-//! [`GuardrailState`](crate::run::GuardrailState).
+//! [`GuardrailState`](crate::harness::guardrails::GuardrailState).
 //!
 //! The chain runs the policy layer first, so guardrails judge exactly the
 //! calls a human or the rules already allowed — a user-approved call still
@@ -19,13 +19,13 @@ use animist::agent::tool::{ToolContext, ToolOutput};
 use animist::agent::{Agent, LayerImpl, Result, RunStatus, StepAction, StepOutcome, ToolDecision};
 use animist::history::{ContentBlock, StoredMessage};
 
-use crate::history::{ext, marker};
-use crate::run::GuardrailState;
-use crate::run::dedup::{self, ToolDedupCache};
-use crate::run::doom;
-use crate::run::guardrails::{
+use crate::harness::dedup::{self, ToolDedupCache};
+use crate::harness::doom;
+use crate::harness::guardrails::GuardrailState;
+use crate::harness::guardrails::{
     GUARDRAIL_BLOCK_MESSAGE, GUARDRAIL_WARN_PREFIX, GuardrailDecision, GuardrailInner,
 };
+use crate::history::{ext, marker};
 
 use super::events::{CraftEvent, EventSink};
 

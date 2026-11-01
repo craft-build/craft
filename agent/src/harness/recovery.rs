@@ -23,14 +23,14 @@ use animist::provider::ProviderError;
 use snafu::GenerateImplicitData;
 
 use crate::compaction::CompactionEngine;
-use crate::provider::ModelHandle;
-use crate::run::GuardrailState;
-use crate::run::SharedCompactionState;
-use crate::run::doom;
-use crate::run::retry::{
+use crate::compaction::SharedCompactionState;
+use crate::harness::doom;
+use crate::harness::guardrails::GuardrailState;
+use crate::harness::retry::{
     MAX_ROTATIONS, MAX_RUN_TRANSIENT_RETRIES, MAX_TIMEOUT_RETRIES, MAX_TRANSIENT_RETRIES,
     ROTATION_DELAY, RetryCtx, RetryState,
 };
+use crate::provider::ModelHandle;
 
 use super::events::{CraftEvent, EventSink};
 
@@ -90,7 +90,7 @@ pub(crate) enum ErrorKind {
     /// Connection-level transport failure: retried with backoff.
     Transport,
     /// Timed out: retried with backoff, capped at
-    /// [`MAX_TIMEOUT_RETRIES`](crate::run::retry::MAX_TIMEOUT_RETRIES).
+    /// [`MAX_TIMEOUT_RETRIES`](crate::harness::retry::MAX_TIMEOUT_RETRIES).
     Timeout,
     /// 401: authentication failed. Never retried here; the reauth wait
     /// owns it.

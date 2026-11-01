@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::diff::unified_text;
-use crate::run::dedup;
+use crate::harness::dedup;
 
 use super::error::{Error, Result, definition, denied, failure, finish, invalid, io_error};
 use super::fuzzy_replace;

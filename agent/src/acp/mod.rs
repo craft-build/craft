@@ -285,6 +285,7 @@ impl AppState {
         .map_err(|e| format!("session {stored_id:?} could not be loaded: {e}"))?;
         let stored_model = persister.store().session().model.clone();
         let stored_thinking = persister.store().session().meta.thinking;
+        let stored_entries = persister.store().session().messages().to_vec();
         let (instructions, workspace, permissions) = self.open_workspace(cwd).await?;
         // The stored model spec is `{provider}/{model}` (see `run_turn`).
         let (provider_name, model): (String, Option<String>) = match stored_model.split_once('/') {
@@ -302,6 +303,9 @@ impl AppState {
             Some(r) => (r.model, r.context_length),
             None => (String::new(), None),
         };
+        // `build_session` consumes the connection and session id; the
+        // replay below still needs both.
+        let (replay_connection, replay_session_id) = (connection.clone(), session_id.clone());
         let mut session = self
             .build_session(BuildInputs {
                 workspace,
@@ -326,6 +330,13 @@ impl AppState {
         session
             .conversation
             .update_settings(|settings| settings.thinking = session.thinking);
+        // The resume contract: the replayed transcript reaches the client as
+        // session updates before the `session/load` response, built by the
+        // same shared replay the TUI resume uses.
+        for update in turn::replay_updates(&crate::harness::replay::transcript(&stored_entries)) {
+            let _ = replay_connection
+                .send_notification(SessionNotification::new(replay_session_id.clone(), update));
+        }
         Ok(session)
     }
 

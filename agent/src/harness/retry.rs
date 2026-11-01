@@ -42,7 +42,7 @@ pub(crate) const ROTATION_DELAY: Duration = Duration::from_millis(5);
 /// registry, Phase 5); this seam only decides retry-vs-advance.
 pub type RotateKey = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// Retry inputs the run loop supplies: the rotation hook and the fallback
+/// Retry inputs the conversation supplies: the rotation hook and the fallback
 /// model chain. Defaults (no hook, empty chain) reproduce single-model
 /// behavior.
 #[derive(Clone, Default)]
@@ -101,7 +101,7 @@ pub(crate) fn hop_max_tokens(
         (Some(request), Some(hop_cap)) => Some(request.min(hop_cap)),
         (request, hop_cap) => request.or(hop_cap),
     };
-    super::clamped_max_tokens(hop.context_length(), prompt_tokens, configured)
+    crate::harness::request::clamped_max_tokens(hop.context_length(), prompt_tokens, configured)
 }
 
 #[cfg(test)]

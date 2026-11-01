@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::diff::unified_text;
-use crate::run::dedup;
+use crate::harness::dedup;
 
 use super::{
     MAX_FILE_BYTES, Workspace, claims, commit_staged,

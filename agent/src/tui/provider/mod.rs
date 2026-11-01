@@ -346,9 +346,11 @@ pub enum AgentEvent {
         text: String,
     },
     /// The session was replaced by a persisted one (`/sessions`, resume);
-    /// carries the user/assistant text transcript for display rebuild,
-    /// the composer draft preserved across checkpoints, and the session's
-    /// stored mode (`None` for legacy sessions predating persistence).
+    /// carries the replayed transcript (built by the shared
+    /// [`crate::harness::replay`] — text, tool results, compaction cards
+    /// and markers), the composer draft preserved across checkpoints, and
+    /// the session's stored mode (`None` for legacy sessions predating
+    /// persistence).
     SessionLoaded {
         messages: Vec<LoadedMessage>,
         draft: String,
@@ -396,11 +398,36 @@ pub enum AgentEvent {
     },
 }
 
-/// One displayable message of a loaded session's transcript.
+/// One displayable message of a loaded session's transcript, built by the
+/// shared replay ([`crate::harness::replay`]): current view, inactive
+/// entries already hidden.
 #[derive(Clone, Debug)]
 pub enum LoadedMessage {
     User(String),
     Assistant(String),
+    /// A tool result: the card kind derived from the tool's name (the
+    /// replay holds no call arguments, so the header carries no detail),
+    /// the text the current view shows (the altered text when an
+    /// alteration revised the entry), and the verbatim original behind the
+    /// card's "show full output" affordance. An error keeps its whole text
+    /// in the body, the live no-detail convention.
+    Tool {
+        id: String,
+        kind: ToolKind,
+        text: String,
+        full: Option<String>,
+    },
+    /// A compaction summary, rendered as a compaction card.
+    Compaction {
+        kind: String,
+        text: String,
+    },
+    /// A synthetic marker (cancel, end, failure, grace, nudge,
+    /// continuation), identified by its tag.
+    Marker {
+        kind: String,
+        text: String,
+    },
 }
 
 /// Mode a persisted session restores. Sent with [`AgentEvent::SessionLoaded`];

@@ -1,11 +1,11 @@
 //! Request layer: the per-step request-view pipeline, in the order the old
-//! loop applied it — recency tail, in-run read lifecycle and output
-//! compression, protocol shaping, the output-token clamp, and the sampling
-//! options. The system prompt rides here too, so its bytes stay exactly the
-//! preamble the surfaces always built. Stored history is never touched:
-//! every rewrite exists because the protocol rejects the shape animist
-//! passes through, or covers results the current run produced (everything
-//! older arrives pre-altered from history, 08).
+//! loop applied it — in-run read lifecycle and output compression, protocol
+//! shaping, the output-token clamp, and the sampling options. The system
+//! prompt rides here too, so its bytes stay exactly the preamble the
+//! surfaces always built. Stored history is never touched: every rewrite
+//! exists because the protocol rejects the shape animist passes through, or
+//! covers results the current run produced (everything older arrives
+//! pre-altered from history, 08).
 
 use std::sync::{Arc, Mutex};
 
@@ -16,18 +16,49 @@ use animist::agent::{Agent, LayerImpl, Result, RunContext, StepRequest};
 use animist::history::StoredMessage;
 use animist::provider::{RequestOptions, StreamResponse};
 
+use crate::compaction::SharedCompactionState;
 use crate::compaction::estimate::RequestOverhead;
 use crate::compression::CompressionConfig;
+use crate::harness::read_lifecycle;
+use crate::harness::retry::hop_max_tokens;
+use crate::harness::view;
 use crate::provider::ModelHandle;
-use crate::run::SharedCompactionState;
-use crate::run::read_lifecycle;
-use crate::run::recency::{self, RecencySource};
-use crate::run::retry::hop_max_tokens;
-use crate::run::view;
 use crate::thinking::ThinkingConfig;
 
 use super::conversation::TurnSettings;
 use super::recovery::RecoveryHandle;
+
+/// Floor for the output-token clamp, never applied above the configured
+/// cap. Servers like vLLM reject `prompt + max_tokens > window` even when
+/// the prompt alone fits; the floor keeps the clamp from trading that
+/// overflow for a too-small budget (reference `MIN_OUTPUT_TOKENS`).
+pub(crate) const MIN_OUTPUT_TOKENS: u64 = 4096;
+
+/// Reduce the request's output cap to what remains of the context window.
+/// `None` leaves the request alone (no window or no configured cap: the
+/// provider picks its own). `prompt_tokens` should be the larger of the
+/// chars/4 estimate and the last measured input count — the estimate is a
+/// floor that skips the clamp on exactly the long sessions it exists for.
+pub(crate) fn clamped_max_tokens(
+    window: Option<u32>,
+    prompt_tokens: u64,
+    configured: Option<u64>,
+) -> Option<u64> {
+    let window = match window {
+        Some(window) => u64::from(window),
+        // No known window: leave the configured cap alone.
+        None => return configured,
+    };
+    let cap = configured?;
+    let remaining = window.saturating_sub(prompt_tokens);
+    // The `min` keeps the floor from raising the cap over what was
+    // configured, since the provider would reject a number it never offered.
+    if cap > remaining {
+        Some(remaining.max(MIN_OUTPUT_TOKENS).min(cap))
+    } else {
+        Some(cap)
+    }
+}
 
 /// Inputs fixed for the conversation's lifetime; everything here would
 /// otherwise be re-read from config on every request.
@@ -37,7 +68,6 @@ pub(crate) struct RequestLayerInputs {
     /// The recovery state: its model override (a fallback hop or a reauth
     /// swap) serves requests while set (09).
     pub recovery: RecoveryHandle,
-    pub recency: Option<Arc<dyn RecencySource>>,
     /// The workspace root as a display string, anchoring read-lifecycle
     /// path normalization.
     pub write_root: Option<String>,
@@ -53,8 +83,6 @@ struct RequestRunState {
     /// The system bytes for this run; rebuilt from the settings so a mode
     /// switch changes the prompt without rebuilding the agent.
     system: String,
-    /// Requests served this run; the recency tail's turn counter.
-    prepares: u32,
     /// Where this run started in the history view: messages before it
     /// arrived pre-altered from history, so the in-run request rewrites
     /// (read lifecycle, compression) only touch the suffix.
@@ -72,7 +100,6 @@ impl RequestLayer {
             inputs,
             run: Mutex::new(RequestRunState {
                 system: String::new(),
-                prepares: 0,
                 run_start: 0,
             }),
         }
@@ -109,7 +136,6 @@ impl LayerImpl for RequestLayer {
         let run_start = agent.history().current().await.len();
         let mut run = self.run.lock().unwrap_or_else(|poison| poison.into_inner());
         run.system = system;
-        run.prepares = 0;
         run.run_start = run_start;
         Ok(message.clone())
     }
@@ -136,16 +162,11 @@ impl LayerImpl for RequestLayer {
         let handle = serving
             .clone()
             .unwrap_or_else(|| Arc::unwrap_or_clone(self.inputs.model.load_full()));
-        let (system, prepares, run_start) = {
-            let mut run = self.run.lock().unwrap_or_else(|poison| poison.into_inner());
-            run.prepares += 1;
-            (run.system.clone(), run.prepares, run.run_start)
+        let (system, run_start) = {
+            let run = self.run.lock().unwrap_or_else(|poison| poison.into_inner());
+            (run.system.clone(), run.run_start)
         };
         request.system = system;
-        // Volatile recency facts ride only this request.
-        if let Some(source) = &self.inputs.recency {
-            recency::attach_recency_tail_wire(&mut request.messages, source, prepares);
-        }
         read_lifecycle::apply_to_request_from(
             &mut request.messages,
             self.inputs.write_root.as_deref(),
@@ -176,7 +197,7 @@ impl LayerImpl for RequestLayer {
         let clamped = if hop {
             hop_max_tokens(settings.max_tokens, &handle, prompt_tokens)
         } else {
-            crate::run::clamped_max_tokens(
+            crate::harness::request::clamped_max_tokens(
                 handle.context_length(),
                 prompt_tokens,
                 settings.max_tokens,

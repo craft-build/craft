@@ -3,6 +3,7 @@
 use super::theme;
 use crate::tui::app::{App, Message};
 use crate::tui::geom;
+use crate::tui::provider::ToolLine;
 use crate::tui::style::Style;
 use crate::tui::text::{Line, Span};
 use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
@@ -18,7 +19,7 @@ pub(crate) use self::text::AssistantCache;
 pub(crate) use self::wrap::wrap_rows;
 
 use self::cards::tool_block;
-use self::text::{notice_block, thinking_block, user_block};
+use self::text::{compaction_block, notice_block, thinking_block, user_block};
 
 /// Transcript side margins. The left one is two cells deeper than the
 /// composer's (which sits at 2), so message blocks read as indented under
@@ -233,10 +234,15 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                 .view
                 .segments
                 .push(Segment::with_lines(notice_block(*tone, text, width))),
+            Message::Compaction { kind, text } => app
+                .view
+                .segments
+                .push(Segment::with_lines(compaction_block(kind, text, width))),
             Message::Tool {
                 id,
                 kind,
                 lines: body,
+                full,
                 diff,
                 review,
                 image,
@@ -245,10 +251,18 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                 let body_expanded = app.conversation.expanded_bodies.iter().any(|c| c == id);
                 let focused = app.conversation.focused == Some(idx);
                 let hovered = app.view.hover_tool == Some(idx);
+                // An expanded replay card with a verbatim original shows the
+                // original; everything else shows the current body.
+                let body: &[ToolLine] = if body_expanded {
+                    full.as_deref().unwrap_or(body)
+                } else {
+                    body
+                };
                 let (lines, notice_row, link) = tool_block(
                     kind,
                     id,
                     body,
+                    full.is_some(),
                     *diff,
                     focused,
                     collapsed,
@@ -650,6 +664,7 @@ mod tests {
         let path = std::env::temp_dir().join("probe.rs");
         app.conversation.messages.push(Message::Tool {
             id: "t1".into(),
+            full: None,
             kind: crate::tui::provider::ToolKind::Read {
                 path: path.display().to_string(),
                 summary: "2 lines".into(),
@@ -808,6 +823,7 @@ mod tests {
         let path = std::env::temp_dir().join("osc8_probe.rs");
         app.conversation.messages.push(Message::Tool {
             id: "t1".into(),
+            full: None,
             kind: crate::tui::provider::ToolKind::Read {
                 path: path.display().to_string(),
                 summary: String::new(),
@@ -853,6 +869,7 @@ mod tests {
         let long = std::env::temp_dir().join("osc8_probe.rs");
         narrow_app.conversation.messages.push(Message::Tool {
             id: "t1".into(),
+            full: None,
             kind: crate::tui::provider::ToolKind::Read {
                 path: format!("{}?padpadpadpadpad", long.display()),
                 summary: String::new(),

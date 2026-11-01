@@ -728,14 +728,14 @@ async fn load_session_restores_history_and_model() {
     let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
     let session_ref =
         crate::id::SessionRef::from_id("01965087-4c71-7f00-8000-000000000000".parse().unwrap());
-    let mut stored = crate::headless::StoredSession::new("openai/gpt-x", "/tmp/proj");
+    let mut stored = crate::storage::sessions::StoredSession::new("openai/gpt-x", "/tmp/proj");
     stored.id = session_ref.clone();
     stored.push_message(history::ext::entry(history::ext::stored(
         history::ext::user_text("hello"),
     )));
     stored.save(&dir).unwrap();
 
-    let loaded = crate::headless::StoredSession::load(session_ref.id(), &dir).unwrap();
+    let loaded = crate::storage::sessions::StoredSession::load(session_ref.id(), &dir).unwrap();
     assert_eq!(loaded.model, "openai/gpt-x");
     assert_eq!(loaded.messages().len(), 1);
 
@@ -755,5 +755,57 @@ async fn load_session_rejects_unknown_ids() {
     let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
     let missing =
         crate::id::SessionRef::from_id("01965087-4c71-7f00-8000-000000000001".parse().unwrap());
-    assert!(crate::headless::StoredSession::load(missing.id(), &dir).is_err());
+    assert!(crate::storage::sessions::StoredSession::load(missing.id(), &dir).is_err());
+}
+
+/// The `session/load` replay (11): the shared replay items become the
+/// session updates a client rebuilds its transcript from — user and agent
+/// text plus completed tool calls. Markers and compaction summaries have
+/// no ACP translation live either, so they replay as nothing.
+#[test]
+fn replay_updates_carry_the_shared_transcript() {
+    use agent_client_protocol::schema::v1::{SessionUpdate, ToolCallStatus};
+
+    let items = vec![
+        crate::harness::ReplayItem::User {
+            text: "do it".into(),
+        },
+        crate::harness::ReplayItem::ToolResult {
+            id: "t1".into(),
+            name: "bash".into(),
+            text: "done".into(),
+            full: None,
+            is_error: false,
+        },
+        crate::harness::ReplayItem::Marker {
+            kind: crate::history::marker::CANCEL.into(),
+            text: "[Cancelled by user]".into(),
+        },
+        crate::harness::ReplayItem::Compaction {
+            kind: "llm".into(),
+            text: "summary".into(),
+        },
+        crate::harness::ReplayItem::Assistant {
+            text: "all set".into(),
+        },
+    ];
+    let updates = replay_updates(&items);
+    assert_eq!(updates.len(), 3, "marker and compaction drop out");
+    assert!(matches!(
+        &updates[0],
+        SessionUpdate::UserMessageChunk(chunk) if chunk.content == text_block("do it")
+    ));
+    let SessionUpdate::ToolCall(call) = &updates[1] else {
+        panic!("tool result replays as a tool call, got {:?}", updates[1]);
+    };
+    assert_eq!(call.tool_call_id.0.as_ref(), "t1");
+    assert_eq!(call.status, ToolCallStatus::Completed);
+    assert!(matches!(
+        call.content.as_slice(),
+        [ToolCallContent::Content(content)] if *content == Content::new(text_block("done"))
+    ));
+    assert!(matches!(
+        &updates[2],
+        SessionUpdate::AgentMessageChunk(chunk) if chunk.content == text_block("all set")
+    ));
 }

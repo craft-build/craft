@@ -6,8 +6,10 @@
 //! records today, and the change-feed persister (05) writes the rest. The
 //! format is crash-safe: on load, each record that fails to parse is
 //! skipped with a stderr warning, wherever it sits in the file (a partial
-//! flush may corrupt multiple records, not just trailing ones). A header
-//! whose id is unparseable fails with `CorruptHeaderId` instead.
+//! flush may corrupt multiple records, not just trailing ones). A record
+//! that parses but addresses an entry the replayed list does not have
+//! fails the load with `RecordOutOfRange` instead of being skipped. A
+//! header whose id is unparseable fails with `CorruptHeaderId` instead.
 //! [`SessionLog`](log::SessionLog) tracks cursor state to enable O(delta)
 //! incremental saves.
 //!
@@ -120,6 +122,18 @@ pub enum SessionError {
         path: String,
         raw_id: String,
         source: crate::id::CraftIdParseError,
+    },
+
+    #[snafu(display(
+        "session log {path}:{line} has record index {index} out of range for the replayed \
+         list ({len} entries); the log is inconsistent — restore it from the session \
+         archives or delete the session"
+    ))]
+    RecordOutOfRange {
+        path: String,
+        line: usize,
+        index: usize,
+        len: usize,
     },
 }
 
@@ -619,14 +633,20 @@ impl StoredSession {
     /// Adopt a batch of history changes into the persisted mirror, the same
     /// replay the loader performs. The changes come from the live history's
     /// feed, so their indices are trusted; a failed apply still skips the
-    /// record rather than panicking.
-    pub fn apply_changes(&mut self, changes: &[animist::history::HistoryChange]) {
+    /// record rather than panicking, and the count is returned so the
+    /// persister can recover instead of appending a record the loader
+    /// would later refuse (the loader fails loads on out-of-range records).
+    pub fn apply_changes(&mut self, changes: &[animist::history::HistoryChange]) -> usize {
         let messages = Arc::make_mut(&mut self.messages);
+        let mut unapplied = 0;
         for change in changes {
             let record = records::record_of(change);
-            let _ = records::apply_record(messages, &record);
+            if records::apply_record(messages, &record).is_err() {
+                unapplied += 1;
+            }
         }
         self.touch();
+        unapplied
     }
 
     pub fn save(&mut self, dir: &StateDir) -> Result<(), SessionError> {
@@ -758,15 +778,20 @@ pub fn latest_model(cwd: &str, dir: &StateDir) -> Result<Option<String>, Session
 
 /// [`latest_model`] against an explicit sessions directory.
 pub fn latest_model_in(cwd: &str, dir: &Path) -> Result<Option<String>, SessionError> {
-    if let Some(path) = load_cwd_index(dir)
+    if let Some(model) = load_cwd_index(dir)
         .get(cwd)
         .and_then(|id| id.parse::<CraftId>().ok())
         .and_then(|id| locate_session_file(dir, id))
+        // An indexed file whose header is unusable (malformed, or written
+        // before headers recorded a model) is stale metadata, not the
+        // answer: fall through to the scan instead of suppressing it (H.28).
+        .and_then(|path| read_header_model(&path))
     {
-        return Ok(read_header_model(&path));
+        return Ok(Some(model));
     }
 
-    // The index is missing or stale; fall back to scanning headers.
+    // The index is missing, stale, or names an unreadable header; fall back
+    // to scanning headers.
     let Some(summary) = scan_headers(Some(cwd), dir)?
         .into_iter()
         .max_by_key(|s| s.updated_at)
@@ -796,15 +821,18 @@ pub fn latest_thinking_in(
     cwd: &str,
     dir: &Path,
 ) -> Result<Option<crate::thinking::ThinkingConfig>, SessionError> {
-    if let Some(path) = load_cwd_index(dir)
+    if let Some(thinking) = load_cwd_index(dir)
         .get(cwd)
         .and_then(|id| id.parse::<CraftId>().ok())
         .and_then(|id| locate_session_file(dir, id))
+        // Same staleness policy as `latest_model_in` (H.28).
+        .and_then(|path| read_last_thinking(&path))
     {
-        return Ok(read_last_thinking(&path));
+        return Ok(Some(thinking));
     }
 
-    // The index is missing or stale; fall back to scanning headers.
+    // The index is missing, stale, or names an unreadable tail; fall back
+    // to scanning headers.
     let Some(summary) = scan_headers(Some(cwd), dir)?
         .into_iter()
         .max_by_key(|s| s.updated_at)

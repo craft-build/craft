@@ -20,11 +20,11 @@ use animist::agent::{Agent, LayerImpl, Result, RunContext, ToolDecision};
 use animist::history::StoredMessage;
 
 use crate::auto_review::{Reviewer, Verdict};
+use crate::harness::guardrails::GuardrailState;
 use crate::permissions::{
     PermissionAnswer, PermissionCheck, PermissionError, PermissionManager, ToolKey,
     append_permission_rule, scope_for_call,
 };
-use crate::run::GuardrailState;
 use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 use super::conversation::TurnSettings;

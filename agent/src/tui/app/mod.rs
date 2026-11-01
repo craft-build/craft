@@ -25,7 +25,8 @@ use tokio::sync::mpsc;
 use crate::tui::composer::Composer;
 use crate::tui::modals::Modal;
 use crate::tui::provider::{
-    AgentEvent, Command, LoadedMessage, PlanItem, SessionMode, Status, TouchedFile, UsageRow,
+    AgentEvent, Command, LineKind, LoadedMessage, PlanItem, SessionMode, Status, Tone, ToolLine,
+    TouchedFile, UsageRow,
 };
 use crate::tui::repaint;
 use crate::tui::shell;
@@ -535,6 +536,29 @@ impl App {
                     let msg = match msg {
                         LoadedMessage::User(text) => Message::User(text),
                         LoadedMessage::Assistant(text) => Message::Assistant(text),
+                        LoadedMessage::Tool {
+                            id,
+                            kind,
+                            text,
+                            full,
+                        } => Message::Tool {
+                            id,
+                            kind,
+                            lines: replay_body(&text),
+                            // "Show full output" reads the verbatim
+                            // original the alteration replaced.
+                            full: full.map(|full| replay_body(&full)),
+                            diff: None,
+                            review: None,
+                            image: None,
+                        },
+                        LoadedMessage::Compaction { kind, text } => {
+                            Message::Compaction { kind, text }
+                        }
+                        LoadedMessage::Marker { kind: _, text } => Message::Notice {
+                            tone: Tone::Neutral,
+                            text,
+                        },
                     };
                     self.conversation.messages.push(msg);
                 }
@@ -1107,6 +1131,14 @@ pub(crate) mod testutil {
     }
 }
 
+/// The card body of one replayed tool result: plain context rows, one per
+/// output line.
+fn replay_body(text: &str) -> Vec<ToolLine> {
+    text.lines()
+        .map(|line| ToolLine::new(LineKind::Context, line))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::testutil::screen_text;
@@ -1176,6 +1208,64 @@ mod tests {
         });
         assert_eq!(app.conversation.visible_text(0), Some("loaded reply"));
         assert!(!app.conversation.reveal_pending(true));
+    }
+
+    /// A resumed session's replayed items rebuild the transcript: compaction
+    /// cards, markers and tool results (with their verbatim originals behind
+    /// the expand affordance) each land as their own message kind (11).
+    #[test]
+    fn session_load_rebuilds_replayed_tool_markers_and_compaction() {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::SessionLoaded {
+            messages: vec![
+                LoadedMessage::User("do it".into()),
+                LoadedMessage::Tool {
+                    id: "t1".into(),
+                    kind: crate::tui::provider::ToolKind::Bash { cmd: "bash".into() },
+                    text: "[4 lines compressed from 4096]".into(),
+                    full: Some("the whole original".into()),
+                },
+                LoadedMessage::Compaction {
+                    kind: "llm".into(),
+                    text: "summary of the early turns".into(),
+                },
+                LoadedMessage::Marker {
+                    kind: "cancel".into(),
+                    text: "[Cancelled by user]".into(),
+                },
+            ],
+            draft: String::new(),
+            mode: None,
+        });
+        let messages = &app.conversation.messages;
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(&messages[0], Message::User(t) if t == "do it"));
+        assert!(matches!(
+            &messages[1],
+            Message::Tool { id, full, lines, .. }
+                if id == "t1"
+                    && full.is_some()
+                    && lines.len() == 1
+        ));
+        assert!(matches!(
+            &messages[2],
+            Message::Compaction { kind, .. } if kind == "llm"
+        ));
+        assert!(matches!(
+            &messages[3],
+            Message::Notice { text, .. } if text == "[Cancelled by user]"
+        ));
+
+        // The compaction card and the full-output affordance both render.
+        let text = screen_text(&mut app, 100, 30);
+        assert!(
+            text.contains("context compacted (llm)"),
+            "compaction card missing:\n{text}"
+        );
+        assert!(
+            text.contains("click to show full output"),
+            "full-output affordance missing:\n{text}"
+        );
     }
 
     /// The status bar carries the turn's elapsed-seconds prompt progress

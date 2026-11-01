@@ -219,7 +219,8 @@ pub async fn complete_text(
     messages: &[crate::history::Message],
     system: &str,
 ) -> Result<String> {
-    let wire = crate::run::view::shape_messages(messages.to_vec(), handle.relocates_tool_images());
+    let wire =
+        crate::harness::view::shape_messages(messages.to_vec(), handle.relocates_tool_images());
     let model = handle.model.clone();
     let mut options = animist::provider::RequestOptions::builder().build();
     if handle.moves_system_to_preamble() {

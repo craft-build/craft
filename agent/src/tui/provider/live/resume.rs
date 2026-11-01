@@ -63,6 +63,10 @@ pub(super) async fn load_session(ctx: &LoopCtx, id: &str) {
             session.messages().to_vec(),
         )
     };
+    // The shared replay list (the same one ACP `session/load` and the
+    // headless resume build): current view, inactive entries hidden,
+    // compaction cards, markers, altered results with their originals.
+    let rendered = loaded_messages(&crate::harness::replay::transcript(&messages));
     // Stored thinking wins on resume; anything the file does not spell out
     // (legacy sessions) keeps the session's current level.
     let thinking = match stored_thinking {
@@ -83,7 +87,6 @@ pub(super) async fn load_session(ctx: &LoopCtx, id: &str) {
         });
         return;
     }
-    let rendered = transcript(&crate::history::ext::stored_of_entries(&messages));
     // Stored mode wins on resume; anything the file does not spell out
     // (legacy sessions) keeps the CLI-seeded mode.
     let mode = match mode.as_deref() {
@@ -153,22 +156,42 @@ pub(super) async fn resume_latest(ctx: &LoopCtx) {
     }
 }
 
-/// User/assistant text of a persisted session, for the conversation view's
-/// rebuild: tool calls and results carry no displayable text, so messages
-/// containing only those are skipped (they leave an empty `text()`).
-pub(super) fn transcript(messages: &[crate::history::StoredMessage]) -> Vec<super::LoadedMessage> {
-    messages
+/// The shared replay list as the TUI's loaded-message payload: the same
+/// items the app's `SessionLoaded` handler maps onto transcript messages.
+pub(super) fn loaded_messages(items: &[crate::harness::ReplayItem]) -> Vec<super::LoadedMessage> {
+    items
         .iter()
-        .filter_map(|stored| {
-            let text = crate::history::ext::message_text(stored);
-            if text.trim().is_empty() {
-                return None;
+        .map(|item| match item {
+            crate::harness::ReplayItem::User { text } => super::LoadedMessage::User(text.clone()),
+            crate::harness::ReplayItem::Assistant { text } => {
+                super::LoadedMessage::Assistant(text.clone())
             }
-            Some(if crate::history::ext::is_user(stored.message()) {
-                super::LoadedMessage::User(text)
-            } else {
-                super::LoadedMessage::Assistant(text)
-            })
+            crate::harness::ReplayItem::ToolResult {
+                id,
+                name,
+                text,
+                full,
+                ..
+            } => {
+                super::LoadedMessage::Tool {
+                    id: id.clone(),
+                    // The same header derivation live cards get, minus the
+                    // argument detail the replay does not hold.
+                    kind: super::cards::tool_head(name, &serde_json::Value::Null),
+                    text: text.clone(),
+                    full: full.clone(),
+                }
+            }
+            crate::harness::ReplayItem::Compaction { kind, text } => {
+                super::LoadedMessage::Compaction {
+                    kind: kind.clone(),
+                    text: text.clone(),
+                }
+            }
+            crate::harness::ReplayItem::Marker { kind, text } => super::LoadedMessage::Marker {
+                kind: kind.clone(),
+                text: text.clone(),
+            },
         })
         .collect()
 }

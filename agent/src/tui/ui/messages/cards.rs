@@ -28,6 +28,7 @@ pub(super) fn tool_block(
     kind: &ToolKind,
     _id: &str,
     body: &[crate::tui::provider::ToolLine],
+    has_full: bool,
     diff: Option<DiffState>,
     focused: bool,
     collapsed: bool,
@@ -258,10 +259,14 @@ pub(super) fn tool_block(
         (body, false)
     };
     let notice_text = if truncating {
-        Some(format!("\u{2026} ({hidden} lines) click to expand"))
-    } else if body_expanded && body.len() > cap {
+        Some(format!("… ({hidden} lines) click to expand"))
+    } else if has_full && !body_expanded {
+        // An alteration replaced this replayed body; the verbatim original
+        // sits one click away.
+        Some("… output compressed — click to show full output".to_string())
+    } else if body_expanded && (has_full || body.len() > cap) {
         // The expanded body keeps a row to fold it back down.
-        Some("\u{2026} click to collapse".to_string())
+        Some("… click to collapse".to_string())
     } else {
         None
     };
@@ -456,7 +461,10 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let lines = tool_block(&kind, "t1", &body, None, false, false, false, false, 80).0;
+        let lines = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, false, 80,
+        )
+        .0;
         let joined: Vec<String> = lines.iter().map(line_text).collect();
         // Numbered gutter on removed/context lines, blank on added.
         assert!(
@@ -499,7 +507,10 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let lines = tool_block(&kind, "t1", &body, None, false, false, false, false, 80).0;
+        let lines = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, false, 80,
+        )
+        .0;
         let ctx = lines
             .iter()
             .find(|l| line_text(l).contains("let x = 1;"))
@@ -523,8 +534,14 @@ mod tests {
             summary: String::new(),
         };
         let body = vec![ToolLine::new(crate::tui::provider::LineKind::Add, "x")];
-        let expanded = tool_block(&kind, "t1", &body, None, false, false, false, false, 80).0;
-        let collapsed = tool_block(&kind, "t1", &body, None, false, true, false, false, 80).0;
+        let expanded = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, false, 80,
+        )
+        .0;
+        let collapsed = tool_block(
+            &kind, "t1", &body, false, None, false, true, false, false, 80,
+        )
+        .0;
         assert!(expanded.len() > collapsed.len());
         let header: String = collapsed[1]
             .spans
@@ -546,8 +563,9 @@ mod tests {
         let body: Vec<ToolLine> = (0..60)
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("line {i}")))
             .collect();
-        let (lines, notice, _link) =
-            tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        let (lines, notice, _link) = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, false, 80,
+        );
         // 40 head lines kept; the notice names the hidden count and sits
         // just above the bottom padding row.
         assert_eq!(notice, Some(lines.len() - 2));
@@ -563,8 +581,9 @@ mod tests {
             "{text:?}"
         );
         // Expanded body renders everything, with a fold-back notice.
-        let (lines, notice, _link) =
-            tool_block(&kind, "t1", &body, None, false, false, false, true, 80);
+        let (lines, notice, _link) = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, true, 80,
+        );
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(
             text.iter().any(|l| l.contains("line 59")),
@@ -581,8 +600,9 @@ mod tests {
         let body: Vec<ToolLine> = (0..60)
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("out {i}")))
             .collect();
-        let (lines, notice, _link) =
-            tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        let (lines, notice, _link) = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, false, 80,
+        );
         assert!(notice.is_some(), "tail-kept bodies still carry a notice");
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(text.iter().any(|l| l.contains("out 59")), "tail kept");
@@ -602,8 +622,9 @@ mod tests {
         let body: Vec<ToolLine> = (0..43)
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("l {i}")))
             .collect();
-        let (lines, notice, _link) =
-            tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        let (lines, notice, _link) = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, false, 80,
+        );
         assert_eq!(notice, None, "3 hidden lines buy no notice");
         let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(text.contains("l 42"), "full body rendered");
@@ -616,7 +637,9 @@ mod tests {
             summary: String::new(),
         };
         let body = vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")];
-        let (_, _, link) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        let (_, _, link) = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, false, 80,
+        );
         let hl = link.expect("read card carries a link");
         assert!(hl.uri.starts_with("file://"), "{}", hl.uri);
         // bar (1) + space (1) + caret (2) + "Read " (5) precede the path.
@@ -627,7 +650,9 @@ mod tests {
             path: "src/b.rs".into(),
             summary: String::new(),
         };
-        let (_, _, link) = tool_block(&kind, "t1", &body, None, false, true, false, false, 80);
+        let (_, _, link) = tool_block(
+            &kind, "t1", &body, false, None, false, true, false, false, 80,
+        );
         assert!(link.is_some(), "collapsed edit card still links");
     }
 
@@ -641,7 +666,9 @@ mod tests {
             },
         ] {
             let body = vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")];
-            let (_, _, link) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+            let (_, _, link) = tool_block(
+                &kind, "t1", &body, false, None, false, false, false, false, 80,
+            );
             assert!(link.is_none());
         }
     }
@@ -656,7 +683,9 @@ mod tests {
         let long = "permission denied: rm -rf outside the project auto-review: \
                     this looks destructive and was blocked by the guardrail";
         let body = vec![ToolLine::new(crate::tui::provider::LineKind::Muted, long)];
-        let (lines, _, _) = tool_block(&kind, "t1", &body, None, false, false, false, false, 40);
+        let (lines, _, _) = tool_block(
+            &kind, "t1", &body, false, None, false, false, false, false, 40,
+        );
         let text: Vec<String> = lines.iter().map(line_text).collect();
         // No row exceeds the card width (minus trailing pad is included).
         assert!(
@@ -678,7 +707,18 @@ mod tests {
             cmd: "cargo test --package craft --lib some::rather::long::module::path".into(),
         };
         let width = 30;
-        let (lines, _, _) = tool_block(&kind, "t1", &[], None, false, false, false, false, width);
+        let (lines, _, _) = tool_block(
+            &kind,
+            "t1",
+            &[],
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            width,
+        );
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(
             text.iter().all(|l| l.chars().count() <= width),

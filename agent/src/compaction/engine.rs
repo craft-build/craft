@@ -18,15 +18,15 @@ use std::sync::Arc;
 
 use animist::history::{History, HistoryError, HistorySnapshot, StoredMessage};
 
+use crate::compaction::SharedCompactionState;
 use crate::config::{
     CompactionBuffer, CompactionConfig, CompactionKind,
     DEFAULT_COMPACTION_BUFFER as DEFAULT_ENGINE_BUFFER,
 };
 use crate::harness::EventSink;
 use crate::harness::events::CraftEvent;
+use crate::harness::guardrails::GuardrailState;
 use crate::provider::ModelHandle;
-use crate::run::GuardrailState;
-use crate::run::SharedCompactionState;
 
 use super::estimate::{TokenEstimator, estimate_tokens};
 use super::llm::{PlanCompactor, build_llm_plan};
@@ -254,8 +254,8 @@ impl CompactionEngine {
         // `is_overflow`: `usage >= window - buffer`) — never less than
         // `MIN_OUTPUT_TOKENS`, so the output-cap floor and the compaction
         // threshold agree on the same reservation.
-        let reserved =
-            u64::from(self.buffer.resolve(context_length)).max(crate::run::MIN_OUTPUT_TOKENS);
+        let reserved = u64::from(self.buffer.resolve(context_length))
+            .max(crate::harness::request::MIN_OUTPUT_TOKENS);
         let usable = u64::from(context_length).saturating_sub(reserved);
         let mut ran = false;
         // Overflow forcing cascades: a VCC pass that leaves the history over
@@ -742,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn compaction_clears_dedup_cache() {
-        use crate::run::ToolDedupCache;
+        use crate::harness::dedup::ToolDedupCache;
 
         let guardrails = std::sync::Arc::new(GuardrailState::new(None));
         let input = serde_json::json!({"path": "/x.rs"});
@@ -782,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn declined_compaction_keeps_dedup_cache() {
-        use crate::run::ToolDedupCache;
+        use crate::harness::dedup::ToolDedupCache;
 
         let guardrails = std::sync::Arc::new(GuardrailState::new(None));
         let input = serde_json::json!({"path": "/x.rs"});
@@ -1198,8 +1198,8 @@ mod tests {
         let seeded = long_history();
         let tokens = estimate_tokens(&seeded);
         // `usable = window - max(0, MIN_OUTPUT_TOKENS)`; sit exactly on it.
-        let usable = tokens.max(crate::run::MIN_OUTPUT_TOKENS);
-        let window = (usable + crate::run::MIN_OUTPUT_TOKENS).max(1) as u32;
+        let usable = tokens.max(crate::harness::request::MIN_OUTPUT_TOKENS);
+        let window = (usable + crate::harness::request::MIN_OUTPUT_TOKENS).max(1) as u32;
         let state = shared(CompactionState::default());
         let history = history_of(seeded);
         // Scale the overhead so the scaled estimate lands exactly on usable.
@@ -1221,9 +1221,9 @@ mod tests {
             .with_buffer(crate::config::CompactionBuffer::Tokens(0));
         let seeded = long_history();
         let tokens = estimate_tokens(&seeded);
-        let usable = tokens.max(crate::run::MIN_OUTPUT_TOKENS);
+        let usable = tokens.max(crate::harness::request::MIN_OUTPUT_TOKENS);
         // Window so `usable - 1` remains below MIN_OUTPUT_TOKENS-free space.
-        let window = (usable + crate::run::MIN_OUTPUT_TOKENS + 1) as u32;
+        let window = (usable + crate::harness::request::MIN_OUTPUT_TOKENS + 1) as u32;
         let state = shared(CompactionState::default());
         state.lock().await.set_request_overhead(usable - tokens - 1);
         let (sink, _stream) = EventSink::new();
@@ -1247,8 +1247,8 @@ mod tests {
         let seeded = long_history();
         let tokens = estimate_tokens(&seeded);
         // Window big enough that usable > 0 but estimate sits above it.
-        let window = (tokens + crate::run::MIN_OUTPUT_TOKENS / 2) as u32;
-        let usable = u64::from(window).saturating_sub(crate::run::MIN_OUTPUT_TOKENS);
+        let window = (tokens + crate::harness::request::MIN_OUTPUT_TOKENS / 2) as u32;
+        let usable = u64::from(window).saturating_sub(crate::harness::request::MIN_OUTPUT_TOKENS);
         assert!(tokens > usable, "test premise: estimate over usable");
         let state = shared(CompactionState::default());
         let (sink, _stream) = EventSink::new();

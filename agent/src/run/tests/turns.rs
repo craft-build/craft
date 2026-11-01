@@ -400,7 +400,7 @@ async fn failed_run_preserves_prior_history_and_commits_the_turn() {
     let provider = script(vec![crate::testing::http_error(400, "boom")]);
     let dir = tempfile::tempdir().unwrap();
     let history = seeded_history(vec![ext::stored_user_text(
-        crate::run::doom::GRACE_CALL_PROMPT,
+        crate::harness::doom::GRACE_CALL_PROMPT,
     )])
     .await;
     let (conversation, _stream) = conversation_over(
@@ -424,7 +424,7 @@ async fn failed_run_preserves_prior_history_and_commits_the_turn() {
     assert_eq!(messages.len(), 3);
     assert_eq!(
         ext::message_text(&messages[0]),
-        crate::run::doom::GRACE_CALL_PROMPT,
+        crate::harness::doom::GRACE_CALL_PROMPT,
         "the prior history is untouched"
     );
     assert_eq!(
@@ -476,7 +476,7 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
     let messages = stored(&conversation).await;
     let grace_count = messages
         .iter()
-        .filter(|m| ext::message_text(m) == crate::run::doom::GRACE_CALL_PROMPT)
+        .filter(|m| ext::message_text(m) == crate::harness::doom::GRACE_CALL_PROMPT)
         .count();
     assert_eq!(grace_count, 1, "grace prompt fired exactly once");
     let events = events_until_done(&mut stream).await;
@@ -515,7 +515,7 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[1].messages.last().map(ext::text),
-        Some(crate::run::doom::GRACE_CALL_PROMPT.to_owned())
+        Some(crate::harness::doom::GRACE_CALL_PROMPT.to_owned())
     );
 }
 

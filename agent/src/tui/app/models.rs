@@ -44,10 +44,20 @@ pub enum Message {
         tone: Tone,
         text: String,
     },
+    /// A compaction summary replayed from history (`craft.compaction`),
+    /// rendered as a muted card: what replaced the compacted-away turns.
+    Compaction {
+        kind: String,
+        text: String,
+    },
     Tool {
         id: String,
         kind: ToolKind,
         lines: Vec<ToolLine>,
+        /// The verbatim original behind this card's "show full output"
+        /// affordance, when an alteration revised the replayed body.
+        /// `None` for every live card.
+        full: Option<Vec<ToolLine>>,
         diff: Option<DiffState>,
         /// Auto-review status for this call, rendered as a line under the
         /// card rather than inside it (updated in place by [`AgentEvent::AutoReview`]).
@@ -300,6 +310,7 @@ impl Conversation {
                             id: id.clone(),
                             kind,
                             lines,
+                            full: None,
                             diff,
                             review: None,
                             image,

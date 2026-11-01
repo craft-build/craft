@@ -6,8 +6,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::error::{Error, Result, definition, finish, invalid};
-use crate::headless::StoredSession;
 use crate::storage::StateDir;
+use crate::storage::sessions::StoredSession;
 /// Sessions listed per call, newest first.
 const MAX_ROWS: usize = 50;
 const NO_STORAGE: &str = "no session storage directory is available";

@@ -14,7 +14,9 @@ use super::commands::{
     PendingMessage, close_aborted_turn, drain_shell_results, handle_clear, handle_interrupt,
     handle_reset, handle_select_model, handle_send_message, maybe_send_next,
 };
-use super::resume::{handle_set_mode, load_session, persist_on_exit, resume_latest, transcript};
+use super::resume::{
+    handle_set_mode, load_session, loaded_messages, persist_on_exit, resume_latest,
+};
 use super::turn::{TurnCtx, run_turn};
 use super::*;
 use crate::history::ext;
@@ -615,11 +617,11 @@ async fn resume_latest_picks_the_newest_session_for_cwd() {
     );
 }
 
-/// Tool calls, results, and system blocks don't render as user/agent
-/// text in the rebuilt transcript; a system block reads as agent text.
+/// The replay skips what is not transcript (system instructions) and
+/// carries tool results as their own items with the current view's text.
 #[test]
-fn transcript_skips_tool_blocks() {
-    let messages = vec![
+fn loaded_messages_replay_the_current_view() {
+    let entries = ext::entries(vec![
         ext::stored_user_text("do it"),
         ext::stored(ext::observation(vec![ext::tool_result(
             "t1",
@@ -627,12 +629,18 @@ fn transcript_skips_tool_blocks() {
             "file body",
             false,
         )])),
-        ext::stored(ext::system_text("compacted summary")),
-    ];
-    let rendered = transcript(&messages);
-    assert_eq!(rendered.len(), 2);
+        ext::stored(ext::system_text("preamble")),
+    ]);
+    let rendered = loaded_messages(&crate::harness::replay::transcript(&entries));
+    assert_eq!(rendered.len(), 2, "the system entry is not transcript");
     assert!(matches!(&rendered[0], LoadedMessage::User(t) if t == "do it"));
-    assert!(matches!(&rendered[1], LoadedMessage::Assistant(t) if t == "compacted summary"));
+    assert!(matches!(
+        &rendered[1],
+        LoadedMessage::Tool { id, kind, text, full: None, .. }
+            if id == "t1"
+                && matches!(kind, crate::tui::provider::ToolKind::Read { .. })
+                && text == "file body"
+    ));
 }
 
 /// An unparseable id keeps the current session and warns.

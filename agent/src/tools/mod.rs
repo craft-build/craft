@@ -344,8 +344,8 @@ impl Workspace {
         let root = self.root_key();
         let guard = self.plan_path.read().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().is_some_and(|plan| {
-            crate::run::dedup::normalize_write_path_with_root(root.as_deref(), requested)
-                == crate::run::dedup::normalize_write_path_with_root(
+            crate::harness::dedup::normalize_write_path_with_root(root.as_deref(), requested)
+                == crate::harness::dedup::normalize_write_path_with_root(
                     root.as_deref(),
                     &plan.display().to_string(),
                 )
@@ -359,8 +359,9 @@ impl Workspace {
     /// writable outside the workspace.
     fn plans_read_target(&self, requested: &str) -> bool {
         let root = self.root_key();
-        let normalize =
-            |path: &str| crate::run::dedup::normalize_write_path_with_root(root.as_deref(), path);
+        let normalize = |path: &str| {
+            crate::harness::dedup::normalize_write_path_with_root(root.as_deref(), path)
+        };
         self.state_dir.as_ref().is_some_and(|dir| {
             let plans = normalize(&dir.path().join("plans").display().to_string());
             Path::new(&normalize(requested)).starts_with(plans)
@@ -683,7 +684,7 @@ impl Workspace {
     }
 
     fn normalized_root(&self) -> String {
-        crate::run::dedup::normalize_write_path_with_root(
+        crate::harness::dedup::normalize_write_path_with_root(
             self.root_key().as_deref(),
             &self.root.display().to_string(),
         )

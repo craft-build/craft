@@ -4,7 +4,6 @@
 //! animist's adapters pass through.
 
 use animist::history::{ContentBlock, Message, Role, ToolContent};
-use animist::provider::Tool;
 
 use crate::compression::{self, CompressionConfig};
 #[cfg(test)]
@@ -203,6 +202,10 @@ pub(crate) fn compress_request_view_from(
 /// Replay validation for debug builds and tests: the request view must be
 /// wire-legal (tool uses answered in order, signatures where required)
 /// before any provider sees it.
+#[cfg(test)]
+use animist::provider::Tool;
+
+#[cfg(test)]
 pub fn assert_replay_valid(messages: &[Message], tools: &[Tool]) {
     if let Err(error) = animist::protocol::validate_replay(messages, tools) {
         debug_assert!(false, "request view violates replay rules: {error}");

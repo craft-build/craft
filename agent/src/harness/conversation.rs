@@ -23,11 +23,10 @@ use crate::error::{BuildConversationSnafu, Result, ShutdownConversationSnafu};
 use crate::provider::ModelHandle;
 use animist::agent::tool::ToolRegistry;
 
+use crate::compaction::SharedCompactionState;
+use crate::harness::guardrails::GuardrailState;
+use crate::harness::retry::RetryCtx;
 use crate::run::AgentMode;
-use crate::run::GuardrailState;
-use crate::run::RetryCtx;
-use crate::run::SharedCompactionState;
-use crate::run::recency::RecencySource;
 use crate::snapshot::SnapshotManager;
 use crate::thinking::ThinkingConfig;
 
@@ -199,7 +198,6 @@ pub struct ConversationBuilder<'a> {
     thinking: Option<ThinkingConfig>,
     fast: bool,
     policy: Option<PolicyLayerInputs>,
-    recency: Option<Arc<dyn RecencySource>>,
     /// Retry inputs for the recovery layer: the key-rotation hook and the
     /// fallback model chain. Defaults reproduce single-model behavior.
     retry: RetryCtx,
@@ -242,7 +240,6 @@ impl<'a> ConversationBuilder<'a> {
             thinking: None,
             fast: false,
             policy: None,
-            recency: None,
             retry: RetryCtx::default(),
             reauth: None,
             max_continuation_turns: DEFAULT_MAX_CONTINUATION_TURNS,
@@ -291,12 +288,6 @@ impl<'a> ConversationBuilder<'a> {
     /// conversation runs ungated (tests; the workspace trusts its caller).
     pub fn policy(mut self, policy: PolicyLayerInputs) -> Self {
         self.policy = Some(policy);
-        self
-    }
-
-    /// Volatile per-turn facts for the request view.
-    pub fn recency(mut self, recency: Arc<dyn RecencySource>) -> Self {
-        self.recency = Some(recency);
         self
     }
 
@@ -368,7 +359,6 @@ impl<'a> ConversationBuilder<'a> {
             thinking,
             fast,
             policy,
-            recency,
             retry,
             reauth,
             max_continuation_turns,
@@ -457,7 +447,6 @@ impl<'a> ConversationBuilder<'a> {
                 model: Arc::clone(&model_cell),
                 settings: Arc::clone(&settings),
                 recovery: Arc::clone(&recovery_state),
-                recency,
                 write_root: write_root
                     .as_deref()
                     .map(|path| path.to_string_lossy().into_owned()),

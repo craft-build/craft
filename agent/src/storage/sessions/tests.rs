@@ -102,7 +102,8 @@ fn legacy_usage_entry_loads_unpriced_and_stays_that_way_on_disk() {
 
 /// A legacy `.json` session (pre-animist message enums) loads through the
 /// converter: messages, tool outputs and subagent histories all arrive in
-/// their animist shapes.
+/// their animist shapes, and the raw `tool_outputs` copies fold into the
+/// matching result entry's source.
 #[test]
 fn legacy_json_session_loads_converted() {
     let tmp = TempDir::new().unwrap();
@@ -115,11 +116,19 @@ fn legacy_json_session_loads_converted() {
         "title": "t",
         "cwd": "/p",
         "model": "m",
-        "messages": [msg("hi"), {"Assistant": {"content": [{"Text": {"text": "hello"}}]}}],
+        "messages": [
+            msg("hi"),
+            {"Assistant": {"content": [{"Text": {"text": "hello"}}]}},
+            {"User": {"content": [{"ToolResult": {
+                "call": "t1", "name": "read",
+                "content": [{"Text": {"text": "2 lines compressed from 512"}}],
+                "is_error": false}}]}}
+        ],
         "token_usage": {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0},
         "tool_outputs": {
             "t1": {"call": "t1", "name": "read",
-                   "content": [{"Text": {"text": "raw"}}], "is_error": false}
+                   "content": [{"Text": {"text": "the raw original output, far longer than the compressed copy"}}],
+                   "is_error": false}
         },
         "subagent_messages": {"call-7": [msg("do things")]},
         "subagents": [],
@@ -132,9 +141,16 @@ fn legacy_json_session_loads_converted() {
     fs::write(json_path(dir, id), json).unwrap();
 
     let loaded = StoredSession::load_from(id, dir).unwrap();
-    assert_eq!(message_texts(loaded.messages()), ["hi", "hello"]);
-    // Legacy `tool_outputs` payloads stay unread until 11's loader folds
-    // them into entry sources.
+    assert_eq!(
+        message_texts(&loaded.messages()[..2]),
+        ["hi", "hello"],
+        "text messages convert as before"
+    );
+    assert_eq!(
+        result_text(&loaded.messages()[2]),
+        "the raw original output, far longer than the compressed copy",
+        "the raw tool_outputs copy folds into the entry's source"
+    );
     assert_eq!(
         message_texts(&loaded.subagent_messages()["call-7"]),
         ["do things"]
@@ -721,6 +737,42 @@ fn latest_falls_back_when_index_stale() {
 
     let latest = StoredSession::latest_in("/project", dir).unwrap().unwrap();
     assert_eq!(latest.id, session.id);
+}
+
+/// H.28: an indexed newest session whose header line is malformed is stale
+/// metadata, not the answer — the model and thinking lookups fall back to
+/// the newest sibling whose header still parses, instead of suppressing
+/// the restore.
+#[test]
+fn latest_model_and_thinking_treat_a_malformed_indexed_header_as_stale() {
+    use crate::thinking::{Effort, ThinkingConfig};
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let mut older = StoredSession::new("zai/glm-5.3", "/project");
+    older.set_thinking(ThinkingConfig::Effort(Effort::Low));
+    save_with_time(&mut older, dir, 1000);
+    let mut newer = StoredSession::new("anthropic/claude-sonnet-4", "/project");
+    save_with_time(&mut newer, dir, 2000);
+    assert_eq!(
+        latest_model_in("/project", dir).unwrap().as_deref(),
+        Some("anthropic/claude-sonnet-4")
+    );
+
+    // Corrupt the indexed newest session's header line: the lookup falls
+    // back to the older sibling instead of reporting nothing.
+    let newest = jsonl_path(dir, newer.id.id());
+    let body = fs::read_to_string(&newest).unwrap();
+    fs::write(&newest, format!("{{\"t\":\"header\",\"trun\n{body}")).unwrap();
+    assert_eq!(
+        latest_model_in("/project", dir).unwrap().as_deref(),
+        Some("zai/glm-5.3"),
+        "a malformed newest header falls back to the readable sibling"
+    );
+    assert_eq!(
+        latest_thinking_in("/project", dir).unwrap(),
+        Some(ThinkingConfig::Effort(Effort::Low)),
+        "the thinking lookup applies the same staleness policy"
+    );
 }
 
 #[test_case("short title", "short title" ; "short_passthrough")]
@@ -1360,6 +1412,185 @@ fn crash_recovery_skips_retired_out_records_around_corrupt_line() {
     assert_eq!(loaded.messages().len(), 2);
 }
 
+/// One user observation entry holding a single tool result.
+fn result_entry(id: &str, name: &str, text: &str) -> animist::history::HistoryEntry {
+    ext::entry(ext::stored(ext::observation(vec![ext::tool_result(
+        id,
+        Some(name),
+        text,
+        false,
+    )])))
+}
+
+/// The verbatim tool-result text of the first block of an entry.
+fn result_text(entry: &animist::history::HistoryEntry) -> String {
+    entry
+        .verbatim()
+        .message()
+        .content
+        .iter()
+        .find_map(|block| match block {
+            animist::history::ContentBlock::ToolResult { content, .. } => {
+                Some(ext::tool_content_text(content))
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn append_out_record(path: &Path, id: &str, text: &str) {
+    let out = serde_json::to_string(&Record::Out {
+        id: id.into(),
+        d: ext::tool_result(id, Some("read"), text, false),
+    })
+    .unwrap();
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(out.as_bytes()).unwrap();
+    file.write_all(b"\n").unwrap();
+}
+
+/// A raw `out` copy folds into the matching tool-result entry's source when
+/// the entry holds a poorer (compressed) copy, and is dropped when the entry
+/// already holds at least as much (including an equally rich copy with
+/// different text) or its call left the history.
+#[test]
+fn out_records_fold_into_entry_sources() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let mut session = StoredSession::new("m", "/project");
+    // t1: the stored copy is the compressed form, the raw copy is richer.
+    session.push_message(result_entry("t1", "read", "3 lines compressed from 9001"));
+    // t2: the stored copy already holds the whole output.
+    let t2_text = "the full output, already richer than any raw copy";
+    session.push_message(result_entry("t2", "bash", t2_text));
+    // t4: the stored copy is exactly as rich as the raw one, with different
+    // text — a tie keeps the entry's copy, never swaps it.
+    let t4_text = "the stored tie-breaking copy";
+    session.push_message(result_entry("t4", "grep", t4_text));
+    session.save_to(dir).unwrap();
+
+    let path = jsonl_path(dir, session.id.id());
+    let raw_t1 = "line one\nline two\nline three\n".repeat(64);
+    append_out_record(&path, "t1", &raw_t1);
+    append_out_record(&path, "t2", "short");
+    // t3's call left the history before the save: dropped, not an error.
+    append_out_record(&path, "t3", "orphaned");
+    // Equal richness, different text: the entry keeps its own copy.
+    append_out_record(&path, "t4", &"y".repeat(t4_text.len()));
+
+    let loaded = StoredSession::load_from(session.id.id(), dir).unwrap();
+    assert_eq!(loaded.messages().len(), 3);
+    assert_eq!(result_text(&loaded.messages()[0]), raw_t1);
+    assert_eq!(result_text(&loaded.messages()[1]), t2_text);
+    assert_eq!(
+        result_text(&loaded.messages()[2]),
+        t4_text,
+        "an equally rich raw copy never replaces the entry's text"
+    );
+    // The fold rewrote the source, so the original survives save/reload.
+    let mut reloaded = loaded;
+    reloaded.save_to(dir).unwrap();
+    let again = StoredSession::load_from(session.id.id(), dir).unwrap();
+    assert_eq!(result_text(&again.messages()[0]), raw_t1);
+}
+
+/// The folded raw output is what `retrieve` reads (entry sources) after a
+/// reload: the compression marker's hash resolves to the raw text.
+#[tokio::test]
+async fn folded_raw_outputs_serve_retrieve_after_reload() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let mut session = StoredSession::new("m", "/project");
+    session.push_message(result_entry(
+        "t1",
+        "bash",
+        "[9001 lines compressed from 9001]",
+    ));
+    session.save_to(dir).unwrap();
+
+    let path = jsonl_path(dir, session.id.id());
+    let raw = "raw output line\n".repeat(32);
+    append_out_record(&path, "t1", &raw);
+
+    let loaded = StoredSession::load_from(session.id.id(), dir).unwrap();
+    let history = animist::history::History::from_entries(loaded.messages().to_vec());
+    let hash = crate::compression::content_hash(&raw);
+    let mut harness = animist::agent::testing::ToolHarness::builder()
+        .build()
+        .expect("harness");
+    let output = harness
+        .call(
+            crate::tools::Retrieve(history),
+            serde_json::json!({ "hash": hash }),
+        )
+        .await
+        .expect("retrieve outcome");
+    assert_eq!(ext::tool_content_text(&output.content), raw);
+}
+
+/// A record whose index addresses an entry the replayed list does not have
+/// fails the load with an error naming the file, line and index (11): the
+/// skip-silently policy is gone.
+#[test]
+fn an_out_of_range_index_fails_the_load() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let mut session = StoredSession::new("m", "/project");
+    session.push_message(user_entry("only"));
+    session.save_to(dir).unwrap();
+
+    let path = jsonl_path(dir, session.id.id());
+    let revise = serde_json::to_string(&Record::Revise {
+        index: 9,
+        message: ext::stored_user_text("revised"),
+    })
+    .unwrap();
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(revise.as_bytes()).unwrap();
+    file.write_all(b"\n").unwrap();
+    drop(file);
+
+    let err = StoredSession::load_from(session.id.id(), dir).unwrap_err();
+    let SessionError::RecordOutOfRange {
+        path,
+        line,
+        index,
+        len,
+    } = &err
+    else {
+        panic!("expected RecordOutOfRange, got {err:?}");
+    };
+    assert_eq!(*index, 9);
+    assert_eq!(*len, 1);
+    assert_eq!(*line, 4, "header, entry, meta, then the bad revise");
+    assert!(path.ends_with(".jsonl"), "the error names the file: {path}");
+    assert!(err.to_string().contains("out of range"));
+}
+
+/// A truncated trailing `revise` (a crash mid-append) is skipped with a
+/// warning and the entry keeps its previous state.
+#[test]
+fn a_corrupt_trailing_revise_is_skipped() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let mut session = StoredSession::new("m", "/project");
+    session.push_message(user_entry("kept"));
+    session.save_to(dir).unwrap();
+
+    let path = jsonl_path(dir, session.id.id());
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"{\"t\":\"revise\",\"index\":0,\"message\":{\"trun")
+        .unwrap();
+    drop(file);
+
+    let loaded = StoredSession::load_from(session.id.id(), dir).unwrap();
+    assert_eq!(message_texts(loaded.messages()), ["kept"]);
+    assert!(
+        loaded.messages()[0].revisions().is_empty(),
+        "the entry keeps its previous state"
+    );
+}
+
 #[test]
 fn corrupt_header_line_only_returns_not_found() {
     let tmp = TempDir::new().unwrap();
@@ -1586,7 +1817,7 @@ mod fixtures {
                 "[Cancelled by user]",
                 "[Run failed: provider exploded]",
                 "[The turn ended here; the run was cut short.]",
-                crate::run::doom::GRACE_CALL_PROMPT,
+                crate::harness::doom::GRACE_CALL_PROMPT,
                 crate::storage::sessions::legacy_messages::LEGACY_NUDGE_PROMPT,
             ]
         );
@@ -1693,14 +1924,14 @@ mod fixtures {
             .iter()
             .map(|e| e.verbatim().message().clone())
             .collect();
-        crate::run::view::assert_replay_valid(&view, &[]);
+        crate::harness::view::assert_replay_valid(&view, &[]);
 
         let image_view: Vec<_> = load_fixture("image_tool_result")
             .messages()
             .iter()
             .map(|e| e.verbatim().message().clone())
             .collect();
-        crate::run::view::assert_replay_valid(&image_view, &[]);
+        crate::harness::view::assert_replay_valid(&image_view, &[]);
     }
 
     /// A user message whose text equals a marker is not a marker: identity
@@ -1714,4 +1945,119 @@ mod fixtures {
             animist::history::MessageKind::Turn
         );
     }
+}
+
+/// An entry-format session round-trips through the current writer with
+/// every record kind 08–10 produce: deactivated entries, a compaction
+/// summary, an altered revision over a tool result, and a plain revision.
+/// The reload equals the in-memory entries, and the shared replay builds
+/// the current view over them (11).
+#[test]
+fn entry_format_round_trips_with_compaction_alterations_and_revisions() {
+    use crate::compaction::alter::ALTER_TAG;
+    use crate::compaction::llm::COMPACTION_TAG;
+    use crate::harness::{ReplayItem, transcript};
+    use animist::history::HistoryEntry;
+
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let mut session = StoredSession::new("m", "/project");
+
+    // A compacted-away turn: deactivated by the compaction plan.
+    let deactivated = HistoryEntry::builder()
+        .source(ext::stored_user_text("old turn"))
+        .active(false)
+        .build();
+    // The summary that replaced it, tagged craft.compaction.
+    let mut summary = ext::stored_user_text("summary of the compacted turns");
+    summary
+        .tags_mut()
+        .insert(COMPACTION_TAG.to_owned(), "llm".to_owned());
+    // A tool result the compression pass altered durably.
+    let source = ext::stored(ext::observation(vec![ext::tool_result(
+        "t1",
+        Some("bash"),
+        "the original long output",
+        false,
+    )]));
+    let mut revised_message = source.message().clone();
+    if let animist::history::ContentBlock::ToolResult { content, .. } =
+        &mut revised_message.content[0]
+    {
+        *content = "[9 lines compressed from 9001 | retrieve: hash=ab12]".into();
+    }
+    let mut revised = ext::stored(revised_message);
+    revised
+        .tags_mut()
+        .insert(ALTER_TAG.to_owned(), "compressed".into());
+    let altered = HistoryEntry::builder()
+        .source(source)
+        .revisions(vec![revised])
+        .build();
+    // A plain revision.
+    let revised_once = HistoryEntry::builder()
+        .source(ext::stored_user_text("first"))
+        .revisions(vec![ext::stored_user_text("first, revised")])
+        .build();
+
+    session.replace_messages(vec![
+        deactivated,
+        ext::entry(summary),
+        altered,
+        revised_once,
+    ]);
+    session.save_to(dir).unwrap();
+
+    let loaded = StoredSession::load_from(session.id.id(), dir).unwrap();
+    assert_eq!(
+        loaded.messages(),
+        session.messages(),
+        "the reload equals the in-memory entries"
+    );
+
+    let items = transcript(loaded.messages());
+    assert_eq!(
+        items,
+        vec![
+            ReplayItem::Compaction {
+                kind: "llm".into(),
+                text: "summary of the compacted turns".into(),
+            },
+            ReplayItem::ToolResult {
+                id: "t1".into(),
+                name: "bash".into(),
+                text: "[9 lines compressed from 9001 | retrieve: hash=ab12]".into(),
+                full: Some("the original long output".into()),
+                is_error: false,
+            },
+            ReplayItem::User {
+                text: "first, revised".into(),
+            },
+        ],
+        "inactive entries hidden, the summary a card, the altered result \
+         showing its altered text with the verbatim original behind it"
+    );
+}
+
+/// `apply_changes` reports records the mirror could not apply, so the
+/// persister recovers with a full rewrite instead of appending a record
+/// the loader would refuse (the write-side counterpart of 11's loud load
+/// policy).
+#[test]
+fn apply_changes_reports_records_it_could_not_apply() {
+    let mut session = StoredSession::new("m", "/project");
+    session.push_message(user_entry("only"));
+    let bad = animist::history::HistoryChange::Revised {
+        index: 9,
+        message: ext::stored_user_text("nowhere"),
+    };
+    assert_eq!(session.apply_changes(&[bad]), 1);
+    assert_eq!(message_texts(session.messages()), ["only"]);
+    // A healthy batch applies whole and reports zero.
+    let good = animist::history::HistoryChange::Appended {
+        index: 1,
+        entry: user_entry("next"),
+    };
+    assert_eq!(session.apply_changes(&[good]), 0);
+    assert_eq!(message_texts(session.messages()), ["only", "next"]);
 }

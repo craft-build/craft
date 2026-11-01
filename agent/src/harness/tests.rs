@@ -10,19 +10,9 @@ use animist::provider::ProviderEvent;
 use crate::config::Config;
 use crate::harness::{Conversation, ConversationBuilder, Event, EventSink, TurnOutcome};
 use crate::provider::ModelHandle;
-use crate::run::recency::{RecencyCtx, RecencyFacts, RecencySource};
 use crate::testing::{self, ScriptedProvider};
 use crate::tools::Workspace;
 use animist::agent::tool::ToolRegistry;
-
-struct FixedRecency;
-impl RecencySource for FixedRecency {
-    fn collect(&self, ctx: &RecencyCtx) -> RecencyFacts {
-        let mut facts = RecencyFacts::new();
-        facts.push(format!("turn {}", ctx.turn));
-        facts
-    }
-}
 
 /// A conversation over the workspace's real dispatch table.
 async fn workspace_conversation(
@@ -587,75 +577,6 @@ async fn model_switch_between_turns_keeps_history_and_subscription() {
 }
 
 #[tokio::test]
-async fn recency_tail_rides_the_request_view_but_not_stored_history() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("f.txt"), "contents").unwrap();
-    let scripted = ScriptedProvider::new(Vec::new());
-    scripted
-        .push(testing::tool_turn(vec![(
-            "t1".into(),
-            "read".into(),
-            serde_json::json!({ "path": "f.txt" }),
-        )]))
-        .push(testing::text_turn("done"));
-    let workspace = Workspace::new(dir.path()).unwrap();
-    let (sink, _stream) = EventSink::new();
-    let handle = ModelHandle::scripted(testing::scripted_model(
-        &scripted,
-        testing::model_info("main", 128_000, 4_096, false, false),
-    ));
-    let history = animist::history::History::default();
-    let conversation = ConversationBuilder::new(
-        &Config::parse("").unwrap(),
-        &dir.path().display().to_string(),
-        "",
-        handle,
-        workspace.registry(&history).unwrap(),
-        sink,
-    )
-    .history(history)
-    .recency(Arc::new(FixedRecency))
-    .build()
-    .unwrap();
-
-    let outcome =
-        crate::harness::run_turn(&conversation, "read it", &[], Cancellation::default()).await;
-    assert!(matches!(&outcome, TurnOutcome::Done { .. }), "{outcome:?}");
-
-    let requests = scripted.requests();
-    assert!(requests.len() >= 2);
-    for (index, request) in requests.iter().enumerate() {
-        let tail = request
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role == Role::User)
-            .expect("a user message")
-            .content
-            .iter()
-            .any(|block| {
-                matches!(block, ContentBlock::Text { text } if text.starts_with("<turn-context>"))
-            });
-        assert!(tail, "request {index} carries the recency tail");
-    }
-    let mut stored_carries_tail = false;
-    for entry in entries(&conversation.history()).await {
-        if let Some(stored) = entry.current() {
-            for block in &stored.message().content {
-                if matches!(block, ContentBlock::Text { text } if text.starts_with("<turn-context>"))
-                {
-                    stored_carries_tail = true;
-                }
-            }
-        }
-    }
-    assert!(
-        !stored_carries_tail,
-        "stored history never carries the tail"
-    );
-}
-
-#[tokio::test]
 async fn shutdown_is_idempotent_and_terminal() {
     let dir = tempfile::tempdir().unwrap();
     let scripted = ScriptedProvider::new(Vec::new());
@@ -990,4 +911,134 @@ async fn a_checkpoint_failure_surfaces_an_event_and_never_fails_the_run() {
         texts(live.entries()),
         "the recovered file equals the live history, nothing duplicated"
     );
+}
+
+/// The agent's parallel-tool-call squash (animist F04) is what persistence
+/// writes and the loader replays: after a run of ten parallel reads with
+/// large outputs, every result entry carries exactly one revision, and a
+/// reload rebuilds a history whose current view equals the in-memory one
+/// (11).
+#[tokio::test]
+async fn parallel_tool_calls_squash_and_reload_to_the_same_current_view() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..10 {
+        let body = format!("line {i:03} of the large output\n").repeat(600);
+        std::fs::write(dir.path().join(format!("big{i}.txt")), body).unwrap();
+    }
+    let scripted = ScriptedProvider::new(Vec::new());
+    let calls: Vec<crate::testing::ToolCallSpec> = (0..10)
+        .map(|i| {
+            (
+                format!("t{i}"),
+                "read".to_owned(),
+                serde_json::json!({ "path": format!("big{i}.txt") }),
+            )
+        })
+        .collect();
+    scripted.push(testing::tool_turn(calls));
+    scripted.push(testing::text_turn("done"));
+
+    // Compression off so the durable passes leave the results alone: the
+    // only revision each result entry carries is the agent's squashed one.
+    let persister = crate::harness::Persister::open_in(
+        state_dir(&dir),
+        session_ref(),
+        "/project",
+        "scripted/main",
+    )
+    .await
+    .unwrap();
+    let workspace = Workspace::new(dir.path()).unwrap();
+    let (sink, stream) = EventSink::new();
+    let handle = ModelHandle::scripted(testing::scripted_model(
+        &scripted,
+        testing::model_info("main", 128_000, 4_096, false, false),
+    ));
+    let history = persister.history();
+    let conversation = ConversationBuilder::new(
+        &Config::parse("compression { enabled = false }").unwrap(),
+        &dir.path().display().to_string(),
+        "",
+        handle,
+        workspace.registry(&history).unwrap(),
+        sink,
+    )
+    .history(history)
+    .persist(Some(Arc::new(tokio::sync::Mutex::new(persister))))
+    .build()
+    .unwrap();
+    let mut stream = stream;
+    let outcome =
+        crate::harness::run_turn(&conversation, "read them all", &[], Cancellation::default())
+            .await;
+    loop {
+        if matches!(
+            next_event(&mut stream).await,
+            Event::Craft(crate::harness::CraftEvent::Done { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(outcome, crate::harness::TurnOutcome::Done { .. }));
+
+    let history = conversation.history();
+    let live_entries = history.snapshot().await.entries().to_vec();
+    let results: Vec<&HistoryEntry> = live_entries
+        .iter()
+        .filter(|entry: &&HistoryEntry| {
+            entry
+                .verbatim()
+                .message()
+                .content
+                .iter()
+                .any(|block| matches!(block, animist::history::ContentBlock::ToolResult { .. }))
+        })
+        .collect();
+    assert_eq!(
+        results.len(),
+        1,
+        "the wave's results land as one placeholder-backed result entry"
+    );
+    let result_entry = results[0];
+    let block_count = result_entry
+        .verbatim()
+        .message()
+        .content
+        .iter()
+        .filter(|block| matches!(block, animist::history::ContentBlock::ToolResult { .. }))
+        .count();
+    assert_eq!(block_count, 10, "every call has its result block");
+    assert_eq!(
+        result_entry.revisions().len(),
+        1,
+        "the squash keeps the placeholder source plus one final revision"
+    );
+    let live_current = history.current().await;
+
+    let loaded = load_session(&dir);
+    assert_eq!(
+        loaded.messages().len(),
+        live_entries.len(),
+        "every entry persisted"
+    );
+    let reloaded = History::from_entries(loaded.messages().to_vec());
+    assert_eq!(
+        reloaded.current().await,
+        live_current,
+        "the reload's current view equals the in-memory one"
+    );
+
+    let session_file = state_dir(&dir)
+        .ensure_subdir(crate::storage::sessions::SESSIONS_DIR)
+        .unwrap()
+        .join(format!("{}.jsonl", session_ref().id()));
+    let size = std::fs::metadata(&session_file).unwrap().len();
+    // Session-size measurement for 11's completion note: ten ~19 KB reads
+    // (190 KB of output) persist as source+revision, roughly doubled.
+    println!(
+        "squash fixture: {} entries, session file {} bytes",
+        live_entries.len(),
+        size
+    );
+    assert!(size > 100_000, "the ten large outputs are on disk: {size}");
 }

@@ -6,7 +6,7 @@ use super::*;
 /// The clamp mirrors the reference `clamped_output_tokens` table.
 #[test]
 fn clamps_output_tokens_to_the_remaining_window() {
-    use crate::run::{MIN_OUTPUT_TOKENS, clamped_max_tokens};
+    use crate::harness::request::{MIN_OUTPUT_TOKENS, clamped_max_tokens};
     const WINDOW: u32 = 262_144;
     let big_cap = 100_000u64;
     let small_cap = 2_048u64;

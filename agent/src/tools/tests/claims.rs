@@ -50,7 +50,7 @@ fn writes_of(claim: &ToolScheduling) -> Vec<String> {
 }
 
 fn normalize(workspace: &Workspace, path: &str) -> String {
-    crate::run::dedup::normalize_write_path_with_root(
+    crate::harness::dedup::normalize_write_path_with_root(
         Some(&workspace.root().display().to_string()),
         path,
     )

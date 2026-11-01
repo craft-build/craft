@@ -1309,7 +1309,7 @@ async fn grace_prompt_fires_once_and_rides_the_next_request() {
         .expect("the grace observation is committed");
     assert_eq!(
         crate::history::ext::message_text(&messages[grace_index]),
-        crate::run::doom::GRACE_CALL_PROMPT
+        crate::harness::doom::GRACE_CALL_PROMPT
     );
     assert!(
         messages[grace_index].message().role == Role::User,
@@ -1336,12 +1336,13 @@ async fn grace_prompt_fires_once_and_rides_the_next_request() {
     let requests = provider.requests();
     assert!(requests.len() >= 2, "the run continued after the grace");
     assert!(
-        requests[1]
-            .messages
-            .iter()
-            .any(|message| message.role == Role::User
-                && message.content.iter().any(|block| matches!(block,
-                    ContentBlock::Text { text } if text == crate::run::doom::GRACE_CALL_PROMPT))),
+        requests[1].messages.iter().any(|message| {
+            message.role == Role::User
+                && message.content.iter().any(|block| {
+                    matches!(block,
+                    ContentBlock::Text { text } if text == crate::harness::doom::GRACE_CALL_PROMPT)
+                })
+        }),
         "the next request carries the grace prompt"
     );
 }

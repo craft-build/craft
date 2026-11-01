@@ -13,7 +13,7 @@ use std::sync::{Arc, atomic::Ordering};
 use animist::agent::AgentEvent;
 use animist::provider::ProviderEvent;
 
-use crate::harness::{Conversation, CraftEvent, Event, EventStream};
+use crate::harness::{Conversation, CraftEvent, Event, EventStream, ReplayItem};
 
 use super::{AppState, clear_turn, internal_error, report};
 
@@ -208,6 +208,39 @@ fn tool_call_start(id: &str, name: &str, arguments: &serde_json::Value) -> AcpTo
     call.status = ToolCallStatus::InProgress;
     call.raw_input = Some(arguments.clone());
     call
+}
+
+/// The session updates a loaded session's replay becomes, sent before the
+/// `session/load` response (the protocol's resume contract: the client
+/// rebuilds its transcript from them). The items come from the shared
+/// replay builder; markers and compaction summaries have no live ACP
+/// translation either, so the replay carries exactly what a live turn
+/// would have shown.
+pub(super) fn replay_updates(items: &[ReplayItem]) -> Vec<SessionUpdate> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            ReplayItem::User { text } => Some(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                ContentBlock::Text(TextContent::new(text.clone())),
+            ))),
+            ReplayItem::Assistant { text } => Some(SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new(text.clone()))),
+            )),
+            ReplayItem::ToolResult { id, name, text, .. } => {
+                let mut call = AcpToolCall::new(
+                    ToolCallId::new(id.clone()),
+                    tool_title(name, &serde_json::Value::Null),
+                );
+                call.kind = tool_kind(name);
+                call.status = ToolCallStatus::Completed;
+                call.content = vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
+                    TextContent::new(text.clone()),
+                )))];
+                Some(SessionUpdate::ToolCall(call))
+            }
+            ReplayItem::Marker { .. } | ReplayItem::Compaction { .. } => None,
+        })
+        .collect()
 }
 
 pub(super) fn tool_title(name: &str, arguments: &serde_json::Value) -> String {

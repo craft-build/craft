@@ -1,50 +1,8 @@
-//! Request-view compression: recency tail, read lifecycle, pre-compression
-//! skips and the opt-out.
+//! Request-view compression: read lifecycle, pre-compression skips and
+//! the opt-out.
 
 use super::*;
 use crate::history::{ContentBlock, Role, ext};
-
-#[tokio::test]
-async fn recency_tail_rides_the_request_but_not_history() {
-    struct Turns;
-    impl crate::run::RecencySource for Turns {
-        fn collect(&self, ctx: &crate::run::RecencyCtx) -> crate::run::RecencyFacts {
-            let mut facts = crate::run::RecencyFacts::new();
-            facts.push(format!("turn {}", ctx.turn));
-            facts
-        }
-    }
-    let provider = script(vec![crate::testing::text_turn("ok")]);
-    let dir = tempfile::tempdir().unwrap();
-    let (sink, _stream) = EventSink::new();
-    let conversation = ConversationBuilder::new(
-        &Config::parse("").unwrap(),
-        &dir.path().display().to_string(),
-        "",
-        model(&provider),
-        animist::agent::tool::ToolRegistry::default(),
-        sink,
-    )
-    .recency(std::sync::Arc::new(Turns))
-    .build()
-    .unwrap();
-
-    let outcome = run_turn(&conversation, "go").await;
-
-    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
-    let requests = provider.requests();
-    let sent = &requests[0].messages;
-    // The request layer numbers prepares from 1 within a turn.
-    assert!(
-        ext::text(&sent[0]).contains("<turn-context>\n\nturn 1"),
-        "tail must ride the request"
-    );
-    let messages = stored(&conversation).await;
-    assert!(
-        !ext::message_text(&messages[0]).contains("turn-context"),
-        "tail must not be committed to history"
-    );
-}
 
 #[tokio::test]
 async fn read_lifecycle_markers_are_durable_with_raw_sources() {
@@ -231,7 +189,7 @@ fn compress_request_view_skips_verbatim_tools_but_compresses_the_rest() {
         ext::tool_result("c3", Some("retrieve"), raw_retrieve.clone(), false),
         ext::tool_result("c4", Some("bash"), raw_bash.clone(), false),
     ])];
-    crate::run::view::compress_request_view(
+    crate::harness::view::compress_request_view(
         &mut full,
         &crate::compression::CompressionConfig::default(),
     );
@@ -444,7 +402,7 @@ async fn durable_alters_match_old_view_bytes_without_mid_run_prefix_mutations() 
     ];
     // Later read rounds of other files, so the f1 edit leaves the
     // working-set lookback and the prefix's f1 read turns Stale mid-run.
-    for gap in 0..crate::run::read_lifecycle::WORKING_SET_LOOKBACK + 1 {
+    for gap in 0..crate::harness::read_lifecycle::WORKING_SET_LOOKBACK + 1 {
         let id = format!("g{gap}");
         run_steps.push(vec![
             assistant_call(&id, "read", format!("gap{gap}.txt")),
@@ -490,11 +448,11 @@ async fn durable_alters_match_old_view_bytes_without_mid_run_prefix_mutations() 
         for raw in &states {
             let mut view = raw.clone();
             if suffix_only {
-                crate::run::read_lifecycle::apply_to_request_from(&mut view, None, run_start);
-                crate::run::view::compress_request_view_from(&mut view, &config, run_start);
+                crate::harness::read_lifecycle::apply_to_request_from(&mut view, None, run_start);
+                crate::harness::view::compress_request_view_from(&mut view, &config, run_start);
             } else {
-                crate::run::read_lifecycle::apply_to_request(&mut view, None);
-                crate::run::view::compress_request_view(&mut view, &config);
+                crate::harness::read_lifecycle::apply_to_request(&mut view, None);
+                crate::harness::view::compress_request_view(&mut view, &config);
             }
             total += bytes(&view);
             // Cache stability: bytes already sent on an earlier request must

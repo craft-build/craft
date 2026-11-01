@@ -53,7 +53,7 @@ struct FileOperation {
     /// The argument string as the model spelled it; kept for user-visible
     /// marker text.
     file_path: String,
-    /// [`crate::run::dedup::PathNormalizer`] key: `./a.rs`, `a.rs`, and the
+    /// [`crate::harness::dedup::PathNormalizer`] key: `./a.rs`, `a.rs`, and the
     /// anchored absolute spelling key the same file identically, so a write
     /// under one spelling staleness-marks a read recorded under another.
     file_key: String,
@@ -131,14 +131,14 @@ fn collect_move_rewrites(history: &[Message]) -> HashMap<&str, Vec<String>> {
 
 /// Walk assistant tool calls and record one `FileOperation` per file touched.
 /// Keys are normalized through the write-root-anchored
-/// [`crate::run::dedup::PathNormalizer`]: only the keying is normalized, the
+/// [`crate::harness::dedup::PathNormalizer`]: only the keying is normalized, the
 /// original argument spelling is kept for display.
 fn collect_file_operations(
     history: &[Message],
     move_rewrites: &HashMap<&str, Vec<String>>,
     root: Option<&str>,
 ) -> Vec<FileOperation> {
-    let normalizer = crate::run::dedup::PathNormalizer::new(root);
+    let normalizer = crate::harness::dedup::PathNormalizer::new(root);
     let mut operations: Vec<FileOperation> = Vec::new();
 
     for (msg_index, msg) in history.iter().enumerate() {

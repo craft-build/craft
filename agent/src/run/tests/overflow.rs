@@ -465,7 +465,7 @@ async fn rate_limit_rotates_then_fails_over_then_backs_off() {
     ]);
     // The rotation hook succeeds exactly once, then reports exhaustion.
     let rotations = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let rotate: crate::run::retry::RotateKey = {
+    let rotate: crate::harness::retry::RotateKey = {
         let rotations = std::sync::Arc::clone(&rotations);
         std::sync::Arc::new(move || {
             rotations.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0
@@ -486,7 +486,7 @@ async fn rate_limit_rotates_then_fails_over_then_backs_off() {
             .unwrap(),
         None,
         |builder| {
-            builder.retry(crate::run::RetryCtx {
+            builder.retry(crate::harness::retry::RetryCtx {
                 rotate: Some(rotate),
                 fallbacks: vec![fallback],
             })
@@ -570,7 +570,7 @@ async fn bedrock_429_goes_straight_to_fallback_without_a_backoff() {
             .unwrap(),
         None,
         |builder| {
-            builder.retry(crate::run::RetryCtx {
+            builder.retry(crate::harness::retry::RetryCtx {
                 rotate: None,
                 fallbacks: vec![fallback],
             })

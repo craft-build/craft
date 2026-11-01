@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::run::dedup;
+use crate::harness::dedup;
 
 use super::edit::persist;
 use super::error::{Error, Result, definition, failure, finish, invalid, io_error};

@@ -75,7 +75,7 @@ pub(crate) fn load_session_entries() -> Vec<SessionEntry> {
     let cwd = std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string());
-    crate::headless::StoredSession::list(cwd.as_deref(), &dir)
+    crate::storage::sessions::StoredSession::list(cwd.as_deref(), &dir)
         .unwrap_or_default()
         .into_iter()
         .map(|summary| SessionEntry {
