@@ -25,6 +25,10 @@ use super::{Selection, SessionKit, SessionState, report};
 /// hang the turn (and with it the whole session) past recovery.
 const FORWARDER_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Tools that spawn a subagent through the `SpawnSubagent` seam; their
+/// finished call settles the spawned subagent's task chat.
+const SUBAGENT_TOOLS: &[&str] = &["task", "review"];
+
 /// Everything one agent turn needs, bundled so the turn's helpers avoid a
 /// long parameter list.
 pub(super) struct TurnCtx {
@@ -162,9 +166,9 @@ impl TurnRenderer {
                 }));
             }
             Event::Agent(RuntimeEvent::ToolFinished { call, output }) => {
-                // A finished task tool call settles its subagent's chat:
+                // A finished seam tool call settles its subagent's chat:
                 // is_error is the most specific ending it sees.
-                if call.name == "task" {
+                if SUBAGENT_TOOLS.contains(&call.name.as_str()) {
                     let _ = self.tx.send(AgentEvent::SubagentFinished {
                         tool_use_id: call.id.clone(),
                         is_error: output.is_error,
@@ -754,6 +758,57 @@ mod tests {
         assert_eq!(id, "t2");
         assert_eq!(tone, Tone::Danger);
         assert_eq!(text, "auto-review failed closed: timed out");
+    }
+
+    fn tool_finished_event(id: &str, name: &str, is_error: bool) -> Event {
+        let builder =
+            animist::agent::tool::ToolOutput::builder().content(history::ToolContents(vec![
+                history::ToolContent::Text { text: "ok".into() },
+            ]));
+        let output = if is_error {
+            builder.is_error(true).build()
+        } else {
+            builder.build()
+        };
+        Event::Agent(RuntimeEvent::ToolFinished {
+            call: animist::agent::tool::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                input: serde_json::json!({}),
+            },
+            output,
+        })
+    }
+
+    /// Both `SpawnSubagent` seam tools settle their subagent's chat when
+    /// the call finishes; a plain tool must not.
+    #[test]
+    fn finished_seam_tools_settle_their_subagent_chats() {
+        for name in SUBAGENT_TOOLS {
+            let (renderer, mut rx) = renderer();
+            renderer.map(tool_finished_event("t1", name, false));
+            let AgentEvent::SubagentFinished {
+                tool_use_id,
+                is_error,
+            } = rx.try_recv().expect("subagent finished")
+            else {
+                panic!("expected SubagentFinished for {name}");
+            };
+            assert_eq!(tool_use_id, "t1");
+            assert!(!is_error);
+            assert!(
+                matches!(rx.try_recv(), Ok(AgentEvent::ToolCall(_))),
+                "the done card still renders"
+            );
+        }
+
+        let (renderer, mut rx) = renderer();
+        renderer.map(tool_finished_event("t9", "bash", true));
+        assert!(
+            matches!(rx.try_recv(), Ok(AgentEvent::ToolCall(_))),
+            "non-seam tools emit no SubagentFinished"
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
