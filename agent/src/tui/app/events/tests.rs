@@ -564,6 +564,44 @@ fn click_notice_row_expands_and_retruncates_body() {
     let _ = idx;
 }
 
+/// A thinking block renders behind a header row; pressing the header
+/// expands the reasoning body, pressing again re-collapses it.
+#[test]
+fn thinking_header_press_toggles_the_body() {
+    let mut app = App::new();
+    app.handle_event(AgentEvent::ReasoningDelta(
+        "the hidden chain of thought".into(),
+    ));
+    app.handle_event(AgentEvent::AssistantEnd);
+    draw_app(&mut app, 80, 24);
+    let header = |app: &App| {
+        app.view
+            .paint
+            .lock()
+            .unwrap()
+            .thinking_regions
+            .first()
+            .copied()
+    };
+    let press = |app: &mut App, row, col| {
+        app.handle_mouse(mouse(MouseKind::Down(MouseButton::Left), row, col));
+        app.handle_mouse(mouse(MouseKind::Up(MouseButton::Left), row, col));
+    };
+    let (idx, rect) = header(&app).expect("collapsed header carries a region");
+    press(&mut app, rect.y, rect.x + 4);
+    assert!(
+        app.conversation.expanded_thinking.contains(&idx),
+        "header press expands the body"
+    );
+    draw_app(&mut app, 80, 24);
+    let (_, rect) = header(&app).expect("expanded header carries a region");
+    press(&mut app, rect.y, rect.x + 4);
+    assert!(
+        app.conversation.expanded_thinking.is_empty(),
+        "second press re-collapses"
+    );
+}
+
 /// Composer chords: Ctrl-W deletes a word, Ctrl-K kills to the
 /// end of the line, Alt-Left moves back a word.
 #[test]

@@ -1014,14 +1014,16 @@ impl App {
         self.conversation.messages.clear();
         self.conversation.collapsed.clear();
         self.conversation.expanded_bodies.clear();
+        self.conversation.expanded_thinking.clear();
         self.conversation.focused = None;
         self.view.hover_tool = None;
         self.view.pending_click = None;
         self.view.highlight_segment = None;
         {
-            let mut p = self.view.paint.lock().expect("paint handoff");
+            let mut p = self.view.paint.lock().unwrap_or_else(|e| e.into_inner());
             p.tool_regions.clear();
             p.notice_regions.clear();
+            p.thinking_regions.clear();
         }
         self.overlays.modal = Modal::None;
         self.view.scroll = ScrollPos::default();

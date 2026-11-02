@@ -19,7 +19,7 @@ pub(crate) use self::text::AssistantCache;
 pub(crate) use self::wrap::wrap_rows;
 
 use self::cards::tool_block;
-use self::text::{compaction_block, notice_block, thinking_block, user_block};
+use self::text::{compaction_block, notice_block, thinking_block, thinking_header, user_block};
 
 /// Transcript side margins. The left one is two cells deeper than the
 /// composer's (which sits at 2), so message blocks read as indented under
@@ -162,6 +162,8 @@ struct FrameBuild {
     tool_spans: Vec<(usize, u16, u16)>,
     /// (message index, row) of "click to expand" notice rows.
     notice_rows: Vec<(usize, u16)>,
+    /// (message index, row) of collapsed thinking headers.
+    thinking_rows: Vec<(usize, u16)>,
     /// (row, col_start, col_end, uri) of card link headers; empty under a
     /// muxed terminal or when every header is off-screen.
     links: Vec<(u16, u16, u16, String)>,
@@ -204,6 +206,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
     let mut msg_seg_start = Vec::with_capacity(app.conversation.messages.len());
     let mut tool_seg_ranges: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, start, end)
     let mut notice_seg_rows: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, seg, row)
+    let mut thinking_seg_rows: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, seg, row)
     // (segment index, link) for card headers carrying an OSC-8 target;
     // resolved into viewport rows once the layout is known.
     let mut card_links: Vec<(usize, Hyperlink)> = Vec::new();
@@ -224,10 +227,15 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                 ));
             }
             Message::Thinking(text) => {
+                let expanded = app.conversation.expanded_thinking.contains(&idx);
+                let active = app.conversation.thinking_active(idx);
                 let text = app.conversation.visible_text(idx).unwrap_or(text);
-                app.view
-                    .segments
-                    .push(Segment::with_lines(thinking_block(text, width)));
+                let mut lines = thinking_header(active, expanded, app.status_tick);
+                if expanded {
+                    lines.extend(thinking_block(text, width));
+                }
+                thinking_seg_rows.push((idx, app.view.segments.len(), 0));
+                app.view.segments.push(Segment::with_lines(lines));
             }
             Message::Notice { tone, text } => app
                 .view
@@ -422,6 +430,22 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
         })
         .collect();
 
+    // Visible thinking headers, addressed like notice rows.
+    let thinking_rows = thinking_seg_rows
+        .iter()
+        .filter_map(|&(idx, seg, row)| {
+            let vis = clamp_row_u16(
+                layout
+                    .doc_row(ScrollPos {
+                        seg,
+                        row: row as u16,
+                    })
+                    .saturating_sub(top_row),
+            );
+            (vis < inner.height).then_some((idx, vis))
+        })
+        .collect();
+
     // Resolve card links to visible rows: the header sits one row under the
     // card's top-padding blank. Skipped under tmux, whose passthrough
     // mangles OSC-8. The single-row guard: a header is one pre-wrapped
@@ -451,6 +475,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
         bands,
         tool_spans,
         notice_rows,
+        thinking_rows,
         links,
     }
 }
@@ -485,6 +510,51 @@ mod tests {
         tb.render(|ui| crate::tui::ui::frame::frame(ui, app, &mut view));
         tb.render(|ui| crate::tui::ui::frame::frame(ui, app, &mut view));
         (0..h).map(|y| tb.line(y)).collect()
+    }
+    /// Thinking renders collapsed behind a header: the body stays hidden
+    /// until the message is expanded, the header carries the spinner while
+    /// the block streams and the settled sigil after.
+    #[test]
+    fn thinking_blocks_render_collapsed_behind_a_clickable_header() {
+        use crate::tui::app::App;
+        use crate::tui::provider::AgentEvent;
+
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ReasoningDelta(
+            "weighing the options carefully".into(),
+        ));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("Thinking…")),
+            "streaming header: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("weighing")),
+            "the body stays hidden while collapsed: {rows:?}"
+        );
+
+        app.handle_event(AgentEvent::AssistantEnd);
+        let rows = frame_rows(&mut app, 80, 24);
+        let header = rows
+            .iter()
+            .find(|r| r.contains("Thinking"))
+            .expect("settled header renders");
+        assert!(
+            header.contains('✻') && header.contains('▸'),
+            "settled collapsed header: {header:?}"
+        );
+
+        app.conversation.expanded_thinking.push(0);
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("weighing")),
+            "expansion shows the body: {rows:?}"
+        );
+        let header = rows
+            .iter()
+            .find(|r| r.contains("Thinking"))
+            .expect("header still renders");
+        assert!(header.contains('▾'), "expanded chevron: {header:?}");
     }
 
     #[test]
@@ -997,8 +1067,9 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
     let area_only = paint.clone();
     // Region data crosses the col closure boundary through this slot so
     // the always-run overlay publish (declared after the col) can own it.
-    let regions_out: std::sync::Arc<std::sync::Mutex<(Vec<(usize, u16, u16)>, Vec<(usize, u16)>)>> =
-        std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new())));
+    let regions_out: std::sync::Arc<
+        std::sync::Mutex<(Vec<(usize, u16, u16)>, Vec<(usize, u16)>, Vec<(usize, u16)>)>,
+    > = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new(), Vec::new())));
     let regions_slot = std::sync::Arc::clone(&regions_out);
     let grow_resp = ui.container().grow(1).col(move |ui| {
         // Top margin row (`inner.y = area.y + 1`).
@@ -1010,6 +1081,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                 bands,
                 tool_spans,
                 notice_rows,
+                thinking_rows,
                 links,
                 ..
             } = build;
@@ -1087,9 +1159,9 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
             ui.container().grow(1).draw(move |_, rect| {
                 publish_area_slt(&area_only, rect, total_rows);
             });
-            *regions_slot.lock().expect("paint handoff") = (tool_spans, notice_rows);
+            *regions_slot.lock().expect("paint handoff") = (tool_spans, notice_rows, thinking_rows);
         } else {
-            *regions_slot.lock().expect("paint handoff") = (Vec::new(), Vec::new());
+            *regions_slot.lock().expect("paint handoff") = (Vec::new(), Vec::new(), Vec::new());
         }
     });
 
@@ -1098,7 +1170,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
     // to zero, and a satisfied grow does exactly that once the bands fill
     // the viewport) — carrying the grow container's previous-frame rect,
     // one frame stale like the rest of the handoff.
-    let (tool_spans, notice_rows) =
+    let (tool_spans, notice_rows, thinking_rows) =
         std::mem::take(&mut *regions_out.lock().expect("paint handoff"));
     let paint_for_publish = paint.clone();
     let _ = ui.overlay(|ui| {
@@ -1108,6 +1180,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                 grow_resp.rect,
                 &tool_spans,
                 &notice_rows,
+                &thinking_rows,
             );
         });
     });
@@ -1200,6 +1273,7 @@ fn publish_frame_slt(
     area: slt::Rect,
     tool_spans: &[(usize, u16, u16)],
     notice_rows: &[(usize, u16)],
+    thinking_rows: &[(usize, u16)],
 ) {
     let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
     let mut p = paint.lock().expect("paint handoff");
@@ -1243,6 +1317,20 @@ fn publish_frame_slt(
         })
         .collect();
     p.notice_regions = notice_rows
+        .iter()
+        .map(|&(idx, r)| {
+            (
+                idx,
+                geom::Rect::new(
+                    clamp16(inner_x),
+                    clamp16(inner_y + u32::from(r)),
+                    clamp16(inner_w),
+                    1,
+                ),
+            )
+        })
+        .collect();
+    p.thinking_regions = thinking_rows
         .iter()
         .map(|&(idx, r)| {
             (

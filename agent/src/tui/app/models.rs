@@ -98,6 +98,9 @@ pub struct Conversation {
     pub collapsed: Vec<String>, // tool ids currently collapsed
     /// Tool ids whose bodies were expanded past the truncation cap.
     pub expanded_bodies: Vec<String>,
+    /// Message indices of [`Message::Thinking`] blocks the user expanded;
+    /// thinking renders collapsed behind its header unless listed here.
+    pub expanded_thinking: Vec<usize>,
     pub focused: Option<usize>, // message index of focused tool block
     /// True while a streamed [`Message::Assistant`] is still being appended to.
     pub(crate) assistant_open: bool,
@@ -113,6 +116,7 @@ impl Conversation {
             messages: Vec::new(),
             collapsed: Vec::new(),
             expanded_bodies: Vec::new(),
+            expanded_thinking: Vec::new(),
             focused: None,
             assistant_open: false,
             thinking_open: false,
@@ -155,6 +159,13 @@ impl Conversation {
                     _ => false,
                 }
         })
+    }
+
+    /// True while `index` is the thinking block still being streamed into.
+    pub(crate) fn thinking_active(&self, index: usize) -> bool {
+        self.thinking_open
+            && index + 1 == self.messages.len()
+            && matches!(self.messages.last(), Some(Message::Thinking(_)))
     }
 
     /// Boundaries, completion and cancellation expose all received text.
@@ -452,6 +463,9 @@ pub struct PaintData {
     /// One-row screen rects of "click to expand" notice rows: (message
     /// index, rect). Checked before card regions on click.
     pub notice_regions: Vec<(usize, Rect)>,
+    /// One-row screen rects of thinking-block headers: (message index,
+    /// rect). A click toggles the reasoning body's visibility.
+    pub thinking_regions: Vec<(usize, Rect)>,
     /// One-row screen rects of the todo widget's section headers; a click
     /// folds/unfolds that section.
     pub todo_header: Rect,
@@ -497,6 +511,8 @@ pub struct ViewModel {
 pub enum PendingClick {
     Card(usize),
     Notice(usize),
+    /// A thinking block's header row: toggles its collapsed body.
+    Thinking(usize),
     /// The todo widget's plan header.
     Todo,
     /// The todo widget's files-touched header.

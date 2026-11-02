@@ -218,6 +218,28 @@ pub(super) fn thinking_block(text: &str, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// The collapsed thinking block's header row. `active` marks the block
+/// still being streamed into: an animated spinner replaces the sigil and
+/// the label carries an ellipsis. The chevron tracks the body's expansion.
+pub(super) fn thinking_header(active: bool, expanded: bool, tick: usize) -> Vec<Line<'static>> {
+    let t = theme::current();
+    let sigil = if active {
+        crate::tui::animation::spinner_frame(tick)
+    } else {
+        '✻'
+    };
+    let label = if active { "Thinking…" } else { "Thinking" };
+    let chevron = if expanded { "▾" } else { "▸" };
+    vec![Line::from(vec![
+        Span::styled(format!("{sigil} "), Style::default().fg(t.accent)),
+        Span::styled(
+            format!("{label} "),
+            Style::default().fg(t.text_secondary).italic(),
+        ),
+        Span::styled(chevron, Style::default().fg(t.text_tertiary)),
+    ])]
+}
+
 /// A system notice: one muted line (wrapped when long) with a tone-colored
 /// prefix glyph, without card chrome.
 pub(super) fn notice_block(tone: Tone, text: &str, width: usize) -> Vec<Line<'static>> {
@@ -262,6 +284,34 @@ pub(super) fn compaction_block(kind: &str, text: &str, width: usize) -> Vec<Line
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_header_states() {
+        let line = |active: bool, expanded: bool, tick: usize| {
+            let text: String = thinking_header(active, expanded, tick)
+                .into_iter()
+                .flat_map(|l| l.spans.into_iter())
+                .map(|s| s.content.into_owned())
+                .collect();
+            text
+        };
+        let streaming = line(true, false, 0);
+        assert!(streaming.starts_with('⠋'), "spinner sigil: {streaming:?}");
+        assert!(streaming.contains("Thinking…"), "{streaming:?}");
+        assert!(streaming.ends_with('▸'), "collapsed chevron: {streaming:?}");
+        let next = line(true, false, 1);
+        assert!(
+            next.starts_with('⠙'),
+            "the sigil animates with the tick: {next:?}"
+        );
+        let settled = line(false, false, 3);
+        assert!(settled.starts_with('✻'), "settled sigil: {settled:?}");
+        assert!(
+            !settled.contains('…') && settled.ends_with('▸'),
+            "{settled:?}"
+        );
+        assert!(line(false, true, 3).ends_with('▾'), "expanded chevron");
+    }
 
     fn expected(text: &str, width: usize) -> SharedLines {
         styled_markdown(render::render(text, width.min(88) as u16)).into()

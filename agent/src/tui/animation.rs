@@ -6,6 +6,13 @@ const MS_PER_CHAR: u64 = 4;
 const MIN_REVEAL_MS: u64 = 30;
 const MAX_REVEAL_MS: u64 = 1000;
 
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Braille spinner frame for the given frame counter.
+pub(crate) fn spinner_frame(tick: usize) -> char {
+    SPINNER[tick % SPINNER.len()]
+}
+
 #[derive(Debug)]
 pub(crate) struct Typewriter {
     visible_chars: usize,
