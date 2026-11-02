@@ -20,7 +20,7 @@ pub enum Command {
     /// Change reasoning for subsequent turns.
     SetThinking(crate::thinking::ThinkingConfig),
     /// User submitted a message in the composer, in the given mode.
-    /// Submit the composer text, with any image attachments (F.6).
+    /// Submit the composer text, with any image attachments.
     SendMessage(String, AgentMode, Vec<crate::history::ContentBlock>),
     /// Bang-mode (`!` / `!!`): run a shell command directly, outside the
     /// model loop. `visible` runs enter history as an `I ran: …` user
@@ -33,19 +33,19 @@ pub enum Command {
     /// deny rule to the project's `permissions.bml` instead of the session.
     Reject { id: String, always: bool },
     /// Answered the permission-prompt overlay (by tool-call id) with the
-    /// full scope-negotiated decision (F.5).
+    /// full scope-negotiated decision.
     AnswerPermission {
         id: String,
         answer: crate::permissions::PermissionAnswer,
     },
     /// Answered the question form (by question-request id) with the
-    /// picked labels per question, or dismissed it (A.5).
+    /// picked labels per question, or dismissed it.
     AnswerQuestion {
         id: String,
         answer: crate::tools::QuestionAnswer,
     },
     /// Run an MCP prompt (`/server:name`): render it server-side and send
-    /// the result as a user message (B.11 prompt surfacing).
+    /// the result as a user message (prompt surfacing).
     RunMcpPrompt {
         /// Qualified prompt name (`server.prompt`).
         qualified: String,
@@ -55,7 +55,7 @@ pub enum Command {
     /// Esc: interrupt the running turn.
     Interrupt,
     /// Cancel one subagent (by the task tool-call's id) without stopping
-    /// the parent turn (task 96, Esc-Esc in a task chat).
+    /// the parent turn (Esc-Esc in a task chat).
     CancelSubagent { tool_use_id: String },
     /// Start over (new session): abort any turn and reset to the initial state.
     Reset,
@@ -68,11 +68,11 @@ pub enum Command {
     /// Toggle LLM auto-review of permissions (`/auto-review`).
     ToggleAutoReview,
     /// `/memory [query]`: search the project's argosy memory concepts and
-    /// render the hits as a notice (Phase 3 of the argosy integration).
+    /// render the hits as a notice.
     ArgosyMemory { query: String },
     /// Refresh the per-model usage snapshot shown by `/usage`.
     GetUsage,
-    /// Fetch the provider-side usage quota shown by `/usage` (F.5); the
+    /// Fetch the provider-side usage quota shown by `/usage`; the
     /// answer streams back as [`AgentEvent::UsageQuota`].
     FetchUsage,
     /// Force-run every armed compaction stage on the current history
@@ -80,10 +80,10 @@ pub enum Command {
     Compact,
     /// Replace the session with a persisted one, by session id (`/sessions`).
     LoadSession { id: String },
-    /// Resume this directory's most recent session (F.3 resume-latest-by-
-    /// cwd; startup `--continue` and `/resume`).
+    /// Resume this directory's most recent session (startup `--continue`
+    /// and `/resume`).
     ResumeLatest,
-    /// The composer draft changed (F.3 draft preservation). The provider
+    /// The composer draft changed. The provider
     /// checkpoints it into the session file at most once per soft-save
     /// delay; empty text clears the stored draft.
     SetDraft(String),
@@ -199,12 +199,11 @@ impl ToolKind {
         )
     }
 
-    /// Body-truncation hints for the card, ported from the reference's
-    /// `RenderHintsRegistry`: how many body lines an unexpanded card shows
-    /// and which end survives. Bash keeps the tail — the interesting part
-    /// of a log is its end. Everything else, generic Card tools included,
-    /// keeps the head: rendered reports lead with summary rows, error
-    /// lines, and ranked results.
+    /// Body-truncation hints for the card: how many body lines an
+    /// unexpanded card shows and which end survives. Bash keeps the tail —
+    /// the interesting part of a log is its end. Everything else, generic
+    /// Card tools included, keeps the head: rendered reports lead with
+    /// summary rows, error lines, and ranked results.
     pub fn body_hints(&self) -> (usize, Keep) {
         const HEAD_CAP: usize = 40;
         const TAIL_CAP: usize = 30;
@@ -230,7 +229,7 @@ pub struct ToolCallData {
     /// The card awaits an approve/reject decision. Only backends that stage
     /// edits set this; the live agent applies filesystem tools inline.
     pub awaiting_approval: bool,
-    /// Base64 image payload rendered inline under the card body (F.6), from
+    /// Base64 image payload rendered inline under the card body, from
     /// a `view_image` tool result. `None` for every other tool.
     pub image: Option<String>,
 }
@@ -250,7 +249,7 @@ pub struct ModelChoice {
     pub thinking_choices: Vec<crate::thinking::ThinkingConfig>,
     /// Whether the model takes image input; unknown models allow the
     /// attach (a wrongly attached image is recoverable, a dropped one is
-    /// not), matching the old metadata-miss behavior.
+    /// not).
     pub vision: bool,
 }
 
@@ -277,8 +276,8 @@ pub struct UsageRow {
     pub cost: Option<f64>,
 }
 
-/// Lifecycle of the provider quota fetch backing `/usage` (F.5), mirroring
-/// the reference `UsageFetchState` (Loading / Ready / Unsupported / Error).
+/// Lifecycle of the provider quota fetch backing `/usage`
+/// (Loading / Ready / Unsupported / Error).
 /// `Idle` is the pre-first-fetch state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UsageFetchState {
@@ -326,7 +325,7 @@ pub enum AgentEvent {
     /// Per-model usage of the current session (`/usage`); pushed after each
     /// completed run and in answer to [`Command::GetUsage`].
     UsageSnapshot(Vec<UsageRow>),
-    /// Provider-side quota answer for `/usage` (F.5). The last answer is
+    /// Provider-side quota answer for `/usage`. The last answer is
     /// kept on the App across modal close/reopen.
     UsageQuota(UsageFetchState),
     /// A tone-tagged system line (retry/auth/compaction/doom/guardrail
@@ -357,7 +356,7 @@ pub enum AgentEvent {
         mode: Option<SessionMode>,
     },
     /// A gated tool call is parked on the user's decision: opens the
-    /// permission-prompt overlay (F.5). `files`/`commands` are display
+    /// permission-prompt overlay. `files`/`commands` are display
     /// context for the form; `scopes` are the permission-engine scopes.
     PermissionRequest {
         id: String,
@@ -372,7 +371,7 @@ pub enum AgentEvent {
         id: String,
     },
     /// The `question` tool is parked on the user: opens the question form
-    /// (A.5) with one tab per question.
+    /// with one tab per question.
     QuestionRequest {
         id: String,
         questions: Vec<crate::tools::QuestionSpec>,
@@ -382,9 +381,9 @@ pub enum AgentEvent {
     QuestionResolved {
         id: String,
     },
-    /// An event from a `task`-spawned subagent (task 96), tagged with the
-    /// spawning call's id. Routed into that subagent's task chat, never
-    /// the main transcript.
+    /// An event from a `task`-spawned subagent, tagged with the spawning
+    /// call's id. Routed into that subagent's task chat, never the main
+    /// transcript.
     Subagent {
         tool_use_id: String,
         description: String,
@@ -449,7 +448,7 @@ pub trait Provider {
         mpsc::UnboundedReceiver<AgentEvent>,
     );
 
-    /// The session's MCP client handle (B.11), cloned into the app so the
+    /// The session's MCP client handle, cloned into the app so the
     /// `/mcp` screen can read snapshots and send commands. `None` for
     /// providers without one.
     fn mcp(&self) -> Option<crate::mcp::McpHandle> {

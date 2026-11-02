@@ -66,8 +66,8 @@ pub(super) fn catalog_choices(
                 .and_then(|m| m.name.clone())
                 .unwrap_or_else(|| id.clone());
             // Vision claims come from the catalog row: a model the catalog
-            // does not know keeps the old metadata-miss behavior (attach
-            // allowed) rather than the provider row's default-false.
+            // does not know allows the attach (metadata miss) rather than
+            // the provider row's default-false.
             let vision = catalog
                 .model(key, id)
                 .is_none_or(|entry| entry.info.features.vision);
@@ -100,7 +100,7 @@ impl CraftProvider {
         let cwd = cwd.as_ref();
         let mut catalogs: BTreeMap<String, Vec<ModelInfo>> = BTreeMap::new();
         let mut notes = Vec::new();
-        // B.11: start the MCP client up front but never await `ready` here —
+        // Start the MCP client up front but never await `ready` here —
         // the first frame must not block on a slow server initialize. The
         // turn path awaits the gate before registering tools. The event
         // channel is created here (before `start` consumes the provider) so
@@ -167,7 +167,7 @@ impl CraftProvider {
             .fail();
         }
 
-        // H.3 model-tier registry: load persisted tier overrides and feed in
+        // Model-tier registry: load persisted tier overrides and feed in
         // the discovered catalogs so tier defaults can be resolved.
         let state_dir = crate::storage::StateDir::resolve().ok();
         if let Some(state_dir) = &state_dir {
@@ -239,7 +239,7 @@ impl CraftProvider {
     }
 
     /// Override the startup model selection with a `provider/model` spec
-    /// (`craft -m`, G.1). Unknown specs fail fast instead of silently
+    /// (`craft -m`). Unknown specs fail fast instead of silently
     /// falling back to the tier default.
     pub fn with_model_spec(mut self, spec: &str) -> crate::error::Result<Self> {
         use snafu::ensure;
@@ -334,7 +334,7 @@ pub(super) async fn build_session_state(
     ));
     let policy = crate::harness::PolicyLayerInputs::new(kit.permissions.clone(), approval.clone())
         .reviewer(crate::auto_review::reviewer_for(model.clone()));
-    // The question seam (A.5) parks on the same slots the loop answers.
+    // The question seam parks on the same slots the loop answers.
     let asker = Arc::new(QuestionAsker::new(
         kit.park.clone(),
         kit.evt_tx.clone(),
@@ -342,12 +342,12 @@ pub(super) async fn build_session_state(
     ));
     let (sink, stream) = crate::harness::EventSink::new();
     let workspace = kit.workspace.clone();
-    // Phase 3: register MCP tool annotations once the tool set is settled
+    // Register MCP tool annotations once the tool set is settled
     // so the gate consults the same hints as the turn path.
     if let Some(mcp) = workspace.mcp() {
         kit.permissions.sync_mcp_annotations(&mcp);
     }
-    // E.10 reauth hook over the session provider's credential.
+    // Reauth hook over the session provider's credential.
     let reauth = crate::provider::reauth_hook(
         kit.config
             .providers
@@ -372,7 +372,7 @@ pub(super) async fn build_session_state(
     .history(history)
     .thinking(thinking)
     .policy(policy.clone())
-    // E.10: a 401 parks the run on the env-credential reauth hook instead
+    // A 401 parks the run on the env-credential reauth hook instead
     // of failing the turn (the TUI's env is refreshed by plugins and
     // config reloads while it runs).
     .reauth(reauth)

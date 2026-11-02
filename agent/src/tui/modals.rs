@@ -33,7 +33,7 @@ pub enum Modal {
     Usage(Vec<crate::tui::provider::UsageRow>),
     /// `/stats`: cross-session totals from the cost ledger.
     Stats(StatsView),
-    /// `/help` or Ctrl+H: data-driven keybinding sheet (F.1); rows come
+    /// `/help` or Ctrl+H: data-driven keybinding sheet; rows come
     /// from the `KEYBINDS` table via the user's overlay resolver.
     Help,
     /// `/sessions`: persisted-session picker; Enter loads the selection.
@@ -42,18 +42,18 @@ pub enum Modal {
         selected: usize,
     },
     /// `/theme`: bundled-theme picker with live preview. `original` is the
-    /// theme active on open; cancel restores it (F.5, reference theme_picker).
+    /// theme active on open; cancel restores it.
     ThemePicker {
         entries: Vec<String>,
         selected: usize,
         original: String,
     },
-    /// `/mcp`: server-status screen (B.11). Rows come from the live MCP
+    /// `/mcp`: server-status screen. Rows come from the live MCP
     /// snapshot at render time; only the selection lives here.
     Mcp {
         selected: usize,
     },
-    /// Ctrl-N task-chat picker (task 96, reference list-picker style):
+    /// Ctrl-N task-chat picker:
     /// row 0 is the main chat, rows 1.. the task chats; rows read the
     /// live `task_chats` at render/handle time, only the selection lives
     /// here. Enter mounts the selected chat.
@@ -189,9 +189,8 @@ impl App {
         }
     }
 
-    /// Keybindings help modal (F.1): Esc / the help and quit chords close,
-    /// arrows and page keys scroll; other keys close (kept from the old
-    /// "any key closes" sheet so muscle memory still works).
+    /// Keybindings help modal: Esc / the help and quit chords close,
+    /// arrows and page keys scroll; any other key closes.
     fn handle_help_key(&mut self, key: KeyEvent) {
         use crate::tui::keybindings::ActionId;
         if key.code == KeyCode::Esc
@@ -298,7 +297,7 @@ impl App {
         }
     }
 
-    /// Task-chat picker keys (task 96): arrows / j-k move, Enter mounts
+    /// Task-chat picker keys: arrows / j-k move, Enter mounts
     /// the selected chat, Esc or any other key closes. All keys are
     /// consumed. Selection is clamped to main + task chats.
     fn handle_task_picker_key(&mut self, key: KeyEvent) {
@@ -373,8 +372,7 @@ impl App {
 
     /// `/usage` and `/stats` sheet keys: close on Esc/Ctrl-C, scroll the
     /// line list, and reload the provider quota on Ctrl+R when the sheet
-    /// supports it (usage only). All keys are consumed (F.5, reference
-    /// usage/stats modals).
+    /// supports it (usage only). All keys are consumed.
     fn handle_usage_key(
         &mut self,
         key: KeyEvent,
@@ -487,7 +485,7 @@ impl App {
         }
     }
 
-    /// `/mcp` screen keys (B.11): arrows move the selection, `t` toggles the
+    /// `/mcp` screen keys: arrows move the selection, `t` toggles the
     /// highlighted server, `r` reconnects it, Enter (or `e`) expands the
     /// row's resource list, Esc or `q` closes. Rows read the live snapshot,
     /// so a command's effect shows up on the next paint.
@@ -504,7 +502,7 @@ impl App {
             key.code,
             KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('E')
         ) {
-            // Phase 5: expand/collapse the selected server's resources.
+            // Expand/collapse the selected server's resources.
             self.overlays.mcp_expanded = if self.overlays.mcp_expanded == Some(selected) {
                 None
             } else {
@@ -535,7 +533,7 @@ impl App {
                     && matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L'))
                     && let Some(info) = infos.get(selected)
                 {
-                    // OAuth login (B.11): run the browser flow off the UI
+                    // OAuth login: run the browser flow off the UI
                     // thread, then ask the manager to reconnect.
                     let handle = handle.clone();
                     let reader = handle.reader();
@@ -562,7 +560,7 @@ impl App {
 }
 
 /// The command (if any) the `/mcp` screen's `t`/`r` keys map to for the
-/// highlighted row (B.11). Pure over the snapshot rows so the mapping is
+/// highlighted row. Pure over the snapshot rows so the mapping is
 /// testable without a live manager: `t` enables a disabled server or
 /// disables anything else; `r` reconnects everything but a disabled one.
 /// `l` is handled separately (OAuth login, not an `McpCommand`).
@@ -591,8 +589,7 @@ fn mcp_command_for(infos: &[McpServerInfo], selected: usize, code: KeyCode) -> O
 
 /// Tier-assignment keys, tolerant of keyboard layout: Shift+1-4 may arrive as
 /// the shifted symbol (`!@#$`), the bare digit with SHIFT held (kitty
-/// protocol), or a layout-specific variant. Identical to the reference's
-/// `tier_for_shortcut`.
+/// protocol), or a layout-specific variant.
 fn tier_for_key(key: &KeyEvent) -> Option<ModelTier> {
     // slt's KeyCode is not Copy: bind through the reference instead of
     // moving the field out of the borrowed event.
@@ -694,7 +691,7 @@ mod tests {
         );
     }
 
-    // --- /mcp screen (B.11) ---
+    // --- /mcp screen ---
 
     fn server_info(name: &str, status: McpServerStatus) -> McpServerInfo {
         McpServerInfo {
@@ -784,7 +781,7 @@ mod tests {
         app.handle_modal_key(slt_key(KeyCode::Esc, KeyModifiers::NONE), &tx);
         assert!(matches!(app.overlays.modal, Modal::None));
     }
-    /// Phase 5: Enter expands the selected server's resource list, a
+    /// Enter expands the selected server's resource list, a
     /// second Enter collapses it, and other keys leave the state alone.
     #[test]
     fn mcp_screen_enter_toggles_resource_expansion() {

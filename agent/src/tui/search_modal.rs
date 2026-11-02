@@ -1,8 +1,7 @@
-//! Fuzzy message search (F.3, Ctrl-F): a nucleo fuzzy matcher over the
+//! Fuzzy message search (Ctrl-F): a nucleo fuzzy matcher over the
 //! transcript's rendered segments, with jump-to-segment and next/prev.
-//! Ported from the reference `craft-ui/src/components/search_modal.rs`,
-//! adapted to this repo: the corpus is this repo's segment cache and the
-//! modal's render lives with the other overlays (`ui::overlays`).
+//! The corpus is the repo's segment cache; the modal's render lives with
+//! the other overlays (`ui::overlays`).
 
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 use nucleo_matcher::{Config, Matcher, Utf32Str};

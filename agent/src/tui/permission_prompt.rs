@@ -1,9 +1,7 @@
-//! Permission prompt overlay (F.5): a bottom, non-modal form that surfaces
+//! Permission prompt overlay: a bottom, non-modal form that surfaces
 //! a gated tool call — its tool name, scopes, and display context — and
 //! negotiates the answer: allow once/session/always (project or all
-//! projects), deny with editable guidance, deny-always. Ported from the
-//! reference `craft-ui/src/components/permission_prompt.rs`; `subagent_id`
-//! routing is deferred until subagents land (task 95).
+//! projects), deny with editable guidance, deny-always.
 
 use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -242,8 +240,8 @@ impl PermissionPrompt {
         let Self::Open { state, buffer, .. } = self else {
             return None;
         };
-        // Ctrl-C denies from any state, matching the reference: the prompt
-        // is the urgent keyboard owner while a tool call is parked on it.
+        // Ctrl-C denies from any state: the prompt is the urgent keyboard
+        // owner while a tool call is parked on it.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(PermissionAnswer::Deny);
         }
@@ -627,15 +625,15 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt panel for this form
+// The slt panel for this form
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Word-wrap one styled line to `max` cells, matching ratatui's
-/// `Paragraph` + `Wrap { trim: false }` byte for byte: a faithful port of
-/// `WordWrapper::process_input` (ratatui-widgets `reflow.rs`) over
-/// `(char, style)` cells with `base` patched under each span's style, the
-/// same merge `Paragraph::style` applied. Wrapped rows are re-merged into
-/// spans so each row paints as one `ui.line`.
+/// `Paragraph` + `Wrap { trim: false }` byte for byte (the semantics of
+/// `WordWrapper::process_input` from ratatui-widgets `reflow.rs`) over
+/// `(char, style)` cells with `base` patched under each span's style.
+/// Wrapped rows are re-merged into spans so each row paints as one
+/// `ui.line`.
 pub(crate) fn wrap_line_rows(line: &Line<'_>, max: usize, base: Style) -> Vec<Vec<Span<'static>>> {
     // Flatten to styled cells first: breaks are chosen per grapheme-ish
     // char with display widths, then runs of equal style become spans.

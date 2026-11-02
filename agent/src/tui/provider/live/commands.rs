@@ -93,7 +93,7 @@ impl CraftProvider {
         // are sent, in order, when that turn settles (never aborting it).
         let mut pending_messages: VecDeque<PendingMessage> = VecDeque::new();
         let mut current_turn: Option<AbortHandle> = None;
-        // Phase 4: server-initiated MCP requests (elicitation) arrive on
+        // Server-initiated MCP requests (elicitation) arrive on
         // their own channel; each is answered on its own task so a parked
         // form never blocks the command loop.
         let mut server_requests = ctx
@@ -268,7 +268,7 @@ impl CraftProvider {
         let _ = ctx.state.lock().await.conversation.shutdown().await;
         // Drain outstanding memory extractions before the loop task ends.
         crate::knowledge_memory::wait_for_pending(std::time::Duration::from_secs(15)).await;
-        // B.11: the UI dropped its command half, so no turn can follow; tear
+        // The UI dropped its command half, so no turn can follow; tear
         // the MCP servers down before the loop task ends (bounded by the
         // manager's own shutdown timeout).
         if let Some(handle) = ctx.kit.workspace.mcp() {
@@ -436,7 +436,7 @@ fn handle_shell(ctx: &LoopCtx, command: String, visible: bool) {
     ));
 }
 
-/// `Command::ArgosyMemory` (Phase 3): search the project's argosy memory
+/// `Command::ArgosyMemory`: search the project's argosy memory
 /// concepts off-loop and render the hits as a notice. Errors degrade to a
 /// warning notice, never a failed turn.
 async fn handle_argosy_memory(ctx: &LoopCtx, query: String) {

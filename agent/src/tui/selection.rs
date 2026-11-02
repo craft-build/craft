@@ -149,9 +149,9 @@ fn clipboard_backends() -> &'static [ClipboardBackend] {
 }
 
 /// Copy text to the system clipboard, returning whether any mechanism
-/// accepted it. The caller flashes "Copied" only for a real copy —
-/// on a box with no clipboard tool the old pbcopy-only code flashed
-/// "Copied" for a copy that never happened (finding 66).
+/// accepted it. The caller flashes "Copied" only for a real copy
+/// (finding 66: a box with no clipboard tool must not flash "Copied"
+/// for a copy that never happened).
 pub(crate) fn copy_to_clipboard(text: &str) -> bool {
     copy_with_backends(clipboard_backends(), text, &pipe_to_tool, &write_osc52)
 }

@@ -1,7 +1,7 @@
-//! Runtime-swappable UI theme, ported from the reference `craft-ui/src/theme.rs`
-//! (task F.5). Themes are Helix-style TOML compiled in via `include_str!` from
-//! `themes/`; `set()` swaps a global `Arc<Theme>` with a generation counter and
-//! restyles syntect highlighting via [`crate::markdown::highlight::set_theme`].
+//! Runtime-swappable UI theme. Themes are Helix-style TOML compiled in via
+//! `include_str!` from `themes/`; `set()` swaps a global `Arc<Theme>` with a
+//! generation counter and restyles syntect highlighting via
+//! [`crate::markdown::highlight::set_theme`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,8 +126,8 @@ pub fn set_named(name: &str) -> Result<(), String> {
 }
 
 /// Bumped by every [`set`]. Anything derived from the theme (highlight
-/// caches, painted lines) is stale once this changes. Mirrors the reference
-/// registry API; highlight uses its own generation internally.
+/// caches, painted lines) is stale once this changes; highlight uses its
+/// own generation internally.
 #[allow(dead_code)]
 pub fn generation() -> u64 {
     GENERATION.load(Ordering::Acquire)
@@ -246,8 +246,7 @@ fn fallback_theme() -> Theme {
     }
 }
 
-// `mode_build` in `fallback_theme` needs the const-to-const aliasing the old
-// module had; replicate it here.
+// Const-to-const aliases used by `fallback_theme`'s `mode_build`.
 mod mode_aliases {
     use crate::tui::style::Color;
 
@@ -359,7 +358,7 @@ fn style_fg(def: &StyleDef, palette: &HashMap<String, Color>) -> Option<Color> {
     resolve_style(def, palette).fg
 }
 
-// Helix scope keys -> TextMate scope selectors, ported from the reference.
+// Helix scope keys -> TextMate scope selectors.
 const HELIX_TO_TEXTMATE: &[(&str, &str)] = &[
     ("comment", "comment, comment punctuation.definition.comment"),
     (
@@ -616,7 +615,7 @@ impl Theme {
 
         // Derive the layer stack from the palette when the theme does not pin
         // it explicitly: `layer01/02` bg, then `current_line`/`selection`, then
-        // a bg<->fg lerp (the reference's `layer_color` approach).
+        // a bg<->fg lerp.
         let layer = |ui_key: &str, primary: &[&str], t: f32| -> Color {
             if let Some(def) = ui.get(ui_key)
                 && let Some(c) = style_bg(def, &palette)

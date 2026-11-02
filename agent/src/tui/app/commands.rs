@@ -304,7 +304,7 @@ impl App {
                 self.overlays.usage_scroll = 0;
                 self.overlays.modal = Modal::Usage(self.overlays.usage.clone());
                 // Rows come from the session ledger; quota is refetched on
-                // every open, like the reference.
+                // every open.
                 let _ = tx.send(Command::GetUsage);
                 let _ = tx.send(Command::FetchUsage);
             }
@@ -537,8 +537,8 @@ impl App {
         self.view.follow = true;
     }
 
-    /// Resolve a `/server:name` slash string to a published MCP prompt
-    /// (B.11). Returns `None` when the name is unknown or claimed by a
+    /// Resolve a `/server:name` slash string to a published MCP prompt.
+    /// Returns `None` when the name is unknown or claimed by a
     /// builtin/custom command.
     pub(crate) fn mcp_prompt(&self, slash: &str) -> Option<crate::mcp::McpPromptInfo> {
         if COMMANDS
@@ -686,8 +686,8 @@ impl App {
         self.view.follow = true;
     }
 
-    /// Run one argosy builtin prompt (Phase 3 of the argosy integration):
-    /// `/dream`, `/scan`, `/review [base=… commit=… focus=…]`, and
+    /// Run one argosy builtin prompt: `/dream`, `/scan`,
+    /// `/review [base=… commit=… focus=…]`, and
     /// `/memory [query]` (which routes to the provider-side memory search
     /// instead of the model). Mirrors the custom-command send path.
     pub(crate) fn submit_argosy_prompt(
@@ -1070,8 +1070,8 @@ mod tests {
         assert!(matches!(&app.overlays.modal, Modal::Usage(rows) if rows.len() == 2));
     }
 
-    /// The provider quota answer survives close/reopen (F.5: the last
-    /// successful fetch is kept, like the reference's usage_slot).
+    /// The provider quota answer survives close/reopen (the last
+    /// successful fetch is kept).
     #[test]
     fn quota_state_persists_across_close_and_reopen() {
         let mut app = App::new();
@@ -1150,7 +1150,7 @@ mod tests {
         ));
     }
 
-    /// B.11: a published MCP prompt appears in slash completion as
+    /// A published MCP prompt appears in slash completion as
     /// `/server:name` and submitting it sends `RunMcpPrompt` with the
     /// qualified name and parsed arguments; missing required arguments are
     /// rejected with a notice instead.
@@ -1227,7 +1227,7 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(Command::Reset)));
     }
 
-    /// B.11: `/mcp` appears in slash completion and opens the server
+    /// `/mcp` appears in slash completion and opens the server
     /// screen; any close key dismisses it.
     #[test]
     fn mcp_slash_opens_the_server_screen() {

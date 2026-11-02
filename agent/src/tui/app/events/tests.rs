@@ -424,7 +424,7 @@ fn model_menu_replaces_open_palette() {
     assert!(matches!(app.overlays.modal, Modal::ModelMenu(_)));
 }
 
-/// Tab cycles Build -> Plan -> Build (F.2); BackTab keeps focus cycling.
+/// Tab cycles Build -> Plan -> Build; BackTab keeps focus cycling.
 #[test]
 fn tab_cycles_modes_and_backtab_keeps_focus_cycling() {
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -564,7 +564,7 @@ fn click_notice_row_expands_and_retruncates_body() {
     let _ = idx;
 }
 
-/// The ported composer chords: Ctrl-W deletes a word, Ctrl-K kills to the
+/// Composer chords: Ctrl-W deletes a word, Ctrl-K kills to the
 /// end of the line, Alt-Left moves back a word.
 #[test]
 fn composer_chords_edit_words_and_lines() {
@@ -937,7 +937,7 @@ fn alt_e_cycles_effort_and_ctrl_e_moves_to_line_end() {
 }
 
 /// Ctrl-H opens the data-driven keybinding sheet; arrows scroll it,
-/// Esc closes (F.1).
+/// Esc closes.
 #[test]
 fn ctrl_h_opens_scrolls_and_closes_the_help_sheet() {
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -959,7 +959,7 @@ fn ctrl_h_opens_scrolls_and_closes_the_help_sheet() {
 }
 
 /// A config overlay rebinds a chord: the new chord dispatches the
-/// action and the old one no longer does (F.1).
+/// action and the old one no longer does.
 #[test]
 fn keybinding_overlay_replaces_the_palette_chord() {
     use crate::tui::keybindings::{ActionId, KeybindingResolver};
@@ -987,7 +987,7 @@ fn keybinding_overlay_replaces_the_palette_chord() {
     );
     assert!(app.overlays.keybinds.is_overridden(ActionId::Palette));
 }
-/// F.6: pasting an image path attaches the image instead of inserting
+/// Pasting an image path attaches the image instead of inserting
 /// the path text; text pastes are unaffected.
 #[test]
 fn paste_of_image_path_attaches_image() {
@@ -1024,7 +1024,7 @@ fn paste_of_image_path_attaches_image() {
 }
 
 // ------------------------------------------------------------------
-// Subagent task chats (task 96)
+// Subagent task chats
 // ------------------------------------------------------------------
 
 fn sub_event(id: &str, text: &str) -> AgentEvent {

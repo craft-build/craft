@@ -1,11 +1,8 @@
-//! File picker (F.3, Ctrl-S): a fuzzy path matcher over an async walkdir of
-//! the session's cwd. Ported from the reference
-//! `craft-ui/src/components/file_picker.rs`, adapted to this repo: the
-//! reference's `nucleo` matcher harness is replaced by `nucleo-matcher`
-//! run off the event-loop thread (a generation-stamped job per query, so
-//! stale answers are dropped and the UI keeps rendering the previous
-//! matches until the fresh ones land), and the render lives with the
-//! other overlays (`ui::overlays`).
+//! File picker (Ctrl-S): a fuzzy path matcher over an async walkdir of the
+//! session's cwd. `nucleo-matcher` runs off the event-loop thread (a
+//! generation-stamped job per query, so stale answers are dropped and the
+//! UI keeps rendering the previous matches until the fresh ones land); the
+//! render lives with the other overlays (`ui::overlays`).
 
 use std::path::PathBuf;
 use std::sync::Arc;

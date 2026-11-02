@@ -208,7 +208,7 @@ pub(super) struct ToolDone {
     pub touched: Vec<(String, FileStatus)>,
 }
 
-/// First image block of a tool result, for inline rendering (F.6).
+/// First image block of a tool result, for inline rendering.
 pub(super) fn result_image(result: &history::ContentBlock) -> Option<String> {
     let history::ContentBlock::ToolResult { content, .. } = result else {
         return None;
@@ -467,10 +467,9 @@ fn diff_lines(text: &str) -> Vec<ToolLine> {
     lines
 }
 
-/// Word-level emphasis for adjacent removed/added line pairs, mirroring the
-/// reference's inline-change `DiffSpan.emphasized` from the unified text
-/// alone: the i-th removed line of a run is paired with the i-th added line
-/// of the run that follows it.
+/// Word-level emphasis for adjacent removed/added line pairs, derived from
+/// the unified text alone: the i-th removed line of a run is paired with
+/// the i-th added line of the run that follows it.
 fn emphasize_pairs(lines: &mut [ToolLine]) {
     use similar::TextDiff;
 
@@ -786,7 +785,7 @@ mod tests {
         );
         assert!(lines.iter().all(|l| l.nr == 0));
     }
-    /// F.6: a view_image result's image block rides on the card for inline
+    /// A view_image result's image block rides on the card for inline
     /// rendering; the leading text block stays as the card body.
     #[test]
     fn tool_done_extracts_view_image_block() {

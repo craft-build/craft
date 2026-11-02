@@ -24,7 +24,7 @@ pub(crate) fn load_stats() -> StatsView {
 
 /// Build the `/stats` view from a cost-ledger summary, capping the by-model
 /// table at 12 rows (the rest folds into an overflow line) and the top
-/// sessions at 8, like the reference stats modal.
+/// sessions at 8.
 fn stats_view(summary: crate::storage::stats::CostSummary) -> StatsView {
     const MAX_MODEL_ROWS: usize = 12;
     const MAX_SESSION_ROWS: usize = 8;

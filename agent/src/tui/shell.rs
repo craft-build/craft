@@ -1,6 +1,5 @@
 //! Bash bang-mode: composer input starting `!` (visible) or `!!` (hidden)
 //! runs a shell command directly, streamed into a bash tool card.
-//! Ported from the reference `craft-ui/src/app/shell.rs` (F.2).
 
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -62,8 +61,7 @@ pub(crate) fn parse_shell_prefix(text: &str) -> Option<ShellPrefix> {
     })
 }
 
-/// Per-session bookkeeping for bang-mode runs, ported from the reference
-/// `ShellState` (`craft-ui/src/app/shell.rs`): monotonically numbered
+/// Per-session bookkeeping for bang-mode runs: monotonically numbered
 /// `shell-N` ids, the set of in-flight runs, one cancel trigger per
 /// in-flight run, and the visible-run results queued for the next turn.
 #[derive(Default)]
@@ -87,7 +85,7 @@ impl ShellState {
     }
 
     /// Ids of runs still in flight.
-    #[allow(dead_code)] // parity with the reference API; exercised by tests
+    #[allow(dead_code)] // exercised only by tests
     pub(crate) fn active_ids(&self) -> &std::collections::HashSet<String> {
         &self.active_ids
     }
@@ -195,7 +193,7 @@ async fn run_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Own process group so ChildGuard's killpg takes the command's children
-    // with it on cancel/timeout (the reference uses setsid for this).
+    // with it on cancel/timeout.
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -306,8 +304,8 @@ const LINE_TRUNC_MARKER: &str = "… [truncated]";
 /// Copy child output lines into the channel. Lines are hard-capped at
 /// [`MAX_LINE_BYTES`] (with a marker appended) and the remainder of an
 /// oversized line is discarded without storing it, so a newline-free
-/// flood can't grow memory. Lines are decoded lossily: binary output no
-/// longer kills the reader (the old `lines()` loop did).
+/// flood can't grow memory. Lines are decoded lossily: binary output
+/// doesn't kill the reader.
 fn spawn_line_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     mut reader: BufReader<R>,
     tx: mpsc::UnboundedSender<String>,
@@ -466,8 +464,8 @@ mod tests {
 
     /// A cancelled token kills a long-running command: `run_shell` returns
     /// promptly with an error card instead of sleeping out the command.
-    /// Matches the reference: the `Done` path (including the visible-run
-    /// result queue) still runs with `is_error` set.
+    /// The `Done` path (including the visible-run result queue) still runs
+    /// with `is_error` set.
     #[tokio::test]
     async fn cancelled_shell_kills_the_command() {
         use crate::run::cancel_channel;

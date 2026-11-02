@@ -37,16 +37,15 @@ fn clamp_row_u16(delta: u32) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
-// OSC-8 hyperlinks (moved here from the deleted `tui/hyperlink.rs`)
+// OSC-8 hyperlinks
 // ---------------------------------------------------------------------------
 
 /// OSC-8 link wrapper. `\x1b]8;;` opens, the URI follows, `ST` (`ESC \`)
 /// terminates the parameter, then the visible text, then the closer.
 const OSC8_OPEN: &str = "\u{1b}]8;;";
 const OSC8_CLOSE: &str = "\u{1b}\\";
-/// The bare closer (empty target). No production code embeds OSC-8 bytes
-/// in symbols anymore (slt owns emission via `Cell::hyperlink`); the
-/// constant stays for the `strip_osc8` tests.
+/// The bare closer (empty target). slt owns OSC-8 emission via
+/// `Cell::hyperlink`; the constant stays for the `strip_osc8` tests.
 #[cfg_attr(not(test), allow(dead_code))]
 const OSC8_EMPTY: &str = "\u{1b}]8;;\u{1b}\\";
 
@@ -117,8 +116,8 @@ fn uri_from_path(path: &std::path::Path) -> String {
 }
 
 /// Whether the terminal multiplexer would corrupt OSC-8 passthrough.
-/// tmux re-escapes sequences it does not recognize; keep the reference's
-/// conservative gate and skip injection entirely under it.
+/// tmux re-escapes sequences it does not recognize, so skip injection
+/// entirely under it.
 pub(crate) fn is_muxed() -> bool {
     std::env::var_os("TMUX").is_some()
 }
@@ -285,7 +284,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                     ));
                 }
                 app.view.segments.push(Segment::with_lines(lines));
-                // F.6 inline images: `view_image` results render below the
+                // `view_image` results render below the
                 // card body, in the same segment so scroll/height math
                 // covers them. The message loop holds `&app.conversation`;
                 // decoding is deferred to after it (the picker cache needs
@@ -425,8 +424,8 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
 
     // Resolve card links to visible rows: the header sits one row under the
     // card's top-padding blank. Skipped under tmux, whose passthrough
-    // mangles OSC-8. The single-row guard mirrors the reference: a header
-    // is one pre-wrapped row, and column bounds keep any overflow from
+    // mangles OSC-8. The single-row guard: a header is one pre-wrapped
+    // row, and column bounds keep any overflow from
     // writing outside the viewport.
     let mut links = Vec::new();
     if !is_muxed() {
@@ -456,7 +455,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
     }
 }
 
-/// The search modal's current match highlight (F.3) as visible rows: the
+/// The search modal's current match highlight as visible rows: the
 /// highlighted segment's doc-row span intersected with the viewport.
 fn highlight_visible(
     app: &App,
@@ -524,7 +523,7 @@ mod tests {
         assert_eq!(clamp_row_u16(u32::MAX), u16::MAX);
     }
 
-    /// F.6: a `view_image` result renders an inline image under the card
+    /// A `view_image` result renders an inline image under the card
     /// body — the segment grows by the image's cell rows and halfblock
     /// glyphs land in the buffer below the header.
     #[test]
@@ -709,8 +708,7 @@ mod tests {
         // Card header: native OSC-8 link attached via `Cell::hyperlink`
         // (slt emits the escapes), full path text survives in the symbols,
         // and no cell inside the message area falls back to an unset
-        // background (the pre-fix symptom: black sections after the
-        // linked cell).
+        // background.
         let ry = rows.iter().position(|r| r.contains("Read ")).unwrap();
         assert!(rows[ry].contains("probe.rs"));
         assert!(
@@ -730,14 +728,9 @@ mod tests {
     }
 
     /// Ctrl+b / ctrl+t toggle the todo/files sections, shifting the
-    /// composer and status line on that same frame. Two one-frame-stale
-    /// sources used to corrupt exactly that frame: the composer's overlay
-    /// pass read `Response::rect` (a retained per-id lookup that returns
-    /// the full-screen fallback when the extra section row shifts the
-    /// widget call order — painting a ▎ bar down column 0 and the
-    /// placeholder at row 0), and the transcript built its bands with the
-    /// previous frame's area height. Both are now computed synchronously,
-    /// so the toggle frame must be byte-identical to the settled frame.
+    /// composer and status line on that same frame. The composer overlay
+    /// rect and the transcript bands are computed synchronously, so the
+    /// toggle frame must be byte-identical to the settled frame.
     #[test]
     fn section_toggle_reflows_without_a_glitch_frame() {
         use crate::tui::app::{App, Message};
@@ -892,7 +885,7 @@ mod tests {
         assert!(!any_linked(&tb));
     }
 
-    // ── hyperlink helpers (moved from `tui/hyperlink.rs`) ──
+    // ── hyperlink helpers ──
 
     use super::{Hyperlink, OSC8_EMPTY, file_uri, strip_osc8};
 
@@ -946,7 +939,7 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt transcript painter (segment flow per the docs contract)
+// slt transcript painter
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Paint the transcript: the visible bands from [`build_frame`] become
@@ -954,8 +947,7 @@ mod tests {
 /// `.draw()` regions painting app `Line`s via `Buffer::set_string`, image
 /// segments as slt image widgets — plus a trailing bookkeeping region that
 /// publishes `msg_area` / hit regions / width into [`PaintData`] for the
-/// next frame's event handlers and wrap math (one frame stale, like the
-/// ratatui-era snapshot reads).
+/// next frame's event handlers and wrap math (one frame stale).
 pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
     // slt lays out after the frame closure returns, so the wrap width can
     // only come from the previous frame's handoff; the bookkeeping draw
@@ -1009,7 +1001,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
         std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new())));
     let regions_slot = std::sync::Arc::clone(&regions_out);
     let grow_resp = ui.container().grow(1).col(move |ui| {
-        // The legacy painter's top margin row (its `inner.y = area.y + 1`).
+        // Top margin row (`inner.y = area.y + 1`).
         ui.container().h(1).draw(|_, _| {});
 
         let mut total_rows: u32 = 0;
@@ -1124,10 +1116,9 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
 /// Paint pre-wrapped app lines into an slt buffer region: one display row
 /// per line, spans left to right, advancing `x` by each span's unicode
 /// width. App styles are slt styles already; unset span backgrounds inherit
-/// the app background, mirroring how the ratatui Paragraph's style patch
-/// kept the root fill under the text. The band's rect is the inner column
-/// (the declaring container carries the margins), so `set_string`'s clip
-/// trims unwrappable rows exactly where the legacy Paragraph did.
+/// the app background, keeping the root fill under the text. The band's
+/// rect is the inner column (the declaring container carries the
+/// margins), so `set_string`'s clip trims unwrappable rows at the margins.
 fn paint_rows_slt(
     buf: &mut slt::buffer::Buffer,
     rect: slt::Rect,
@@ -1302,8 +1293,7 @@ fn iterm_terminal() -> bool {
 
 /// Trailing per-frame buffer pass, declared last so it sees the finished
 /// cells: the search-highlight fg↔bg swap, the full-screen `frame_text`
-/// snapshot, and the current selection as REVERSED cells (the same math as
-/// the legacy `render_selection`).
+/// snapshot, and the current selection as REVERSED cells.
 pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
     let sel = app.view.selection;
     let paint = app.view.paint.clone();
@@ -1333,8 +1323,7 @@ pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
                 )
             };
 
-            // Search highlight (F.3): the segment's visible cells swap
-            // fg↔bg, mirroring the reference's `Cursor::render(highlight)`.
+            // Search highlight: the segment's visible cells swap fg↔bg.
             if let Some((start, end)) = hl_rows
                 && inner_w > 0
             {

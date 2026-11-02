@@ -1,9 +1,8 @@
-//! Todo/plan panel (F.3, task 79): Ctrl-T toggles the plan form — the
-//! "Plan complete" menu shown when the agent finishes drafting its plan in
-//! Plan mode — and Ctrl-O hands the plan file to `$VISUAL`/`$EDITOR`.
-//! Ported from the reference `craft-ui/src/components/plan_form.rs`.
-//! Dismiss and open-editor chords resolve through the data-driven
-//! keybinding resolver, so user rebinds apply inside the form.
+//! Todo/plan panel: Ctrl-T toggles the plan form — the "Plan complete"
+//! menu shown when the agent finishes drafting its plan in Plan mode —
+//! and Ctrl-O hands the plan file to `$VISUAL`/`$EDITOR`. Dismiss and
+//! open-editor chords resolve through the data-driven keybinding
+//! resolver, so user rebinds apply inside the form.
 
 use slt::event::{KeyCode, KeyEvent};
 
@@ -165,8 +164,8 @@ impl PlanForm {
         ]))
     }
 
-    /// The form's fixed height (menu + chrome), as `render_slt` reserves.
-    /// Test-only now that the painter sizes from `FORM_HEIGHT` directly.
+    /// The form's fixed height (menu + chrome). Test-only: `render_slt`
+    /// sizes from `FORM_HEIGHT` directly.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn height(&self) -> u16 {
         if self.is_visible() { FORM_HEIGHT } else { 0 }
@@ -429,7 +428,7 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt panel for this form
+// The slt panel for this form
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Render this form in the composer box's place, styled like the input

@@ -7,7 +7,7 @@ use crate::tui::modals::Modal;
 use crate::tui::style::Style;
 use crate::tui::text::{Line, Span};
 
-/// One `model  tokens  cost` body line (styled like the old table rows).
+/// One `model  tokens  cost` body line.
 fn usage_row_line(row: &crate::tui::provider::UsageRow, w: usize) -> Line<'static> {
     use crate::storage::stats::format_usd;
     use crate::usage::format_tokens;
@@ -48,7 +48,7 @@ fn section_label(text: &str) -> Line<'static> {
 
 fn format_reset(reset_at: u64) -> String {
     match jiff::Timestamp::from_millisecond(reset_at as i64) {
-        // Local wall-clock time, matching the reference's local-time fallback.
+        // Local wall-clock time.
         Ok(ts) => ts
             .to_zoned(jiff::tz::TimeZone::system())
             .strftime("%m-%d %H:%M")
@@ -58,7 +58,7 @@ fn format_reset(reset_at: u64) -> String {
 }
 
 /// The provider-quota section of `/usage`, one line per limit plus the
-/// per-model today rows (F.5). Pure so layout can be unit-tested.
+/// per-model today rows. Pure so layout can be unit-tested.
 pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<Line<'static>> {
     let t = theme::current();
 
@@ -168,8 +168,8 @@ fn session_line(entry: &(String, f64, u64)) -> Line<'static> {
 use super::{SheetRow, centered_slt, clip_spans, sheet_slt};
 
 /// The shared scrollable sheet on the slt frame: dim, centered box, bold
-/// title, a clipped body window, and the footer pinned to the last row
-/// (legacy `render_usage_sheet` geometry). Returns `max_scroll`.
+/// title, a clipped body window, and the footer pinned to the last row.
+/// Returns `max_scroll`.
 pub(super) fn render_usage_sheet_slt(
     ui: &mut slt::Context,
     title: &str,
@@ -201,7 +201,7 @@ pub(super) fn render_usage_sheet_slt(
             .take(visible)
             .enumerate()
             .map(|(i, line)| {
-                // An empty Line still occupies its row in the legacy
+                // An empty Line still occupies its row in the
                 // sheet; a fully clipped row keeps one space so the
                 // layout below is unaffected either way.
                 let mut spans = clip_spans(line.spans.clone(), w_in);
@@ -231,7 +231,7 @@ pub(super) fn render_usage_slt(ui: &mut slt::Context, app: &mut App) {
     let Modal::Usage(rows) = &app.overlays.modal else {
         return;
     };
-    let w = 56usize; // body column width, as the old table used
+    let w = 56usize; // body column width
     let mut lines = Vec::new();
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(

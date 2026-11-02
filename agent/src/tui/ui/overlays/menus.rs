@@ -67,7 +67,7 @@ pub(super) fn render_slash_slt(ui: &mut slt::Context, app: &App) {
     boxed_slt(ui, x, y, width, n, rows);
 }
 
-/// Model picker (no dim; windowed around the selection as legacy).
+/// Model picker (no dim; windowed around the selection).
 pub(super) fn render_model_menu_slt(ui: &mut slt::Context, app: &App) {
     let t = theme::current();
 
@@ -196,9 +196,9 @@ pub(super) fn render_palette_slt(ui: &mut slt::Context, app: &App) {
         .min(items.len().saturating_sub(window));
 
     // Query row: `> ` prompt, the query (or placeholder), and the caret.
-    // Wave 2b: the `▎` glyph matches the composer/editor widget carets
-    // (the app owns the query — filtering, list navigation — so this row
-    // is painted, not a TextInputState; see docs/tui-slt-migration.md).
+    // The `▎` glyph matches the composer/editor widget carets (the app
+    // owns the query — filtering, list navigation — so this row is
+    // painted, not a TextInputState).
     let qspans = clip_spans(
         vec![
             Span::styled("> ", Style::default().fg(t.accent).bold()),

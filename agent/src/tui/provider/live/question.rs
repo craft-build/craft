@@ -1,4 +1,4 @@
-//! The question seam (A.5): the `question` tool parks on the user through
+//! The question seam: the `question` tool parks on the user through
 //! this asker, mirroring the approval gate's parking pattern — event out,
 //! oneshot back, cancellation and a 30-minute ask timeout.
 

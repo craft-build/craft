@@ -1,4 +1,4 @@
-//! Startup terminal probes that own raw stdin (`F.6`).
+//! Startup terminal probes that own raw stdin.
 //!
 //! Every pre-`slt` query lives here: probes must run before slt's input
 //! pump takes over the terminal, they bound their wait so a silent

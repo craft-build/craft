@@ -6,8 +6,8 @@
 //! [`StyleExt`] adds the few builder helpers the code base relies on
 //! (`add_modifier`, `remove_modifier`, `patch`).
 
-/// Text-modifier bitflags. Aliased as `Modifier` because most of the code
-/// base spells it that way (ratatui heritage).
+/// Text-modifier bitflags, aliased as `Modifier` because most of the code
+/// base spells it that way.
 pub use slt::style::Modifiers;
 pub use slt::style::{Color, Style, UnderlineStyle};
 
@@ -64,7 +64,7 @@ impl StyleExt for Style {
     }
 }
 
-/// Alias matching the ratatui-era spelling used by most call sites.
+/// Alias matching the spelling used by most call sites.
 pub use Modifiers as Modifier;
 
 #[cfg(test)]

@@ -34,8 +34,8 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut crate::tui::app::App) 
     pickers::render_recipes_slt(ui, app);
 }
 
-/// Legacy `centered` math over the terminal rect: clamp, then halve the
-/// slack. Returns `(x, y, width, height)`.
+/// Centered math over the terminal rect: clamp, then halve the slack.
+/// Returns `(x, y, width, height)`.
 pub(super) fn centered_slt(width: u32, height: u32, sw: u32, sh: u32) -> (u32, u32, u32, u32) {
     let width = width.min(sw);
     let height = height.min(sh);
@@ -43,18 +43,16 @@ pub(super) fn centered_slt(width: u32, height: u32, sw: u32, sh: u32) -> (u32, u
 }
 
 /// One prebuilt sheet row: styled spans at `(dx, dy)` inside the sheet
-/// box. Sheets position rows absolutely, exactly as the legacy
-/// `Rect`-per-row renders did.
+/// box. Sheets position rows absolutely.
 pub(super) struct SheetRow {
     pub dx: u32,
     pub dy: u32,
     pub spans: Vec<Span<'static>>,
 }
 
-/// Legacy `dim`: a full-screen `bg_sunken` fill that erases the UI
-/// beneath. Painted as a trailing draw region — the transcript's own
-/// deferred painters run after every container bg, so container-based
-/// fills cannot cover them.
+/// A full-screen `bg_sunken` fill that erases the UI beneath. Painted as
+/// a trailing draw region — the transcript's deferred painters run after
+/// every container bg, so container-based fills cannot cover them.
 pub(super) fn dim_slt(ui: &mut slt::Context) {
     let sunken = theme::current().bg_sunken;
     let _ = ui.overlay(|ui| {
@@ -157,7 +155,7 @@ fn paint_sheet_slt(
     }
 }
 
-/// Fill a rect with blank cells carrying `bg` (legacy `Clear` + bg Block).
+/// Fill a rect with blank cells carrying `bg`.
 fn fill_slt(
     buf: &mut slt::buffer::Buffer,
     x: u32,
@@ -175,9 +173,8 @@ fn fill_slt(
 }
 
 /// Write one row of spans starting at `(x, y)`, clipped to `w` display
-/// cells (ratatui Paragraph truncation: the row stops at the first char
-/// that no longer fits). Spans without a bg carry the box surface, like
-/// the parent-bg inheritance of container text.
+/// cells (the row stops at the first char that no longer fits). Spans
+/// without a bg carry the box surface.
 fn paint_spans_slt(
     buf: &mut slt::buffer::Buffer,
     x: u32,
@@ -234,10 +231,9 @@ pub(super) fn row_spans(
         .collect()
 }
 
-/// Hard-clip a span list to `w` display cells — ratatui's Paragraph
-/// truncation (the row simply stops at the first char that no longer
-/// fits; no ellipsis). slt text nodes only clip at the buffer edge, so
-/// sheet body rows clip explicitly.
+/// Hard-clip a span list to `w` display cells (the row simply stops at
+/// the first char that no longer fits; no ellipsis). slt text nodes only
+/// clip at the buffer edge, so sheet body rows clip explicitly.
 pub(super) fn clip_spans<'a>(spans: Vec<Span<'a>>, w: usize) -> Vec<Span<'a>> {
     let mut out = Vec::with_capacity(spans.len());
     let mut used = 0usize;

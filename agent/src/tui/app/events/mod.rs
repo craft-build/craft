@@ -15,8 +15,7 @@ use crate::tui::keybindings::ActionId;
 use crate::tui::provider::{AgentEvent, Command};
 use crate::tui::selection::{clamp_to, copy_to_clipboard, extract_selection_text, rect_contains};
 
-// `super::X` paths in the moved impl files used to point at `app`; with the
-// extra module level they now land here, so keep these two names in scope.
+// Keep these two names in scope for the sibling impl files' `super::X` paths.
 use super::{FLASH_TTL, TaskOutcome};
 
 mod keys;
@@ -42,7 +41,7 @@ enum KeyboardOwner {
 impl App {
     /// Resolve which surface owns the keyboard, mirroring the overlay
     /// stack priority: the modal first, then the answerable prompts
-    /// (permission F.5 / question A.5, whose keys must stay answerable
+    /// (permission / question, whose keys must stay answerable
     /// even if search/picker was already open), then the informational
     /// overlays.
     fn keyboard_owner(&self) -> KeyboardOwner {
@@ -57,8 +56,8 @@ impl App {
         }
     }
 
-    /// The next owner under the prompts: search (F.3), then the file
-    /// picker (F.3, Ctrl-S), then the plan form (F.3, Ctrl-T), then the
+    /// The next owner under the prompts: search, then the file
+    /// picker (Ctrl-S), then the plan form (Ctrl-T), then the
     /// base surface.
     fn owner_below(&self) -> KeyboardOwner {
         if self.overlays.search.is_open() {

@@ -1,10 +1,9 @@
-//! Question form (A.5): a bottom, non-modal overlay the `question` tool
-//! parks on, ported from the reference `plugins/question/question_form.lua`.
-//! One tab per question; per tab a cursor over the predefined options plus
-//! the always-present "Type your own answer" row. Single-select submits on
-//! pick (a confirm stage appears when there is more than one question or
-//! the question is multi-select, matching the reference); multi-select
-//! toggles; Esc/Ctrl-C dismisses.
+//! Question form: a bottom, non-modal overlay the `question` tool parks
+//! on. One tab per question; per tab a cursor over the predefined options
+//! plus the always-present "Type your own answer" row. Single-select
+//! submits on pick (a confirm stage appears when there is more than one
+//! question or the question is multi-select); multi-select toggles;
+//! Esc/Ctrl-C dismisses.
 
 use slt::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -91,9 +90,9 @@ impl FormState {
         }
     }
 
-    /// The reference's `advance`: single-select pick (or custom submit)
-    /// either jumps to the next tab or submits the whole form, depending
-    /// on whether a confirm stage exists.
+    /// Single-select pick (or custom submit) either jumps to the next
+    /// tab or submits the whole form, depending on whether a confirm
+    /// stage exists.
     fn advance(&mut self, questions: &[QuestionSpec]) -> Outcome {
         if self.has_confirm(questions) {
             self.next_tab(questions);
@@ -373,7 +372,7 @@ impl QuestionForm {
             ];
             spans.push(Span::raw(chars.iter().take(cursor).collect::<String>()));
             // The `▎` caret glyph, matching the slt input-widget carets
-            // (wave 2b; the app owns the field's key routing).
+            // (the app owns the field's key routing).
             spans.push(Span::styled("▎", Style::default().fg(t.text_primary)));
             spans.push(Span::raw(chars.iter().skip(cursor).collect::<String>()));
             lines.push(Line::from(spans));
@@ -530,7 +529,7 @@ mod tests {
         form.handle_key(key(KeyCode::Down));
         assert!(form.handle_key(key(KeyCode::Enter)).is_none());
         // Toggles do not advance; Tab reaches the confirm stage, and Enter
-        // there submits both picks (reference semantics).
+        // there submits both picks.
         form.handle_key(key(KeyCode::Tab));
         let answer = form.handle_key(key(KeyCode::Enter)).expect("submits");
         assert_eq!(answer.answers, vec![vec!["A".to_string(), "B".to_string()]]);
@@ -686,7 +685,7 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Wave 2a: the slt panel for this form
+// The slt panel for this form
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Render this form in the composer box's place, styled like the input

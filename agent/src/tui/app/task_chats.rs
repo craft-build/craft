@@ -1,4 +1,4 @@
-//! Subagent task chats (task 96): one transcript per `task` tool call,
+//! Subagent task chats: one transcript per `task` tool call,
 //! selectable from the Ctrl-N modal picker, cancellable with Esc-Esc.
 //!
 //! The visible transcript always lives in `App::conversation` /
@@ -137,9 +137,8 @@ impl App {
         }
     }
 
-    /// Open the task-chat picker modal (task 96, reference list-picker
-    /// style) with the cursor on the currently focused chat. A no-op
-    /// without task chats.
+    /// Open the task-chat picker modal with the cursor on the currently
+    /// focused chat. A no-op without task chats.
     pub fn open_task_picker(&mut self) {
         if self.task_chats.is_empty() {
             return;

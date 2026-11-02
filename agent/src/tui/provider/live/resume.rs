@@ -1,5 +1,5 @@
 //! Session load/resume and exit-time persistence: swap a persisted session
-//! in (`/sessions`, F.3 resume-latest-by-cwd), rebuild the transcript, and
+//! in (`/sessions`), rebuild the transcript, and
 //! flush queued results and drafts when the command loop ends.
 
 use std::sync::Arc;
@@ -113,7 +113,7 @@ pub(super) async fn load_session(ctx: &LoopCtx, id: &str) {
     });
 }
 
-/// F.3 resume-latest-by-cwd: load the newest session recorded for this
+/// Load the newest session recorded for this
 /// directory (cwd index first, disk scan fallback), reusing the `/sessions`
 /// load path. Nothing found keeps the fresh session.
 pub(super) async fn resume_latest(ctx: &LoopCtx) {

@@ -66,11 +66,11 @@ pub mod key {
         modifiers: KeyModifiers::ALT,
         label: "Alt+E",
     };
-    /// Clipboard image paste (F.6). Terminals without bracketed-paste
+    /// Clipboard image paste. Terminals without bracketed-paste
     /// image support deliver screenshots via the OSC 52-style clipboard,
     /// so the chord reads the clipboard directly.
     pub const PASTE_IMAGE: Bind = ctrl('v', "Ctrl+V");
-    /// Task-chat picker (task 96, reference list-picker style): Ctrl-N
+    /// Task-chat picker: Ctrl-N
     /// opens a modal selector; Ctrl-P stays bound to the palette.
     pub const TASK_CHAT_PICKER: Bind = ctrl('n', "Ctrl+N");
 }

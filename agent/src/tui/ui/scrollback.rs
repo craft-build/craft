@@ -1,10 +1,9 @@
 //! Scrollback engine: the transcript as a segment-addressed document.
 //!
-//! Ported from the reference (`craft-ui/src/components/messages/{scroll.rs,
-//! segment.rs}`), adapted to this repo: lines are pre-wrapped at build
-//! width, so a segment's height is its line count; the width-keyed height
-//! cache states the invariant that heights are only valid at the width the
-//! lines were wrapped for (and serves the several walks a frame makes).
+//! Lines are pre-wrapped at build width, so a segment's height is its line
+//! count; the width-keyed height cache upholds the invariant that heights
+//! are only valid at the width the lines were wrapped for (and serves the
+//! several walks a frame makes).
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -136,7 +135,7 @@ impl PartialEq for SharedLines {
 /// spacer). Lines are one display row each, so row slicing is line slicing.
 pub struct Segment {
     lines: SharedLines,
-    /// Inline image rendered below the lines (F.6): occupies `rows` extra
+    /// Inline image rendered below the lines: occupies `rows` extra
     /// display rows, tracked by the same height cache.
     pub image: Option<std::sync::Arc<crate::tui::ui::image::ImageRenderState>>,
     cached_height: Cell<Option<CachedHeight>>,

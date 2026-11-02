@@ -189,7 +189,7 @@ async fn emit(tx: &mpsc::UnboundedSender<AgentEvent>, ms: u64, ev: AgentEvent) {
     let _ = tx.send(ev);
 }
 
-/// The full scripted first turn, ported from the prototype's seed session.
+/// The full scripted first turn.
 async fn run_first_turn(tx: mpsc::UnboundedSender<AgentEvent>) {
     emit(&tx, 500, AgentEvent::StatusChanged(Status::Thinking)).await;
     emit(

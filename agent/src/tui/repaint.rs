@@ -8,13 +8,10 @@
 //! - [`Cadence`]: how soon the loop has to come back when no event will wake
 //!   it, and whether the clock alone owes a frame when it does.
 //!
-//! Ported from the reference craft-ui `repaint.rs`, adapted to this repo's
-//! tokio-based loop: the loop sleeps one cadence frame per turn instead of
+//! The tokio-based loop sleeps one cadence frame per turn instead of
 //! selecting over every channel inside a single selector.
 //
-// Some primitives (Watch, SMOOTH, PENDING) are ported ahead of their first
-// consumers — markdown streaming, scrollback, usage polling land in later
-// Phase 7 tasks — so dead-code lints stay quiet until they arrive.
+// Watch, SMOOTH, and PENDING have no consumers yet.
 #![allow(dead_code)]
 
 use std::ops::{BitOr, BitOrAssign};

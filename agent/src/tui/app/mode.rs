@@ -1,6 +1,6 @@
-//! Mode cycling (F.2): Build / Plan, toggled with Tab. Plan mode restricts
+//! Mode cycling: Build / Plan, toggled with Tab. Plan mode restricts
 //! the agent to writing its allocated plan file (`run::AgentMode::Plan`).
-//! Flow mode is ported last (task 99) and deliberately absent.
+//! Flow mode is deliberately absent.
 
 use std::path::PathBuf;
 
@@ -59,7 +59,7 @@ impl App {
     }
 
     /// Fresh `<state>/plans/<slug>.md`, falling back to a relative path when
-    /// the state dir (or slug allocation) fails — the reference's fallback.
+    /// the state dir (or slug allocation) fails.
     fn allocate_plan_path(dir: Option<&crate::storage::StateDir>) -> PathBuf {
         dir.and_then(|dir| crate::storage::plans::new_plan_path(dir).ok())
             .unwrap_or_else(|| PathBuf::from("plans/plan.md"))
@@ -73,7 +73,7 @@ impl App {
     }
 
     // ------------------------------------------------------------------
-    // Todo/plan panel + plan editor handoff (F.3, task 79)
+    // Todo/plan panel + plan editor handoff
     // ------------------------------------------------------------------
 
     /// The plan form owns plain keys while shown over the composer
@@ -125,8 +125,7 @@ impl App {
     }
 
     /// Ctrl-T: toggle the plan form in Plan mode; in Build mode the panel
-    /// is the todo widget's plan checklist, so the chord folds/unfolds it
-    /// (the reference toggles its float panel, which is not ported).
+    /// is the todo widget's plan checklist, so the chord folds/unfolds it.
     pub(crate) fn toggle_plan_panel(&mut self) {
         if self.mode == Mode::Plan {
             self.plan_mode.plan_form.toggle();

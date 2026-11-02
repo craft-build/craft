@@ -39,7 +39,7 @@ impl App {
                 // The plan form takes no pastes; they reach the composer.
                 KeyboardOwner::PlanForm | KeyboardOwner::Base => {
                     // A paste that is nothing but an image path attaches
-                    // the image instead of inserting the text (F.6).
+                    // the image instead of inserting the text.
                     if let Some((path, media)) = crate::tui::ui::image::try_parse_image_path(text)
                         && path.is_file()
                     {

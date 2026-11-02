@@ -1,8 +1,6 @@
 //! Bell notifications: urgency-ranked, gated on whether the user is
-//! watching the terminal. Ported from the reference `craft-ui`
-//! `event_loop.rs` / `app/mod.rs` notification machinery, adapted to our
-//! single-session event loop (no queue: a turn "settles" when the provider
-//! status leaves Thinking/Running).
+//! watching the terminal. Single-session event loop (no queue: a turn
+//! "settles" when the provider status leaves Thinking/Running).
 
 use std::time::{Duration, Instant};
 
@@ -44,8 +42,7 @@ impl Notification {
         }
     }
 
-    /// The reference's `error_completion`: a failed turn rings like a
-    /// completion, but with the error wording.
+    /// A failed turn rings like a completion, but with the error wording.
     pub(crate) fn error_completion() -> Self {
         Self::TurnComplete {
             response: Some("Agent stopped with an error".into()),
@@ -144,7 +141,7 @@ pub(crate) struct RunNotificationState {
 
 impl RunNotificationState {
     /// A queued follow-up replaces the in-flight turn, so any pending bell
-    /// for the old one is void.
+    /// for the replaced one is void.
     pub(crate) fn on_new_turn(&mut self) {
         self.response_candidate = None;
         self.pending_completion = None;

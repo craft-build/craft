@@ -125,7 +125,7 @@ impl App {
         }
     }
 
-    /// Route a key through the open question form (A.5): an answer (picked
+    /// Route a key through the open question form: an answer (picked
     /// labels or dismissal) goes to the provider by question-request id;
     /// unhandled ctrl chords keep working, plain keys stay in the form.
     fn handle_question_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) -> bool {
@@ -163,8 +163,8 @@ impl App {
         self.handle_submit_or_edit_key(key, tx);
     }
 
-    /// Global chords, dispatched through the data-driven keybinding table
-    /// (F.1): quit/interrupt, palette, sidebar, model, effort, half-page
+    /// Global chords, dispatched through the data-driven keybinding table:
+    /// quit/interrupt, palette, sidebar, model, effort, half-page
     /// scroll, plan panel/editor, help, and diff approval/rejection.
     fn handle_chord_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) -> bool {
         let key = crate::tui::keybindings::normalize_key(key);
@@ -186,9 +186,9 @@ impl App {
             self.overlays.modal = Modal::Help;
             return true;
         }
-        // Task-chat picker (task 96): Ctrl-N opens the modal selector,
+        // Task-chat picker: Ctrl-N opens the modal selector,
         // claimed only while task chats exist; Ctrl-P keeps opening the
-        // palette unconditionally (no more chord clash).
+        // palette unconditionally.
         if !self.task_chats.is_empty() && m(ActionId::TaskChatPicker) {
             self.open_task_picker();
             return true;
@@ -215,7 +215,7 @@ impl App {
             return true;
         }
         if m(ActionId::PasteImage) {
-            // Clipboard image attach (F.6); a no-op flash when the
+            // Clipboard image attach; a no-op flash when the
             // clipboard holds no image.
             self.start_clipboard_image_paste();
             return true;
@@ -234,7 +234,7 @@ impl App {
             return true;
         }
         if m(ActionId::OpenEditor) {
-            // Plan editor handoff (F.3, task 79): Ctrl-O opens the
+            // Plan editor handoff: Ctrl-O opens the
             // session's plan file in $VISUAL/$EDITOR.
             self.open_plan_editor();
             return true;
@@ -250,10 +250,9 @@ impl App {
         false
     }
 
-    /// Composer editing chords (reference `TextBuffer::handle_key`):
-    /// ctrl motions and deletes plus Alt word motions. Effort cycling moved
-    /// to Ctrl-F so Ctrl-E can be line-end; with an empty composer it jumps
-    /// the scrollback to bottom.
+    /// Composer editing chords: ctrl motions and deletes plus Alt word
+    /// motions. Effort cycling lives on Ctrl-F so Ctrl-E can be line-end;
+    /// with an empty composer it jumps the scrollback to bottom.
     fn handle_editing_chord_key(
         &mut self,
         key: KeyEvent,
@@ -340,10 +339,9 @@ impl App {
     ) -> bool {
         match key.code {
             KeyCode::Esc => {
-                // Inside a task chat, Esc stays local (the reference
-                // swallows it there too): Esc-Esc cancels the subagent
-                // while it works, and does nothing once finished — never
-                // the main chat's interrupt chain.
+                // Inside a task chat, Esc stays local: Esc-Esc cancels the
+                // subagent while it works, and does nothing once finished —
+                // never the main chat's interrupt chain.
                 if let Some(idx) = self.active_task {
                     if self.task_chats[idx].outcome.is_none() {
                         let armed = self
@@ -378,7 +376,7 @@ impl App {
                 }
                 true
             }
-            // Tab cycles Build/Plan (F.2); focus cycling stays on
+            // Tab cycles Build/Plan; focus cycling stays on
             // BackTab so block navigation remains reachable. The change is
             // user-initiated, so it persists into the session meta.
             KeyCode::Tab => {

@@ -7,8 +7,7 @@
 //! heights are terminal rows, derived from the font's pixel cell size
 //! probed once at startup.
 //!
-//! Where the reference carries a `craft_agent::ImageSource`, this repo's
-//! images are the `history::ImageBlock` base64 payloads produced by
+//! Images are the `history::ImageBlock` base64 payloads produced by
 //! `view_image` and composer attachments.
 
 use std::io::IsTerminal;

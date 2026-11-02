@@ -158,25 +158,20 @@ const TRUECOLOR_TERMS: &[&str] = &[
     "xterm-kitty",
 ];
 
-/// Color depth for the slt run config, resolved in two evidence layers.
+/// Color depth for the slt run config, resolved in two layers.
 ///
 /// **Env layer** (extends `slt::ColorDepth::detect`): `NO_COLOR` → no
-/// color, `COLORTERM=truecolor|24bit` → truecolor, and — closing the
-/// first SSH gap — the known-truecolor `TERM` allowlist plus the terminfo
-/// `*-direct` convention, since SSH forwards `TERM` but not `COLORTERM`:
-/// without them, `xterm-ghostty` and friends collapsed to 16-color Basic
-/// and every bundled theme read as "the coloring disappeared".
+/// color, `COLORTERM=truecolor|24bit` → truecolor, plus the
+/// known-truecolor `TERM` allowlist and the terminfo `*-direct`
+/// convention — SSH forwards `TERM` but not `COLORTERM`, so those
+/// terminals would otherwise collapse to 16-color Basic.
 ///
 /// **Wire layer** (`tui::probe`, consulted when the env layer alone would
-/// downsample): `xterm-256color` is what most modern truecolor terminals
-/// report out of the box (iTerm2, Terminal.app, VS Code, tmux users), so
-/// an SSH session to one of them cannot be distinguished from an SSH
-/// session to a genuinely 256-color terminal by environment alone. Before
-/// slt takes over stdin, the startup probe asks the terminal itself for
-/// the terminfo `Tc` direct-color capability — every truecolor terminal
-/// behind a plain SSH hop answers, and the ack upgrades EightBit/Basic to
-/// truecolor. A silent or 256-only terminal keeps the downsampled depth:
-/// the probe only ever adds fidelity, it never speculates.
+/// downsample): before slt takes over stdin, the startup probe asks the
+/// terminal itself for the terminfo `Tc` direct-color capability — the
+/// ack upgrades EightBit/Basic to truecolor. A silent or 256-only
+/// terminal keeps the downsampled depth: the probe only ever adds
+/// fidelity, it never speculates.
 ///
 /// `NO_COLOR` is an explicit user demand and stays final in both layers.
 fn detect_color_depth() -> slt::ColorDepth {
@@ -265,7 +260,7 @@ pub(crate) fn color_env_doctor() -> serde_json::Value {
 async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> io::Result<()> {
     // Probe the terminal's graphics protocol (kitty/sixel vs halfblocks)
     // before slt takes over the terminal: the probe reads its replies
-    // straight from stdin (F.6).
+    // straight from stdin.
     ui::image::probe();
     // Same pre-pump window: ask the terminal for its `Tc` direct-color
     // capability. SSH drops COLORTERM, so for `TERM=xterm-256color` — what
@@ -274,7 +269,7 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
     // `detect_color_depth` reads it back when the run config is built.
     probe::probe_truecolor();
 
-    // B.11: grab the MCP handle before `start` consumes the provider.
+    // Grab the MCP handle before `start` consumes the provider.
     let mcp = provider.mcp();
     // `--no-commands`: read the gate before `start` consumes the provider.
     let custom_commands = provider.custom_commands();
@@ -401,16 +396,15 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
         //
         // The app owns the keyboard: every event dispatched below is
         // marked consumed so the focused input widgets (the composer
-        // textarea, wave 2b) render + carry the caret but never edit —
-        // `App`'s composer state stays the single source of truth (the
-        // render mirrors sync from it each frame). Mouse events stay
+        // textarea) render + carry the caret but never edit — `App`'s
+        // composer state stays the single source of truth (the render
+        // mirrors sync from it each frame). Mouse events stay
         // unconsumed so clicks keep their widget-focus meaning.
         //
         // `raw_events` (not `events`): the plain accessor is blocked while
         // a modal was active the previous frame — with the editor modal
         // open, the closure would see no keys at all and Esc/Ctrl-S could
-        // never fire. The app is a global input router; the raw stream is
-        // the documented bypass. Indices align with the consumed flags
+        // never fire. Indices align with the consumed flags
         // (nothing consumes before the closure runs).
         let events: Vec<(usize, slt::Event)> = ui
             .raw_events()
@@ -483,8 +477,8 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
         }
 
         // Per-frame maintenance: the file picker's walker ticks on its own,
-        // clipboard/file image loads land here (F.6), the draft gets its
-        // checkpoint (F.3), and the typewriter reveal advances.
+        // clipboard/file image loads land here, the draft gets its
+        // checkpoint, and the typewriter reveal advances.
         app.tick_file_picker();
         app.poll_image_loads();
         app.sync_draft(&cmd_tx_frame);
@@ -621,7 +615,7 @@ mod tests {
     use super::*;
     use crate::tui::provider::Status;
 
-    /// Wave 2b routing contract: while the editor modal is open,
+    /// Routing contract: while the editor modal is open,
     /// `editor_modal_key` consumes everything except the textarea's own
     /// edit keys; Esc cancels, Ctrl-S saves into the composer.
     #[test]

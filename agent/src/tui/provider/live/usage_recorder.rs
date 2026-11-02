@@ -57,8 +57,7 @@ impl UsageLedger {
                 }
             })
             .collect();
-        // Total-desc order, like the reference usage modal's per-model
-        // section.
+        // Total-desc order.
         rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.model.cmp(&b.model)));
         rows
     }

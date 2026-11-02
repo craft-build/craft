@@ -245,7 +245,7 @@ pub(super) fn tool_block(
         rows
     }
 
-    // --- body truncation (ported from the reference's tool display) ---
+    // --- body truncation ---
     let indent = " ".repeat(BODY_INDENT);
     let (cap, keep) = kind.body_hints();
     let hidden = body.len().saturating_sub(cap);

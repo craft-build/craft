@@ -144,14 +144,9 @@ impl TurnRenderer {
             }
             Event::Agent(RuntimeEvent::AttemptInterrupted { .. }) => {
                 // An abandoned attempt's streamed text is superseded, never
-                // concatenated into the next attempt's reply (the retry
-                // notice below already separates them visually; closing the
-                // streaming buffer keeps the buffers separate even when no
-                // notice lands in between). On cancellation the partial is
-                // real — the driver commits it — and closing the buffer is
-                // still correct: the turn is over. The streamed flags stay
-                // set: the user did see that text, so the outcome renderer
-                // must not re-emit it.
+                // concatenated into the next attempt's reply. The streamed
+                // flags stay set: the user did see that text, so the
+                // outcome renderer must not re-emit it.
                 let _ = self.tx.send(AgentEvent::AssistantEnd);
             }
             Event::Agent(RuntimeEvent::ToolStarted { call, .. }) => {
@@ -167,8 +162,8 @@ impl TurnRenderer {
                 }));
             }
             Event::Agent(RuntimeEvent::ToolFinished { call, output }) => {
-                // A finished task tool call settles its subagent's chat
-                // (task 96): is_error is the most specific ending it sees.
+                // A finished task tool call settles its subagent's chat:
+                // is_error is the most specific ending it sees.
                 if call.name == "task" {
                     let _ = self.tx.send(AgentEvent::SubagentFinished {
                         tool_use_id: call.id.clone(),
@@ -298,7 +293,7 @@ impl TurnRenderer {
             | Event::Agent(_) => {}
             // Child events arrive wrapped from the subagent launcher's
             // forwarder; route the renderable ones into the subagent's
-            // task chat (task 96), tagged with the spawning call's id.
+            // task chat, tagged with the spawning call's id.
             Event::Craft(CraftEvent::Subagent {
                 tool_use_id,
                 description,
@@ -335,7 +330,7 @@ fn tool_result_block(
     }
 }
 
-/// Tone for an advisor note by severity (C.12): blockers shout, concerns
+/// Tone for an advisor note by severity: blockers shout, concerns
 /// warn, nits stay neutral.
 fn advisor_tone(severity: &str) -> Tone {
     match severity {
@@ -346,7 +341,7 @@ fn advisor_tone(severity: &str) -> Tone {
 }
 
 /// Convert one forwarded child event into the `AgentEvent` its task chat
-/// renders (task 96); anything the chat has no surface for is dropped.
+/// renders; anything the chat has no surface for is dropped.
 /// Tool cards complete from `ToolFinished` (child streaming output is
 /// filtered upstream).
 fn subagent_event(event: Event) -> Option<AgentEvent> {
@@ -566,7 +561,7 @@ const MAX_EMPTY_CONTINUATIONS: usize = 2;
 const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and no tool \
      calls. Continue the task with your reply or the next tool call.";
 
-/// How long a turn waits for MCP servers to settle (B.11): slow initializes
+/// How long a turn waits for MCP servers to settle: slow initializes
 /// covered, a hung server cannot pin the turn.
 const MCP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -623,7 +618,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<history::Co
     if let Some(plan) = mode.plan_path() {
         kit.workspace.set_plan_path(Some(plan.to_path_buf()));
     }
-    // B.11: the first prompt must not ship without MCP tools, but a hung
+    // The first prompt must not ship without MCP tools, but a hung
     // server cannot block forever — the gate times out and the turn
     // proceeds with whatever has landed. Esc skips the wait (and the
     // warning): the run's own cancel check settles the turn immediately.
@@ -645,7 +640,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<history::Co
                 }
             }
         }
-        // Phase 3: feed MCP tool annotations to the permission engine;
+        // Feed MCP tool annotations to the permission engine;
         // sync is generation-keyed, so steady state is a no-op.
         kit.permissions.sync_mcp_annotations(&mcp);
     }
@@ -667,7 +662,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<history::Co
             TurnFlow::Commit => break,
         }
     }
-    // Phase 4: detached, best-effort memory extraction over the committed
+    // Detached, best-effort memory extraction over the committed
     // conversation; never blocks or fails the turn.
     let messages = conversation
         .history()

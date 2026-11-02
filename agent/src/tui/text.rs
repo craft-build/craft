@@ -111,9 +111,8 @@ impl<'a> From<&'a str> for Line<'a> {
 /// Merge consecutive spans that share a style into single runs.
 ///
 /// Used after wrapping/slicing spans so the painter writes fewer, larger
-/// runs (this preserves the run-length coalescing the old renderer did when
-/// mutating `Cow` contents in place).
-#[allow(dead_code)] // consumed by the wave-2 transcript painter
+/// runs.
+#[allow(dead_code)]
 pub fn run_length_spans(spans: impl IntoIterator<Item = Span<'static>>) -> Vec<Span<'static>> {
     let mut merged: Vec<Span<'static>> = Vec::new();
     for span in spans {

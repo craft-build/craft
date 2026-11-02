@@ -151,7 +151,7 @@ mod tests {
         }
     }
 
-    /// B.11: the `/mcp` sheet renders one row per server from a snapshot —
+    /// The `/mcp` sheet renders one row per server from a snapshot —
     /// name, transport, counts, and every status spelling — plus the auth
     /// URL detail line for a NeedsAuth server.
     #[test]
@@ -192,8 +192,8 @@ mod tests {
         }
     }
 
-    /// Phase 5: the sheet shows the resource count, and Enter-expanded
-    /// state renders the server's resources (name + uri) under its row.
+    /// The sheet shows the resource count, and Enter-expanded state
+    /// renders the server's resources (name + uri) under its row.
     #[test]
     fn mcp_sheet_renders_expanded_resources() {
         let mut info = server_info("res-srv", McpServerStatus::Running);

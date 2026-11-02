@@ -40,8 +40,7 @@ use usage_recorder::UsageLedger;
 
 use super::cards::Files;
 use super::{AgentEvent, ModelChoice};
-// Re-exported for descendant modules (bootstrap/commands/resume were split
-// out of the old live.rs and import these through `super::`).
+// Re-exported for descendant modules, which import these through `super::`.
 #[allow(unused_imports)]
 pub(super) use super::{Command, LoadedMessage, Provider, Status, Tone, UsageFetchState, cards};
 
@@ -51,13 +50,13 @@ pub(super) fn report(error: crate::error::Error) -> String {
 }
 
 /// Tool-call parking slots shared by the approval/question gates and the
-/// command loop that answers them. Split from the session state so the
-/// gates can be built with a conversation before the state exists.
+/// command loop that answers them, kept separate from the session state so
+/// the gates can be built with a conversation before the state exists.
 #[derive(Default)]
 pub(super) struct ParkSlots {
     /// Edit-family call awaiting the user's decision, by tool-call id.
     pub(super) pending_approval: Option<(String, oneshot::Sender<PermissionAnswer>)>,
-    /// Parked `question` tool call, by question-request id (A.5).
+    /// Parked `question` tool call, by question-request id.
     pub(super) pending_question: Option<(String, oneshot::Sender<QuestionAnswer>)>,
 }
 
@@ -124,7 +123,7 @@ pub(super) struct SessionKit {
     /// cancellation here, and the gates/tools linked to the cell observe
     /// whatever turn is current. `Command::Interrupt` cancels through it.
     pub(super) cancel_cell: Arc<ArcSwap<Cancellation>>,
-    /// Per-tool-call subagent cancellation (task 96), shared with every
+    /// Per-tool-call subagent cancellation, shared with every
     /// session's task-tool launcher; `Command::CancelSubagent` fires here.
     pub(super) subagent_cancels: Arc<run::cancel::CancelMap<String>>,
     /// The gates' parking slots; answers land here from the command loop.
@@ -145,7 +144,7 @@ pub(super) struct SessionKit {
 struct LoopCtx {
     state: Arc<Mutex<SessionState>>,
     kit: SessionKit,
-    /// Bang-mode bookkeeping (task 96): run ids, in-flight cancel
+    /// Bang-mode bookkeeping: run ids, in-flight cancel
     /// triggers, and visible-run results waiting for the next turn.
     shell: Arc<std::sync::Mutex<crate::tui::shell::ShellState>>,
     catalogs: BTreeMap<String, Vec<ModelInfo>>,
@@ -197,12 +196,12 @@ pub struct CraftProvider {
     selection: Selection,
     cwd_label: String,
     branch: String,
-    /// F.3 resume-latest-by-cwd at startup (`craft --continue`).
+    /// Resume-latest-by-cwd at startup (`craft --continue`).
     resume_latest: bool,
-    /// Resume this specific session id at startup (`craft -s/--session`,
-    /// G.1); takes precedence over `resume_latest`.
+    /// Resume this specific session id at startup (`craft -s/--session`);
+    /// takes precedence over `resume_latest`.
     resume_session: Option<String>,
-    /// MCP client handle (B.11): installed on the workspace before the
+    /// MCP client handle: installed on the workspace before the
     /// first turn and cloned into the app for the `/mcp` screen.
     mcp: Option<crate::mcp::McpHandle>,
     /// Receiver for events the MCP manager emits through `McpEvents`
@@ -219,20 +218,20 @@ pub struct CraftProvider {
 
 impl CraftProvider {
     /// Resume this directory's most recent session when the command loop
-    /// starts (F.3 resume-latest-by-cwd, `craft --continue`).
+    /// starts (`craft --continue`).
     pub fn with_resume_latest(mut self, yes: bool) -> Self {
         self.resume_latest = yes;
         self
     }
 
-    /// Resume a specific session id at startup (`craft -s/--session`, G.1).
+    /// Resume a specific session id at startup (`craft -s/--session`).
     /// Takes precedence over [`Self::with_resume_latest`].
     pub fn with_session(mut self, id: Option<String>) -> Self {
         self.resume_session = id;
         self
     }
 
-    /// Prepend first-run notes (G.6 auto-detected providers) to the startup
+    /// Prepend first-run notes (auto-detected providers) to the startup
     /// notes so they surface before discovery problems.
     pub fn with_startup_notes(mut self, mut notes: Vec<String>) -> Self {
         notes.append(&mut self.notes);
@@ -240,9 +239,9 @@ impl CraftProvider {
         self
     }
 
-    /// Apply G.1 permission flags before the session's first turn: `--yolo`
+    /// Apply permission flags before the session's first turn: `--yolo`
     /// bypasses every check, `-A/--auto-review` starts auto-review on.
-    /// `--yolo` also disables the command sandbox (predecessor parity).
+    /// `--yolo` also disables the command sandbox.
     pub fn with_permission_flags(self, yolo: bool, auto_review: bool) -> Self {
         self.permissions.set_yolo(yolo);
         self.permissions.set_auto_review(auto_review);

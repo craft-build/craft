@@ -7,7 +7,7 @@ use crate::tui::text::Span;
 
 /// One path row: matched chars bolded in the accent color, the selected row
 /// on the overlay background, truncated to the display width (unicode-width
-/// aware, like the reference's `build_highlighted_line`).
+/// aware).
 fn highlighted_path_row(
     m: &crate::tui::file_picker::Match,
     max_width: usize,
@@ -78,7 +78,7 @@ pub(super) fn render_search_slt(ui: &mut slt::Context, app: &mut App) {
     let (x, y, w, h) = centered_slt(width, height, sw, sh);
 
     // The titled block claims the first row; the list gets the rows
-    // between it and the query row (legacy [Min(1), Length(1)] split).
+    // between it and the query row (a [Min(1), Length(1)] split).
     let list_h = h.saturating_sub(2);
     search.viewport_height = list_h as usize;
     search.ensure_visible();

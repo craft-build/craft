@@ -437,7 +437,7 @@ mod reveal_tests {
 /// the last paint produced, plus the transcript area's width. Painters run
 /// deferred (after the frame closure returns), so they hand data back
 /// through this shared lock instead of borrowing `App`; event handlers read
-/// it one frame later, exactly as the ratatui-era snapshot was read.
+/// it one frame later.
 #[derive(Default)]
 pub struct PaintData {
     /// Text of the last rendered frame, one entry per terminal row (used to
@@ -486,8 +486,8 @@ pub struct ViewModel {
     /// Click target the current press started on; a press without drag
     /// activates it.
     pub pending_click: Option<PendingClick>,
-    /// Segment index highlighted by the open search modal (F.3); rendered
-    /// as reversed cells like the reference's `Cursor::render(highlight)`.
+    /// Segment index highlighted by the open search modal; rendered
+    /// as reversed cells.
     pub highlight_segment: Option<usize>,
 }
 

@@ -527,7 +527,7 @@ async fn loading_a_persisted_session_repopulates_history() {
     assert!(resumed);
 }
 
-/// F.3 resume-latest-by-cwd: the newest session for this directory is
+/// The newest session for this directory is
 /// loaded; nothing persisted keeps the fresh session untouched.
 #[tokio::test]
 async fn resume_latest_picks_the_newest_session_for_cwd() {
@@ -925,9 +925,9 @@ fn capture_server(body: &'static str) -> (String, std::thread::JoinHandle<String
     (base, task)
 }
 
-/// Regression (docs/hardening/10): the TUI turn must send the preamble
-/// exactly as `main` resolved it — one copy of the config baseline, one of
-/// the appended marker — in the final model request.
+/// The TUI turn must send the preamble exactly as `main` resolved it —
+/// one copy of the config baseline, one of the appended marker — in the
+/// final model request.
 #[tokio::test]
 async fn run_turn_sends_the_resolved_preamble_exactly_once() {
     let sse = "data: {\"id\":\"t\",\"object\":\"chat.completion.chunk\",\"created\":0,\

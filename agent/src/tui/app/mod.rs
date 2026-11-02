@@ -9,8 +9,7 @@ mod scroll;
 mod sidebar;
 mod task_chats;
 
-// Re-exported so `crate::tui::app::*` keeps working for every item that
-// lived in the old flat `app.rs`.
+// Re-exported so `crate::tui::app::*` keeps working for downstream callers.
 #[allow(unused_imports)]
 pub use self::commands::{COMMANDS, CommandSpec};
 #[allow(unused_imports)]
@@ -43,7 +42,7 @@ pub(crate) const FLASH_TTL: std::time::Duration = std::time::Duration::from_mill
 pub struct PlanMode {
     /// Session's allocated plan file; set on first entry into Plan mode.
     pub plan_path: Option<std::path::PathBuf>,
-    /// The plan form (F.3, Ctrl-T): "Plan complete" menu over the composer
+    /// The plan form (Ctrl-T): "Plan complete" menu over the composer
     /// while a finished plan draft is parked.
     pub plan_form: crate::tui::plan_form::PlanForm,
     /// Whether the allocated plan file holds a finished draft; drives the
@@ -74,18 +73,18 @@ pub struct Overlays {
     /// on the composer (shown when the composer starts with '/').
     pub modal: Modal,
     pub slash_selected: usize, // row in the slash popup
-    /// Permission-prompt overlay (F.5): open while a gated tool call is
+    /// Permission-prompt overlay: open while a gated tool call is
     /// parked on the user's decision. Not a modal — it rides above the
     /// composer and owns plain keys while open.
     pub permission_prompt: crate::tui::permission_prompt::PermissionPrompt,
-    /// Question form (A.5): open while the `question` tool is parked on
+    /// Question form: open while the `question` tool is parked on
     /// the user's answers. Like the permission prompt, not a modal — it
     /// rides above the composer and owns plain keys while open.
     pub question_form: crate::tui::question_form::QuestionForm,
     /// Latest per-model usage snapshot from the provider (the `/usage`
     /// overlay's data; refreshed after every completed run).
     pub usage: Vec<UsageRow>,
-    /// Latest provider quota answer for `/usage` (F.5); kept across modal
+    /// Latest provider quota answer for `/usage`; kept across modal
     /// close/reopen so the last successful fetch survives.
     pub usage_quota: crate::tui::provider::UsageFetchState,
     /// Scroll offset of the `/usage` overlay's line list, reset on open.
@@ -94,26 +93,26 @@ pub struct Overlays {
     /// renderer so handlers clamp against the real bound (not
     /// `usize::MAX`, which pins the sheet at the bottom).
     pub usage_scroll_max: usize,
-    /// Scroll offset of the keybindings help modal (F.1), reset on open.
+    /// Scroll offset of the keybindings help modal, reset on open.
     pub help_scroll: usize,
     /// Max scroll of the help sheet, written back by its renderer.
     pub help_scroll_max: usize,
-    /// `/mcp` sheet (Phase 5): index of the server whose resource list is
+    /// `/mcp` sheet: index of the server whose resource list is
     /// expanded under its row; `None` when every row is collapsed.
     pub mcp_expanded: Option<usize>,
-    /// Data-driven keybinding resolution (F.1): compile-time defaults plus
+    /// Data-driven keybinding resolution: compile-time defaults plus
     /// the user's config overlay. All chord dispatch goes through this.
     pub keybinds: crate::tui::keybindings::KeybindingResolver,
-    /// Fuzzy transcript search (F.3): owns the keyboard while open, above
+    /// Fuzzy transcript search: owns the keyboard while open, above
     /// the base surface like a modal but outside the exclusive `modal` slot.
     pub search: crate::tui::search_modal::SearchModal,
-    /// File picker (F.3, Ctrl-S): fuzzy path matcher over an async walkdir
+    /// File picker (Ctrl-S): fuzzy path matcher over an async walkdir
     /// of the session cwd; owns the keyboard while open, above the base
     /// surface like the search modal.
     pub file_picker: crate::tui::file_picker::FilePicker,
 }
 
-/// Inline-image state (F.6): picker, decoded render-state cache, staged
+/// Inline-image state: picker, decoded render-state cache, staged
 /// attachments, and pending loads.
 pub struct Images {
     /// Terminal-graphics picker (kitty/sixel/halfblocks), resolved once.
@@ -135,7 +134,7 @@ pub struct Images {
 }
 
 pub struct App {
-    // --- mode (F.2 Tab cycling, Build/Plan) ---
+    // --- mode (Tab cycling, Build/Plan) ---
     pub mode: Mode,
     pub plan_mode: PlanMode,
 
@@ -155,13 +154,12 @@ pub struct App {
     /// Timed flash toast for the status row: text plus its expiry.
     pub flash: Option<(String, std::time::Instant)>,
 
-    // --- state groups (fields stay pub for the renderer for now;
-    // accessor encapsulation is a follow-up) ---
+    // --- state groups ---
     pub conversation: Conversation,
     pub view: ViewModel,
     pub session: Session,
 
-    // --- subagent task chats (task 96) ---
+    // --- subagent task chats ---
     /// One chat per `task` tool call, in spawn order. The focused chat's
     /// transcript/view are swapped into `conversation`/`view`.
     pub task_chats: Vec<TaskChat>,
@@ -187,7 +185,7 @@ pub struct App {
     /// in tests unless set directly.
     pub custom_commands: Vec<crate::command::CustomCommand>,
 
-    /// MCP client handle (B.11): snapshot reader + command sender for the
+    /// MCP client handle: snapshot reader + command sender for the
     /// `/mcp` screen. Cloned from the provider at startup; `None` when no
     /// MCP servers are configured.
     pub mcp: Option<crate::mcp::McpHandle>,
@@ -289,7 +287,7 @@ impl App {
     }
 
     /// Decode `data` into a cached render state for tool `id`, reusing the
-    /// cached one while the width is unchanged (F.6). The cache is a
+    /// cached one while the width is unchanged. The cache is a
     /// capped LRU (see [`Self::touch_image_state`]).
     pub(crate) fn image_state(
         &mut self,
@@ -365,7 +363,7 @@ impl App {
             .is_none_or(|m| m.vision)
     }
 
-    /// Attach an image file by path (paste of an image path, F.6).
+    /// Attach an image file by path (paste of an image path).
     pub fn start_file_image_paste(
         &mut self,
         path: std::path::PathBuf,
@@ -381,7 +379,7 @@ impl App {
         });
     }
 
-    /// Attach the clipboard image (Ctrl+V, F.6).
+    /// Attach the clipboard image (Ctrl+V).
     pub fn start_clipboard_image_paste(&mut self) {
         if !self.model_supports_vision() {
             self.flash("Model does not support image input");
@@ -428,9 +426,9 @@ impl App {
     /// clock alone owes a frame. Streaming text uses the smooth cadence
     /// only while its visible prefix still has text to reveal.
     ///
-    /// The slt run loop repaints on its own fixed tick, so production no
-    /// longer schedules through this; it stays as the tested description
-    /// of the app's animation state (reveal, spinner, flash expiry).
+    /// The slt run loop repaints on its own fixed tick and never reads
+    /// this; it stays as the tested description of the app's animation
+    /// state (reveal, spinner, flash expiry).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn cadence(&self) -> repaint::Cadence {
         repaint::Cadence::any([
@@ -562,7 +560,7 @@ impl App {
                     };
                     self.conversation.messages.push(msg);
                 }
-                // F.3 draft preservation: a draft saved across checkpoints
+                // A draft saved across checkpoints
                 // comes back into the composer, cursor at the end.
                 if !draft.is_empty() {
                     self.composer.set_text(draft);
@@ -577,8 +575,8 @@ impl App {
                     None => {}
                 }
             }
-            // Subagent events (task 96): inner events fill the task
-            // chat's own transcript; the tool verdict sets its outcome.
+            // Subagent events: inner events fill the task chat's own
+            // transcript; the tool verdict sets its outcome.
             AgentEvent::Subagent {
                 tool_use_id,
                 description,
@@ -686,7 +684,7 @@ impl App {
                 items.push((slash, custom.description.clone()));
             }
         }
-        // MCP prompts (B.11): `/server:name`, after custom commands so
+        // MCP prompts: `/server:name`, after custom commands so
         // neither shadows the builtins.
         for prompt in self.mcp_prompts() {
             let slash = format!("/{}", prompt.display_name);
@@ -707,8 +705,8 @@ impl App {
     }
 
     /// Plain text of every rendered segment, one entry per segment index
-    /// (the search corpus). Derived on demand like the reference's
-    /// `segment_search_texts`: output can land behind the modal.
+    /// (the search corpus). Derived on demand: output can land behind
+    /// the modal.
     pub(crate) fn search_texts(&self) -> Vec<String> {
         (0..self.view.segments.len())
             .map(|i| {
@@ -768,8 +766,8 @@ impl App {
     }
 
     /// Hand the current composer draft to the provider when it changed
-    /// (F.3 draft preservation). Called once per loop turn, like the
-    /// reference's per-frame checkpoint; unchanged drafts cost nothing.
+    /// (draft preservation). Called once per loop turn; unchanged drafts
+    /// cost nothing.
     /// Submitting also lands here: the emptied draft clears the stored
     /// copy a frame before the turn mirrors the prompt back.
     pub(crate) fn sync_draft(&mut self, tx: &mpsc::UnboundedSender<Command>) {
@@ -859,7 +857,7 @@ impl App {
             self.submit_custom_command(&custom, &args, tx);
             return;
         }
-        // Exact `/server:name key=value ...` MCP prompt (B.11); like custom
+        // Exact `/server:name key=value ...` MCP prompt; like custom
         // commands, only reachable with trailing arguments once the popup
         // has closed.
         if text.starts_with('/')
@@ -874,9 +872,9 @@ impl App {
             self.submit_mcp_prompt(&prompt, &args, tx);
             return;
         }
-        // Exact `/dream|/scan|/review|/memory [args]` (Phase 3): argosy
-        // builtin prompts, builtin slash names, so like /recipe the
-        // custom-command path cannot claim them.
+        // Exact `/dream|/scan|/review|/memory [args]`: argosy builtin
+        // prompts, builtin slash names, so like /recipe the custom-command
+        // path cannot claim them.
         if text.starts_with('/')
             && let Some((token, rest)) = text.split_once(' ')
             && matches!(token, "/dream" | "/scan" | "/review" | "/memory")
@@ -954,8 +952,7 @@ impl App {
 
     /// Whether the history entry at `index` is normal text that ↑/↓ may
     /// recall. Slash commands are skipped so recalling one cannot reopen the
-    /// slash menu and hijack the history keys. Ported from the reference
-    /// `InputBox::history_up`.
+    /// slash menu and hijack the history keys.
     fn recallable(&self, index: usize) -> bool {
         self.input_history
             .get(index)
@@ -1145,7 +1142,7 @@ mod tests {
     use super::*;
     use crate::tui::repaint::Cadence;
 
-    /// The status bar carries the active mode as a chip (F.2); the
+    /// The status bar carries the active mode as a chip; the
     /// inactive mode is not rendered.
     #[test]
     fn status_bar_shows_only_the_active_mode() {
@@ -1212,7 +1209,7 @@ mod tests {
 
     /// A resumed session's replayed items rebuild the transcript: compaction
     /// cards, markers and tool results (with their verbatim originals behind
-    /// the expand affordance) each land as their own message kind (11).
+    /// the expand affordance) each land as their own message kind.
     #[test]
     fn session_load_rebuilds_replayed_tool_markers_and_compaction() {
         let mut app = App::new();
@@ -1284,7 +1281,7 @@ mod tests {
         );
     }
 
-    /// A loaded session's preserved draft lands back in the composer (F.3),
+    /// A loaded session's preserved draft lands back in the composer,
     /// and `sync_draft` hands the provider only the changes.
     #[test]
     fn loaded_draft_restores_and_sync_draft_sends_only_changes() {

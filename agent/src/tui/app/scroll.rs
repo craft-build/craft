@@ -37,9 +37,8 @@ impl App {
         let layout = Layout::new(&self.view.segments, self.view.view_width);
         let mut clamped = layout.clamp(pos);
         // Before the first frame (no viewport height) keep the follow flag
-        // as-is: there is no bottom to be at yet. Otherwise, like the
-        // flat-offset model before it, the viewport never scrolls past the
-        // point where the document stops filling it.
+        // as-is: there is no bottom to be at yet. Otherwise, the viewport
+        // never scrolls past the point where the document stops filling it.
         if self.view.view_height > 0 {
             let bottom = layout.bottom(self.view.view_height);
             clamped = clamped.min(bottom);
@@ -75,8 +74,8 @@ impl App {
         let top = layout.doc_row(self.view.scroll);
         if doc < top || doc >= top + u32::from(self.view.view_height) {
             self.set_scroll_pos(layout.at_row(doc.saturating_sub(2)));
-            // Like the flat-offset code before it: an explicit jump away
-            // from the bottom must not be re-pinned by the next frame.
+            // An explicit jump away from the bottom must not be
+            // re-pinned by the next frame.
             self.view.follow = false;
         }
     }
@@ -84,9 +83,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    // These tests paint through the frozen `app/mod.rs` testutil fixtures
-    // (draw_app/scrolled_app still ride the legacy ratatui TestBackend
-    // until the paint wave); their key events go through `compat::slt_key`.
+    // These tests paint through the `app/mod.rs` testutil fixtures
+    // (draw_app/scrolled_app, ratatui TestBackend); their key events go
+    // through `compat::slt_key`.
     use super::super::testutil::{draw_app, scrolled_app};
     use super::*;
     use crate::tui::compat::slt_key;

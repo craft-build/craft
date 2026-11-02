@@ -1,5 +1,5 @@
 //! The approval responder: the TUI's half of the approval interaction.
-//! Permission rules and auto-review live in the harness policy layer (07);
+//! Permission rules and auto-review live in the harness policy layer;
 //! what remains here is the overlay — park the ask on the shared slots,
 //! render the permission request, and deliver the user's answer.
 
@@ -67,7 +67,7 @@ impl ApprovalResponder for ApprovalGate {
                     reason: "cancelled by client".into(),
                 };
             }
-            // Phase 3: a server-declared read-only tool still prompts, but
+            // A server-declared read-only tool still prompts, but
             // the card can phrase it in a neutral, low-risk tone.
             if low_risk {
                 let _ = tx.send(AgentEvent::Notice {
@@ -129,8 +129,8 @@ impl ApprovalResponder for ApprovalGate {
     }
 }
 
-/// The model-visible denial text: the guidance the answer carried, else the
-/// engine's standard denial. Identical bytes to the pre-07 gate.
+/// The model-visible denial text: the guidance the answer carried, else
+/// the engine's standard denial.
 fn denied_message(name: &str, scopes: &[String], guidance: Option<&str>) -> String {
     let tool = crate::permissions::ToolKey::parse(name);
     match guidance {
@@ -373,9 +373,7 @@ mod tests {
 
     /// Two gated calls running concurrently (a parallel wave) must never
     /// show two permission prompts at once: the overlay is one modal with
-    /// one pending slot, so asks serialize inside the responder. Pinned by
-    /// 07 (the pre-layer gate could clobber a parked oneshot under
-    /// concurrency).
+    /// one pending slot, so asks serialize inside the responder.
     #[tokio::test]
     async fn two_parallel_asks_never_show_two_prompts() {
         let (gate, park, mut rx, _cell) = gate();

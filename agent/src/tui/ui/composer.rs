@@ -14,8 +14,7 @@ use crate::tui::text::Span;
 /// Max text rows the composer grows to before it scrolls instead of expanding.
 pub const MAX_TEXT_ROWS: usize = 12;
 
-/// Bang-prefix highlighting (task 96, ported from the reference's
-/// `shell_highlight_spans`): a first line starting `!` / `!!` renders its
+/// Bang-prefix highlighting: a first line starting `!` / `!!` renders its
 /// sigil in the theme's warning color and the command syntax-highlighted
 /// as bash. `None` keeps plain rendering — no bang prefix, or the syntect
 /// engine not warmed up yet.
@@ -154,7 +153,7 @@ mod tests {
         assert!(shell_spans("! ", base()).is_none(), "empty command");
     }
 
-    /// The mirror keeps the legacy wrapped-row layout: a wide-glyph line
+    /// The mirror keeps the `wrap_rows` layout: a wide-glyph line
     /// wraps at the same cells `wrap_rows` picks, and the cursor maps to
     /// (row, char offset within that row).
     #[test]
@@ -254,7 +253,7 @@ pub(crate) fn block_height(app: &App, term_w: u32) -> u32 {
 }
 
 /// The footer hint row, when there is one: the dismissed plan form's
-/// `Plan Ctrl+T` reminder, or the running-subagents hint (task 96).
+/// `Plan Ctrl+T` reminder, or the running-subagents hint.
 fn footer_hint(app: &App) -> Option<Vec<Span<'static>>> {
     let t = theme::current();
     if let Some(hint) = app.plan_mode.plan_form.hint_line() {
@@ -327,7 +326,7 @@ fn status_left_spans(app: &App, with_tab_hint: bool, with_esc_hint: bool) -> Vec
         sep(),
         Span::styled(app.thinking_label(), Style::default().fg(t.text_tertiary)),
     ];
-    // Attached images (F.6): a count chip, so staged attachments are
+    // Attached images: a count chip, so staged attachments are
     // visible before the message is sent.
     let n_images = app.images.attached.len();
     if n_images > 0 {
@@ -474,11 +473,10 @@ pub(crate) fn render_slt(
         // The textarea rect is COMPUTED, not read from `Response::rect`:
         // that is a retained per-id lookup, and a todo/files toggle (ctrl+b
         // / ctrl+t) changes the widget call order, so the id misses and slt
-        // hands back the full-screen fallback rect — the overlay then
-        // painted a ▎ bar down column 0 and the placeholder at row 0 for a
-        // frame. The box is bottom-anchored with fixed insets, so the rect
-        // is exact synchronously; when the terminal is too short for the
-        // box (clipped flow), skip the pass like before.
+        // hands back the full-screen fallback rect. The box is
+        // bottom-anchored with fixed insets, so the rect is exact
+        // synchronously; when the terminal is too short for the box
+        // (clipped flow), skip the pass.
         let term_h = ui.height().max(1) as u32;
         let text_rect: Option<slt::Rect> = if term_h > box_height(view_rows) + rows_below(app) {
             Some(slt::Rect {
@@ -662,7 +660,7 @@ pub(crate) fn render_form_panel(
 }
 
 /// Feed the app's composer state into the render mirror: the widget's
-/// lines are the legacy `wrap_rows` output (word-preferring breaks) and
+/// lines are the `wrap_rows` output (word-preferring breaks) and
 /// the cursor lands on the row containing its char index, as a char
 /// offset within that row. The widget clamps both to the actual rows.
 fn sync_mirror(state: &mut slt::TextareaState, text: &str, rows: &[(usize, usize)], cursor: usize) {
@@ -676,7 +674,7 @@ fn sync_mirror(state: &mut slt::TextareaState, text: &str, rows: &[(usize, usize
     if state.lines.is_empty() {
         state.lines.push(String::new());
     }
-    // First row whose end reaches the cursor (the legacy `cursor_row_col`
+    // First row whose end reaches the cursor (the `cursor_row_col`
     // tie-break: an edge cursor belongs to the earlier row).
     let mut row = rows.len().saturating_sub(1);
     let mut col = 0usize;

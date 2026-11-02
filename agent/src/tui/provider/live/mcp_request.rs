@@ -1,5 +1,5 @@
-//! Server-initiated MCP requests (Phase 4): elicitation relayed from the
-//! rmcp handler, answered here.
+//! Server-initiated MCP requests: elicitation relayed from the rmcp
+//! handler, answered here.
 //!
 //! Elicitation maps its schema onto the question form (text and
 //! single-select enum fields only). Sampling is deprecated by SEP-2577 and

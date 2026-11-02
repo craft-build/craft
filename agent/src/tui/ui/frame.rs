@@ -1,8 +1,6 @@
-//! The `slt` frame: root layout for the whole TUI, replacing the legacy
-//! ratatui `draw()` composition one panel at a time (wave 2a).
+//! The `slt` frame: root layout for the whole TUI.
 //!
-//! Layout (the "Craft TUI" design), verified against the golden fixtures
-//! by `tui::parity_slt`:
+//! Layout (the "Craft TUI" design):
 //!
 //! ```text
 //! root col (bg = bg_app)
@@ -25,27 +23,26 @@ use super::{composer, todo};
 
 /// View state that persists across frames on the `slt` side. The document
 /// engine in `App` stays the source of truth; the input-widget states here
-/// are render mirrors (wave 2b) — the app owns every edit, the widgets own
+/// are render mirrors — the app owns every edit, the widgets own
 /// caret rendering.
 #[derive(Default)]
 pub struct View {
     /// The in-TUI editor modal (Alt-O composer handoff / Ctrl-O plan
-    /// editing), replacing the old `$EDITOR` spawn. Owned here so the
-    /// frame closure stays `Send + 'static`.
+    /// editing). Owned here so the frame closure stays `Send + 'static`.
     pub editor: Option<EditorForm>,
-    /// Composer render mirror (wave 2b): fed the legacy `wrap_rows` layout
-    /// each frame so row breaks stay byte-identical while the textarea
-    /// paints the real caret (`▎` glyph + hardware cursor position).
+    /// Composer render mirror: fed the `wrap_rows` layout each frame so
+    /// row breaks stay byte-identical while the textarea paints the real
+    /// caret (`▎` glyph + hardware cursor position).
     pub composer: slt::TextareaState,
 }
 
 /// A multiline edit session rendered as a modal over the whole UI.
 ///
-/// Wave 2b: the buffer is a real `slt::widgets::TextareaState` — native
-/// editing (grapheme-safe caret, word jumps, Ctrl-Z/Ctrl-Y undo/redo,
-/// bracketed paste) with the `▎` glyph + hardware-cursor caret. The
-/// widget owns editing while the modal is open; the run-loop closure
-/// consumes everything except the widget's own edit keys (see
+/// The buffer is a real `slt::widgets::TextareaState` — native editing
+/// (grapheme-safe caret, word jumps, Ctrl-Z/Ctrl-Y undo/redo, bracketed
+/// paste) with the `▎` glyph + hardware-cursor caret. The widget owns
+/// editing while the modal is open; the run-loop closure consumes
+/// everything except the widget's own edit keys (see
 /// `editor_key_edits_widget`) plus Esc/Ctrl-S, which it intercepts.
 pub struct EditorForm {
     /// Where the edited text goes on save.
@@ -81,8 +78,7 @@ impl EditorForm {
     }
 }
 
-/// Full frame paint on the `slt` backend. Counterpart of the legacy
-/// `ui::draw`; the two must produce identical output (see `parity_slt`).
+/// Full frame paint on the `slt` backend.
 pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
     app.status_tick = app.status_tick.wrapping_add(1);
     app.clear_expired_flash();
@@ -93,7 +89,7 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
     let _ = ui.container().bg(t.bg_app).grow(1).col(|ui| {
         chat_column(ui, app, view);
 
-        // Overlays, back to front (modal stack, matching draw() ordering).
+        // Overlays, back to front (modal stack).
         super::overlays::render_slt(ui, app);
 
         // The in-TUI editor modal (Alt-O / Ctrl-O), full screen above all.
@@ -103,7 +99,7 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
 
         // Trailing pass over the finished buffer: current selection
         // highlight and the frame_text snapshot for the next event's
-        // copy/region reads (reads run one frame late in both worlds).
+        // copy/region reads (reads run one frame late).
         messages::overlay_pass_slt(ui, app);
     });
 }
@@ -112,7 +108,7 @@ pub fn frame(ui: &mut slt::Context, app: &mut App, view: &mut View) {
 /// composer block pinned to the bottom.
 fn chat_column(ui: &mut slt::Context, app: &mut App, view: &mut View) {
     let _ = ui.container().grow(1).col(|ui| {
-        // Task-chat header (task 96): one line above the transcript.
+        // Task-chat header: one line above the transcript.
         if app.active_task.is_some() {
             render_task_header_slt(ui, app);
         }
@@ -137,7 +133,7 @@ fn chat_column(ui: &mut slt::Context, app: &mut App, view: &mut View) {
     });
 }
 
-/// One-line task header above a focused task chat (task 96).
+/// One-line task header above a focused task chat.
 fn render_task_header_slt(ui: &mut slt::Context, app: &App) {
     use crate::tui::style::{Color, Style};
 

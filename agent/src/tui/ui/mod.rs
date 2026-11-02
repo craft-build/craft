@@ -315,9 +315,8 @@ mod tests {
         assert!(text.contains("zenburn")); // last entry stays visible via the window
     }
 
-    /// The palette scrolls its window so the highlighted item stays visible
-    /// past the eighth row (regression: the selection used to scroll off the
-    /// rendered window and vanish).
+    /// The palette scrolls its window so the highlighted item stays
+    /// visible past the eighth row.
     #[test]
     fn palette_scrolls_to_keep_selection_visible() {
         let mut screen = Screen::new(120, 36);
@@ -511,7 +510,7 @@ mod tests {
     }
 
     /// Rows show tiers held in the global registry, and the keybind footer
-    /// advertises the tier-assignment keys (task 73).
+    /// advertises the tier-assignment keys.
     #[test]
     fn model_menu_shows_tier_labels_and_footer() {
         let mut screen = Screen::new(120, 36);

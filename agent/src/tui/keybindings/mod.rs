@@ -1,8 +1,5 @@
-//! Data-driven keybindings (F.1): a compile-time `KEYBINDS` table plus a
-//! user-rebindable overlay resolved by [`KeybindingResolver`]. Ported from
-//! the reference `craft-ui/src/components/keybindings.rs`, adapted to this
-//! repo's action set (the reference's chat-queue / rewind / task-chat keys
-//! are not ported because those subsystems do not exist here yet).
+//! Data-driven keybindings: a compile-time `KEYBINDS` table plus a
+//! user-rebindable overlay resolved by [`KeybindingResolver`].
 //!
 //! Layout: [`table`] holds [`Bind`] and the defaults/`KEYBINDS` table,
 //! [`parse`] parses user chord strings, [`help`] renders the help modal,
@@ -19,7 +16,7 @@ mod help;
 mod parse;
 mod table;
 
-// The full pre-split public surface is re-exported for path stability;
+// The full public surface is re-exported for path stability;
 // some items are currently unused outside the module tree.
 #[allow(unused_imports)]
 pub use help::{ALT_SEP, KeyLabel, ResolvedLabel, effective_label, help_lines};
@@ -143,8 +140,8 @@ impl ActionId {
 
 /// Normalize a raw terminal key event so user-defined chords match
 /// regardless of how the terminal reports it: BackTab becomes Tab+Shift,
-/// and shift-modified letters are lowercased. Ported from the reference;
-/// applied before chord matching only (never before composer insertion).
+/// and shift-modified letters are lowercased. Applied before chord
+/// matching only (never before composer insertion).
 pub fn normalize_key(key: KeyEvent) -> KeyEvent {
     match key.code {
         KeyCode::BackTab => key_event(
