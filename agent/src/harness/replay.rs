@@ -123,8 +123,8 @@ pub fn transcript(entries: &[HistoryEntry]) -> Vec<ReplayItem> {
 
 /// Animist's agent commits every tool-result entry with a placeholder
 /// source ("Tool execution interrupted…", `is_error`) that the final
-/// revision replaces; the agent squashes to exactly placeholder + final
-/// (F04). A placeholder is never the "full output" the affordance promises.
+/// revision replaces; the agent squashes to exactly placeholder + final.
+/// A placeholder is never the "full output" the affordance promises.
 const INTERRUPT_PLACEHOLDER: &str =
     "Tool execution interrupted or not completed; external effects may have occurred";
 
@@ -254,7 +254,7 @@ mod tests {
     }
 
     /// The production entry shape: animist commits a placeholder source
-    /// and squashes to placeholder + one final revision (F04). An
+    /// and squashes to placeholder + one final revision. An
     /// unaltered result must NOT offer the placeholder as its "full
     /// output", and an altered one must surface the pre-alteration
     /// revision, not the placeholder source.

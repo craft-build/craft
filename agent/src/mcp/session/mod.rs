@@ -127,7 +127,7 @@ pub trait McpSession: Send + Sync {
     fn call_tool(&self, name: &str, args: &Value)
     -> BoxFuture<'_, Result<McpToolOutput, McpError>>;
 
-    /// Phase 6: `call_tool` under the turn's cancellation token. When the
+    /// `call_tool` under the turn's cancellation token. When the
     /// token fires the future resolves with [`McpError::Cancelled`] instead
     /// of parking until the server answers (or the request timeout lapses).
     /// rmcp does not cancel on future drop — the `notifications/cancelled`
@@ -211,7 +211,7 @@ mod tests {
 
     use super::*;
 
-    /// Phase 6, unit: cancelling the token resolves a pending
+    /// Unit: cancelling the token resolves a pending
     /// `call_tool_cancellable` promptly — before the server answers and
     /// well before any request timeout — with `McpError::Cancelled`.
     #[tokio::test]

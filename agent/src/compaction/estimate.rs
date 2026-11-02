@@ -1,5 +1,5 @@
-//! Rough token estimation for conversation history (ported from Craft's
-//! compaction estimator). Deliberately approximate; the engine's
+//! Rough token estimation for conversation history.
+//! Deliberately approximate; the engine's
 //! effectiveness score keeps behavior safe when estimates drift.
 
 use animist::history::{ContentBlock, Message, StoredMessage, ToolContent};
@@ -16,8 +16,8 @@ pub const TOKENS_PER_MESSAGE: u64 = 5;
 pub const MAX_TOKEN_ESTIMATION_MULTIPLIER: f64 = 5.0;
 
 /// Calibrated token estimation: `chars / 4` scaled by a multiplier that grows
-/// when the provider's actual usage proves the estimate too low (ported from
-/// Craft's overflow recalibration: `actual / estimated × 1.1`, clamped).
+/// when the provider's actual usage proves the estimate too low
+/// (`actual / estimated × 1.1`, clamped).
 #[derive(Clone, Copy, Debug)]
 pub struct TokenEstimator {
     multiplier: f64,
@@ -68,7 +68,7 @@ fn text_len(text: &str) -> usize {
 }
 
 /// Flat token weight for one image block (Anthropic's pricing for images
-/// sent as vision input, per the reference's D.1 estimator).
+/// sent as vision input).
 pub const TOKENS_PER_IMAGE: u64 = 1500;
 
 /// Estimate the prompt tokens for `messages`: chars aggregated across all

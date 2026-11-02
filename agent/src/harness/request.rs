@@ -66,7 +66,7 @@ pub(crate) struct RequestLayerInputs {
     pub model: Arc<ArcSwap<ModelHandle>>,
     pub settings: Arc<ArcSwap<TurnSettings>>,
     /// The recovery state: its model override (a fallback hop or a reauth
-    /// swap) serves requests while set (09).
+    /// swap) serves requests while set.
     pub recovery: RecoveryHandle,
     /// The workspace root as a display string, anchoring read-lifecycle
     /// path normalization.
@@ -105,8 +105,7 @@ impl RequestLayer {
         }
     }
 
-    /// The system prompt for the current settings; identical bytes to the
-    /// preamble the old `run_policy` built for the same inputs.
+    /// The system prompt for the current settings.
     fn system_prompt(settings: &TurnSettings, base: &str, cwd: &str) -> String {
         crate::prompt::build_system_prompt(
             &crate::prompt::Vars::new()
@@ -192,7 +191,7 @@ impl LayerImpl for RequestLayer {
         let prompt_tokens = estimate.saturating_add(overhead.tokens()).max(measured);
         request.model = handle.model.clone();
         request.messages = view::shape_messages(request.messages, handle.relocates_tool_images());
-        // A serving hop carries its own budgets (hardening/06); the primary
+        // A serving hop carries its own budgets; the primary
         // and a same-model reauth swap keep the plain window clamp.
         let clamped = if hop {
             hop_max_tokens(settings.max_tokens, &handle, prompt_tokens)

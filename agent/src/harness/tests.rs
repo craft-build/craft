@@ -1,5 +1,5 @@
-//! Phase-A harness tests: the conversation driven end to end over the
-//! scripted provider, pinning the behaviours the animist cutover changes.
+//! Harness tests: the conversation driven end to end over the scripted
+//! provider.
 
 use std::sync::Arc;
 
@@ -595,8 +595,8 @@ async fn shutdown_is_idempotent_and_terminal() {
 
 #[tokio::test]
 async fn max_turns_budget_ends_with_the_end_marker() {
-    // Decision 12 sizes the step budget at max_turns plus the continuation
-    // and nudge budgets (2 + 3 + 20 = 25), so the loop stops on the 25th
+    // The step budget is max_turns plus the continuation and nudge
+    // budgets (2 + 3 + 20 = 25), so the loop stops on the 25th
     // model call, not the second.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f.txt"), "x\n".repeat(64)).unwrap();
@@ -637,7 +637,7 @@ async fn max_turns_budget_ends_with_the_end_marker() {
     ));
 }
 
-// --- Phase B: the change-feed persister ---
+// --- change-feed persister ---
 
 fn state_dir(tmp: &tempfile::TempDir) -> crate::storage::StateDir {
     crate::storage::StateDir::from_path(tmp.path().to_path_buf())
@@ -916,8 +916,7 @@ async fn a_checkpoint_failure_surfaces_an_event_and_never_fails_the_run() {
 /// The agent's parallel-tool-call squash (animist F04) is what persistence
 /// writes and the loader replays: after a run of ten parallel reads with
 /// large outputs, every result entry carries exactly one revision, and a
-/// reload rebuilds a history whose current view equals the in-memory one
-/// (11).
+/// reload rebuilds a history whose current view equals the in-memory one.
 #[tokio::test]
 async fn parallel_tool_calls_squash_and_reload_to_the_same_current_view() {
     let dir = tempfile::tempdir().unwrap();
@@ -1033,7 +1032,7 @@ async fn parallel_tool_calls_squash_and_reload_to_the_same_current_view() {
         .unwrap()
         .join(format!("{}.jsonl", session_ref().id()));
     let size = std::fs::metadata(&session_file).unwrap().len();
-    // Session-size measurement for 11's completion note: ten ~19 KB reads
+    // Session-size measurement: ten ~19 KB reads
     // (190 KB of output) persist as source+revision, roughly doubled.
     println!(
         "squash fixture: {} entries, session file {} bytes",

@@ -285,7 +285,7 @@ async fn notification_bursts_are_debounced() {
     handle.shutdown().await;
 }
 
-/// Phase 5: resources flow `populate` → `publish` → snapshot (with
+/// Resources flow `populate` → `publish` → snapshot (with
 /// `resource_count`), and `McpHandle::read_resource` routes the
 /// (server, uri) pair to the entry's session — unknown pairs refuse.
 #[tokio::test]
@@ -579,7 +579,7 @@ async fn disable_purges_entry_and_published_view() {
     assert!(handle.tool_descriptors().is_empty());
 }
 
-/// Regression (reference semantics): a slow tool call must not block a
+/// Regression: a slow tool call must not block a
 /// publish. The call is parked on `call_gate` while `publish` runs.
 #[tokio::test]
 async fn slow_tool_call_does_not_block_publish() {
@@ -609,8 +609,7 @@ async fn slow_tool_call_does_not_block_publish() {
 
 /// Commands must actually be awaited in the loop: a toggle-enable on a
 /// disabled server drives it Connecting → Failed through the real
-/// command loop (regression: a refactor once constructed the handler
-/// future without polling it, so commands silently did nothing).
+/// command loop.
 #[tokio::test]
 async fn toggle_enable_runs_a_background_refresh() {
     let mut raw = stdio_raw(&[MISSING_PROGRAM]);
@@ -712,7 +711,7 @@ fn stub_handle_publishes_wire_names() {
     assert_eq!(descriptors[0].parameters["type"], "object");
 }
 
-/// Phase 3: server-declared annotations flow ToolInfo → `populate` →
+/// Server-declared annotations flow ToolInfo → `populate` →
 /// `publish` → descriptors, and the permission engine can sync them from
 /// the published generation without re-registering per turn.
 #[tokio::test]
@@ -928,7 +927,7 @@ for line in sys.stdin:
     let messages = session.get_prompt("greet", &HashMap::new()).await.unwrap();
     assert_eq!(messages[0].text.as_deref(), Some("hello prompt"));
 
-    // Phase 5: resources list and read (text inline, blob under a mime
+    // Resources list and read (text inline, blob under a mime
     // header line).
     let resources = session.list_resources().await.unwrap();
     assert_eq!(resources.len(), 2);

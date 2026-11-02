@@ -1,10 +1,8 @@
 //! VCC compaction on animist's `VccCompactor`, with craft's harness
-//! knowledge ported into a [`VccExtractor`]: tool-specific breadcrumbs
+//! knowledge in a [`VccExtractor`]: tool-specific breadcrumbs
 //! (compressed bash commands, file paths, patch targets, move endpoints),
-//! noise-tool suppression, and XML-wrapper stripping. Since 08 the cut,
-//! budget, and prior-summary merge rules are animist's; craft no longer
-//! forks the algorithm (`docs/animist/08` documents the accepted
-//! differences).
+//! noise-tool suppression, and XML-wrapper stripping. The cut,
+//! budget, and prior-summary merge rules are animist's.
 
 mod cut;
 mod util;
@@ -38,8 +36,8 @@ const MAX_EXCERPT_CHARS: usize = 512;
 /// animist's default whole-summary budget in Unicode scalar values.
 const MAX_SUMMARY_CHARS: usize = 16_000;
 
-/// Tools whose calls and results are noise in a summary (ported from the
-/// craft VCC filter; the lowercase spellings are craft's own tools).
+/// Tools whose calls and results are noise in a summary; the lowercase
+/// spellings are craft's own tools.
 static NOISE_TOOLS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         "TodoWrite",
@@ -58,9 +56,8 @@ static NOISE_TOOLS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 });
 
 /// Craft tools whose *call* breadcrumb already says what happened: their
-/// successful results are omitted, exactly as the pre-08 brief carried call
-/// one-liners and error lines but never result content — a tool result as a
-/// breadcrumb is nearly as big as the exchange it replaces, and an
+/// successful results are omitted — a tool result as a breadcrumb is
+/// nearly as big as the exchange it replaces, and an
 /// output-heavy round would compact to almost nothing. Unknown tools (MCP
 /// and friends) keep animist's generic result excerpts.
 static ONE_LINER_TOOLS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -157,8 +154,8 @@ impl CraftVccExtractor {
     }
 }
 
-/// The one-line breadcrumb shape for a tool call, ported from the craft
-/// brief: the file/pattern/query argument names the target.
+/// The one-line breadcrumb shape for a tool call: the file/pattern/query
+/// argument names the target.
 fn tool_call_breadcrumbs(name: &str, input: &serde_json::Value) -> Vec<String> {
     let field = match name {
         "Read" | "read" | "Edit" | "edit" | "Write" | "write" | "Glob" | "glob" | "Grep"
@@ -271,11 +268,9 @@ impl VccExtractor for CraftVccExtractor {
 /// nothing is protected). Returns `None` when the stage declines (no safe
 /// boundary, empty prefix, everything protected).
 ///
-/// The summary budget is animist's own: the pre-08 stage never sized its
-/// summary from the engine's token limit (that limit only fed the
-/// under-limit check, which the engine runs after the commit), and mapping
-/// the overhead-subtracted target onto a character budget collapses to zero
-/// for large schemas — "a total budget too small for any breadcrumb
+/// The summary budget is a character budget of its own: mapping the
+/// overhead-subtracted token target onto a character budget collapses to
+/// zero for large schemas — "a total budget too small for any breadcrumb
 /// produces no edits".
 pub(crate) async fn build_vcc_plan(
     snapshot: &HistorySnapshot,
@@ -333,7 +328,6 @@ fn clamp_plan(
         .filter_map(|(index, entry)| entry.current().is_some().then_some(index))
         .collect();
     let first_protected = active.get(summarize_end).copied();
-    // Drop removes of protected (and later) entries.
     plan.edits.retain(|edit| match edit {
         CompactionEdit::Remove { index } => Some(*index) < first_protected,
         _ => true,

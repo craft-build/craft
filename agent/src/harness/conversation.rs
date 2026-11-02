@@ -49,7 +49,7 @@ pub enum MaxTurns {
     Unbounded,
 }
 
-/// Nesting cap for child dispatches (10): `batch` children dispatch at
+/// Nesting cap for child dispatches: `batch` children dispatch at
 /// depth one and an exclusive child orchestrator may fan serial dispatches
 /// deeper; eight is animist's default, owned here so the child budgets the
 /// batch relies on are craft's to size.
@@ -83,7 +83,7 @@ struct LayerSet {
 }
 
 impl LayerSet {
-    /// The chain head, the settled order: policy → guardrail → request →
+    /// The chain head: policy → guardrail → request →
     /// recovery → continuation → snapshot (→ persist). A denial
     /// short-circuits everything after it; the request layer prepares every
     /// attempt (retries included) so it owns the fallback model; a step's
@@ -143,22 +143,22 @@ struct Inner {
     config: AgentConfig,
     layers: LayerSet,
     sink: EventSink,
-    /// The guardrail state's typed handle: 08's compaction resets it when a
+    /// The guardrail state's typed handle: compaction resets it when a
     /// run rewrites history.
     guardrails: Arc<GuardrailState>,
-    /// The recovery state's typed handle (09): the driver charges the
+    /// The recovery state's typed handle: the driver charges the
     /// overflow budget, swaps the serving model, and marks follow-up runs.
     recovery: RecoveryHandle,
-    /// The continuation state's typed handle (09): the driver marks
+    /// The continuation state's typed handle: the driver marks
     /// follow-up runs.
     continuation: ContinuationHandle,
     compaction: SharedCompactionState,
-    /// The compaction engine (08), driven by the driver between runs and by
-    /// 09's overflow recovery inside `recover`.
+    /// The compaction engine, driven by the driver between runs and by
+    /// overflow recovery inside `recover`.
     engine: crate::compaction::CompactionEngine,
     /// The compression settings the durable alteration passes run under.
     compression: crate::compression::CompressionConfig,
-    /// The advisor configuration (09): the driver runs the post-turn
+    /// The advisor configuration: the driver runs the post-turn
     /// review between runs when it is enabled.
     advisor: crate::config::AdvisorConfig,
     /// The workspace write root, anchoring the read-lifecycle path keying.
@@ -183,8 +183,8 @@ impl std::fmt::Debug for Conversation {
 }
 
 /// The single construction point for a session's conversation; folds the
-/// former `run_policy` inputs (config read once) into the agent config, the
-/// layer wiring, and the initial [`TurnSettings`].
+/// config (read once) into the agent config, the layer wiring, and the
+/// initial [`TurnSettings`].
 pub struct ConversationBuilder<'a> {
     config: &'a Config,
     cwd: &'a str,
@@ -210,7 +210,7 @@ pub struct ConversationBuilder<'a> {
     /// The session workspace: anchors write-path normalization and owns
     /// the compression store the request layer reads from.
     workspace: Option<crate::tools::Workspace>,
-    /// Test seam (10): one extra layer at the chain's head; `None` outside
+    /// Test seam: one extra layer at the chain's head; `None` outside
     /// tests (the setter is test-only).
     test_layer: Option<Layer>,
 }
@@ -332,7 +332,7 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
-    /// Test seam (10): mount one extra layer at the chain's head so a test
+    /// Test seam: mount one extra layer at the chain's head so a test
     /// can observe hook calls on a conversation's own instances.
     #[cfg(test)]
     pub(crate) fn test_layer(mut self, layer: Layer) -> Self {
@@ -387,7 +387,7 @@ impl<'a> ConversationBuilder<'a> {
             temperature: config.agent.temperature,
             max_tokens: config.agent.max_tokens,
         }));
-        // Step budget (README decision 12): `agent.max_turns` bounds the
+        // Step budget: `agent.max_turns` bounds the
         // productive model calls, and each `step_end` continuation (a
         // `MaxTokens` continuation or a nudge) consumes a step of its own,
         // so their budgets ride on top. Unbounded stays unbounded.
@@ -409,7 +409,7 @@ impl<'a> ConversationBuilder<'a> {
             .max_retries(super::recovery::retry_budget())
             .max_concurrent_tools(config.agent.max_concurrent_tools)
             .max_tool_calls(u64::MAX)
-            // Decision 12: the budgets are high so a full `batch`
+            // The budgets are high so a full `batch`
             // (MAX_BATCH_SIZE entries, reserved upfront) always fits.
             .max_child_calls(u64::MAX)
             .max_tool_depth(MAX_TOOL_DEPTH)
@@ -569,30 +569,30 @@ impl Conversation {
     }
 
     /// The session's guardrail state (doom tracker, guardrail counters,
-    /// dedup cache); 08's compaction resets it when a run rewrites history.
+    /// dedup cache); compaction resets it when a run rewrites history.
     pub fn guardrails(&self) -> Arc<GuardrailState> {
         Arc::clone(&self.inner.guardrails)
     }
 
-    /// The session's shared compaction state (08 drives it).
+    /// The session's shared compaction state.
     pub fn compaction(&self) -> SharedCompactionState {
         self.inner.compaction.clone()
     }
 
-    /// The recovery state's typed handle (09): the driver reads the serving
+    /// The recovery state's typed handle: the driver reads the serving
     /// model, charges the overflow budget, and marks follow-up runs on it.
     pub(crate) fn recovery(&self) -> RecoveryHandle {
         Arc::clone(&self.inner.recovery)
     }
 
-    /// The continuation state's typed handle (09): the driver marks
+    /// The continuation state's typed handle: the driver marks
     /// follow-up runs on it.
     pub(crate) fn continuation(&self) -> ContinuationHandle {
         Arc::clone(&self.inner.continuation)
     }
 
     /// The session's compaction engine, run by the driver between runs and
-    /// by 09's overflow recovery.
+    /// by overflow recovery.
     pub fn compaction_engine(&self) -> crate::compaction::CompactionEngine {
         self.inner.engine.clone()
     }
@@ -644,7 +644,7 @@ impl Conversation {
         Arc::clone(&guard)
     }
 
-    /// Test seam (10): the assembled agent config, for pinning the child
+    /// Test seam: the assembled agent config, for pinning the child
     /// budgets a full `batch` depends on.
     #[cfg(test)]
     pub(crate) fn agent_config_for_tests(&self) -> &AgentConfig {

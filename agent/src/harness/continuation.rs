@@ -1,10 +1,10 @@
-//! Continuation layer (09): the two in-run continuations that live at step
+//! Continuation layer: the two in-run continuations that live at step
 //! boundaries — a truncated (`MaxTokens`) reply continues from a
 //! continuation observation, and a stalled turn (an empty reply while tool
 //! results sit in the recent window) is nudged — both as durable
 //! `step_end` appends that set `continue_run`, so the run never re-runs
 //! from the driver. Each continuation consumes a step from `max_steps`
-//! (sized per README decision 12); the budgets reset in `turn_start`
+//! (sized to the step budget); the budgets reset in `turn_start`
 //! except on driver follow-up runs.
 
 use std::sync::{Arc, Mutex};
@@ -88,9 +88,7 @@ impl ContinuationLayer {
 /// `synthetic_tail` counts the marker+nudge pairs this run already
 /// appended; they are skipped so repeated nudges cannot push the results
 /// out of the window, as are the committed empty replies a stall leaves
-/// behind (the old loop replaced them with markers; on this substrate they
-/// commit, but they carry nothing and must not consume window depth
-/// either).
+/// behind (they carry nothing and must not consume window depth either).
 pub(crate) fn has_recent_tool_results(
     entries: &[StoredMessage],
     depth: usize,
@@ -138,8 +136,7 @@ impl LayerImpl for ContinuationLayer {
         _run: &RunContext,
         outcome: &StepOutcome,
     ) -> Result<StepAction> {
-        // Real progress resets the nudge budget (the old loop cleared it
-        // whenever a step dispatched tool calls).
+        // Real progress resets the nudge budget.
         if outcome
             .response
             .content

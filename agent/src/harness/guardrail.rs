@@ -1,10 +1,10 @@
-//! Guardrail layer (07): the doom loop, the per-tool guardrails and the
+//! Guardrail layer: the doom loop, the per-tool guardrails and the
 //! dedup cache sit here, behind the conversation's
 //! [`GuardrailState`](crate::harness::guardrails::GuardrailState).
 //!
 //! The chain runs the policy layer first, so guardrails judge exactly the
 //! calls a human or the rules already allowed — a user-approved call still
-//! cannot loop unproductively (the pre-migration order). `pre_tool_exec`
+//! cannot loop unproductively. `pre_tool_exec`
 //! decides doom hard stop → doom repeat → guardrail warn/block → dedup;
 //! `post_tool_exec` feeds the counters and the cache and appends any
 //! `[guardrail]` warning to the model-visible result; `step_end` fires the
@@ -33,16 +33,15 @@ pub(crate) struct GuardrailLayer {
     state: Arc<GuardrailState>,
     sink: EventSink,
     /// Calls this run answered from the dedup cache, so `post_tool_exec`
-    /// re-runs the guardrail counters on the replayed result (the old loop
-    /// did) but never re-records it into the cache.
+    /// re-runs the guardrail counters on the replayed result but never
+    /// re-records it into the cache.
     responded: Mutex<HashSet<String>>,
     /// Calls whose pre-exec guardrail check warned; `post_tool_exec`
     /// consumes the mark to append the warning the counters may not repeat.
     pre_warned: Mutex<HashSet<String>>,
-    /// Calls denied as a doom-loop repeat this run: the old loop routed
-    /// them straight to the result, never through the wave commit's error
-    /// count, so the block contributes exactly `SCORE_DOOM_LOOP` — no
-    /// extra error point from its denied result.
+    /// Calls denied as a doom-loop repeat this run: they never pass through
+    /// the run's error count, so the block contributes exactly
+    /// `SCORE_DOOM_LOOP` — no extra error point from the denied result.
     doom_blocked: Mutex<HashSet<String>>,
 }
 
@@ -208,8 +207,8 @@ impl LayerImpl for GuardrailLayer {
                 })
             }
             Verdict::GuardrailBlock => {
-                // The user-facing status mirrors the old wave commit's
-                // `Event::Info`, reason stripped of the model-visible lead.
+                // The user-facing status event strips the model-visible
+                // lead from the reason.
                 self.sink.craft(CraftEvent::Info(format!(
                     "guardrail blocked {name}: {}",
                     GUARDRAIL_BLOCK_MESSAGE.trim_start_matches("blocked by guardrails: ")
@@ -273,10 +272,9 @@ impl LayerImpl for GuardrailLayer {
             .remove(&call.id);
         let read_only = ToolDedupCache::is_read_only(name);
         let text = ext::tool_content_text(&output.content);
-        // One pass: doom accounting runs for every closed result (the old
-        // wave commit counted denials too — except doom blocks, which never
-        // rode a wave), the guardrail counters and the cache only for calls
-        // that really executed or replayed.
+        // One pass: doom accounting runs for every closed result, the
+        // guardrail counters and the cache only for calls that really
+        // executed or replayed.
         let reason = self.state.with(|inner| {
             if !doom_blocked {
                 if output.is_error {
@@ -323,9 +321,8 @@ impl LayerImpl for GuardrailLayer {
     ) -> Result<StepAction> {
         // The grace prompt fires once per run, after a step's results
         // commit and before the next inference attempt — a durable append
-        // inside the same run, where the old loop pushed the prompt
-        // mid-run. `mark_grace_called` inside the lock keeps it exactly
-        // once even with concurrent step ends.
+        // inside the same run. `mark_grace_called` inside the lock keeps it
+        // exactly once even with concurrent step ends.
         let score = self.state.with(|inner| {
             if inner.doom.should_grace() {
                 inner.doom.mark_grace_called();

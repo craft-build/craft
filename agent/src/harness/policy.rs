@@ -1,12 +1,12 @@
-//! The policy layer (07): permission rules, auto-review, the surface's
+//! The policy layer: permission rules, auto-review, the surface's
 //! [`ApprovalResponder`] and the plan-mode write gate, in that order. One
 //! policy serves every surface; the responder only conducts the
 //! interaction (the TUI overlay, an ACP `session/request_permission`, the
 //! headless fail-closed answer).
 //!
 //! A rules denial or a rejection is reported as a normal (non-error)
-//! result, the shape permission answers always had; the plan-mode gate is a
-//! hard denial. The guardrail layer sits behind this one and sees only
+//! result; the plan-mode gate is a hard denial. The guardrail layer sits
+//! behind this one and sees only
 //! calls the rules (or the interaction) allowed.
 
 use std::path::PathBuf;
@@ -473,8 +473,7 @@ mod tests {
         assert_eq!(reads, None);
     }
 
-    /// The scopes of an apply_patch ask cover every file the patch touches
-    /// (restored from the pre-07 TUI gate tests, which owned it).
+    /// The scopes of an apply_patch ask cover every file the patch touches.
     #[test]
     fn apply_patch_scopes_cover_every_patched_file() {
         let root = std::path::Path::new("/repo");
@@ -491,9 +490,8 @@ mod tests {
     }
 
     /// An unregistered tool name still rides the policy chain: the runtime
-    /// resolves unknown tools at execution, so the call is an ask (the old
-    /// dispatch errored before any gate ever saw it). Pinned as the named
-    /// behaviour change of 07.
+    /// resolves unknown tools at execution, so the call is an ask rather
+    /// than an early error.
     #[tokio::test]
     async fn an_unknown_tool_name_still_asks_before_it_errors() {
         let dir = tempfile::tempdir().unwrap();
@@ -675,7 +673,7 @@ mod tests {
         );
     }
 
-    /// Reference parity: an in-project file write is a builtin allow, so it
+    /// An in-project file write is a builtin allow, so it
     /// runs without a prompt.
     #[tokio::test]
     async fn in_project_write_runs_without_asking() {
@@ -1032,7 +1030,7 @@ mod tests {
         );
     }
 
-    /// A full 25-entry batch fits the conversation's child budgets (10):
+    /// A full 25-entry batch fits the conversation's child budgets:
     /// every entry dispatches and succeeds, and the assembled config
     /// carries the high child-call budget with the explicit depth cap.
     #[tokio::test]
@@ -1091,7 +1089,7 @@ mod tests {
     /// Two gated children in one batch share the parent's approval seam,
     /// and the seam serializes them: one ask at a time even though the
     /// children overlap (the argosy code tools claim shared reads, so both
-    /// asks are genuinely in flight together — 07's responder rule).
+    /// asks are genuinely in flight together).
     #[tokio::test]
     async fn two_gated_batch_children_never_show_two_prompts() {
         let dir = tempfile::tempdir().unwrap();

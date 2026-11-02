@@ -1,9 +1,7 @@
 //! Tool-output pre-compression: heuristic content-type detection plus
 //! type-specific compressors, applied to tool-result text at request-build
 //! time so the model sees trimmed outputs while history keeps the raw ones.
-//!
-//! Ported from the reference craft agent's `compression/` module (Magika
-//! ONNX detection intentionally not ported; heuristics only).
+//! Heuristics only; no ONNX content detection.
 
 mod code;
 mod diff_comp;
@@ -26,7 +24,7 @@ pub enum ContentType {
     PlainText,
 }
 
-/// Tunable compression settings; defaults mirror the reference agent.
+/// Tunable compression settings.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CompressionConfig {
@@ -39,7 +37,7 @@ pub struct CompressionConfig {
     pub max_json_items: usize,
     pub json_first_keep: usize,
     pub json_last_keep: usize,
-    /// Carried for config parity; enforcement belongs to compaction (D.9).
+    /// Carried for config parity; enforcement belongs to compaction.
     pub protect_recent_tool_outputs: usize,
 }
 
@@ -179,8 +177,8 @@ pub fn should_compress_tool(tool: &str) -> bool {
     !VERBATIM_TOOLS.contains(&tool)
 }
 
-/// The request-side gate the reference applies via `as_text_for_llm`:
-/// short, empty, or disabled outputs pass through; everything else is
+/// The request-side gate: short, empty, or disabled outputs pass
+/// through; everything else is
 /// detected and compressed.
 pub fn compress_for_llm(text: &str, config: &CompressionConfig) -> String {
     if !config.enabled || text.len() < MIN_COMPRESS_LEN {

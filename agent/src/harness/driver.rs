@@ -2,7 +2,7 @@
 //! cover. It builds the input, runs the agent with its animist event
 //! channel drained into the conversation sink, awaits the run after
 //! cancellation, adds the terminal markers, and reports the folded usage.
-//! The one re-run territory 09 leaves here: the `ContextWindowExceeded`
+//! The one re-run territory left here: the `ContextWindowExceeded`
 //! stop reason (terminal by animist's rules, unreachable from `step_end`)
 //! and the advisor's post-turn review — both as follow-up runs that carry
 //! the turn's budgets over.
@@ -28,7 +28,7 @@ pub(crate) const END_MARKER: &str = "[The turn ended here; the run was cut short
 /// in the [`marker::CANCEL`] tag.
 pub(crate) const CANCEL_MARKER: &str = "[Cancelled by user]";
 
-/// Between-runs history edits (08): the durable alteration passes first,
+/// Between-runs history edits: the durable alteration passes first,
 /// then the compaction engine's stages. The driver owns the sequencing —
 /// this never runs concurrently with `Agent::run` — so a `Conflict` from a
 /// pass means an unexpected writer won the race; each edit is retried once
@@ -280,7 +280,7 @@ async fn recover_stop_reason_overflow(
     ran.then(|| marker::observation(marker::CONTINUATION, CONTINUATION_PROMPT))
 }
 
-/// The advisor gate (C.12): one delta review after a terminal reply,
+/// The advisor gate: one delta review after a terminal reply,
 /// before the turn result escapes. Returns the follow-up input when the
 /// run should continue.
 async fn advisor_followup(
@@ -293,9 +293,8 @@ async fn advisor_followup(
     conversation.sink().craft(CraftEvent::Info(
         crate::run::advisor::ADVISOR_REVIEWING_INFO.to_owned(),
     ));
-    // No cancel race: racing the token would silently skip every review
-    // the way the auto-reviewer's once did; the deadline bounds the call
-    // and the token is checked after (same deviation, kept).
+    // No cancel race: the deadline bounds the call and the token is
+    // checked after.
     let model = lock_recovery(&conversation.recovery())
         .model_override
         .clone()
@@ -345,7 +344,7 @@ pub async fn run_turn(
     let sink = conversation.sink();
     let input = input_message(prompt, images);
     let anchor_input = input.clone();
-    // Between-runs history edits (08): alterations, then the engine's
+    // Between-runs history edits: alterations, then the engine's
     // stages, before the run builds its first request on top of them.
     compact_between_runs(conversation, false).await;
     // A fresh turn is never a follow-up: clear any mark a cancelled
@@ -353,7 +352,7 @@ pub async fn run_turn(
     // `turn_start` does not consume its own mark).
     clear_follow_up_marks(conversation);
     let mut series = RunSeries::default();
-    // Advisor state (C.12): reviews only this turn's delta, so the cursor
+    // Advisor state: reviews only this turn's delta, so the cursor
     // starts at the current entries (the input lands after it).
     let advisor_config = conversation.advisor_config();
     let mut advisor_state = advisor_config
@@ -458,11 +457,9 @@ pub async fn run_turn(
         break (outcome, Some(report));
     };
     // The turn's overflow episode is over whatever way it ended; a later
-    // turn's overflow gets its own attempt. (The layers' `turn_start`
-    // resets would cover this too — this keeps the shared counter honest
-    // even mid-conversation.)
+    // turn's overflow gets its own attempt.
     lock_recovery(&conversation.recovery()).overflow_recoveries = 0;
-    // Carry anchoring (Craft's `carry_from`): a turn that did not complete
+    // Carry anchoring: a turn that did not complete
     // leaves its input unanswered — everything from it on must stay out of
     // any summary until a later turn answers it. A completed turn answers
     // its input.
@@ -554,7 +551,7 @@ async fn finish_error(sink: &EventSink, history: &History, error: AgentError) ->
             // run ends like a step budget does — partial history committed,
             // an end marker recording where, replayable from there. Any
             // other stop (a client cancelling inside an approval, a failed
-            // reauth) keeps the failed-run mapping 05 pinned.
+            // reauth) keeps the failed-run mapping.
             if reason.starts_with(crate::harness::doom::DOOM_STOP_PREFIX) {
                 history
                     .add_stored(marker::observation(marker::END, END_MARKER))

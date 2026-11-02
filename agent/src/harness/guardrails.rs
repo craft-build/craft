@@ -1,19 +1,16 @@
 //! Per-tool guardrails against unproductive loops.
 //!
-//! Ported from the reference `craft-agent/src/agent/guardrails.rs`: the
-//! guardrail layer consults [`ToolGuardrails::check_before_call`] before
+//! The guardrail layer consults [`ToolGuardrails::check_before_call`] before
 //! executing a call and feeds results back through
 //! [`ToolGuardrails::record_result`]. State resets when a compaction run
 //! rewrites history (the compacted conversation no longer describes the
 //! calls that tripped the counters).
 //!
-//! Deliberate divergence from the reference: its failure counters never
-//! decayed, so a tool that failed a few non-consecutive times (routine for a
-//! general-purpose tool like `bash`, where a non-zero exit is reported as an
-//! error) warned on *every* later call and, past the block threshold, was
-//! locked out for the rest of the session. Here a successful call clears the
-//! failure streak, and a block trips as a one-shot circuit breaker that
-//! clears the triggering counters, so no tool can be permanently banned.
+//! A successful call clears the failure streak (non-consecutive failures
+//! are routine for a general-purpose tool like `bash`, where a non-zero
+//! exit is reported as an error), and a block trips as a one-shot circuit
+//! breaker that clears the triggering counters, so no tool can be
+//! permanently banned.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -218,10 +215,10 @@ impl ToolGuardrails {
     }
 }
 
-/// The conversation's guardrail state (07): the doom tracker, the per-tool
+/// The conversation's guardrail state: the doom tracker, the per-tool
 /// guardrail counters and the dedup cache behind one lock, held as an `Arc`
 /// by the guardrail layer, the policy layer (its "answered without
-/// execution" marks) and the conversation's typed handle — the one 08's
+/// execution" marks) and the conversation's typed handle — which
 /// compaction calls `reset` on.
 ///
 /// `with` runs its closure synchronously, so the lock is never held across
@@ -368,8 +365,7 @@ mod tests {
     fn interleaved_failure_prevents_exact_loop_block() {
         // A, A, B, A: the differing failure in the middle resets the exact
         // streak, so the last call leaves it at 1 — only the same-tool
-        // failure warn applies. Under the old unconditional counter the
-        // streak would have reached EXACT_REPEAT_BLOCK and blocked.
+        // failure warn applies.
         let mut g = ToolGuardrails::new();
         for input in ["cmd_a", "cmd_a", "cmd_b", "cmd_a"] {
             g.record_result("bash", &json!(input), "err", true, false);
@@ -455,9 +451,8 @@ mod tests {
 
     #[test]
     fn success_clears_failure_streak() {
-        // Non-consecutive failures must not accumulate into a block: a single
-        // success resets the streak. This is the `bash` regression — routine
-        // non-zero exits used to warn on every later call, then lock it out.
+        // Non-consecutive failures must not accumulate into a block: a
+        // single success resets the streak.
         let mut g = ToolGuardrails::new();
         for i in 0..SAME_TOOL_FAIL_WARN {
             g.record_result("bash", &json!(format!("cmd{i}")), "err", true, false);
@@ -495,7 +490,7 @@ mod tests {
         );
     }
 
-    // --- GuardrailState (07) ---
+    // --- GuardrailState ---
 
     #[test]
     fn a_new_turn_resets_the_doom_score_but_keeps_the_window() {

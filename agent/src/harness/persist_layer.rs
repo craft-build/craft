@@ -39,8 +39,7 @@ impl LayerImpl for PersistLayer {
         _run: &RunContext,
         _outcome: &StepOutcome,
     ) -> Result<StepAction> {
-        // Runs after the step's results commit (and the agent's squash), the
-        // replacement for the old content_revision tool-result checkpoints.
+        // Runs after the step's results commit (and the agent's squash).
         self.checkpoint().await;
         Ok(StepAction::default())
     }

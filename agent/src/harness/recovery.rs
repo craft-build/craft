@@ -1,17 +1,17 @@
-//! Recovery layer (09): the retry taxonomy behind [`LayerImpl::recover`].
-//! A failed inference attempt classifies through the taxonomy 02/03 landed
-//! (HTTP status first, then message matching), and today's policy applies:
+//! Recovery layer: the retry taxonomy behind [`LayerImpl::recover`].
+//! A failed inference attempt classifies through the taxonomy (HTTP
+//! status first, then message matching), and today's policy applies:
 //! rate limits rotate the key then fail over to the next fallback model,
 //! server/transport/timeout failures back off linearly (raced against the
 //! run's cancellation), auth failures pause for the surface's reauth hook,
-//! and context overflow recalibrates the estimator and forces 08's
-//! compaction engine before the one retry. Content-policy and fatal errors
-//! propagate.
+//! and context overflow recalibrates the estimator and forces the
+//! compaction engine before the one retry. Content-policy and fatal
+//! errors propagate.
 //!
 //! The fallback hop and a reauth-swapped model live in the shared
-//! [`RecoveryRunState`] so the request layer serves them (there is no
-//! global scope); the driver reads the same handle for its stop-reason
-//! overflow re-runs and to carry budgets across follow-up runs.
+//! [`RecoveryRunState`] so the request layer serves them; the driver
+//! reads the same handle for its stop-reason overflow re-runs and to
+//! carry budgets across follow-up runs.
 
 use std::sync::{Arc, Mutex};
 
@@ -51,11 +51,9 @@ const RETRY_BUDGET_REARM_CYCLES: u32 = 4;
 
 /// The retry budget animist's loop enforces: the run-wide transient budget
 /// plus headroom for rearm cycles of the reauth and overflow caps. Rotations
-/// charge the transient budget themselves, like the old machine. A turn
-/// with more reauth/overflow episodes than the headroom covers surfaces
-/// the error from the agent's counter instead of the layer's caps —
-/// accepted (see the completion note), since such a turn is already
-/// pathological.
+/// charge the transient budget themselves. A turn with more reauth/overflow
+/// episodes than the headroom covers surfaces the error from the agent's
+/// counter instead of the layer's caps.
 pub(crate) fn retry_budget() -> u32 {
     MAX_RUN_TRANSIENT_RETRIES
         + RETRY_BUDGET_REARM_CYCLES * (MAX_REAUTH_ATTEMPTS + MAX_OVERFLOW_RECOVERIES)
@@ -63,12 +61,11 @@ pub(crate) fn retry_budget() -> u32 {
 
 // --- Reauth hook -----------------------------------------------------------------
 
-/// What a surface supplies so a run can pause for re-authentication
-/// (E.10): block until credentials are refreshed, returning the model
-/// rebuilt from them (`Ok(None)` when the active model needs no swap — its
+/// What a surface supplies so a run can pause for re-authentication:
+/// block until credentials are refreshed, returning the model rebuilt
+/// from them (`Ok(None)` when the active model needs no swap — its
 /// provider's credentials are reloaded in place), or report failure. The
-/// boxed-future alias this replaces lived in the old run loop; the TUI and
-/// ACP implement it.
+/// TUI and ACP implement it.
 #[async_trait]
 pub trait ReauthHook: Send + Sync {
     async fn reauth(&self, attempt: u32) -> std::result::Result<Option<ModelHandle>, String>;
@@ -76,11 +73,9 @@ pub trait ReauthHook: Send + Sync {
 
 // --- Recovery taxonomy ------------------------------------------------------------
 
-/// Recovery taxonomy for provider stream errors, ported from the
-/// classification 02/03 landed (originally the reference's
-/// `AgentError::{is_retryable, should_rotate_key, should_abort}`). Most
-/// failures classify from the preserved HTTP status, when one survived,
-/// and otherwise fall back to message matching.
+/// Recovery taxonomy for provider stream errors. Most failures classify
+/// from the preserved HTTP status, when one survived, and otherwise fall
+/// back to message matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ErrorKind {
     /// 429: retried with backoff; the first remedy is key rotation.
@@ -105,16 +100,13 @@ pub(crate) enum ErrorKind {
 }
 
 impl ErrorKind {
-    /// 429 alone: the reference also lists 401/403 in `should_rotate_key`,
-    /// but rotation is only reachable inside the retryable branch (the
-    /// transient arms of `recover`), so those statuses never rotate there
-    /// either.
+    /// 429 alone: rotation is only reachable inside the retryable branch
+    /// (the transient arms of `recover`), so 401/403 never rotate.
     pub(crate) fn should_rotate_key(self) -> bool {
         self == Self::RateLimited
     }
 
-    /// Human summary for [`CraftEvent::Retry`], after the reference's
-    /// `AgentError::retry_message`.
+    /// Human summary for [`CraftEvent::Retry`].
     pub(crate) fn retry_message(self, message: &str) -> String {
         match self {
             Self::RateLimited => "Rate limited".into(),
@@ -211,7 +203,6 @@ fn classify_string(message: &str) -> ErrorKind {
         return ErrorKind::Overflow;
     }
     let message = message.to_ascii_lowercase();
-    // Reference `AgentError::should_abort`.
     if ["content policy", "content_policy", "billing"]
         .iter()
         .any(|n| message.contains(n))
@@ -294,8 +285,8 @@ pub(crate) fn parse_overflow_prompt_size(text: &str) -> Option<u64> {
         [] => None,
         [single] => {
             // One token-sized figure next to window words ("maximum context
-            // length is 8192 tokens") is the window bound — the exact value
-            // the old code refused to recalibrate to — not the prompt size.
+            // length is 8192 tokens") is the window bound, not the prompt
+            // size.
             let window_words = ["maximum", "context length", "context window", " window"];
             (!window_words.iter().any(|w| lower.contains(w))).then_some(*single)
         }
@@ -398,14 +389,13 @@ pub(crate) struct RecoveryRunState {
     /// fallback hop. `None` is the conversation's model.
     pub model_override: Option<ModelHandle>,
     /// Whether `model_override` is a fallback hop (and so carries its own
-    /// request budgets, hardening/06) rather than a reauth swap of the
-    /// same model.
+    /// request budgets) rather than a reauth swap of the same model.
     pub is_fallback_hop: bool,
     /// The fallback chain cursor: 0 is the primary, `i` the `(i-1)`-th
     /// fallback. Advances inside `recover`; resets at `turn_start`.
     fallback: usize,
     /// Consecutive transient failures without a successful stream between
-    /// them (the old per-call machine's counter).
+    /// them.
     transient_failures: u32,
     /// Run-wide transient tally across every model call.
     transient_run: u32,
@@ -446,8 +436,8 @@ impl Default for RecoveryRunState {
 
 impl RecoveryRunState {
     /// A stream succeeded since the last failure the state saw: re-arm the
-    /// per-streak counters, exactly where the old loop reset them at
-    /// `finish_turn`. The run-wide transient tally is never re-armed.
+    /// per-streak counters. The run-wide transient tally is never
+    /// re-armed.
     fn rearm_after_success(&mut self) {
         self.transient_failures = 0;
         self.rotations = 0;
@@ -474,7 +464,7 @@ impl RecoveryRunState {
 /// The recovery state's typed handle.
 pub(crate) type RecoveryHandle = Arc<Mutex<RecoveryRunState>>;
 
-/// Recalibrate the estimator and force 08's compaction engine after a
+/// Recalibrate the estimator and force the compaction engine after a
 /// context overflow — the shared body of the error-form recovery (inside
 /// `recover`, with the provider's error body) and the driver's
 /// stop-reason re-run (with the provider's measured prompt size).
@@ -573,8 +563,7 @@ pub(crate) struct RecoveryLayer {
     compaction: SharedCompactionState,
     engine: CompactionEngine,
     guardrails: Arc<GuardrailState>,
-    /// The conversation's model: overflow compaction summarizes with it,
-    /// like the old loop.
+    /// The conversation's model: overflow compaction summarizes with it.
     model: Arc<arc_swap::ArcSwap<ModelHandle>>,
     sink: EventSink,
 }
@@ -649,7 +638,7 @@ impl RecoveryLayer {
         hop
     }
 
-    /// Recalibrate the estimator from the error body, force 08's compaction
+    /// Recalibrate the estimator from the error body, force the compaction
     /// engine, and score the result into the doom tracker. Returns whether
     /// a stage ran (a declined compaction must not be retried blindly).
     async fn recover_overflow(&self, agent: &Agent, message: &str) -> bool {
@@ -735,7 +724,7 @@ impl RecoveryLayer {
             }
             // A rate limit that names its wait ("retry after 30s",
             // "Retry-After: 30") is honored as a floor on the backoff: the
-            // server asked for patience and the old linear band alone
+            // server asked for patience and the linear band alone
             // could hammer it well before that.
             let delay = match kind {
                 ErrorKind::RateLimited => {
@@ -850,8 +839,7 @@ impl LayerImpl for RecoveryLayer {
             return Ok(Recovery::Propagate);
         };
         let kind = classify_error(source);
-        // A stream succeeded since the last failure: re-arm the budgets
-        // exactly where the old loop reset them at `finish_turn`.
+        // A stream succeeded since the last failure: re-arm the budgets.
         let steps = run.stats.snapshot().await.steps;
         {
             let mut state = lock(&self.state);
@@ -881,7 +869,7 @@ impl LayerImpl for RecoveryLayer {
             | ErrorKind::Timeout => {
                 // The fallback chain's window checks need the prompt size:
                 // the history view plus the overhead the request layer last
-                // published, the same currency the old loop compared.
+                // published.
                 let overhead = self.compaction.lock().await.request_overhead();
                 let view = agent.history().current().await;
                 let prompt_tokens =
@@ -1029,7 +1017,7 @@ mod tests {
         );
     }
 
-    // --- overflow prompt-size parse (ported verbatim from the old loop) ---
+    // --- overflow prompt-size parse ---
 
     #[test]
     fn parses_openai_style_requested_size() {

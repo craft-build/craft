@@ -1,4 +1,4 @@
-//! MCP client errors (B.11).
+//! MCP client errors.
 
 use snafu::Snafu;
 

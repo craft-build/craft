@@ -1,4 +1,4 @@
-//! OAuth 2.1 login flow for HTTP MCP servers (B.11).
+//! OAuth 2.1 login flow for HTTP MCP servers.
 //!
 //! rmcp provides the protocol machinery (discovery, PKCE, dynamic
 //! registration, token refresh); this module supplies the interactive bits —

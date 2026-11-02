@@ -2,8 +2,7 @@
 //! long-lived [`Conversation`], driven turn by turn by
 //! [`driver::run_turn`](driver::run_turn).
 //!
-//! Policy lives in the layer chain (policy → guardrail → request →
-//! snapshot; persistence and recovery join in later prompts). Surfaces own a
+//! Policy lives in the layer chain. Surfaces own a
 //! conversation, subscribe to its event sink once, and never run a loop of
 //! their own.
 

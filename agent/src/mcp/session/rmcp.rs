@@ -109,7 +109,7 @@ async fn connect(
                 Err(_) => None,
             };
             // The two transports are distinct types, so the generic
-            // `run_initialize` is instantiated per arm rather than unified.
+            // `run_initialize` is instantiated per arm.
             let service = match stored {
                 Some(manager) => {
                     let auth_client =
@@ -135,7 +135,7 @@ async fn connect(
         }
     };
 
-    // Asymmetric on purpose (reference semantics): sloppy servers omit
+    // Asymmetric on purpose: sloppy servers omit
     // `capabilities` yet serve tools/list fine, so always ask for tools (fatal
     // only when tools were declared). Prompts only when declared: undeclared
     // endpoints may answer junk, and junk must not take down the tools.
@@ -803,7 +803,7 @@ impl McpSession for RmcpSession {
         })
     }
 
-    /// Phase 6: send `tools/call` as a cancellable request so the request
+    /// Send `tools/call` as a cancellable request so the request
     /// id stays ours. rmcp sends no `notifications/cancelled` on future
     /// drop (`RequestHandle` has no `Drop`), so on cancel (or timeout) we
     /// notify the server explicitly before giving up on the response.
@@ -964,16 +964,9 @@ impl McpSession for RmcpSession {
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         // Stop the keepalive pings and fail every later call fast.
         self.dead.store(true, Ordering::SeqCst);
-        // This hand-rolled waitpid/killpg applies the same discipline as
-        // `crate::child_guard::ChildGuard` (kill the process group only while
-        // the child is ours and unreaped, since a reaped pid can be recycled),
-        // but it cannot literally reuse `ChildGuard`: rmcp's
-        // `TokioChildProcess` owns the `tokio::process::Child` (both the
-        // `kill_on_drop(true)` set at spawn and rmcp's own drop-kill depend on
-        // it) and exposes no adopt/attach API that would let a guard take
-        // ownership — taking it after the transport wraps the pipes would
-        // double-manage the child. So the split stays: kill_on_drop reaps the
-        // *direct* child, while the block below covers its process group.
+        // Kill the process group only while the child is unreaped: a reaped
+        // pid can be recycled. (kill_on_drop reaps the *direct* child; this
+        // block covers its process group.)
         self.service.cancellation_token().cancel();
         #[cfg(unix)]
         if let Some(pid) = self.child_pid {
@@ -982,11 +975,8 @@ impl McpSession for RmcpSession {
             // own group and killpg reaches the grandchildren wrappers (npx &
             // co.) fork into that group — the ones direct-child reaping alone
             // would miss.
-            // REMAINING LEAK: a grandchild that calls setsid()/setpgid(0)
-            // escapes this process group, so neither killpg nor kill_on_drop
-            // reaches it and it outlives shutdown. Closing that needs
-            // containment the session layer does not have (a PID namespace or
-            // cgroup), so it is documented here rather than fixed.
+            // Known leak: a grandchild that calls setsid()/setpgid(0) escapes
+            // this process group and outlives shutdown.
             let reaped = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
             if reaped == 0 {
                 unsafe { libc::killpg(pid, libc::SIGKILL) };
@@ -1243,7 +1233,7 @@ for line in sys.stdin:
         session.shutdown().await;
     }
 
-    /// Phase 6, end-to-end over stdio: a cancelled turn tells the server to
+    /// End-to-end over stdio: a cancelled turn tells the server to
     /// stop the in-flight tool call. The mock server parks the `tools/call`
     /// and records receipt of `notifications/cancelled` to an evidence file
     /// (the only channel a child process can hand back); the test waits for

@@ -1,6 +1,5 @@
 //! Doom-loop detection: a run-scoped score that rises on pathological agent
-//! behavior and decays on healthy progress (reference
-//! `craft-agent/src/agent/doom.rs`).
+//! behavior and decays on healthy progress.
 //!
 //! Score reaches `GRACE_THRESHOLD` => the agent is asked to summarize and
 //! stop (once per run). Score reaches `HARD_STOP_THRESHOLD` => the run ends
@@ -12,13 +11,12 @@
 //! `GRACE_THRESHOLD` and triggers the grace call immediately — the per-call
 //! warning alone is too easy for the model to ignore when it repeats.
 //!
-//! Known divergence from the reference (deliberate): a blocked call's error
-//! result is committed as soon as it is seen, which can precede
-//! still-running earlier calls' results in history (results stay paired by
-//! id, so replay is unaffected). The tracker itself is conversation-scoped
-//! from 07 on, held in the guardrail layer's state: `reset_for_new_user_input`
-//! runs at `turn_start`, and `RecentCalls` survives across runs so a loop
-//! that spans prompts is still detected.
+//! A blocked call's error result is committed as soon as it is seen,
+//! which can precede still-running earlier calls' results in history
+//! (results stay paired by id, so replay is unaffected). The tracker is
+//! conversation-scoped, held in the guardrail layer's state:
+//! `reset_for_new_user_input` runs at `turn_start`, and `RecentCalls`
+//! survives across runs so a loop that spans prompts is still detected.
 
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -37,8 +35,8 @@ pub(crate) const DOOM_STOP_REASON: &str =
     "doom-stop: the doom-loop score reached the hard-stop threshold";
 
 const SCORE_DOOM_LOOP: u32 = 15;
-// Compaction-driven scoring lands with 08's compactors and 09's recovery
-// layer; kept so the API is complete.
+// Compaction-driven scoring lives in the compaction engine and the
+// recovery layer; kept so the API is complete.
 const SCORE_INEFFECTIVE_COMPACT: u32 = 2;
 const SCORE_TOOL_ERROR: u32 = 1;
 const DECAY_TOOL_SUCCESS: u32 = 1;
@@ -47,23 +45,21 @@ const DECAY_EFFECTIVE_COMPACT: u32 = 1;
 /// Identical repeated calls that constitute a doom loop.
 const DOOM_LOOP_THRESHOLD: usize = 3;
 
-/// What the model reads when its identical retry is blocked instead of run
-/// (reference `tool_dispatch.rs` `DOOM_LOOP_MESSAGE`).
+/// What the model reads when its identical retry is blocked instead of run.
 pub(crate) const DOOM_LOOP_MESSAGE: &str = "You have called this tool with identical input 3 times in a row. This call was NOT executed. You are stuck in a loop. Retrying the same input will be blocked again. Stop, summarize what you have tried, and take a different approach (different arguments, a different tool, or report the blocker to the user).";
 
-/// The one-shot "summarize and stop" prompt fired at `GRACE_THRESHOLD`
-/// (reference `doom.rs` `GRACE_CALL_PROMPT`).
+/// The one-shot "summarize and stop" prompt fired at `GRACE_THRESHOLD`.
 pub(crate) const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom-loop (repeated calls, errors, or stagnation). Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
 
 /// Compaction that recovers less than this fraction is "ineffective" for
-/// scoring purposes (reference the reference crate's `compaction.rs`).
+/// scoring purposes.
 pub(crate) const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 
 #[derive(Default)]
 pub(crate) struct DoomTracker {
     score: u32,
     grace_called: bool,
-    // Conversation-scoped from 07 on: the window survives a new user turn
+    // Conversation-scoped: the window survives a new user turn
     // (via `reset_for_new_user_input`) so loops that span prompts are still
     // detected.
     pub(crate) recent_calls: RecentCalls,
@@ -117,7 +113,7 @@ impl DoomTracker {
 
     /// Reset the volatile signals (score, grace flag) but keep loop-detection
     /// state so trans-prompt loops remain visible. The guardrail layer runs
-    /// this at `turn_start` (07), replacing the old loop's per-run tracker.
+    /// this at `turn_start`.
     pub(crate) fn reset_for_new_user_input(&mut self) {
         self.score = 0;
         self.grace_called = false;

@@ -6,11 +6,11 @@ mod strip;
 pub mod vcc;
 
 /// Collapse marker substituted for oversized tool results in compaction
-/// requests (ported from Craft).
+/// requests.
 pub(crate) const TOOL_RESULT_PLACEHOLDER: &str = "[tool result]";
 
 /// Char budget the most recent tool results keep their full text for when a
-/// summary request is first built (ported from Craft).
+/// summary request is first built.
 pub(crate) const RECENT_TOOL_RESULT_BUDGET: usize = 64 * 1024;
 
 /// Progressive shares of tool results collapsed per step once the overflow

@@ -1,5 +1,5 @@
 //! The retry substrate: budget bounds, the rotation seam, and the linear
-//! backoff state machine, driven by 09's recovery layer behind `Agent`
+//! backoff state machine, driven by the recovery layer behind `Agent`
 //! hooks.
 
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::provider::ModelHandle;
 
 /// Timeouts are retried more patiently than other transient errors, but not
-/// forever (reference `MAX_TIMEOUT_RETRIES`).
+/// forever.
 pub(crate) const MAX_TIMEOUT_RETRIES: u32 = 10;
 /// Run-scoped bound on non-timeout transient retries (rate-limit, server,
 /// transport): the last hop otherwise retries forever, which keeps a
@@ -21,9 +21,8 @@ pub(crate) const MAX_RUN_TRANSIENT_RETRIES: u32 = 16;
 /// "succeeding" without changing the active key cannot hot-loop the
 /// provider.
 pub(crate) const MAX_ROTATIONS: u32 = 4;
-// Linear backoff band and rotation pacing (reference `RETRY_DELAY`,
-// `MAX_DELAY`, `ROTATION_DELAY`); shrunk under cfg(test) so the state
-// machine's tests stay fast. 09's recovery layer drives them.
+// Linear backoff band and rotation pacing; shrunk under cfg(test) so the
+// state machine's tests stay fast. The recovery layer drives them.
 #[cfg(not(test))]
 pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
@@ -38,8 +37,8 @@ pub(crate) const MAX_DELAY: Duration = Duration::from_millis(80);
 pub(crate) const ROTATION_DELAY: Duration = Duration::from_millis(5);
 
 /// Consulted when a rate limit exhausts the current API key; returns whether
-/// a different key became active. The provider layer owns key pools (model
-/// registry, Phase 5); this seam only decides retry-vs-advance.
+/// a different key became active. The provider layer owns key pools; this
+/// seam only decides retry-vs-advance.
 pub type RotateKey = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Retry inputs the conversation supplies: the rotation hook and the fallback
@@ -62,7 +61,7 @@ impl std::fmt::Debug for RetryCtx {
 
 /// Linear backoff counter: delay grows by [`RETRY_DELAY`] per attempt up to
 /// [`MAX_DELAY`], and the wait lands in the upper half of that band (half +
-/// jitter), matching the reference `RetryState::next_delay`.
+/// jitter).
 #[derive(Default)]
 pub(crate) struct RetryState {
     attempt: u32,
@@ -87,7 +86,7 @@ impl RetryState {
     }
 }
 
-/// Rebudge the request's output cap for a fallback hop (hardening/06):
+/// Rebudge the request's output cap for a fallback hop:
 /// never above the hop's own `max_output` or what remains of its window,
 /// floored at [`super::MIN_OUTPUT_TOKENS`] exactly like the primary clamp.
 /// `None` limits everywhere leave the request untouched.

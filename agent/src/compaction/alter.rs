@@ -1,7 +1,6 @@
 //! Durable alteration passes: per-message revisions of the latest active
 //! content, applied between runs, with the original and earlier revisions
-//! kept in the entry (README decision 5). Two passes exist, both durable
-//! versions of what the request view recomputed every step before 08:
+//! kept in the entry. Two passes exist:
 //!
 //! - **Read lifecycle**: `classify_reads` over the active view decides which
 //!   `read` results are Stale or Superseded; those results are revised into
@@ -17,13 +16,12 @@
 //! call-name table, the read classifications) and then look up per-block
 //! decisions by `tool_use_id`.
 //!
-//! The tag value is a sorted comma-joined set of the kinds that have touched
-//! the entry (`compressed`, `stale`, `superseded`): one step's observation
-//! entry can hold a compressible result and a read result side by side, and
-//! neither kind's marker may untag the other or the next pass would re-apply
-//! (re-compressing compressed text, re-marking markers). Idempotence beyond
-//! the tag is guaranteed per block: a result already carrying a lifecycle
-//! marker prefix is never re-marked, and compression skips tagged entries.
+//! Idempotence: the tag value is a sorted comma-joined set of every kind
+//! that has touched the entry (`compressed`, `stale`, `superseded`) — one
+//! step's observation entry can hold a compressible result and a read
+//! result side by side, so neither pass may untag the other. Per block, a
+//! result already carrying a lifecycle marker prefix is never re-marked,
+//! and compression skips tagged entries.
 
 use std::collections::{HashMap, HashSet};
 
@@ -87,8 +85,8 @@ fn names_by_id(entries: &[animist::history::HistoryEntry]) -> HashMap<String, St
 
 /// The output-compression pass. Results inside the recent window stay raw so
 /// the model keeps full text for the calls it is still working from; the
-/// compressed bytes are the same `compress_for_llm` the request view
-/// produced, so the model-visible request does not change when a result
+/// compressed bytes come from the same `compress_for_llm` the request view
+/// produces, so the model-visible request does not change when a result
 /// crosses the window — only where the rewrite lives.
 pub(crate) struct CompressAlteration<'a> {
     config: &'a CompressionConfig,
@@ -330,12 +328,11 @@ impl Alteration for ReadLifecycleAlteration {
 }
 
 /// Run every durable alteration pass over the history, read lifecycle
-/// first — the order the pre-08 request view applied them, so the
-/// classifier reads uncompressed `move` results (their text names the
-/// files a move rewrote). Each pass commits atomically; a concurrent
-/// mutation returns `HistoryError::Conflict` with nothing committed, and
-/// the caller (the driver, which owns the between-runs sequencing)
-/// retries once.
+/// first — the classifier reads uncompressed `move` results (their text
+/// names the files a move rewrote). Each pass commits atomically; a
+/// concurrent mutation returns `HistoryError::Conflict` with nothing
+/// committed, and the caller (the driver, which owns the between-runs
+/// sequencing) retries once.
 #[expect(
     clippy::result_large_err,
     reason = "animist's HistoryError is the operation's public error type"

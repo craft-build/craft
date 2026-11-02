@@ -1,11 +1,10 @@
 //! LLM-powered compaction: one summarization call replaces the conversation
-//! head; the recent tail is preserved verbatim (ported from Craft's
-//! `compaction/llm.rs`, rebuilt on `Compactor` plans since 08 — the head is
-//! `Remove`d and the summary `Insert`ed before the first kept entry, and the
-//! original entries stay in the snapshot as inactive sources).
+//! head; the recent tail is preserved verbatim. The head is `Remove`d and
+//! the summary `Insert`ed before the first kept entry, and the original
+//! entries stay in the snapshot as inactive sources.
 //!
-//! D.8 keeps the two Craft refinements: a targeted summary prompt embedding
-//! the top relevance-scored topics, and an overflow retry ladder that prunes
+//! The summary prompt embeds the top relevance-scored topics, and an
+//! overflow retry ladder prunes
 //! the request (collapse tool results → drop the oldest round → strip tool
 //! results by progressive ratio) before giving up and falling back to a
 //! static summary. The ladder works on the summarizer's *request copy* and
@@ -31,7 +30,7 @@ use crate::error::{Result, SummarizeSnafu};
 /// summaries.
 pub(crate) const LLM_SUMMARY_PREFIX: &str = "Summary of the conversation so far:";
 
-/// Tag marking a summary this stage generated (README decision 5).
+/// Tag marking a summary this stage generated.
 pub(crate) const COMPACTION_TAG: &str = "craft.compaction";
 pub(crate) const COMPACTION_LLM: &str = "llm";
 
@@ -40,8 +39,8 @@ const TARGETED_MIN_SCORE: f32 = 0.5;
 const MAX_OVERFLOW_RETRIES: usize = 3;
 
 /// `(message index, relevance score)` pairs, best first, from the semantic
-/// module. Until that module is ported every caller passes `None` and the
-/// plain summary prompt is used.
+/// module. Callers without scores pass `None` and the plain summary prompt
+/// is used.
 pub type RelevanceScores<'a> = &'a [(usize, f32)];
 
 /// The active entries of a snapshot, as `(snapshot index, stored message)`
@@ -61,7 +60,7 @@ pub(crate) fn active_entries(snapshot: &HistorySnapshot) -> Active<'_> {
 /// a static fallback if the call fails) and the tail is kept verbatim.
 /// Entries from `summarize_end` (an index into `active`, the first protected
 /// entry) are held out of the summary and kept as-is, so input no turn has
-/// answered yet survives compaction verbatim (Craft's carry protection).
+/// answered yet survives compaction verbatim.
 /// Returns `None` when the stage declines (nothing compactable ahead of the
 /// protected tail); errors from the summarizer never abort the plan — the
 /// static fallback covers them.
@@ -76,8 +75,8 @@ pub(crate) async fn build_llm_plan(
         return None;
     }
     let summarize_end = summarize_end.min(active.len());
-    // The boundary finder sees the whole active view (matching the pre-08
-    // stage); the protection then clamps it.
+    // The boundary finder sees the whole active view; the protection then
+    // clamps it.
     let tail_start = find_cut(&active_messages(&active))
         .map_or(0, |cut| cut.tail_start.min(active.len()))
         .min(summarize_end);
@@ -175,9 +174,9 @@ fn message_text(stored: &StoredMessage) -> Option<String> {
 const OUTPUT_CAP_FIELDS: [&str; 3] = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
 
 /// The single shared context-overflow classifier: compaction's retry
-/// ladder and 09's recovery classification both consult it.
+/// ladder and the recovery layer's classification both consult it.
 /// Detects context-window overflow in a provider error string across
-/// providers (ported from Craft's `craft-providers::error`):
+/// providers:
 /// - Anthropic:  413 "prompt is too long"
 /// - OpenAI:     400 "maximum context length is X tokens"
 /// - Gemini:     400 "input token count exceeds" / "too many tokens"
@@ -198,9 +197,8 @@ pub(crate) fn is_context_overflow_body(message: &str) -> bool {
         || m.contains("too many")
         || m.contains("maximum")
         || m.contains("context_length_exceeded")
-        // Generic provider phrasing with no explicit "exceeds": the old
-        // stream classifier treated any "context window" error mention as
-        // overflow, and the run loop keeps that semantics.
+        // Generic provider phrasing with no explicit "exceeds": any
+        // "context window" mention counts as overflow.
         || m.contains("context window");
     is_scope && is_overflow
 }
@@ -657,8 +655,8 @@ mod tests {
         assert!(ext::message_text(&summary).contains("user"));
     }
 
-    /// Provider overflow messages ported verbatim from Craft's error-classifier
-    /// test table (Anthropic, OpenAI, Ollama, Mistral, Bedrock shapes).
+    /// Provider overflow messages (Anthropic, OpenAI, Ollama, Mistral,
+    /// Bedrock shapes).
     #[test]
     fn overflow_classifier_matches_provider_messages() {
         for message in [
@@ -730,8 +728,7 @@ mod tests {
                 "input length and `max_tokens` exceed context limit: 10922 + 8192 > 8192",
                 false,
             ),
-            // tier-cap phrasing the old stream classifier missed; the
-            // superset reads it as the overflow it is
+            // tier-cap phrasing reads as the overflow it is
             ("maximum tokens per request is 128000 for this tier", true),
         ];
         for (message, expected) in cases {

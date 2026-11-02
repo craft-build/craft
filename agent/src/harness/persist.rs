@@ -140,7 +140,7 @@ impl Persister {
         }
     }
 
-    /// Record one finished subagent's history and roster entry (10): the
+    /// Record one finished subagent's history and roster entry: the
     /// child conversation runs no persistence layer of its own, so its
     /// parent stores what it produced when it ends. The entries land as
     /// sub-entry records through the log's sub cursors; the roster rides

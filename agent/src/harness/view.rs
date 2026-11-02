@@ -61,9 +61,8 @@ pub(crate) fn shape_messages(
 pub(crate) fn coalesce_user_messages(mut messages: Vec<Message>) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
     for message in messages.drain(..) {
-        // Both sides must be user messages; the old edge only ever pushed
-        // user blocks here, and folding an assistant message into a user
-        // one is a replay violation.
+        // Both sides must be user messages; folding an assistant message
+        // into a user one is a replay violation.
         let merges = matches!(message.role, Role::User)
             && matches!(
                 out.last(),
@@ -137,10 +136,10 @@ pub(crate) fn relocate_tool_result_images(messages: Vec<Message>) -> Vec<Message
 
 /// Rewrite tool-result texts in the request copy through pre-compression.
 /// Only the wire view is affected: `turn` and `history` keep raw results.
-/// Request-time compression is unconditional (per the reference);
+/// Request-time compression is unconditional;
 /// `protect_recent_tool_outputs` is a compaction-stage knob, not ours.
 ///
-/// Since 08 this is the in-run half of the durable compression alteration:
+/// This is the in-run half of the durable compression alteration:
 /// results before `from` (where the run started in the view) already
 /// arrived compressed from history, so only the suffix is rewritten. The
 /// compressed bytes are the same either way — the pass is deterministic —

@@ -7,13 +7,12 @@
 //! - **Superseded**: a later read fully contains the same file range; the old
 //!   snapshot is redundant.
 //!
-//! Since 08 the durable home for these markers is a history alteration pass
+//! The durable home for these markers is a history alteration pass
 //! (`compaction::alter`); what remains here is the in-run half, applied to
 //! the request view for results the current run produced. Everything older
 //! arrives pre-altered from history.
 //!
-//! Ported from the reference's `agent/read_lifecycle.rs` minus the semantic
-//! scorer; superseded reads carry retrieval markers (D.5) naming the hash of
+//! Superseded reads carry retrieval markers naming the hash of
 //! the original content, which `retrieve` resolves against history entry
 //! sources.
 

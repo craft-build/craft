@@ -1,4 +1,4 @@
-//! `mcp.bml` loading and validation (B.11).
+//! `mcp.bml` loading and validation.
 //!
 //! Global config (`mcp "name" { ... }` blocks in the merged craft document)
 //! is merged first, then the project's `.craft/mcp.bml` overrides by server

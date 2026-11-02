@@ -1,4 +1,4 @@
-//! MCP client manager: owns server sessions and routes tool calls (B.11).
+//! MCP client manager: owns server sessions and routes tool calls.
 //!
 //! Tool names are namespaced as `server.tool` internally and `server__tool` on
 //! the wire (LLM APIs reject dots). All mutable state lives in the `run` task,
@@ -15,8 +15,6 @@ pub mod error;
 mod manager;
 pub mod oauth;
 pub mod request;
-// Pinned because both `session.rs` (pending deletion) and `session/mod.rs`
-// exist; drop the attribute once `session.rs` is gone.
 pub mod session;
 
 use std::collections::HashMap;
@@ -67,9 +65,9 @@ pub struct McpToolDescriptor {
     pub qualified_name: String,
     pub description: String,
     pub parameters: Value,
-    /// Server-declared `readOnlyHint` (Phase 3): feeds the permission engine.
+    /// Server-declared `readOnlyHint`: feeds the permission engine.
     pub read_only_hint: Option<bool>,
-    /// Server-declared `destructiveHint` (Phase 3): feeds the permission engine.
+    /// Server-declared `destructiveHint`: feeds the permission engine.
     pub destructive_hint: Option<bool>,
 }
 
@@ -377,7 +375,7 @@ impl McpHandle {
         session.call_tool(&raw_name, args).await
     }
 
-    /// Phase 6: [`Self::call_tool`] under the turn's cancellation token —
+    /// [`Self::call_tool`] under the turn's cancellation token —
     /// a cancelled turn tells the server to stop the in-flight call.
     pub async fn call_tool_cancellable(
         &self,
@@ -414,7 +412,7 @@ impl McpHandle {
         session.get_prompt(&raw_name, arguments).await
     }
 
-    /// `resources/read` on the named server (Phase 5). The (server, uri)
+    /// `resources/read` on the named server. The (server, uri)
     /// pair must exist in the published index — reads of unlisted uris are
     /// refused the same way unknown tool names are.
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<String, McpError> {

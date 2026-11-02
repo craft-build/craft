@@ -1,5 +1,4 @@
-//! Overflow-pruning helpers for the LLM compaction request (ported from
-//! Craft's `compaction/strip.rs`, adapted to animist's history types).
+//! Overflow-pruning helpers for the LLM compaction request.
 //! Every function here exists so a summarization request that overflowed
 //! the provider's context window can be cheaply shrunk and retried.
 

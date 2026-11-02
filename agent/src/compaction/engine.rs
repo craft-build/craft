@@ -3,13 +3,13 @@
 //! that disarms a stage whose last run barely shrank the context (avoiding
 //! cyclical compaction when the context cannot shrink further).
 //!
-//! Since 08 the engine works on the conversation's `History` handle through
+//! The engine works on the conversation's `History` handle through
 //! `Compactor` plans: each stage builds its plan against a snapshot, the
 //! commit runs under animist's generation check (one retry on `Conflict`,
 //! never re-running the summarizer), and the original entries stay in the
 //! snapshot as inactive sources. Edits run only between runs — the driver
 //! owns that sequencing — and [`CompactionEngine::maybe_compact`] is the one
-//! seam 09's `RecoveryLayer::recover` calls for overflow compaction (the
+//! seam `RecoveryLayer::recover` calls for overflow compaction (the
 //! agent re-takes its history snapshot per attempt, so compacting inside
 //! `recover` cannot conflict with the run's own commit).
 
@@ -33,7 +33,7 @@ use super::llm::{PlanCompactor, build_llm_plan};
 use super::vcc::build_vcc_plan;
 
 /// A stage whose last run saved less than this fraction is disarmed until
-/// another stage compacts effectively (ported from Craft's threshold).
+/// another stage compacts effectively.
 pub const INEFFECTIVE_SAVINGS: f32 = 0.1;
 /// Ordered stage list (ascending by context ratio).
 #[derive(Debug, Clone)]
@@ -55,8 +55,8 @@ pub struct CompactionState {
     guardrails: Option<Arc<GuardrailState>>,
     /// Where the unanswered input starts, as a snapshot-entry index:
     /// everything from here on is held out of the summary and kept
-    /// verbatim, so input no turn has answered yet is never summarized away
-    /// (Craft's `carry_from`). `None` (the default) protects nothing, which
+    /// verbatim, so input no turn has answered yet is never summarized away.
+    /// `None` (the default) protects nothing, which
     /// is the correct state between turns.
     carry_from: Option<usize>,
     /// Tokens the request carries besides its messages (system preamble +
@@ -193,7 +193,7 @@ impl CompactionEngine {
     }
 
     /// Set the compaction buffer reserved below the context window
-    /// (defaults to 20% of the window, matching Craft).
+    /// (defaults to 20% of the window).
     pub fn with_buffer(mut self, buffer: CompactionBuffer) -> Self {
         self.buffer = buffer;
         self
@@ -206,7 +206,7 @@ impl CompactionEngine {
     /// A stage runs when either its proactive fill threshold is crossed or
     /// the estimated context has already overflowed the buffer-subtracted
     /// window — overflow forces every armed stage in order (VCC first, then
-    /// LLM), regardless of its ratio threshold. This is the seam 09's
+    /// LLM), regardless of its ratio threshold. This is the seam
     /// `RecoveryLayer::recover` calls for overflow compaction.
     pub async fn maybe_compact(
         &self,
@@ -250,8 +250,7 @@ impl CompactionEngine {
         };
         let mut state = shared.lock().await;
         // The buffer is headroom the model needs for its reply, so the fill
-        // checks run against the window minus the buffer (Craft's
-        // `is_overflow`: `usage >= window - buffer`) — never less than
+        // checks run against the window minus the buffer — never less than
         // `MIN_OUTPUT_TOKENS`, so the output-cap floor and the compaction
         // threshold agree on the same reservation.
         let reserved = u64::from(self.buffer.resolve(context_length))
@@ -335,8 +334,7 @@ impl CompactionEngine {
             }
             // A VCC pass that left the history over its limit is not a
             // sufficient pass: force the heavier stages to run too. The
-            // check uses the raw estimate against the stage target, exactly
-            // as the pre-08 stage's under-limit return did.
+            // check uses the raw estimate against the stage target.
             if stage.kind == CompactionKind::Vcc && estimate_tokens(&after_view) > stage_target {
                 forced = true;
             }
@@ -589,8 +587,8 @@ mod tests {
         assert!(ran);
         let view = view(&history).await;
         assert!(!view.is_empty());
-        // VCC summary present (deterministic, no LLM call): animist's
-        // preamble, tagged by craft as a VCC summary.
+        // VCC summary present (deterministic, no LLM call): the system
+        // preamble, tagged as a VCC summary.
         assert!(ext::message_text(&view[0]).contains("Earlier conversation"));
         assert_eq!(
             view[0].tags().get("craft.compaction").map(String::as_str),
@@ -642,8 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn overflow_forcing_respects_disarmed_stages() {
-        // Craft skips auto-compaction after ineffective runs even on
-        // overflow. Disarm VCC on the tight history first.
+        // Disarm VCC on the tight history first.
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
         let state = shared(CompactionState::default());
         let (sink, _stream) = EventSink::new();
@@ -1138,7 +1135,7 @@ mod tests {
     #[tokio::test]
     async fn overflow_of_buffer_subtracted_window_forces_stage_below_threshold() {
         // Fill is under the 0.6 proactive threshold but over the window minus
-        // the buffer: the stage must still run (Craft's is_overflow forcing).
+        // the buffer: the stage must still run.
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)])
             .with_buffer(crate::config::CompactionBuffer::Percent(50));
         let state = shared(CompactionState::default());
