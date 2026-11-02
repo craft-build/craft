@@ -850,3 +850,126 @@ fn restore_finds_the_checkpoint_made_in_the_active_session() {
         "legacy"
     );
 }
+
+#[gpui::test]
+fn comment_and_archive_affordances_render(cx: &mut gpui::TestAppContext) {
+    let (_app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = tool_test_app(cx);
+        let project = app.active_project.clone().unwrap();
+        app.projects.push(project);
+        let session = &mut app.sessions_by_project.get_mut("project").unwrap()[0];
+        session.messages[0].diff = Some(Diff {
+            file: "src/main.rs".into(),
+            stat: "+1 -1".into(),
+            hunk_header: "@@ -1,1 +1,1 @@".into(),
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Del,
+                    text: "old".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "new".into(),
+                },
+            ],
+        });
+        app
+    });
+    cx.simulate_resize(gpui::size(px(1400.), px(900.)));
+    cx.run_until_parked();
+
+    for selector in ["comment-toggle", "diff-comment", "archive-session"] {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} must render in the workspace"));
+        assert!(
+            bounds.size.width > px(0.) && bounds.size.height > px(0.),
+            "{selector} must have a visible size: {bounds:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn archiving_deletes_the_session_and_its_comments(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut app = tool_test_app(cx);
+        let sessions = app.sessions_by_project.get_mut("project").unwrap();
+        sessions.push(Session {
+            id: "second".into(),
+            name: "Second".into(),
+            messages: vec![],
+            acp_session_id: None,
+            archived: false,
+            agent_profile_id: None,
+        });
+        let comment_key = app.comment_key("msg_tools");
+        app.comments.insert(
+            comment_key,
+            vec![Comment {
+                author: "you".into(),
+                text: "note".into(),
+                pending: true,
+                label: "assistant reply".into(),
+            }],
+        );
+        app
+    });
+    cx.run_until_parked();
+
+    // First click only arms the icon.
+    app.update(cx, |app, cx| app.archive_session("project", "session", cx));
+    app.read_with(cx, |app, _| {
+        assert_eq!(app.sessions_by_project["project"].len(), 2);
+        assert_eq!(app.pending_session_delete.as_deref(), Some("session"));
+    });
+
+    // Second click deletes the session outright and switches to the next one.
+    app.update(cx, |app, cx| app.archive_session("project", "session", cx));
+    app.read_with(cx, |app, _| {
+        let ids: Vec<_> = app.sessions_by_project["project"]
+            .iter()
+            .map(|session| session.id.clone())
+            .collect();
+        assert_eq!(ids, ["second"]);
+        assert_eq!(app.active_session_id.as_deref(), Some("second"));
+        assert!(app.comments.is_empty());
+        assert!(app.pending_session_delete.is_none());
+    });
+}
+
+#[gpui::test]
+fn archived_sessions_from_old_state_are_dropped_on_load(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, cx| {
+        let mut persisted = PersistedState::default();
+        persisted.sessions_by_project.insert(
+            "project".into(),
+            vec![
+                Session {
+                    id: "gone".into(),
+                    name: "Archived".into(),
+                    messages: vec![],
+                    acp_session_id: None,
+                    archived: true,
+                    agent_profile_id: None,
+                },
+                Session {
+                    id: "kept".into(),
+                    name: "Active".into(),
+                    messages: vec![],
+                    acp_session_id: None,
+                    archived: false,
+                    agent_profile_id: None,
+                },
+            ],
+        );
+        App::from_state(persisted, vec![], None, cx)
+    });
+    cx.run_until_parked();
+    app.read_with(cx, |app, _| {
+        let ids: Vec<_> = app.sessions_by_project["project"]
+            .iter()
+            .map(|session| session.id.clone())
+            .collect();
+        assert_eq!(ids, ["kept"]);
+    });
+}

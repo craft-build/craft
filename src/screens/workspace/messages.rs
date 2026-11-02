@@ -263,9 +263,10 @@ fn assistant_message(
                         SharedString::from(format!("comment-toggle-{msg_id}")),
                         "◆ comment",
                     )
+                    .debug_selector(|| "comment-toggle".into())
                     .ml_auto()
                     .text_size(px(11.))
-                    .text_color(rgb(theme::TEXT_FAINT))
+                    .text_color(rgb(theme::TEXT_MUTED))
                     .hover(|style| style.text_color(rgb(theme::USER)))
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.open_comment_box(

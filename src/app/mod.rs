@@ -65,7 +65,6 @@ pub struct App {
     pub file_tree_visible: bool,
     pub review_tab: ReviewTab,
     pub collapsed_projects: HashSet<String>,
-    pub expanded_archives: HashSet<String>,
     pub pending_session_delete: Option<String>,
 
     pub active_diff_file: Option<String>,
@@ -169,10 +168,17 @@ impl App {
             Screen::Projects
         };
 
+        // Archiving deletes a session, so archived entries surviving in older
+        // state files are dropped on load.
+        let mut sessions_by_project = persisted.sessions_by_project;
+        for sessions in sessions_by_project.values_mut() {
+            sessions.retain(|session| !session.archived);
+        }
+
         App {
             screen,
             projects: persisted.projects,
-            sessions_by_project: persisted.sessions_by_project,
+            sessions_by_project,
             active_project: None,
             active_session_id: None,
             session_config_controls: vec![],
@@ -184,7 +190,6 @@ impl App {
             file_tree_visible: true,
             review_tab: ReviewTab::Comments,
             collapsed_projects: HashSet::new(),
-            expanded_archives: HashSet::new(),
             pending_session_delete: None,
             active_diff_file: None,
             file_diffs: HashMap::new(),
@@ -397,15 +402,14 @@ impl App {
         cx.notify();
     }
 
-    pub fn toggle_archived_sessions(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        if !self.expanded_archives.insert(project_id.to_string()) {
-            self.expanded_archives.remove(project_id);
-        }
-        self.pending_session_delete = None;
-        cx.notify();
-    }
-
+    /// Archiving deletes the session outright; there is no archive to restore
+    /// from. The first click arms the icon, the second destroys the session.
     pub fn archive_session(&mut self, project_id: &str, session_id: &str, cx: &mut Context<Self>) {
+        if self.pending_session_delete.as_deref() != Some(session_id) {
+            self.pending_session_delete = Some(session_id.to_string());
+            cx.notify();
+            return;
+        }
         let was_active = self
             .active_project
             .as_ref()
@@ -417,18 +421,24 @@ impl App {
             cx.notify();
             return;
         }
+
+        // A deleted session takes its review comments and drafts with it.
+        let scope = comments::comment_scope_prefix(Some(session_id));
+        self.comments.retain(|key, _| !key.starts_with(&scope));
+        self.comment_drafts.retain(|key, _| !key.starts_with(&scope));
+
         let Some(sessions) = self.sessions_by_project.get_mut(project_id) else {
             return;
         };
-        let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
+        let had_session = sessions.iter().any(|session| session.id == session_id);
+        sessions.retain(|session| session.id != session_id);
+        if !had_session {
             return;
-        };
-        session.archived = true;
+        }
 
         if was_active {
             let next_id = sessions
-                .iter()
-                .find(|session| !session.archived)
+                .first()
                 .map(|session| session.id.clone())
                 .unwrap_or_else(|| {
                     let id = new_id("s");
@@ -445,39 +455,6 @@ impl App {
             self.active_session_id = Some(next_id);
             self.context_chips.clear();
             self.connect_project(cx);
-        }
-        self.pending_session_delete = None;
-        self.persist_state();
-        cx.notify();
-    }
-
-    pub fn restore_session(&mut self, project_id: &str, session_id: &str, cx: &mut Context<Self>) {
-        if let Some(session) = self
-            .sessions_by_project
-            .get_mut(project_id)
-            .and_then(|sessions| sessions.iter_mut().find(|session| session.id == session_id))
-        {
-            session.archived = false;
-            self.pending_session_delete = None;
-            self.persist_state();
-            cx.notify();
-        }
-    }
-
-    pub fn request_delete_session(
-        &mut self,
-        project_id: &str,
-        session_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pending_session_delete.as_deref() != Some(session_id) {
-            self.pending_session_delete = Some(session_id.to_string());
-            cx.notify();
-            return;
-        }
-
-        if let Some(sessions) = self.sessions_by_project.get_mut(project_id) {
-            sessions.retain(|session| session.id != session_id || !session.archived);
         }
         self.pending_session_delete = None;
         self.persist_state();

@@ -138,12 +138,6 @@ fn sidebar_project_row(
         .flatten()
         .filter(|session| !session.archived)
         .collect::<Vec<_>>();
-    let archived_sessions = sessions
-        .into_iter()
-        .flatten()
-        .filter(|session| session.archived)
-        .collect::<Vec<_>>();
-    let archives_expanded = app.expanded_archives.contains(&p.id);
     let pending_delete = app.pending_session_delete.clone();
     let toggle_id = p.id.clone();
     let row_state = SessionRowState {
@@ -190,19 +184,13 @@ fn sidebar_project_row(
                 ),
         )
         .when(expanded, |d| {
-            archived_sessions_section(
-                active_sessions_section(
-                    d,
-                    p,
-                    is_active,
-                    active_session_id,
-                    &active_sessions,
-                    row_state,
-                    cx,
-                ),
+            active_sessions_section(
+                d,
                 p,
-                &archived_sessions,
-                archives_expanded,
+                is_active,
+                active_session_id,
+                &active_sessions,
+                row_state,
                 pending_delete.as_deref(),
                 cx,
             )
@@ -223,6 +211,7 @@ fn active_sessions_section(
     active_session_id: &Option<String>,
     active_sessions: &[&crate::state::Session],
     state: SessionRowState,
+    pending_delete: Option<&str>,
     cx: &mut Context<App>,
 ) -> gpui::Div {
     let add_id = p.id.clone();
@@ -241,7 +230,7 @@ fn active_sessions_section(
         let archive_project_id = p.id.clone();
         let session_id = s.id.clone();
         let archive_session_id = s.id.clone();
-        let group = SharedString::from(format!("sess-row-{}-{}", p.id, s.id));
+        let archive_armed = pending_delete == Some(s.id.as_str());
         let (glyph, glyph_color) = if session_active && state.thinking {
             (SPINNER, theme::ACCENT)
         } else if s.messages.is_empty() {
@@ -251,7 +240,6 @@ fn active_sessions_section(
         };
         div()
             .id(SharedString::from(format!("sess-{}-{}", p.id, s.id)))
-            .group(group.clone())
             .flex()
             .items_center()
             .gap(px(8.))
@@ -291,13 +279,17 @@ fn active_sessions_section(
             .child(
                 div()
                     .id(SharedString::from(format!("archive-session-{}", s.id)))
+                    .debug_selector(|| "archive-session".into())
                     .flex_shrink_0()
                     .text_size(px(11.))
-                    .text_color(rgba(0))
-                    .group_hover(group, |style| style.text_color(rgb(theme::TEXT_MUTED)))
+                    .text_color(rgb(if archive_armed {
+                        theme::DIFF_DEL_TEXT
+                    } else {
+                        theme::TEXT_MUTED
+                    }))
                     .cursor_pointer()
-                    .hover(|style| style.text_color(rgb(theme::ACCENT)))
-                    .child("archive")
+                    .hover(|style| style.text_color(rgb(theme::DIFF_DEL_TEXT)))
+                    .child(if archive_armed { "confirm" } else { "×" })
                     .on_click(cx.listener(move |app, _, _, cx| {
                         cx.stop_propagation();
                         app.archive_session(&archive_project_id, &archive_session_id, cx)
@@ -330,94 +322,4 @@ fn active_sessions_section(
             .child("+ new thread")
             .on_click(cx.listener(move |app, _, _, cx| app.add_session_to_project(&add_id, cx))),
     )
-}
-
-fn archived_sessions_section(
-    d: gpui::Div,
-    p: &crate::state::Project,
-    archived_sessions: &[&crate::state::Session],
-    archives_expanded: bool,
-    pending_delete: Option<&str>,
-    cx: &mut Context<App>,
-) -> gpui::Div {
-    d.when(!archived_sessions.is_empty(), |d| {
-        let archive_toggle_id = p.id.clone();
-        d.child(
-            div()
-                .id(SharedString::from(format!("archived-sessions-{}", p.id)))
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .py(px(5.))
-                .pl(px(30.))
-                .pr(px(8.))
-                .text_size(px(12.))
-                .text_color(rgb(theme::TEXT_FAINT))
-                .cursor_pointer()
-                .hover(|style| style.text_color(rgb(theme::TEXT_SECONDARY)))
-                .child(if archives_expanded { "▾" } else { "▸" })
-                .child(format!("Archived ({})", archived_sessions.len()))
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.toggle_archived_sessions(&archive_toggle_id, cx)
-                })),
-        )
-        .when(archives_expanded, |d| {
-            d.children(archived_sessions.iter().map(|session| {
-                let restore_project_id = p.id.clone();
-                let delete_project_id = p.id.clone();
-                let restore_session_id = session.id.clone();
-                let delete_session_id = session.id.clone();
-                let delete_armed = pending_delete == Some(session.id.as_str());
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .py(px(5.))
-                    .pl(px(36.))
-                    .pr(px(8.))
-                    .text_size(px(12.))
-                    .text_color(rgb(theme::TEXT_MUTED))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(session.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "restore-session-{}",
-                                session.id
-                            )))
-                            .cursor_pointer()
-                            .text_color(rgb(theme::ACCENT))
-                            .child("restore")
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.restore_session(&restore_project_id, &restore_session_id, cx)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("delete-session-{}", session.id)))
-                            .cursor_pointer()
-                            .text_color(rgb(if delete_armed {
-                                theme::DIFF_DEL_TEXT
-                            } else {
-                                theme::TEXT_MUTED
-                            }))
-                            .child(if delete_armed { "confirm" } else { "×" })
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.request_delete_session(
-                                    &delete_project_id,
-                                    &delete_session_id,
-                                    cx,
-                                )
-                            })),
-                    )
-            }))
-        })
-    })
 }

@@ -393,10 +393,8 @@ pub(super) fn diff_line_view(
     let marked = !comments.is_empty() || draft.is_some();
     let toggle_key = key.clone();
     let toggle_label = label.clone();
-    let group = SharedString::from(format!("diff-line-{key}"));
 
     let row = div()
-        .group(group.clone())
         .flex()
         .items_center()
         .when_some(bg, |d, bg| d.bg(rgba(bg)))
@@ -443,14 +441,13 @@ pub(super) fn diff_line_view(
         .child(
             div()
                 .id(SharedString::from(format!("edit-{key}")))
+                .debug_selector(|| "diff-comment".into())
                 .flex_shrink_0()
                 .pl(px(8.))
                 .text_size(px(11.))
                 .cursor_pointer()
                 .when(comments.is_empty(), |d| {
-                    d.text_color(rgba(0))
-                        .group_hover(group, |style| style.text_color(rgb(theme::TEXT_MUTED)))
-                        .child("◆ +")
+                    d.text_color(rgb(theme::TEXT_MUTED)).child("◆ +")
                 })
                 .when(!comments.is_empty(), |d| {
                     d.text_color(rgb(theme::USER))
