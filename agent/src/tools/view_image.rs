@@ -1,6 +1,6 @@
 //! `view_image`: return an image file to the model as vision input.
 //!
-//! Ported from the reference `plugins/view_image`. Limits: 50 MiB input cap,
+//! Limits: 50 MiB input cap,
 //! 3 MiB raw-output cap (~4 MiB base64, provider-safe), 1568 px max edge
 //! (providers downscale beyond this anyway). Files are fully decoded even on
 //! the pass-through path: a corrupt file shipped undecoded poisons message

@@ -108,7 +108,7 @@ enum BgState {
 /// same job without holding any lock across an await.
 #[derive(Clone)]
 pub(crate) struct BgJob {
-    /// Kept for diagnostics; the reference stores it on the job too.
+    /// Kept for diagnostics.
     #[allow(dead_code)]
     pub command: String,
     output: OutputBuf,
@@ -259,11 +259,10 @@ async fn drain<R: tokio::io::AsyncRead + Unpin>(
 }
 
 // ---------------------------------------------------------------------------
-// Output shaping (reference: compress_output + truncate)
+// Output shaping
 // ---------------------------------------------------------------------------
 
-/// Remove SGR escape sequences (`ESC [ ... m`) the way the reference's
-/// `strip_ansi` does.
+/// Remove SGR escape sequences (`ESC [ ... m`).
 fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
@@ -350,7 +349,7 @@ fn format_exit(output: &str, code: i32) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Command shaping (reference: parse_cd_hint, denied_command_reason)
+// Command shaping
 // ---------------------------------------------------------------------------
 
 fn unquote(text: &str) -> &str {
@@ -364,8 +363,8 @@ fn unquote(text: &str) -> &str {
     text
 }
 
-/// Split `DIR && REST` after a leading `cd `, mirroring the reference's
-/// `^cd%s+(.-)%s+&&%s+(.+)$`. `&&` must sit between whitespace runs.
+/// Split `DIR && REST` after a leading `cd `; `&&` must sit between
+/// whitespace runs.
 fn split_cd_tail(rest: &str) -> Option<(&str, &str)> {
     let (dir, tail) = rest.split_once("&&")?;
     if dir.ends_with(|c: char| c.is_whitespace())
@@ -574,9 +573,6 @@ impl Bash {
                 child: Arc::new(Mutex::new(Some(guard))),
                 pending_readers: pending_readers.clone(),
             };
-            // The registry holds the live child; the readers drain its pipes
-            // into the shared buffer until EOF, decrementing the pending
-            // count so terminal-state delivery waits for complete output.
             let mut held = job.child.lock().unwrap().take().unwrap();
             spawn_readers(&mut held, &output, Some(&pending_readers));
             job.child.lock().unwrap().replace(held);
@@ -591,10 +587,9 @@ impl Bash {
             });
         }
         // The foreground run reuses the background job machinery: the child
-        // lives in a shared slot, a waiter task polls it to completion, and
-        // the kill paths take it out of the slot. Holding a lock around a
-        // live `status()` await instead would deadlock the kill: the kill
-        // needs the very lock the waiter would hold until the child dies.
+        // lives in a shared slot, a waiter polls it to completion, and the
+        // kill paths take it out of the slot — no lock is held across the
+        // `status()` await, where it would deadlock the kill.
         let pending_readers = Arc::new(AtomicUsize::new(0));
         let job = BgJob {
             command,
@@ -848,8 +843,6 @@ impl ToolImpl for BashStatus {
         )
     }
 
-    // Exclusive, like the rest of the bash family.
-
     async fn call(&self, _context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
         let outcome = async {
             let (text, is_error) = Bash::new(self.0.clone()).status_text(&args.task_id)?;
@@ -885,8 +878,6 @@ impl ToolImpl for BashWatch {
 Polls until the pattern matches, the task exits, or the timeout (default 60s) elapses.",
         )
     }
-
-    // Exclusive, like the rest of the bash family.
 
     async fn call(&self, context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
         let outcome = async {
@@ -968,8 +959,6 @@ impl ToolImpl for BashKill {
     fn definition(&self) -> ToolDefinition {
         definition::<BashKillArgs>("bash_kill", "Terminate a background bash task.")
     }
-
-    // Exclusive, like the rest of the bash family.
 
     async fn call(&self, _context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
         let outcome = async {
@@ -1339,7 +1328,6 @@ mod tests {
         assert!(text.contains("bash_status"), "{}", text);
 
         let status = BashStatus(workspace.clone());
-        // Poll until the task exits.
         let mut final_text = String::new();
         for _ in 0..100 {
             let out = invoke(&status, json!({"task_id": id})).await;

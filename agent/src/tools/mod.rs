@@ -165,19 +165,19 @@ pub struct Workspace {
     bash_jobs: bash::BashJobs,
     /// Resolved once so the `sessions` tool lists without re-walking XDG.
     state_dir: Option<crate::storage::StateDir>,
-    /// Host seam for the `question` tool (A.5): the TUI installs the
+    /// Host seam for the `question` tool: the TUI installs the
     /// interactive asker per turn; the default dismisses headlessly.
     questions: Arc<dyn question::AskQuestions>,
-    /// Session plan file (C.17): the one write target allowed outside the
+    /// Session plan file: the one write target allowed outside the
     /// workspace root. Shared so every clone sees the set, and kept for the
     /// whole session once allocated — mode switches must not revoke it.
     plan_path: Arc<RwLock<Option<PathBuf>>>,
-    /// MCP client handle (B.11): when set, [`Workspace::registry`] appends
+    /// MCP client handle: when set, [`Workspace::registry`] appends
     /// one executor per published MCP tool under its `server__tool` wire
     /// name. Shared like every other cell so the set is visible through
     /// clones.
     mcp: Arc<RwLock<Option<McpHandle>>>,
-    /// Host seam for the `task` tool (A.5): the TUI and headless surfaces
+    /// Host seam for the `task` tool: the TUI and headless surfaces
     /// install a subagent launcher per turn; the default reports that
     /// subagents are unavailable.
     subagents: Arc<dyn task::SpawnSubagent>,
@@ -219,7 +219,7 @@ impl Workspace {
         self
     }
 
-    /// Install the subagent seam (A.5). Taken on a workspace clone per turn
+    /// Install the subagent seam. Taken on a workspace clone per turn
     /// (like the question asker) so the launcher can carry the turn's cancel
     /// token, history snapshot, and event channel.
     pub fn with_subagents(mut self, spawn: Arc<dyn task::SpawnSubagent>) -> Self {
@@ -227,8 +227,8 @@ impl Workspace {
         self
     }
 
-    /// A child workspace rooted at `root` for a worktree-isolated subagent
-    /// (hardening/04): tools, snapshots, bash jobs and the plan file anchor
+    /// A child workspace rooted at `root` for a worktree-isolated subagent:
+    /// tools, snapshots, bash jobs and the plan file anchor
     /// at the child root, while the session's cross-root services —
     /// instruction dedupe, the todo plan, MCP tools, the sandbox policy and
     /// the cross-agent path locks — stay shared with this workspace. The
@@ -244,7 +244,7 @@ impl Workspace {
         Ok(child)
     }
 
-    /// Install the session's MCP client (B.11). Call before the first turn
+    /// Install the session's MCP client. Call before the first turn
     /// registers tools, after awaiting `McpHandle::ready` where the caller
     /// must not ship a prompt without the MCP tools.
     pub fn set_mcp(&self, handle: Option<McpHandle>) {
@@ -331,7 +331,7 @@ impl Workspace {
             .await
     }
 
-    /// Set (or clear) the session's plan file (C.17). The plan file lives
+    /// Set (or clear) the session's plan file. The plan file lives
     /// in the state dir, outside the workspace root; `walk` exempts exactly
     /// this path from containment. Install when a plan is allocated and
     /// leave it for the rest of the session — Build-mode turns that
@@ -368,7 +368,7 @@ impl Workspace {
         })
     }
 
-    /// Install the question seam (A.5). Taken on a workspace clone per
+    /// Install the question seam. Taken on a workspace clone per
     /// turn (like the subagent launcher) so the asker can carry the turn's
     /// cancel token and event channel.
     pub fn with_questions(mut self, asker: Arc<dyn question::AskQuestions>) -> Self {
@@ -434,7 +434,7 @@ impl Workspace {
         Ok(registry)
     }
 
-    /// The restricted registry for a `task`-spawned subagent (A.5):
+    /// The restricted registry for a `task`-spawned subagent:
     /// `general` adds the write family to the read-only research set;
     /// neither includes `task`, `question`, or `sessions`. MCP tools are
     /// inherited, so a subagent's fan-outs cannot escape its tool budget.
@@ -471,9 +471,8 @@ impl Workspace {
         Ok(registry)
     }
 
-    /// The reviewer subagent's registry (Phase 5 of the argosy
-    /// integration): the read-only research set plus the argosy review
-    /// workflow. The reviewer never writes.
+    /// The reviewer subagent's registry: the read-only research set plus the
+    /// argosy review workflow. The reviewer never writes.
     #[expect(
         clippy::result_large_err,
         reason = "AgentError is animist's public error type and cannot be boxed here"
@@ -484,7 +483,6 @@ impl Workspace {
     ) -> std::result::Result<ToolRegistry, animist::agent::AgentError> {
         let allowed = crate::subagent::REVIEWER_TOOLS;
         let mut registry = ToolRegistry::default();
-        // The reviewer never writes.
         self.register_builtins(
             &mut registry,
             self.frozen_read_only_cell(),
@@ -609,7 +607,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// The argosy knowledge tools (Phase 1 of the argosy integration): one
+    /// The argosy knowledge tools: one
     /// executor per argosy definition under its native name, filtered by
     /// the same budget list as the builtins. Reports render to text via
     /// [`crate::knowledge::render_report_text`] — embedded bodies
@@ -640,7 +638,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// One executor per published MCP tool (B.11). The model sees the
+    /// One executor per published MCP tool. The model sees the
     /// `server__tool` wire name; the executor resolves it back to the
     /// qualified name the manager's tool index is keyed by.
     #[expect(
@@ -705,7 +703,7 @@ impl Workspace {
         if requested.is_empty() {
             return Err(error::invalid("path must not be empty"));
         }
-        // Outside-workspace exemptions (C.17): the session's plan file, plus
+        // Outside-workspace exemptions: the session's plan file, plus
         // — read only — the state dir's plans directory. Both are exempt from
         // workspace containment only; the component validation below still
         // applies, just walked from the path's own root.
@@ -935,8 +933,7 @@ fn mcp_contents(output: McpToolOutput) -> ToolContents {
 }
 
 /// The model-visible media type for an MCP image mime. `image/heic`,
-/// `image/heif`, and `image/svg+xml` are served as `image/png`, as the pre-animist
-/// bridge did.
+/// `image/heif`, and `image/svg+xml` are served as `image/png`.
 fn media_type(mime: &str) -> Option<&'static str> {
     match mime.to_ascii_lowercase().as_str() {
         "image/jpeg" | "image/jpg" => Some("image/jpeg"),
@@ -980,7 +977,7 @@ pub(crate) async fn stage_bytes(
 }
 
 /// Like [`stage_bytes`] without permission preservation: fresh files take
-/// the temp file's default permissions, as full-file writes always have.
+/// the temp file's default permissions.
 pub(crate) async fn stage_bytes_for_write(
     parent: &Path,
     after: &[u8],
@@ -1058,7 +1055,7 @@ pub(crate) fn truncate_output(text: &str) -> String {
 
 #[cfg(test)]
 mod plan_walk_tests {
-    //! Plan-mode (C.17) containment exemption: only the workspace-boundary
+    //! Plan-mode containment exemption: only the workspace-boundary
     //! rule is relaxed for the plan file; the component validation (no
     //! `..`, no symlinks, no Git metadata) still applies.
 

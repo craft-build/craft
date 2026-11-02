@@ -1,7 +1,6 @@
-//! `websearch` tool: Exa-backed web search (task #57, A.4).
+//! `websearch` tool: Exa-backed web search.
 //!
-//! Ported from the reference `plugins/websearch/init.lua` + `parse_sse.lua`:
-//! same MCP endpoint, JSON-RPC `web_search_exa` call with `type: auto` /
+//! Exa MCP endpoint, JSON-RPC `web_search_exa` call with `type: auto` /
 //! `livecrawl: fallback`, optional `EXA_API_KEY` via `x-api-key`, 25s
 //! timeout, 5MB cap, and SSE-stream response parsing that extracts the first
 //! non-empty `result.content[0].text` payload.
@@ -157,8 +156,7 @@ impl ToolImpl for Websearch {
 }
 
 /// Walk `data: ` SSE lines and return the first JSON-RPC payload whose
-/// `result.content[0].text` is a non-empty string. Ported from the
-/// reference `parse_sse.lua`.
+/// `result.content[0].text` is a non-empty string.
 fn parse_sse_response(body: &str) -> std::result::Result<String, String> {
     for line in body.lines() {
         let Some(data) = line.strip_prefix("data: ") else {

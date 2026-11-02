@@ -215,9 +215,9 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
         .map(|tool| tool.name.as_str())
         .collect();
     names.sort();
-    // Phase 1 of the argosy integration: the argosy knowledge tools and
-    // the `review` tool extend the builtin set; the pinned list asserts the
-    // core tools all survive registration next to them.
+    // The argosy knowledge tools and the `review` tool extend the builtin
+    // set; the pinned list asserts the core tools all survive registration
+    // next to them.
     for expected in [
         "ask",
         "search",

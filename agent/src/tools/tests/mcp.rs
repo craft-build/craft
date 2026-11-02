@@ -80,7 +80,7 @@ async fn dispatch_child(
         .expect("batch outcome")
 }
 
-/// MCP integration (B.11): tools from a stub MCP handle register under their
+/// MCP integration: tools from a stub MCP handle register under their
 /// `server__tool` wire name, the executor routes through MCP, and clearing
 /// the handle removes them again.
 #[tokio::test]

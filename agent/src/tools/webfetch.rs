@@ -1,16 +1,10 @@
 //! `webfetch` tool: fetch an http(s) URL and return it as markdown, text, or
-//! html (task #56, A.4).
+//! html.
 //!
-//! Ported from the reference `plugins/webfetch/init.lua` (tool semantics:
-//! formats, caps, content-type handling) on top of `craft-lua/src/api/net.rs`
-//! (`do_request`: retry ladder, Cloudflare-challenge fallback, size caps).
-//!
-//! Deviation from the reference, inherited from this repo's stricter SSRF
-//! guard (`ssrf.rs`): the reference pins vetted DNS answers but lets reqwest
-//! follow every redirect internally. Here redirects use `ssrf::redirect_policy()`,
-//! which stops cross-host hops; the loop below then re-runs the guard on the
-//! target URL and rebuilds the client with newly pinned addresses, so no hop
-//! ever connects on unvetted DNS.
+//! Redirects go through `ssrf::redirect_policy()`, which stops cross-host
+//! hops; the fetch loop re-runs the SSRF guard on the target URL and
+//! rebuilds the client with newly pinned addresses, so no hop ever connects
+//! on unvetted DNS.
 
 use std::time::Duration;
 
@@ -226,9 +220,9 @@ async fn fetch(
     }
 }
 
-/// One client with DNS pinned to `guarded`, plus the reference's retry ladder:
-/// up to three retries on transport errors and 5xx, and one `craft`
-/// User-Agent retry when a GET is answered by a Cloudflare challenge page.
+/// One client with DNS pinned to `guarded`, plus a retry ladder: up to three
+/// retries on transport errors and 5xx, and one `craft` User-Agent retry when
+/// a GET is answered by a Cloudflare challenge page.
 async fn request_with_retries(
     url: &str,
     format: Format,
@@ -305,7 +299,7 @@ fn render_body(
 
 /// Strip tags for the `text` format: drop `script`/`style`/`noscript`
 /// contents entirely, replace every tag with a single space, collapse runs
-/// of whitespace, and trim. Ported from the reference `strip_html`.
+/// of whitespace, and trim.
 fn strip_html(html: &str) -> String {
     let mut out = String::new();
     let mut in_tag = false;
@@ -412,7 +406,7 @@ mod tests {
         }
     }
 
-    // ── strip_html: port of the reference spec.lua cases ──
+    // ── strip_html ──
 
     #[test]
     fn strip_html_nested_tags_and_whitespace() {

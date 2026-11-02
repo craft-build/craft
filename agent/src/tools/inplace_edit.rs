@@ -1,5 +1,4 @@
-//! Best-effort detection of files rewritten in place by `sed -i` / `perl -i`
-//! (reference: `craft-agent/src/agent/inplace_edit.rs`).
+//! Best-effort detection of files rewritten in place by `sed -i` / `perl -i`.
 //!
 //! Returns no paths on any ambiguity (command substitution, globs, unknown
 //! flags, unrecognized program): the snapshot layer fails open for safety

@@ -1,8 +1,7 @@
-//! `task` tool (A.5): spawn a child agent (subagent) with its own context
-//! window and a restricted tool set. Ported from the reference
-//! `craft-agent/src/tools/task.rs`; the child run itself lives in
+//! `task` tool: spawn a child agent (subagent) with its own context
+//! window and a restricted tool set. The child run itself lives in
 //! [`crate::subagent`] and hosts install it through the [`SpawnSubagent`]
-//! seam (the `question` tool's pattern).
+//! seam.
 
 use std::sync::Arc;
 
@@ -18,8 +17,7 @@ use crate::subagent::{SubagentRequest, SubagentResult};
 /// Host seam: launch one subagent and run it to completion. The TUI and
 /// headless surfaces install a [`crate::subagent::SubagentLauncher`] per
 /// turn; the default ([`NoSubagents`]) reports that subagents are
-/// unavailable, the same degradation the reference's hostless sessions
-/// produce.
+/// unavailable.
 pub trait SpawnSubagent: Send + Sync {
     fn spawn(
         &self,

@@ -1,10 +1,8 @@
-//! `question` tool (A.5): structured ask-the-user tool. The model poses
+//! `question` tool: structured ask-the-user tool. The model poses
 //! one or more questions with predefined options; the tool parks on a
 //! host-provided [`AskQuestions`] seam until the user answers, is
-//! dismissed, or the ask times out. Ported from the reference
-//! `craft-agent/src/tools/question.rs` + `plugins/question/`; the
-//! interactive form lives in the TUI (`tui/question_form.rs`), and the
-//! default asker is the reference's headless variant: answer dismissed.
+//! dismissed, or the ask times out. The interactive form lives in the TUI
+//! (`tui/question_form.rs`).
 
 use std::sync::Arc;
 
@@ -16,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::error::{Error, Result, definition, finish, invalid};
 
 /// How long a question may wait for the user before the answer degrades
-/// to dismissed. Shared with the permission prompt (reference: 30 min).
+/// to dismissed. Shared with the permission prompt.
 pub const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 const ANSWER_PREFIX: &str = "question:";
@@ -57,8 +55,7 @@ pub trait AskQuestions: Send + Sync {
 }
 
 /// Headless default: nobody is there to ask, so the question reads as
-/// dismissed — the same degradation the reference's hostless sessions
-/// produce.
+/// dismissed.
 pub struct DismissAsk;
 
 impl AskQuestions for DismissAsk {
@@ -92,7 +89,7 @@ pub struct QuestionInput {
     /// Whether multiple options can be selected
     #[serde(default)]
     pub multi_select: bool,
-    /// Accepted alias of `multi_select` (reference schema keeps both).
+    /// Accepted alias of `multi_select`.
     #[serde(default)]
     pub multiple: bool,
 }

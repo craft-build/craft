@@ -1,11 +1,11 @@
 //! Fuzzy-matched find/replace used by the edit-family tools.
 //!
-//! Ports the reference engine: candidate strings are produced by a ladder of
-//! increasingly forgiving passes (exact → line-trimmed → block-anchor →
-//! whitespace-normalized → indentation-flexible → NFKD → trimmed-boundary →
-//! context-aware → escape-normalized), and the first pass that yields a
-//! usable match wins. When a fuzzy pass forgave indentation drift, the
-//! replacement is rebased into the file's indentation frame.
+//! Candidate strings are produced by a ladder of increasingly forgiving
+//! passes (exact → line-trimmed → block-anchor → whitespace-normalized →
+//! indentation-flexible → NFKD → trimmed-boundary → context-aware →
+//! escape-normalized), and the first pass that yields a usable match wins.
+//! When a fuzzy pass forgave indentation drift, the replacement is rebased
+//! into the file's indentation frame.
 
 use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
@@ -225,10 +225,9 @@ fn indent_of(line: &str) -> &str {
     &line[..end]
 }
 
-// Only `old_string` was ever checked against the file, so the drift between the
-// two is the sole evidence of what the matcher forgave. Positions correspond
-// when the line counts agree, which every matcher but `block_anchor` guarantees;
-// otherwise only lines whose content agrees are the same line.
+// Positions correspond when the line counts agree, which every matcher but
+// `block_anchor` guarantees; otherwise only lines whose content agrees are
+// the same line.
 fn indent_drift<'m, 'f>(matched: &'m str, find: &'f str) -> Option<HashMap<&'f str, &'m str>> {
     let file_lines: Vec<&str> = matched.split('\n').collect();
     let model_lines: Vec<&str> = find.split('\n').collect();
@@ -248,10 +247,9 @@ fn indent_drift<'m, 'f>(matched: &'m str, find: &'f str) -> Option<HashMap<&'f s
     forgave.then_some(drift)
 }
 
-// A column the model never used is extrapolated from the deepest one it did, so
-// a level the replacement adds keeps the shape the model gave it. A column
-// shallower than any in the block belongs to a line that leaves the block, a
-// new top level definition say, so it stays where the model put it.
+// An unseen column is extrapolated from the deepest column the model used; a
+// column shallower than any in the block belongs to a line that leaves the
+// block and stays where the model put it.
 fn rebase(drift: &HashMap<&str, &str>, indent: &str) -> String {
     if let Some(&exact_column) = drift.get(indent) {
         return exact_column.to_string();
@@ -266,22 +264,14 @@ fn rebase(drift: &HashMap<&str, &str>, indent: &str) -> String {
     )
 }
 
-// The model can write `old_string` sloppily and `new_string` in the file's own
-// frame, and then there is nothing left to correct. Two independent signs of
-// that, either one enough: every column the replacement uses is already a file
-// column, or the replacement's base column is the file's one rather than the
-// model's. The second matters because a replacement that adds a nesting level
-// uses a column neither side has seen, which defeats the first on its own and
-// would push the whole block a level deeper.
-//
-// The bases only tell the frames apart when they differ; when they agree the
-// drift is a widening of the inner levels, which the column test still catches
-// and reindent has to correct otherwise.
+// Two independent signs that the replacement was written in the file's own
+// frame, either one enough: every column it uses is already a file column, or
+// its base column is the file's rather than the model's. When the bases agree
+// the drift is a widening of inner levels, which the column test still catches
+// and reindent has to correct.
 fn written_in_file_frame(drift: &HashMap<&str, &str>, replacement: &str) -> bool {
-    // `HashMap` iteration order is arbitrary, so two columns of equal width,
-    // easy to hit once tabs and spaces mix, used to leave that order deciding
-    // how the file gets reindented. Shallowest first, then by content so a tie
-    // always falls the same way.
+    // `HashMap` iteration order is arbitrary; take the shallowest column and
+    // break ties by content so the choice is deterministic.
     let (model_base, file_base) = drift
         .iter()
         .min_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
@@ -936,7 +926,7 @@ mod tests {
 
     // A replacement that adds a nesting level uses a column the file has never
     // shown, so the "every column is a file column" test cannot recognise the
-    // frame on its own and the whole block used to sink a level.
+    // frame on its own.
     #[test]
     fn reindent_leaves_a_file_frame_new_string_that_adds_a_level_alone() {
         let content = "def f():\n    if x:\n        a()\n    return 1\n";

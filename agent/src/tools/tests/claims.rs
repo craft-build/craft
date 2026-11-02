@@ -149,7 +149,6 @@ fn claim_table_matches_the_documented_scheme() {
     let file_delete = claim(&Delete(workspace.clone()), json!({"files": ["tree/a.rs"]}));
     assert!(!matches!(file_delete, ToolScheduling::Exclusive));
 
-    // Exclusive by policy.
     for tool in [
         claim(&Bash::new(workspace.clone()), json!({"command": "ls"})),
         claim(&BashStatus(workspace.clone()), json!({"task_id": "bg_1"})),

@@ -1,10 +1,9 @@
 //! Move/rename a file (or directory) inside the workspace, then update
 //! project-wide imports that referenced the old module path.
 //!
-//! Ports the reference `craft-agent/src/tools/move_file.rs` onto this repo's
-//! workspace model: paths flow through the shared validation walk, the
-//! rename runs under the workspace-wide path lock, and every rewritten
-//! file is snapshotted for `/undo` before it is touched.
+//! Paths flow through the shared validation walk, the rename runs under the
+//! workspace-wide path lock, and every rewritten file is snapshotted for
+//! `/undo` before it is touched.
 
 use std::path::{Path, PathBuf};
 

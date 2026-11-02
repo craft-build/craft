@@ -61,8 +61,7 @@ async fn apply_patch_fuzzy_matches_whitespace_and_reports_missing_lines() {
         json!({"patch_text": "*** Begin Patch\n*** Update File: f.txt\n@@\n foo\n-bar\n+BAR\n*** End Patch"}),
     )
     .await;
-    // Reference semantics: a fuzzily matched context line is rewritten to
-    // the patch's version of it.
+    // A fuzzily matched context line is rewritten to the patch's version of it.
     assert_eq!(
         fs::read_to_string(workspace.root().join("f.txt")).unwrap(),
         "foo\nBAR\n"

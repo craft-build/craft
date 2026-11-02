@@ -39,8 +39,7 @@ impl super::error::IntoToolResult for BatchOutput {
 }
 
 /// Normalize one entry: extract `tool`, and produce the child arguments from
-/// `parameters` and/or flat fields. Duplicate keys across both are rejected,
-/// mirroring the reference's custom deserializer.
+/// `parameters` and/or flat fields. Duplicate keys across both are rejected.
 fn normalize_entry(entry: &Map<String, Value>) -> Result<(String, Value)> {
     let tool = match entry.get("tool") {
         Some(Value::String(name)) => name.clone(),
@@ -111,11 +110,10 @@ impl Batch {
             })
             .collect();
         // Children run under the agent's own pipeline: layers, claims, and
-        // bounded waves. A budget or nesting limit is reserved for the
-        // whole batch upfront, so it is every entry's error, not the run's:
-        // per-entry text lets the model split the fan-out and retry. Any
-        // other dispatch failure (cancellation, a layer stop) is fatal and
-        // propagates as the batch's own error.
+        // bounded waves. A budget or nesting limit hit is reported as every
+        // entry's error, not the run's; any other dispatch failure
+        // (cancellation, a layer stop) is fatal and becomes the batch's own
+        // error.
         let results = match context.dispatch_all(calls).await {
             Ok(results) => results,
             Err(
@@ -300,8 +298,7 @@ mod tests {
     /// children: children ride the agent pipeline, so the guardrail layer's
     /// post-hook records their results. The reads alternate between two
     /// files with identical contents — identical *inputs* would trip the
-    /// doom window (which also covers children now) before the no-progress
-    /// counter could speak.
+    /// doom window before the no-progress counter could speak.
     #[tokio::test]
     async fn children_feed_guardrail_counters() {
         let (_dir, workspace) = crate::tools::tests::workspace();

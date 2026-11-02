@@ -26,7 +26,7 @@ impl super::error::IntoToolResult for RetrieveOutput {
 }
 
 /// Restores the original text of a replaced tool output by content hash.
-/// The originals live in history entry sources (08): every entry keeps its
+/// The originals live in history entry sources: every entry keeps its
 /// verbatim message even after compression alterations or compaction
 /// removed it from the active view, so retrieval works in a later turn of
 /// the same conversation and after a session reload.
@@ -37,10 +37,8 @@ impl Retrieve {
     /// The original whose hash matches, searched across every entry's
     /// source and revisions (inactive entries included). `Err` names an
     /// ambiguous short hash (two distinct originals colliding) instead of
-    /// silently serving the older one: the pre-08 store extended the hash
-    /// at write time, which the marker writers no longer do, so a
-    /// collision must fail loudly rather than hand the model the wrong
-    /// output to work from.
+    /// silently serving the older one: a collision must fail loudly rather
+    /// than hand the model the wrong output to work from.
     async fn resolve(&self, hash: &str) -> std::result::Result<String, ResolveError> {
         // The snapshot is a point-in-time copy; the history lock is held
         // only while it is cloned.

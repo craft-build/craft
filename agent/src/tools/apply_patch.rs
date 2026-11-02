@@ -1,9 +1,5 @@
 //! Codex-style `apply_patch`: parse `*** Begin Patch` / `*** End Patch`
 //! text and apply Add/Update/Delete file hunks with fuzzy context matching.
-//!
-//! Ported from the reference implementation; the pure string algorithm
-//! (parser, chunk matching, replacement planning) is unchanged, while file
-//! I/O goes through the workspace's safety and atomic-write primitives.
 
 use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
 use async_trait::async_trait;

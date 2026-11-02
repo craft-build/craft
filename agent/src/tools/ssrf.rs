@@ -1,8 +1,6 @@
-//! SSRF guard for outbound web requests (webfetch, task #56).
+//! SSRF guard for outbound web requests (webfetch).
 //!
-//! Ported from the reference `craft-lua/src/api/net.rs` (comparison.md points
-//! at `internal_urls.rs`, which actually holds internal URL scheme dispatch —
-//! the code wins). Behavior:
+//! Behavior:
 //!
 //! - Only `http:`/`https:` URLs; `http:` is upgraded to `https:`.
 //! - Literal IPs and every DNS answer are checked against private, loopback,
@@ -31,10 +29,9 @@ const DNS_ATTEMPTS: u32 = 3;
 const DNS_RETRY_DELAY: Duration = Duration::from_millis(150);
 pub const MAX_REDIRECTS: usize = 10;
 
-/// Reserved IPv4 ranges the standard library has no predicate for. Carrier
-/// grade NAT is the one that bites: Alibaba Cloud parks its instance metadata
-/// service on it at 100.100.100.200. Then protocol assignments, benchmarking,
-/// and everything from 240.0.0.0 up, which takes in the broadcast address.
+/// Reserved IPv4 ranges the standard library has no predicate for: CGNAT
+/// 100.64/10 (Alibaba Cloud serves instance metadata at 100.100.100.200),
+/// protocol assignments, benchmarking, and everything from 240.0.0.0 up.
 const RESERVED_V4_NETS: [(Ipv4Addr, u8); 4] = [
     (Ipv4Addr::new(100, 64, 0, 0), 10),
     (Ipv4Addr::new(192, 0, 0, 0), 24),
@@ -63,13 +60,12 @@ pub fn validate_and_upgrade_url(url: &str) -> Result<String, String> {
     ))
 }
 
-/// Parse the URL once with the `url` crate and return its canonical host and
-/// port. `url`'s host parsing lowercases domains and normalizes trailing
-/// dots, and reqwest keys its `resolve_to_addrs` override by the very same
-/// `host_str()` value — so THIS canonical string is the only key the caller
-/// may pin `GuardedDns` addresses under. Hand-parsing the URL string here
-/// instead would let spellings like `EXAMPLE.com` or `example.com.` silently
-/// miss the pin and fall back to live (unvetted) DNS.
+/// Parse the URL with the `url` crate and return its canonical host and port.
+/// `url` lowercases domains and normalizes trailing dots, and reqwest keys its
+/// `resolve_to_addrs` override by that same `host_str()` value — so this
+/// canonical string is the only key `GuardedDns` addresses may be pinned
+/// under; any other spelling silently misses the pin and falls back to
+/// unvetted DNS.
 fn canonical_host_and_port(url: &str) -> Result<(String, u16), String> {
     // The URL version in use rejects zone IDs outright, which would turn a
     // fail-closed "blocked" verdict into a parse error; pre-check so a scoped
@@ -346,8 +342,7 @@ mod tests {
         );
         // IPv6 literal: the url crate's `host_str()` keeps the brackets, and
         // reqwest's override lookup uses the URI host in the same bracketed
-        // form — the old hand-parser stripped brackets and its IPv6 pins
-        // silently missed.
+        // form.
         assert_eq!(
             canonical_host_and_port("https://[::1]:9090/path").unwrap(),
             ("[::1]".to_string(), 9090)

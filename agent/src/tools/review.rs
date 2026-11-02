@@ -1,4 +1,4 @@
-//! `review` tool (Phase 5 of the argosy integration): spawn a read-only
+//! `review` tool: spawn a read-only
 //! reviewer subagent over the working-tree diff (or one committed revision),
 //! built from argosy's reviewer material. The reviewer records findings via
 //! the argosy review tools (`start_review` / `review_diff` /

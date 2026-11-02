@@ -1,4 +1,4 @@
-//! Git worktree isolation for subagents (A.5 `task` tool).
+//! Git worktree isolation for subagents (the `task` tool).
 //!
 //! Creates a linked git worktree so a subagent can mutate files without
 //! affecting the parent's working tree. The worktree shares object storage
@@ -6,8 +6,6 @@
 //! fails explicitly when the root is not a git repository or `git worktree
 //! add` fails: isolation must never degrade into silently editing the
 //! parent tree.
-//!
-//! Ported from the reference `craft-agent/src/tools/worktree.rs`.
 
 use std::path::PathBuf;
 use std::process::Command;

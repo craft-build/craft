@@ -2,12 +2,11 @@
 //!
 //! Craft tools report two distinct failure channels. A model-correctable
 //! failure (bad path, denied access, missing file, a fuzzy match that found
-//! nothing) is a successful call carrying an `is_error` result with the
-//! message the model has always seen — the pre-animist dispatcher rendered these
-//! error results from the error's own text. `Error::Tool` carries exactly
-//! that text. Real faults of the tool machinery itself (a blocking worker
-//! that panicked, a lock wait interrupted by cancellation) return `Err` and
-//! surface as `ToolError::Execution` results.
+//! nothing) is a successful call carrying an `is_error` result whose text is
+//! the message the model sees; `Error::Tool` carries exactly that text. Real
+//! faults of the tool machinery itself (a blocking worker that panicked, a
+//! lock wait interrupted by cancellation) return `Err` and surface as
+//! `ToolError::Execution` results.
 
 use animist::agent::tool::{ToolContents, ToolDefinition, ToolOutput};
 use snafu::Snafu;
@@ -21,7 +20,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
     /// A model-correctable failure; `message` is the model-visible text,
-    /// byte-identical to the bytes the pre-animist dispatcher produced.
+    /// emitted verbatim.
     #[snafu(display("{message}"))]
     Tool { message: String },
 
