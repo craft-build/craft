@@ -3,12 +3,12 @@
 //! The current format (log version 4) writes animist [`HistoryEntry`]
 //! records — `entry`, `insert`, `revise`, `deactivate`, `replace` — mapping
 //! one to one onto animist's `HistoryChange` feed, which the change-feed
-//! persister writes from 05 on. Craft writes only `entry` records today;
-//! the loader replays all five kinds so a record written by a later build
-//! still reconstructs its snapshot.
+//! persister writes. Craft writes only `entry` records; the loader replays
+//! all five kinds so a record written by a later build still reconstructs
+//! its snapshot.
 //!
 //! Older shapes stay loadable line by line: a record that fails the current
-//! parse is decoded as a legacy record (pre-animist craft messages,
+//! parse is decoded as a legacy record (legacy craft messages,
 //! `msg`/`sub_msg`/`out`) and converted, exactly like the `.json` legacy
 //! path. Load-time corruption policy: every record that fails both parses
 //! is skipped with a stderr warning, wherever it sits in the file, while a
@@ -92,14 +92,14 @@ pub(super) enum Record {
     },
 }
 
-/// Records of the pre-animist format (log version 3 and older), decoded
+/// Records of the legacy format (log version 3 and older), decoded
 /// only when a line fails the current parse.
 #[derive(Deserialize)]
 #[serde(tag = "t")]
 enum LegacyRecord {
     #[serde(rename = "msg")]
     Msg { d: LegacyMessage },
-    // Retired with the session `tool_outputs` map (08): still parsed so
+    // Retired with the session `tool_outputs` map: still parsed so
     // old lines load, their payloads folding into entry sources.
     #[serde(rename = "out")]
     Out {
@@ -216,7 +216,7 @@ fn record_index(record: &Record) -> Option<usize> {
 }
 
 /// How much output a tool result carries: text characters and image
-/// blocks. The pre-08 writers stored the raw copy next to a possibly
+/// blocks. Older writers stored the raw copy next to a possibly
 /// compressed in-message copy, so whichever side carries more content is
 /// the original.
 fn contents_richness(content: &animist::history::ToolContents) -> (usize, usize) {
@@ -324,9 +324,9 @@ fn fold_tool_output(
 
 /// Fold every collected raw tool-output copy into the entry lists that hold
 /// their calls: the main history first, then the subagent histories (the
-/// pre-08 map was keyed by call id across both). One raw copy folds into at
+/// legacy map was keyed by call id across both). One raw copy folds into at
 /// most one list — the first that holds the call; the same id in two lists
-/// is a cross-agent collision the pre-08 keying could not disambiguate
+/// is a cross-agent collision the legacy keying could not disambiguate
 /// anyway.
 fn fold_tool_outputs(
     messages: &mut [HistoryEntry],
@@ -610,11 +610,10 @@ fn check_version(
     Ok(session)
 }
 
-/// The pre-jsonl single-file shape: the session wrapper around the
-/// pre-animist message and tool-result enums, mirrored field for field so
-/// the retired `tool_outputs` map deserializes too. Converted on load the
-/// way the jsonl loader converts legacy records. The current shape loads
-/// directly.
+/// The pre-JSONL single-file shape: the session wrapper around the legacy
+/// message and tool-result enums, mirrored field for field so the retired
+/// `tool_outputs` map deserializes too. Converted on load; the current
+/// shape loads directly.
 #[derive(Deserialize)]
 struct LegacyJsonSession {
     version: u32,
@@ -640,12 +639,12 @@ struct LegacyJsonSession {
     updated_at: u64,
 }
 
-/// The pre-jsonl single-file shape: the same session wrapper around the
-/// pre-animist message and tool-result enums, converted on load the way the
-/// jsonl loader converts legacy records. The current shape loads directly.
+/// The pre-JSONL single-file shape: the same session wrapper around the
+/// legacy message and tool-result enums, converted on load. The current
+/// shape loads directly.
 fn load_json(data: &[u8]) -> Result<Session<HistoryEntry, StoredTokenUsage>, SessionError> {
     // Same policy as the jsonl reader: try the current shape first, then
-    // decode the pre-animist one and convert.
+    // decode the legacy one and convert.
     if let Ok(session) = serde_json::from_slice::<Session<HistoryEntry, StoredTokenUsage>>(data) {
         return check_version(session);
     }

@@ -3,8 +3,7 @@
 //! complete new one.
 //!
 //! `atomic_write_permissions` sets the file mode before the rename, for
-//! secrets that must land at 0600. Ported from the reference
-//! `craft-storage/src/lib.rs`.
+//! secrets that must land at 0600.
 
 use std::fs;
 use std::io::Write;

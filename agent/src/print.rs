@@ -1,4 +1,4 @@
-//! G.3 print mode (headless): `craft -p` with text or stream-json output.
+//! Print mode (headless): `craft -p` with text or stream-json output.
 //!
 //! Wire format intentionally matches Claude Code so existing scripts work
 //! unchanged: `stream-json` is JSONL (`system/init`, `assistant`, `user`,
@@ -6,7 +6,6 @@
 //! the raw reply (`--verbose` events only surface in stream-json mode). We
 //! adopt new fields when Claude Code adds them but never invent our own.
 //!
-//! Unlike the reference (whose print mode exits 0 even on agent errors),
 //! [`emit`] reports agent failures so the caller can exit nonzero.
 
 use std::io::Cursor;
@@ -175,7 +174,7 @@ struct RetryEvent<'a> {
     session_id: &'a SessionRef,
 }
 
-/// Stream-json line for a non-fatal system notice (C.12 advisor notes).
+/// Stream-json line for a non-fatal system notice (advisor notes).
 #[derive(Serialize)]
 struct SystemEvent<'a> {
     #[serde(rename = "type")]
@@ -372,8 +371,7 @@ impl PrintState {
                     session_id: &self.session_id,
                 })?;
             }
-            // Auto-review verdicts ride stderr (the pre-07 headless gate
-            // printed them there); a failed review is its own line.
+            // Auto-review verdicts ride stderr; a failed review is its own line.
             Event::Craft(CraftEvent::AutoReviewDecision {
                 verdict,
                 risk,
@@ -457,7 +455,7 @@ fn tool_result_json(
 
 /// Consume a print-mode run's events to completion and print the output for
 /// `format`. Returns the agent error message, if any, so the caller can exit
-/// nonzero (the reference's known bug, deliberately not ported).
+/// nonzero.
 pub async fn emit(run: PrintRun, format: &OutputFormat, verbose: bool) -> Result<Option<String>> {
     let PrintRun {
         stream,

@@ -1,4 +1,4 @@
-//! LLM auto-review of permissions (E.7).
+//! LLM auto-review of permissions.
 //!
 //! When a tool call is not pre-approved and auto-review is on, a single
 //! locked-down model call decides allow/deny with a risk level and a
@@ -6,11 +6,7 @@
 //! cannot itself mutate state. It fails closed on timeout, provider error,
 //! empty, or unparseable output.
 //!
-//! Ported from the reference `craft-agent/src/agent/auto_review.rs`,
-//! re-expressed for this repo's provider seam: the reviewer call goes through
-//! [`crate::provider::complete_text`], like the
-//! compaction summarizer. Deviation: no reviewer-side cancel token (the
-//! reference races one); the deadline alone bounds the call.
+//! The deadline alone bounds the reviewer call.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,8 +142,8 @@ pub fn parse_decision(text: &str) -> Result<Decision, ReviewError> {
     })
 }
 
-/// Decision-endpoint auto-approval (Phase 2 of the argosy integration):
-/// answer the same NeedsPrompt question through the configured Jev/laya
+/// Decision-endpoint auto-approval: answer the same NeedsPrompt question
+/// through the configured Jev/laya
 /// endpoint instead of an LLM reviewer call. The endpoint's calibrated
 /// answer for the `safe` noul question is thresholded (≥ 0.5 → allow):
 /// `answer_confidence` when the endpoint reports one, else the noul
@@ -233,7 +229,7 @@ pub(crate) fn model_reviewer(model: crate::provider::ModelHandle) -> Reviewer {
     })
 }
 
-/// Decision-endpoint reviewer (Phase 2 of the argosy integration): when
+/// Decision-endpoint reviewer: when
 /// `decision.enabled` is set in the argosy user config, permission prompts
 /// are answered by the Jev/laya endpoint via the argosy decision API
 /// instead of the LLM reviewer. Failures deny without recording a rule,
@@ -335,7 +331,7 @@ mod tests {
         }
     }
 
-    /// Phase 2: the endpoint's calibrated confidence maps onto the same
+    /// The endpoint's calibrated confidence maps onto the same
     /// Decision the LLM reviewer produces — >= 0.5 allows, below denies.
     #[tokio::test]
     async fn endpoint_confidence_maps_to_verdicts() {

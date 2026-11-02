@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// G.5 Elicitation: the `question` tool over `elicitation/create`
+// Elicitation: the `question` tool over `elicitation/create`
 // ---------------------------------------------------------------------------
 
 use agent_client_protocol::{
@@ -98,10 +98,10 @@ fn content_labels(value: &ElicitationContentValue) -> Vec<String> {
     }
 }
 
-/// `elicitation/create` with an untyped response: the reference parses the
-/// raw JSON-RPC result, and the typed `CreateElicitationResponse` cannot
-/// represent nulled-out content values ("one bad value costs one answer, not
-/// the form"), so this wrapper keeps the wire shape but returns raw JSON.
+/// `elicitation/create` with an untyped response: the typed
+/// `CreateElicitationResponse` cannot represent nulled-out content values
+/// ("one bad value costs one answer, not the form"), so this wrapper keeps
+/// the wire shape but returns raw JSON.
 const ELICITATION_METHOD: &str = "elicitation/create";
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -148,8 +148,8 @@ impl agent_client_protocol::JsonRpcRequest for RawElicitationRequest {
 }
 
 /// Turns the client's `elicitation/create` result into the encoded answer
-/// the `question` tool already understands. Ported from the reference
-/// `elicitation.rs`: values parse per key — nothing in the schema is
+/// the `question` tool already understands. Values parse per key — nothing
+/// in the schema is
 /// `required`, so clients may null out skipped fields, and one unreadable
 /// value should cost one answer, not the whole form.
 pub(super) fn answer_from_response(raw: &serde_json::Value) -> QuestionAnswer {
@@ -170,7 +170,7 @@ pub(super) fn answer_from_response(raw: &serde_json::Value) -> QuestionAnswer {
             continue;
         };
         // One unreadable value costs one answer, not the form: the key is
-        // dropped, exactly like the reference's filter_map.
+        // dropped.
         let Ok(value) = serde_json::from_value::<ElicitationContentValue>(v.clone()) else {
             continue;
         };

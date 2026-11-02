@@ -262,9 +262,7 @@ pub(super) fn converse_text(text: &str, usage: Usage) -> Vec<u8> {
     let mut body = converse_event("messageStart", json!({"role": "assistant"}));
     // No contentBlockStart for text blocks: animist v0.7.0's Converse
     // parser rejects a text-open start event (its `Start` shape covers
-    // toolUse only), so real-Bedrock streams that emit one — and parsers
-    // that grow to require it — are an animist followup, not this mock's
-    // dialect. Recorded as animist followup F12.
+    // toolUse only).
     body.extend_from_slice(&converse_event(
         "contentBlockDelta",
         json!({"contentBlockIndex": 0, "delta": {"text": text}}),

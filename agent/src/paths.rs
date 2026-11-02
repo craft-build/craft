@@ -2,11 +2,10 @@
 //!
 //! XDG split (config / data / state / logs / cache) with legacy `~/.craft/`
 //! adoption: when that directory exists, every base collapses into it.
-//! Ported from the reference `craft-storage/src/paths.rs`.
 //!
 //! Note: `xdg_config_dir()` creates the XDG config directory on demand, so
 //! `config_search_dirs()` may create `~/.config/craft` even on a read-only
-//! lookup. This matches the reference behavior.
+//! lookup.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -408,10 +407,7 @@ mod tests {
     #[test]
     fn search_dirs_neither_depends_on_process_env() {
         // The pure core takes its inputs explicitly; any env the process
-        // carries cannot influence it. (The reference additionally mutated
-        // XDG_CONFIG_HOME under nextest's process-per-test isolation; this
-        // harness runs threaded, so we assert the property without the
-        // mutation.)
+        // carries cannot influence it.
         let home_a = tempfile::tempdir().unwrap();
         let xdg_a = home_a.path().join(".config").join(APP_NAME);
 

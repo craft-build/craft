@@ -1,8 +1,8 @@
 //! Synthetic-turn markers: cancel, end, failure, grace and nudge messages
 //! the harness appends to history carry their identity in a
 //! [`StoredMessage`] tag instead of their text, so detection never depends
-//! on string equality (the fragility hardening/27 describes) and a user who
-//! types a marker's text verbatim is not misclassified.
+//! on string equality, and a user who types a marker's text verbatim is
+//! not misclassified.
 
 use jiff::Timestamp;
 

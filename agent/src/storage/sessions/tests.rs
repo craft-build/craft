@@ -100,7 +100,7 @@ fn legacy_usage_entry_loads_unpriced_and_stays_that_way_on_disk() {
     );
 }
 
-/// A legacy `.json` session (pre-animist message enums) loads through the
+/// A legacy `.json` session (legacy message enums) loads through the
 /// converter: messages, tool outputs and subagent histories all arrive in
 /// their animist shapes, and the raw `tool_outputs` copies fold into the
 /// matching result entry's source.
@@ -739,7 +739,7 @@ fn latest_falls_back_when_index_stale() {
     assert_eq!(latest.id, session.id);
 }
 
-/// H.28: an indexed newest session whose header line is malformed is stale
+/// An indexed newest session whose header line is malformed is stale
 /// metadata, not the answer — the model and thinking lookups fall back to
 /// the newest sibling whose header still parses, instead of suppressing
 /// the restore.
@@ -1529,8 +1529,7 @@ async fn folded_raw_outputs_serve_retrieve_after_reload() {
 }
 
 /// A record whose index addresses an entry the replayed list does not have
-/// fails the load with an error naming the file, line and index (11): the
-/// skip-silently policy is gone.
+/// fails the load with an error naming the file, line and index.
 #[test]
 fn an_out_of_range_index_fails_the_load() {
     let tmp = TempDir::new().unwrap();
@@ -1678,7 +1677,7 @@ fn legacy_meta_without_mode_loads_as_none() {
     assert_eq!(loaded.meta.mode, None);
 }
 
-// -- the 04 format cutover: golden legacy fixtures, conversion, round trips --
+// -- legacy format fixtures: conversion, round trips --
 
 mod fixtures {
     use super::*;
@@ -1948,10 +1947,10 @@ mod fixtures {
 }
 
 /// An entry-format session round-trips through the current writer with
-/// every record kind 08–10 produce: deactivated entries, a compaction
-/// summary, an altered revision over a tool result, and a plain revision.
-/// The reload equals the in-memory entries, and the shared replay builds
-/// the current view over them (11).
+/// every record kind the persister produces: deactivated entries, a
+/// compaction summary, an altered revision over a tool result, and a plain
+/// revision. The reload equals the in-memory entries, and the shared replay
+/// builds the current view over them.
 #[test]
 fn entry_format_round_trips_with_compaction_alterations_and_revisions() {
     use crate::compaction::alter::ALTER_TAG;

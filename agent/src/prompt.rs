@@ -1,9 +1,8 @@
 //! Prompt slot system: templated system/research/general prompts whose
-//! sections are filled from named slots (ported from Craft's
-//! `craft-agent/src/prompt.rs`). Singleton slots take the last entry (or the
-//! default), aggregate slots join every entry. The plugin runtime that
-//! overrides slots (J.1) is not ported yet, so callers currently pass empty
-//! slots and get the defaults.
+//! sections are filled from named slots. Singleton slots take the last entry
+//! (or the default), aggregate slots join every entry. No plugin runtime
+//! overrides slots yet, so callers currently pass empty slots and get the
+//! defaults.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -129,7 +128,7 @@ impl fmt::Display for Slot {
     }
 }
 
-/// Error returned when a plugin (J.1, not yet ported) names an unknown slot.
+/// Error returned when a plugin names an unknown slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseSlotError(String);
 
@@ -320,7 +319,7 @@ fn fill_marker(template: &str, marker: &str, content: &str) -> String {
 }
 
 /// Minimal `{key}` substitution for env-style template variables (`{cwd}`,
-/// `{platform}`, `{date}`). Mirrors the reference's `template::Vars` surface.
+/// `{platform}`, `{date}`).
 #[derive(Default)]
 pub struct Vars(Vec<(String, String)>);
 
@@ -377,9 +376,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// Assemble the root agent's system prompt: the env section (cwd, platform,
 /// date) is prepended to `instructions` (the user preamble followed by any
-/// discovered AGENTS.md instruction text, C.15) and substituted into the
-/// system template's `{{instructions}}` slot. In plan mode (C.17) the
-/// plan-mode section is appended with `{plan_path}` filled.
+/// discovered AGENTS.md instruction text) and substituted into the system
+/// template's `{{instructions}}` slot. In plan mode the plan-mode section
+/// is appended with `{plan_path}` filled.
 pub fn build_system_prompt(
     vars: &Vars,
     instructions: &str,

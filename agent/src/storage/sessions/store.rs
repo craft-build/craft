@@ -12,7 +12,7 @@ use crate::storage::StorageError;
 use crate::storage::stats::{self, CostLedger, CostUsage};
 
 /// The shortest gap between two writes that carry only soft session state
-/// (the composer draft). Ported from the reference `SOFT_SAVE_DELAY`.
+/// (the composer draft).
 pub(crate) const SOFT_SAVE_DELAY: Duration = Duration::from_millis(1000);
 
 /// Owns a session's persisted state for the lifetime of one run. Save

@@ -1,10 +1,5 @@
 //! The provider seam: craft's provider configs become animist providers
-//! and models. This is the only module that constructs providers; the
-//! HTTP clients, credential chains, retries, wire protocols, and the
-//! models.dev parse belong to animist. Craft adds only what animist
-//! deliberately leaves to the application: config parsing, the catalog
-//! disk cache, per-model metadata overrides, and Bedrock's
-//! protocol-per-model routing.
+//! and models.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,11 +135,11 @@ async fn cache_is_fresh(path: &std::path::Path) -> bool {
 
 // --- Side completions -----------------------------------------------------------
 
-/// Production E.10 reauth hook (see [`harness::ReauthHook`]): waits for the
+/// Production reauth hook (see [`harness::ReauthHook`]): waits for the
 /// provider credential to be refreshed, then rebuilds the provider and
 /// returns the model for the run to retry with. A process's environment
 /// only changes in-process, so this serves flows that update credentials
-/// while craft runs (plugins, config reloads, the future H.5 auth flow).
+/// while craft runs (plugins, config reloads, future auth flows).
 #[expect(
     clippy::result_large_err,
     reason = "the crate error type is deliberately unboxed"
@@ -159,7 +154,7 @@ pub async fn reauth_hook(
     }))
 }
 
-/// How often the E.10 hook polls the credential, and how long it waits
+/// How often the reauth hook polls the credential, and how long it waits
 /// overall before giving up (the run's cancellation still ends it
 /// immediately).
 const REAUTH_POLL: Duration = Duration::from_secs(2);
@@ -345,7 +340,7 @@ impl ProviderHandle {
         }
     }
 
-    /// Test seam mirroring the old `from_config_with`: credentials come
+    /// Test seam: credentials come
     /// from the injected lookup instead of the process environment, and
     /// Bedrock builds from static credentials without AWS discovery.
     pub async fn from_config_with(

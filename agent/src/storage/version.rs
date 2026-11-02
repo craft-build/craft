@@ -1,5 +1,4 @@
-//! Latest-release check, ported from the reference
-//! `craft-storage/src/version.rs` (task G.7).
+//! Latest-release check.
 
 use std::time::Duration;
 

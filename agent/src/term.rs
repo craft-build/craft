@@ -1,9 +1,6 @@
-//! G.9 shell integration (`craft term`), ported from the reference
-//! `src/cmd/subcmd/term.rs`. The reference's `headless::run_headless` with
-//! extra context is replaced by [`crate::cli::run_headless_query`], whose
-//! `context` blocks wrap the same `<context>` envelope; the reference's
-//! `Session::latest` lookup is replaced by the cwd index
-//! (`cwd_latest.json`).
+//! `craft term`: shell integration. Runs a headless query through
+//! [`crate::cli::run_headless_query`] with `<context>`-wrapped context
+//! blocks; session lookup goes through the cwd index (`cwd_latest.json`).
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -155,7 +152,7 @@ async fn run_query(
             session_id: None,
             policy,
             // term run does not expose the tool flags; the top-level CLI
-            // policy never reaches this surface (same as the reference).
+            // policy never reaches this surface.
             tool_policy: Vec::new(),
         },
     )
@@ -185,7 +182,7 @@ fn info() -> Result<()> {
 }
 
 /// The cwd index maps cwd → latest session id (see
-/// `storage::sessions::index`); the reference calls `Session::latest`.
+/// `storage::sessions::index`).
 fn latest_session_for_cwd(index_path: &Path, cwd: &str) -> Option<String> {
     let data = fs::read(index_path).ok()?;
     let index: std::collections::HashMap<String, String> = serde_json::from_slice(&data).ok()?;

@@ -1,4 +1,4 @@
-//! Offline provider conformance (hardening/25, animist 12): every supported
+//! Offline provider conformance: every supported
 //! config kind drives a real [`Conversation`] against a local mock HTTP
 //! server speaking its protocol, proving text, thinking and tool-call round
 //! trips, tool-result image placement, recovery, usage and pricing through

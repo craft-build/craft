@@ -1,7 +1,5 @@
 //! Persisted model selection and the recent-models list (max 4, most recent
 //! first).
-//!
-//! Ported from the reference `craft-storage/src/model.rs`.
 
 use std::fs;
 

@@ -39,8 +39,8 @@ pub enum McpStartup {
     /// prompt — for surfaces with no frame to protect (headless, ACP).
     Connected,
     /// `start_with_events`: startup returns without waiting; the first turn
-    /// gates on `ready` (B.11). The TUI routes MCP log notifications
-    /// through the event channel.
+    /// gates on `ready`. The TUI routes MCP log notifications through the
+    /// event channel.
     Background(crate::mcp::McpEvents),
 }
 
@@ -72,8 +72,8 @@ pub async fn workspace_env(
     let workspace = Workspace::new(cwd)
         .map_err(crate::error::client_error)?
         .with_loaded_instructions(instructions.loaded.clone());
-    // Phase 5 of the argosy integration: best-effort, idempotent install
-    // of the built-in reviewer agent definition into `.craft/agents/`.
+    // Best-effort, idempotent install of the built-in reviewer agent
+    // definition into `.craft/agents/`.
     if install_reviewer {
         let root = cwd.to_path_buf();
         let _ = tokio::task::spawn_blocking(move || {

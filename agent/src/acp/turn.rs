@@ -61,7 +61,7 @@ pub(super) async fn run_turn(
     }
     let context_length = conversation.model().context_length();
 
-    // Phase 3: MCP tool annotations were registered when the session's
+    // MCP tool annotations were registered when the session's
     // tool set was armed; the gate consults the same hints as the TUI.
     let emitted_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // The terminal Done's per-model ledger, captured by the forwarder so
@@ -119,13 +119,11 @@ pub(super) async fn run_turn(
                     *ledger.lock().expect("usage ledger unpoisoned") = Some(by_model);
                     return true;
                 }
-                // The remaining events have no ACP translation: craft
-                // events (compaction, retry, subagents) until 10–11, and
+                // The remaining events have no ACP translation — e.g.
                 // `AttemptInterrupted`, whose superseded text ACP cannot
-                // express — `AgentMessageChunk`s are an append-only stream,
+                // express: `AgentMessageChunk`s are an append-only stream,
                 // so an abandoned attempt's text stays interleaved with the
-                // retry's (the TUI closes the buffer instead; today's ACP
-                // dropped the retry events too).
+                // retry's.
                 _ => return false,
             };
             // A dead connection stops the notifications but not the turn; the

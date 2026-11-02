@@ -1,4 +1,4 @@
-//! The approval seam (07): the narrow interaction trait surfaces implement
+//! The approval seam: the narrow interaction trait surfaces implement
 //! so `harness::PolicyLayer` can ask a human or a client about a tool call.
 //!
 //! The policy itself — permission rules, auto-review, the plan-mode gate —

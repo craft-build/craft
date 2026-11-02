@@ -1,6 +1,4 @@
 //! Persisted theme name.
-//!
-//! Ported from the reference `craft-storage/src/theme.rs`.
 
 use std::fs;
 

@@ -1,8 +1,4 @@
-//! G.2 subcommands (`models`, `stats`, `doctor`, `prompt`), ported from the
-//! reference `src/cmd/subcmd.rs` and `src/cmd/subcmd/doctor.rs`. The
-//! reference's plugin-host/model-policy plumbing is replaced by the config
-//! file plus the animist provider stack; doctor's `Model::from_tier` healing
-//! loop iterates configured providers instead.
+//! Subcommands (`models`, `stats`, `doctor`, `prompt`).
 
 use std::path::{Path, PathBuf};
 
@@ -126,8 +122,7 @@ const LOG_TAIL_LINES: usize = 100;
 const LOG_TAIL_READ_CAP: u64 = 64 * 1024;
 
 /// `craft doctor [--export]`: ping the current model's provider, self-heal to
-/// another configured provider when it fails, and report diagnostics. The
-/// report shape mirrors the reference's JSON schema.
+/// another configured provider when it fails, and report diagnostics.
 pub async fn doctor(config: Config, export: bool) -> Result<()> {
     let dir = storage()?;
     let saved_model = model_store::read_model(&dir);
@@ -313,9 +308,6 @@ fn print_doctor_report(report: &Value) {
     if let Some(dir) = report["state_dir"].as_str() {
         println!("state dir:  {dir}");
     }
-    // Terminal rendering facts: SSH color reports used to require
-    // reproducing the session by hand, because nothing surfaced what the
-    // TUI actually saw (tui::color_env_doctor mirrors the depth chain).
     if let Some(term) = report["terminal"].as_object() {
         let show = |key: &str, value: Option<&str>| match value {
             Some("") | None => format!("{key}=<unset>"),

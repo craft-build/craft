@@ -6,15 +6,6 @@
 //! Any matching deny wins; unclaimed scopes fall through to the default
 //! effect (`prompt` unless configured otherwise). "Always allow" answers are
 //! written back to `permissions.bml` (regenerated; comments not kept).
-//!
-//! Ported from the reference `craft-agent/src/permissions.rs` +
-//! `craft-config` permission layer. Deviations: no plugin rule store (no
-//! plugin subsystem yet), no yolo toggle, no plan mode, and no plugin rules.
-//! The reference's `builtin_rules(cwd)` are preserved and extended: every
-//! path-scoped mutation except `delete` is pre-approved inside the project
-//! root, and `task` everywhere. Auto-review
-//! (E.7) toggles live here; its reviewer model call lives in
-//! [`crate::auto_review`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,7 +23,7 @@ mod rules;
 use rules::{rule_matches_scope, rule_reaches};
 
 /// Tree-sitter bash parsing that splits compound commands into per-command
-/// scopes (task B.2).
+/// scopes.
 pub mod bash {
     pub use super::compound::{BashScopes, permission_scopes};
 }
@@ -87,8 +78,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "webfetch",
 ];
 
-/// Builtins allowed without a decision, matching the reference's
-/// `builtin_rules` non-file-write allow. `task` is not read-only (a
+/// Builtins allowed without a decision. `task` is not read-only (a
 /// `general` subagent writes), so it lives here, not in [`READ_ONLY_TOOLS`];
 /// the child's own tool calls still pass through this same gate.
 pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task", "review"];
@@ -141,8 +131,8 @@ pub const BUILTIN_WRITE_ALLOW_TOOLS: &[&str] = &[
     "move",
 ];
 
-/// Builtin allow rules, modelled on the reference's `builtin_rules(cwd)`.
-/// Each file-write tool is allowed only under the project root (`cwd/**`); a
+/// Builtin allow rules. Each file-write tool is allowed only under the
+/// project root (`cwd/**`); a
 /// deny rule still outranks these because the rule loop returns on the first
 /// deny.
 fn builtin_rules(cwd: &Path) -> Vec<PermissionRule> {
@@ -392,7 +382,7 @@ impl PermissionAnswer {
     }
 }
 
-/// Server-declared MCP tool annotations (Phase 3). Hints, never grants.
+/// Server-declared MCP tool annotations. Hints, never grants.
 #[derive(Debug, Clone, Copy, Default)]
 struct McpHints {
     read_only: Option<bool>,
@@ -422,9 +412,9 @@ pub struct PermissionManager {
     tool_defaults: HashMap<ToolKey, DefaultEffect>,
     cwd: PathBuf,
     auto_review: AtomicBool,
-    /// MCP tool annotations (Phase 3): `server__tool` → declared hints.
+    /// MCP tool annotations: `server__tool` → declared hints.
     mcp_annotations: Mutex<McpAnnotationTable>,
-    /// G.1 `--yolo` (`--dangerously-skip-permissions`): when set, every
+    /// `--yolo` (`--dangerously-skip-permissions`): when set, every
     /// check short-circuits to allowed before rules are consulted.
     yolo: AtomicBool,
 }
@@ -527,9 +517,8 @@ impl PermissionManager {
         }
     }
 
-    /// G.1 `--yolo`: skip every permission prompt and allow every check.
-    /// Explicit deny rules in `permissions.bml` are also bypassed, matching
-    /// the reference's "allow everything" semantics.
+    /// `--yolo`: skip every permission prompt and allow every check.
+    /// Explicit deny rules in `permissions.bml` are also bypassed.
     pub fn set_yolo(&self, yes: bool) {
         self.yolo.store(yes, std::sync::atomic::Ordering::Relaxed);
     }
@@ -538,7 +527,7 @@ impl PermissionManager {
         self.yolo.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Start the session with auto-review on (`craft -A`, G.1).
+    /// Start the session with auto-review on (`craft -A`).
     pub fn set_auto_review(&self, yes: bool) {
         self.auto_review
             .store(yes, std::sync::atomic::Ordering::Relaxed);
@@ -573,7 +562,7 @@ impl PermissionManager {
         if self.is_yolo() {
             return PermissionCheck::Allowed;
         }
-        // MCP annotations (Phase 3): consulted after the rule loop below —
+        // MCP annotations: consulted after the rule loop below —
         // deny rules and explicit user rules always win, hints never grant.
         // A destructive hint mirrors the unsplittable-bash precedent: the
         // user must see the call even if an allow rule covers it.
@@ -664,7 +653,7 @@ impl PermissionManager {
         }
     }
 
-    /// Record one MCP tool's declared annotations (Phase 3). Called when the
+    /// Record one MCP tool's declared annotations. Called when the
     /// tool snapshot is (re)published; `sync_mcp_annotations` is the bulk form.
     pub fn register_mcp_annotations(
         &self,
@@ -850,7 +839,7 @@ impl PermissionManager {
 }
 
 /// The scope a tool call is about: the touched path for file tools,
-/// per-command scopes for bash (task B.2), `*` otherwise (scope-less rules
+/// per-command scopes for bash, `*` otherwise (scope-less rules
 /// still match it; everything else falls to the default). Shared by the
 /// TUI's approval gate and the ACP permission gate so the two frontends
 /// prompt for exactly the same things. The flag is the bash parser's

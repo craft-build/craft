@@ -37,7 +37,7 @@ nucleo-matcher = "0.3"
 regex = "1"
 reqwest = "0.13"
 rmcp = {
-  version = "3.5",
+  version = "3.8",
   default-features = false,
   features = [
     "auth",

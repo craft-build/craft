@@ -807,9 +807,7 @@ mod tests {
     /// every width in the transcript. The empty `highlighters` pins that only
     /// the content cache is in play, and that cache ignores width, so revisiting
     /// a width must not hand back the wrapping of the one in between.
-    /// The reference also pinned a language mixup at the same block index;
-    /// with syntect the fence language reaches the highlighter, so the
-    /// language half of that pin lives in `highlight.rs` (where a fixed
+    /// The language half of the mixup pin lives in `highlight.rs` (a fixed
     /// comment-rule theme makes the diff deterministic).
     #[test_case(SAME_BODY_AS_RUST, SAME_BODY_AS_PYTHON; "content_cache_ignores_width")]
     #[test_case(LONG_RUST_BLOCK, SHORT_RUST_BLOCK; "code_body_shrinks_at_the_same_block_index")]

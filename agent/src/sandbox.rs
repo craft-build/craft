@@ -1,7 +1,7 @@
 //! OS-level command sandboxing. An enforcement layer that sits *under* the
 //! logical permission manager: once a command is approved, the sandbox confines
 //! it to the workspace (with network optionally gated) regardless of its
-//! contents. Ported from reference `craft-sandbox/`.
+//! contents.
 //!
 //! Policy resolution ([`SandboxPolicy::resolve`]): `[sandbox]` config, `--yolo`
 //! ⇒ off, `CRAFT_SANDBOX=off` env escape (highest precedence). Enforcement
@@ -95,8 +95,7 @@ impl SandboxProfile {
 pub struct SandboxPolicy {
     pub mode: SandboxMode,
     pub network: NetworkPolicy,
-    /// Exact-path write grants honored in every mode (used to keep the
-    /// allocated plan file writable under `ReadOnly`).
+    /// Exact-path write grants honored in every mode.
     pub writable_roots: Vec<PathBuf>,
 }
 

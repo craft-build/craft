@@ -1,11 +1,5 @@
 //! The seams surfaces and the harness share: the approval responder, the
 //! cancel tokens, the advisor, and the mode taxonomy.
-//!
-//! The request-view, guardrail, dedup, read-lifecycle and retry logic the
-//! layers own moved next to them under `harness/` (docs/animist/11); the
-//! multi-turn loop itself lives in the animist `Agent` behind
-//! `harness::Conversation` (docs/animist/05). The advisor is driven by the
-//! harness driver (09).
 
 pub mod advisor;
 pub mod approval;

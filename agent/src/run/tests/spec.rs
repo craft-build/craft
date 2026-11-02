@@ -3,7 +3,6 @@
 
 use super::*;
 
-/// The clamp mirrors the reference `clamped_output_tokens` table.
 #[test]
 fn clamps_output_tokens_to_the_remaining_window() {
     use crate::harness::request::{MIN_OUTPUT_TOKENS, clamped_max_tokens};

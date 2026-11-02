@@ -5,16 +5,14 @@
 //! read/grep/edit/delete tools, streaming output, per-turn usage) is
 //! surfaced here: provider and model selection travel as session config options, model
 //! output streams as `session/update` notifications, and `session/cancel`
-//! stops the in-flight turn. The loop itself is unchanged; this module only
-//! translates. Gated tool calls ask the client over
+//! stops the in-flight turn. Gated tool calls ask the client over
 //! `session/request_permission`, the `question` tool is mapped onto
 //! `elicitation/create` forms, the `task` tool spawns subagents under the
 //! turn's shared permission gate (like the TUI/headless surfaces), and
-//! `session/load` resumes a persisted session (task G.5).
+//! `session/load` resumes a persisted session.
 //!
 //! Deliberately not advertised: embedded context, image, and audio
-//! prompts. `mcp_servers` on new/load is ignored until the MCP client
-//! (task 94) is ported.
+//! prompts. `mcp_servers` on new/load is ignored.
 
 mod elicitation;
 mod permissions;
@@ -68,8 +66,7 @@ struct Session {
     /// The per-turn cancellation cell: each prompt stores its cancellation
     /// here, and the gate, asker, MCP tools, and subagent launcher race it.
     cancel_cell: Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
-    /// Loaded sessions persist through the change feed; fresh ones do not
-    /// (matching the old store rule).
+    /// Loaded sessions persist through the change feed; fresh ones do not.
     persister: Option<Arc<tokio::sync::Mutex<crate::harness::Persister>>>,
     provider_name: String,
     models: Vec<animist::provider::ModelInfo>,
@@ -258,7 +255,7 @@ impl AppState {
         .await
     }
 
-    /// Resume a persisted session (G.5 `session/load`): history, provider,
+    /// Resume a persisted session (`session/load`): history, provider,
     /// and model come from the stored record; the workspace is rooted at the
     /// client-requested `cwd`, not the recorded one — the client decides
     /// where the resumed session runs.
@@ -424,9 +421,9 @@ impl AppState {
             session_id.clone(),
             cancel_cell.clone(),
         ));
-        // No reviewer: ACP asks always went to the client, and the surface
-        // never toggles auto-review on, so the policy layer falls through
-        // to the responder exactly as before.
+        // No reviewer: ACP asks go to the client and the surface never
+        // toggles auto-review on, so the policy layer falls through to the
+        // responder.
         let policy = crate::harness::PolicyLayerInputs::new(Arc::clone(&permissions), gate.clone());
         let asker = Arc::new(crate::acp::elicitation::ElicitationAsker {
             connection: connection.clone(),
@@ -439,12 +436,12 @@ impl AppState {
             Some(persister) => persister.lock().await.history(),
             None => animist::history::History::new(),
         };
-        // Phase 3: register MCP tool annotations once the tool set is
+        // Register MCP tool annotations once the tool set is
         // settled so the gate consults the same hints as the TUI.
         if let Some(mcp) = workspace.mcp() {
             permissions.sync_mcp_annotations(&mcp);
         }
-        // E.10 reauth hook over the session provider's credential; a 401
+        // Reauth hook over the session provider's credential; a 401
         // parks the run for the refresh instead of failing the turn.
         let reauth = crate::provider::reauth_hook(provider_config, &model)
             .await
@@ -597,8 +594,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Ok(session) => session,
                     Err(message) => return respond_setup_error(responder, message),
                 };
-                // `mcp_servers` is ignored until the MCP client (task 94)
-                // is ported.
+                // `mcp_servers` is ignored.
                 let options =
                     session.config_options(&new_state.config, &new_state.provider_names());
                 let response =

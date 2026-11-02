@@ -1,4 +1,4 @@
-//! Always-on lightweight advisor (C.12): a distinct, cheaper quality gate
+//! Always-on lightweight advisor: a distinct, cheaper quality gate
 //! that reviews the transcript delta after a terminal reply and emits at
 //! most one deduped note. The driver runs it between runs (the review is a
 //! model call and a decision outside the step, so no layer hook fits), up
@@ -13,14 +13,6 @@
 //! and a single line of guidance. An [`EmissionGuard`] normalizes the note,
 //! drops content-free phrases, dedupes against a bounded FIFO, and allows
 //! at most one note per update. Off by default (`agent.advisor.enabled`).
-//!
-//! Ported from the reference `craft-agent/src/agent/advisor.rs` +
-//! `agent/run/flow.rs` wiring, re-expressed for animist: the review call
-//! goes through [`crate::provider::complete_text`]. Deviations from the
-//! reference: no advisor model-role/spec resolution (the run's model serves
-//! the review, which is the reference's own fallback), no cancel-raced
-//! provider stream (the caller checks the token and the deadline bounds
-//! the call), and state is per-run rather than per-session.
 
 use std::collections::VecDeque;
 
@@ -213,8 +205,8 @@ pub(crate) enum AdvisorTurnAction {
     Stop,
 }
 
-/// The reference's `advisor_turn_action`, minus the Flow goal-approval gate
-/// (no pending-approval state exists in this harness).
+/// Advisor turn action; no Flow goal-approval gate (no pending-approval
+/// state exists in this harness).
 pub(crate) fn advisor_turn_action(
     note: Option<AdvisorNote>,
     cfg: &AdvisorConfig,

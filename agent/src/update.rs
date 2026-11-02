@@ -1,8 +1,5 @@
-//! G.7 self-update & rollback, ported from the reference `src/update.rs`.
-//!
-//! The reference fetches `install.sh` from `main`, which the comparison
-//! notes has no integrity pinning; here the script is fetched from the
-//! tag matching the latest release and its SHA-256 verified against the
+//! Self-update & rollback. The install script is fetched from the tag
+//! matching the latest release and its SHA-256 verified against the
 //! `install.sh.sha256` digest published with that tag. A release without
 //! a digest, or a mismatch, refuses to run.
 
@@ -272,8 +269,6 @@ pub async fn update(skip_confirm: bool, _no_color: bool) -> Result<()> {
     let storage = StateDir::resolve().map_err(|e| invalid(format!("resolve state dir: {e}")))?;
 
     let script = fetch_pinned_script(&latest).await?;
-    // The reference syntax-highlights the script here; this repo has no
-    // standalone bash highlighter, so it prints plainly either way.
     println!("{script}");
 
     if !skip_confirm && !prompt_yes(&install_dir) {

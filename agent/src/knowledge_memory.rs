@@ -1,7 +1,7 @@
-//! Post-turn memory extraction (Phase 4 of the argosy integration).
+//! Post-turn memory extraction.
 //!
-//! Ported from the reference craft's `memory_extraction`: after a successful
-//! run, a keyword cue gate decides whether the turn might contain durable
+//! After a successful run, a keyword cue gate decides whether the turn
+//! might contain durable
 //! facts; a weak-tier side completion (the `edge`/compaction pattern, no
 //! tools) extracts a bounded set of strict-JSON facts; each is persisted
 //! into the project's local argosy through `write_memory` (same title →

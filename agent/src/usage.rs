@@ -1,14 +1,12 @@
-//! Usage & cost accounting (H.6), ported from the reference
-//! `craft-providers/src/{model.rs, pricing.rs}`.
+//! Usage & cost accounting.
 //!
 //! A turn is priced once, when it runs, and that number is what gets stored,
 //! summed and shown; history is never re-priced, because rates move. The
 //! only thing that moves them today is a provider's [`PricingSchedule`]
 //! (DeepSeek's peak-hours surcharge), which scales the quoted off-peak
-//! table rates inside its windows. Until the model registry lands here
-//! (H.3), a static [`PricedModel`] table stands in; unknown models are
-//! unpriced: callers get `None` and show no cost instead of a made-up
-//! "$0.000".
+//! table rates inside its windows. A static [`PricedModel`] table holds
+//! the rates; unknown models are unpriced: callers get `None` and show no
+//! cost instead of a made-up "$0.000".
 
 use std::collections::HashMap;
 use std::fmt;
@@ -326,8 +324,8 @@ impl fmt::Display for PricingSchedule {
     }
 }
 
-/// A model and its rates: the registry-free slice of the reference `Model`
-/// that pricing needs. `id` is the canonical entry name; `prefixes` match
+/// A model and its rates: the registry-free model data that pricing
+/// needs. `id` is the canonical entry name; `prefixes` match
 /// dated snapshots without registry churn.
 #[derive(Debug)]
 pub struct PricedModel {
@@ -382,9 +380,8 @@ const DEEPSEEK_PEAK_WINDOWS: &[PricingWindow] =
 pub(crate) const DEEPSEEK_PEAK_HOURS: PricingSchedule =
     PricingSchedule::new(DEEPSEEK_PEAK_WINDOWS, 2.0).weekdays_only();
 
-/// Rates copied from the reference v0.14.1 tables for the providers this repo
-/// talks to natively. Everything else is unpriced until the model registry
-/// (H.3) lands.
+/// Rates for the providers this repo talks to natively; everything else
+/// is unpriced.
 static PRICED_MODELS: &[PricedModel] = &[
     // Anthropic
     PricedModel {
@@ -404,7 +401,6 @@ static PRICED_MODELS: &[PricedModel] = &[
         provider: "anthropic",
         id: "claude-sonnet-5",
         prefixes: &["claude-sonnet-5"],
-        // Introductory rates until 2026-09-01, then 3.00 / 15.00 / 3.75 / 0.30.
         pricing: ModelPricing {
             input: 2.00,
             output: 10.00,
@@ -904,9 +900,8 @@ mod tests {
         }
     }
 
-    /// An entry written before turns recorded their cost used to keep only the
-    /// cost of the next turn that touched it, so every later load reported the
-    /// session as costing whatever it last did.
+    /// A stored cost breakdown survives the later turns that touch the
+    /// entry; loads never re-report a stale single-turn cost.
     #[test_case(&[]                ; "counters_with_no_breakdown")]
     #[test_case(&[(CURRENT, None)] ; "a_breakdown_written_before_costs")]
     fn a_settled_estimate_survives_the_next_turn(entries: &[(&str, Option<f64>)]) {

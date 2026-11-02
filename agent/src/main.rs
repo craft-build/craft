@@ -75,9 +75,9 @@ async fn main() -> Result<(), Error> {
         None => {
             let mut config = Config::load().await?;
             cli.apply_thinking(&mut config)?;
-            // G.1 run overrides land in the config the TUI builds its run
+            // Run overrides land in the config the TUI builds its run
             // parameters from.
-            // G.6 first run: auto-detect providers from credential env
+            // First run: auto-detect providers from credential env
             // vars when craft.bml configures none.
             let setup_notes = craft::setup::first_run(&mut config);
             cli.apply_prompt_overrides(&mut config);

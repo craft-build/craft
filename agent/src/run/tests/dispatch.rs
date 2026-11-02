@@ -122,9 +122,8 @@ async fn responder_denial_reports_reason_to_model() {
     assert_eq!(result_text(&results[0]), "not allowed");
 }
 
-/// The post-execution transform seam (the old `AfterExecute` hook) is the
-/// layer chain's `post_tool_exec`: an output-transforming layer sees every
-/// executed call's result.
+/// The post-execution transform seam is the layer chain's `post_tool_exec`:
+/// an output-transforming layer sees every executed call's result.
 #[tokio::test]
 async fn post_exec_layer_transforms_results() {
     use animist::agent::{Layer, LayerImpl};
@@ -1426,9 +1425,9 @@ async fn the_assembled_chain_orders_policy_guardrail_and_dedup() {
 }
 
 /// A permission denial is a closed result like any other, so it decays the
-/// doom score by one (the old wave commit counted skips as successes).
+/// doom score by one.
 /// Discriminating pin: two rule-denied calls pull 2 errors + one doom block
-/// (17) down to exactly the grace threshold — 15, not 17 — and the grace
+/// down to exactly the grace threshold — 15, not 17 — and the grace
 /// event carries the difference in its similarity.
 #[tokio::test]
 async fn permission_denials_decay_the_doom_score() {

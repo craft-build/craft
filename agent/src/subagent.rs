@@ -1,15 +1,10 @@
-//! Reusable subagent launcher (A.5 `task` tool).
+//! Reusable subagent launcher (`task` tool).
 //!
 //! Spawns a child agent with a restricted tool set and its own context
 //! window, runs it to completion on its own [`crate::harness::Conversation`]
 //! (never the parent's — per-run layer state would collide), and returns
 //! the final assistant text or, when an `output_schema` is supplied, the
 //! validated JSON object.
-//!
-//! Ported from the reference `craft-agent/src/tools/subagent.rs` +
-//! `task.rs`; the host seams (TUI, headless) install a
-//! [`SubagentLauncher`] on the [`crate::tools::Workspace`] the same way
-//! the `question` tool installs its asker.
 
 use std::sync::Arc;
 
@@ -39,7 +34,7 @@ pub const RESEARCH_TOOLS: &[&str] = &[
     "websearch",
     "batch",
     "list_tools",
-    // Argosy knowledge tools (read-only, Phase 1).
+    // Argosy knowledge tools (read-only).
     "search",
     "search_rules",
     "ask",
@@ -81,7 +76,7 @@ pub const GENERAL_TOOLS: &[&str] = &[
     "todo_write",
 ];
 
-/// The reviewer subagent's budget (Phase 5): the read-only research set
+/// The reviewer subagent's budget: the read-only research set
 /// plus the argosy review workflow, minus the network tools.
 pub const REVIEWER_TOOLS: &[&str] = &[
     "read",
@@ -194,14 +189,14 @@ pub struct SubagentLauncher {
     /// turn's cancellation into it, and the child links under whatever the
     /// cell holds when it spawns.
     pub cancel: Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>,
-    /// Per-tool-call child cancellation (task 96): every spawn registers
+    /// Per-tool-call child cancellation: every spawn registers
     /// its child trigger here under the spawning call's id, so a surface
     /// can cancel one subagent without stopping the parent turn.
     pub cancels: Arc<run::cancel::CancelMap<String>>,
     /// The parent conversation's event sink; filtered child events are
     /// forwarded into it as `CraftEvent::Subagent`.
     pub sink: crate::harness::EventSink,
-    /// The parent's approval seam (B.1): subagent tool calls flow through
+    /// The parent's approval seam: subagent tool calls flow through
     /// the same permission rules and the same interaction, so a `general`
     /// subagent cannot bypass approvals by running `bash` itself.
     pub policy: crate::harness::PolicyLayerInputs,
@@ -295,12 +290,12 @@ impl SubagentLauncher {
             other => return Err(format!("unknown context_mode: {other}")),
         };
 
-        // Worktree isolation (hardening/04) roots the child's whole
+        // Worktree isolation roots the child's whole
         // execution state at a fresh linked worktree: its tools, snapshots,
         // bash cwd and claim normalization all anchor at the child root,
         // and creation failure is an error — never a silent fall back to
         // editing the parent tree. Every other child runs on the parent
-        // workspace as before.
+        // workspace.
         let (worktree, workspace, cwd) = match req.isolation.as_str() {
             "none" => (None, self.workspace.clone(), self.cwd.clone()),
             "worktree" if !general => {
@@ -369,7 +364,7 @@ impl SubagentLauncher {
         // rules, approval responder, auto-review reviewer); no persistence
         // layer, because the parent stores the child's entries when it
         // ends. The parent's approval gate governs the child's tool calls
-        // too (reference shares ctx.permissions with the spawned agent).
+        // too.
         let (sink, stream) = crate::harness::EventSink::new();
         let mut builder =
             crate::harness::ConversationBuilder::new(&config, &cwd, "", model, tools, sink)
@@ -382,7 +377,7 @@ impl SubagentLauncher {
         // Filtered child events forward into the parent's sink, tagged with
         // the spawning call: the parent derives its own Done/Error and live
         // tool output; forwarding the child's would duplicate. ToolFinished
-        // passes so the task chat (task 96) can complete its tool cards.
+        // passes so the task chat can complete its tool cards.
         let forwarder = {
             let parent_sink = self.sink.clone();
             let tool_use_id = req.tool_use_id.clone();
@@ -414,7 +409,7 @@ impl SubagentLauncher {
 
         let child_cancel = animist::agent::Cancellation::default();
         let parent_cancel = (*self.cancel.load_full()).clone();
-        // The cancel-map slot (task 96): the surface can cancel one
+        // The cancel-map slot: the surface can cancel one
         // subagent without stopping the parent turn. Retiring the slot at
         // exit drops the trigger, which fires the token — the linked run
         // observes both through the same select.
@@ -546,7 +541,7 @@ impl SubagentLauncher {
     }
 
     /// Store the finished child's entries in the session's subagent
-    /// histories (10): the child runs no persistence layer, so the parent
+    /// histories: the child runs no persistence layer, so the parent
     /// records what it produced. Programmatic launches (no call id) and
     /// unpersisted parents (no state dir) store nothing.
     async fn persist_child(
@@ -670,8 +665,7 @@ async fn run_linked(
 /// `output_schema` parameter accepts: `type` (string or list), `properties`,
 /// `required`, `items`, and `enum`. No JSON-Schema validator crate is a
 /// dependency, and the schemas models compose are simple objects, so a
-/// small recursive check covers the reference's `validate` behavior for
-/// this seam.
+/// small recursive check suffices.
 pub fn validate_schema(schema: &Value, value: &Value) -> Result<(), String> {
     let Some(obj) = schema.as_object() else {
         return Ok(());
@@ -1211,7 +1205,7 @@ mod tests {
     }
 
     /// Every schema retry spent without valid JSON ends the spawn with the
-    /// last validation error, exactly as before the animist cutover.
+    /// last validation error.
     #[tokio::test]
     async fn output_schema_exhaustion_reports_the_last_error() {
         let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
@@ -1234,8 +1228,7 @@ mod tests {
     }
 
     /// The forwarded stream keeps tool completion (the task chat needs it)
-    /// and drops the child's terminal and progress noise: today's filter,
-    /// on the animist event names.
+    /// and drops the child's terminal and progress noise.
     #[tokio::test]
     async fn child_noise_events_are_filtered_and_completion_passes() {
         let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
@@ -1371,7 +1364,7 @@ mod tests {
         );
     }
 
-    // ---- 10: worktree isolation (hardening/04) ----
+    // ---- worktree isolation ----
 
     fn git_available() -> bool {
         std::process::Command::new("git")

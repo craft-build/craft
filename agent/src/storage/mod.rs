@@ -1,9 +1,5 @@
 //! Persistent misc state: input history, model/theme preferences, rotating
 //! logs, and the atomic IO they share.
-//!
-//! Ported from the reference `craft-storage` crate (thiserror → snafu, and
-//! flock replaced with a std-only best-effort lock because the lock crate is
-//! not a dependency here).
 
 pub mod atomic;
 pub mod input_history;

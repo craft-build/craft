@@ -2,8 +2,8 @@
 //!
 //! Models asked for JSON frequently wrap it in prose or markdown fences, or
 //! emit slightly malformed JSON (trailing commas, single quotes). Consumers
-//! with schema-constrained output — auto-review decisions now, the subagent
-//! `task` tool later — extract via [`extract_json`] so they share one
+//! with schema-constrained output — auto-review decisions, the subagent
+//! `task` tool — extract via [`extract_json`] so they share one
 //! tolerance policy instead of each rolling its own slicing.
 
 use jsonrepair::{Options as RepairOpts, loads as repair_loads};

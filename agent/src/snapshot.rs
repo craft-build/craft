@@ -6,8 +6,8 @@
 //! are workdir-scoped, capped at 5 MiB, and text-only — binary or oversized
 //! files are skipped. This is a convenience rollback, not a crash-safe
 //! journal: captures and restores ride ordinary filesystem operations.
-//! Files a write tool created during the turn are not removed by `/undo`
-//! (matching the reference, which only records pre-existing contents).
+//! Files a write tool created during the turn are not removed by `/undo`:
+//! only pre-existing contents are recorded.
 //! Out of scope by design: `delete` has no pre-delete capture. Bash
 //! in-place edits (`sed -i` / `perl -i`) are detected by
 //! [`crate::tools::inplace_edit`] and noted before execution.
@@ -122,9 +122,8 @@ impl SnapshotManager {
     }
 
     /// Pop the most recent committed session and restore its files. Falls
-    /// back to the active (uncommitted) session when the stack is empty,
-    /// mirroring the reference's mid-run rollback. Returns a summary, or
-    /// `None` when there is nothing to undo.
+    /// back to the active (uncommitted) session when the stack is empty.
+    /// Returns a summary, or `None` when there is nothing to undo.
     pub async fn rollback(&self) -> Option<String> {
         let mut session = {
             let mut state = self.state.lock().unwrap();

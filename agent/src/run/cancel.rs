@@ -1,9 +1,9 @@
-//! Cancellation architecture (reference: `craft-agent/src/cancel.rs`, C.6).
+//! Cancellation architecture.
 //!
 //! The watch-based [`CancelToken`](super::CancelToken)/[`CancelFlag`](super::CancelFlag)
-//! pair stays the substrate — the TUI surface, the stream select, and the
-//! epoch re-arm semantics all hang off it. This module layers the
-//! reference's richer API on top: a cancel-on-drop [`CancelTrigger`],
+//! pair is the substrate — the TUI surface, the stream select, and the
+//! epoch re-arm semantics all hang off it. On top: a cancel-on-drop
+//! [`CancelTrigger`],
 //! [`CancelToken::race`], and the slotted [`CancelMap`] for per-key
 //! grouped cancellation with pre-cancel. Parent↔child propagation is the
 //! caller's awaited select (see `subagent::run_linked`).
@@ -301,8 +301,7 @@ mod tests {
         assert!(token.cancelled());
     }
 
-    /// One tool call can open several subagents. They used to evict each
-    /// other, so the first died the moment the second registered.
+    /// One tool call can open several subagents.
     #[test]
     fn cancel_map_keeps_siblings_under_one_key() {
         let map = CancelMap::new();

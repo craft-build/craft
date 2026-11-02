@@ -1,12 +1,11 @@
-//! Agent modes (C.17, plan subset): the surface tells the run which mode
-//! it is in, and Plan mode restricts writes to the allocated plan file.
-//! Flow mode is deliberately absent (ported last, task 99).
+//! Agent modes: the surface tells the run which mode it is in, and Plan
+//! mode restricts writes to the allocated plan file. Flow mode is
+//! deliberately absent.
 
 use std::path::{Path, PathBuf};
 
 /// Tool-result message returned when a write outside the plan file is
-/// attempted in plan mode. Ported verbatim from the reference
-/// (`craft-agent/src/tools/mod.rs::PLAN_WRITE_RESTRICTED`).
+/// attempted in plan mode.
 pub const PLAN_WRITE_RESTRICTED: &str = "write restricted to plan file in plan mode";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

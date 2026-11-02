@@ -215,7 +215,7 @@ fn tool_kinds_follow_the_registered_tools() {
 async fn registered_tools_route_task_calls_to_the_installed_launcher() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
-    // The launcher the session installs (A.5): a `task` call with a bad
+    // The launcher the session installs: a `task` call with a bad
     // subagent type reaches its spawn and fails informatively instead of
     // degrading to the no-host availability error.
     let (sink, _stream) = crate::harness::EventSink::new();
@@ -460,7 +460,7 @@ fn tool_result_text_pretty_prints_json_results() {
     assert!(!text.contains("Json {"), "Debug rendering leaked: {text}");
 }
 
-// ----- G.5 permission requests -----
+// ----- permission requests -----
 
 fn selected(option_id: &str) -> RequestPermissionOutcome {
     RequestPermissionOutcome::Selected(
@@ -580,7 +580,7 @@ fn gate_decides_run_skip_and_stop_without_a_client() {
     );
 }
 
-// ----- G.5 elicitation -----
+// ----- elicitation -----
 
 fn question_specs() -> Vec<QuestionSpec> {
     vec![
@@ -720,7 +720,7 @@ fn supports_form_requires_form_capability() {
     assert!(!supports_form(&url_only));
 }
 
-// ----- G.5 session/load -----
+// ----- session/load -----
 
 #[tokio::test]
 async fn load_session_restores_history_and_model() {
@@ -758,7 +758,7 @@ async fn load_session_rejects_unknown_ids() {
     assert!(crate::storage::sessions::StoredSession::load(missing.id(), &dir).is_err());
 }
 
-/// The `session/load` replay (11): the shared replay items become the
+/// The `session/load` replay: the shared replay items become the
 /// session updates a client rebuilds its transcript from — user and agent
 /// text plus completed tool calls. Markers and compaction summaries have
 /// no ACP translation live either, so they replay as nothing.

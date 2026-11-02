@@ -8,10 +8,10 @@ use crate::history::{ext, marker};
 use animist::agent::{AgentEvent, Cancellation};
 use animist::provider::ProviderEvent;
 
-// --- Context-overflow recovery (C.5) ---
-// The in-run half (retry, compaction inside `recover`) is 09's
-// `RecoveryLayer`; the stop-reason half is the driver's re-run. A failed
-// run KEEPS any compaction it did (README decision 11).
+// --- Context-overflow recovery ---
+// The in-run half (retry, compaction inside `recover`) is the recovery
+// layer; the stop-reason half is the driver's re-run. A failed run KEEPS
+// any compaction it did.
 fn overflow_error_turn() -> Attempt {
     // The body must name a size beyond the run's overhead-inclusive
     // estimate (history + tool schemas) for recalibration to trigger.
@@ -59,17 +59,14 @@ fn overflow_history() -> Vec<StoredMessage> {
 
 /// Window big enough that the driver's pre-turn fill check leaves the
 /// seeded history alone (its estimate stays under every stage threshold),
-/// so the overflow recovery inside the run is the pass that compacts —
-/// exactly the premise the old `recovery_setup` created by calling the
-/// loop directly.
+/// so the overflow recovery inside the run is the pass that compacts.
 fn overflow_window() -> u32 {
     let tokens = crate::compaction::estimate_tokens(&overflow_history());
     ((tokens as f64 * 2.2) as u32).max(1)
 }
 
-/// The recovery-stage list the old `recovery_setup` used: one VCC stage,
-/// so overflow recovery compacts without an LLM call eating the scripted
-/// attempts.
+/// The recovery-stage list: one VCC stage, so overflow recovery compacts
+/// without an LLM call eating the scripted attempts.
 fn vcc_only_config() -> Config {
     let mut config = Config::parse("").unwrap();
     config.compaction = vec![crate::config::CompactionConfig {
@@ -383,7 +380,7 @@ async fn success_between_overflows_rearms_recovery() {
 
 #[tokio::test]
 async fn fatal_errors_fail_immediately() {
-    // Rate limits are retryable by design since C.2; a fatal error must
+    // Rate limits are retryable by design; a fatal error must
     // still surface without a retry or compaction event.
     let provider = script(vec![crate::testing::http_error(400, "invalid api key")]);
     let dir = tempfile::tempdir().unwrap();
@@ -429,7 +426,7 @@ async fn overflow_without_compaction_stages_fails_as_before() {
     )));
 }
 
-// --- Streaming retry state machine (C.2) ---
+// --- Streaming retry state machine ---
 #[tokio::test(start_paused = true)]
 async fn rate_limited_stream_is_retried_and_recovers() {
     let provider = script(vec![rate_limit_turn(), done_turn("recovered")]);
@@ -642,7 +639,7 @@ async fn cancel_mid_stream_commits_the_partial_reply_with_marker() {
     let _ = events_until_done(&mut stream).await;
 }
 
-// --- Auth-error reauth wait (E.10) ---
+// --- Auth-error reauth wait ---
 #[tokio::test]
 async fn auth_error_without_responder_fails_as_before() {
     // Without a reauth hook, an auth error is an honest failure.
@@ -812,7 +809,7 @@ async fn declined_compaction_fails_without_a_blind_retry() {
     );
 }
 
-/// README decision 11: a failed run KEEPS the compaction it did — history
+/// A failed run KEEPS the compaction it did — history
 /// keeps sources, so nothing is lost — and the failed turn still commits.
 #[tokio::test]
 async fn failed_run_after_overflow_compaction_keeps_the_rewrite() {

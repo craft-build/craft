@@ -1,4 +1,4 @@
-//! The post-turn advisor (C.12): a review rides the same script after a
+//! The post-turn advisor: a review rides the same script after a
 //! terminal reply, its note may continue the run as a driver follow-up,
 //! and a failure never fails the run.
 

@@ -5,9 +5,6 @@
 //! a fresh set of its own, one per compiled `Regex` in the syntax, and that
 //! memory is never given back, not even when the thread exits. Single-
 //! threading every highlight keeps the bill to one set.
-//!
-//! Ported from the reference `craft-highlight/src/pool.rs`, with std
-//! mpsc channels in place of `flume` (the only channel user in this crate).
 
 use std::any::Any;
 use std::cell::Cell;

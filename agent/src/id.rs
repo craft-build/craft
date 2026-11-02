@@ -1,6 +1,4 @@
 //! Canonical unique ids: time-ordered, base58-encoded, backed by a UUIDv7.
-//!
-//! Ported from the reference `craft-storage/src/id.rs` (thiserror → snafu).
 
 use std::fmt;
 use std::str::FromStr;
@@ -102,8 +100,6 @@ impl<'de> Deserialize<'de> for CraftId {
 /// A session id that preserves the caller's exact string verbatim (legacy
 /// hex ids resume unchanged) while caching the parsed [`CraftId`] so `id()`
 /// is infallible. Canonical (base58) when self-generated via [`SessionRef::from_id`].
-///
-/// Ported from the reference `craft-storage/src/id.rs`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionRef {
     id: CraftId,

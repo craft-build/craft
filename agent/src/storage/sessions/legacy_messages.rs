@@ -1,7 +1,7 @@
-//! The pre-animist craft message enums, serde-only, and the converter that
-//! turns a legacy session's messages into animist [`StoredMessage`]s (03's
-//! `edge.rs` mapping, in the history direction). Nothing in the crate
-//! constructs these types; they exist so old session files keep loading.
+//! The legacy craft message enums, serde-only, and the converter that
+//! turns a legacy session's messages into animist [`StoredMessage`]s.
+//! Nothing in the crate constructs these types; they exist so old session
+//! files keep loading.
 
 use animist::history::{ContentBlock, MessageKind, Role, StoredMessage, ToolContent};
 use jiff::Timestamp;
@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::history::marker;
 
-/// The legacy nudge prompt's literal text (the run loop that produced it
-/// is gone; sessions written before the animist cutover still carry it).
+/// The legacy nudge prompt's literal text (older sessions still carry it).
 pub(crate) const LEGACY_NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty \
      response. Please process the tool results above and continue with the task.";
 
@@ -272,7 +271,7 @@ fn result_content(content: &ToolResultContent) -> ToolContent {
     match content {
         ToolResultContent::Text(Text { text }) => ToolContent::Text { text: text.clone() },
         // Legacy JSON results render to pretty text; tools that produce
-        // JSON render it themselves (06).
+        // JSON render it themselves.
         ToolResultContent::Json { value } => ToolContent::Text {
             text: serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
         },

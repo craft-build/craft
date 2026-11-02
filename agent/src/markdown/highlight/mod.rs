@@ -1,5 +1,5 @@
-//! Syntect-based code highlighting, ported from the reference
-//! `craft-highlight` crate. All syntect work runs on the single dedicated
+//! Syntect-based code highlighting. All syntect work runs on the single
+//! dedicated
 //! thread in [`pool`] to bound regex-automata cache memory.
 
 pub mod pool;
@@ -817,7 +817,7 @@ mod tests {
         assert_eq!(normalize_text(""), "");
     }
 
-    /// The language mixup pin from the reference: the same body under two
+    /// The language mixup pin: the same body under two
     /// fence languages must paint differently once a theme has scope rules
     /// (rust's `//` is a comment, python's is not).
     #[test]

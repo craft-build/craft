@@ -294,7 +294,7 @@ async fn empty_truncated_reply_is_committed_as_max_tokens() {
     // A truncation with zero visible text is not an empty-and-stalled
     // turn: the cut-off (empty) assistant message is committed and the
     // run ends MaxTokens instead of firing the nudge path. The
-    // continuation budget is 0, as in the old loop's version of this pin.
+    // continuation budget is 0.
     let provider = script(vec![crate::testing::max_tokens_turn("")]);
     let dir = tempfile::tempdir().unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
@@ -442,9 +442,8 @@ async fn failed_run_preserves_prior_history_and_commits_the_turn() {
 #[tokio::test]
 async fn doom_loop_scores_reach_grace_then_summarize() {
     // One batch of identical failing probe calls: two errors (+1 each) and
-    // one blocked doom-loop call (+15, exactly — a blocked call never rode
-    // the old wave commit's error count) put the score at 17 — past the
-    // grace threshold — so the next request carries the one-shot grace
+    // one blocked doom-loop call (+15, exactly) put the score at 17 — past
+    // the grace threshold — so the next request carries the one-shot grace
     // prompt. The probe is exclusive-claimed, so the window ordering is
     // deterministic under concurrent dispatch. Distinct ids per call:
     // replay validation rejects duplicates.
@@ -490,9 +489,8 @@ async fn doom_loop_scores_reach_grace_then_summarize() {
         })
         .count();
     assert_eq!(stagnation, 1, "grace posts exactly one StagnationDetected");
-    // The score at grace is exactly 2 errors + one doom block: 17/25, the
-    // same normalization the old loop posted (and the executable pin that a
-    // blocked call contributes exactly +15).
+    // The score at grace is exactly 2 errors + one doom block: 17/25 (the
+    // executable pin that a blocked call contributes exactly +15).
     assert!(
         events.iter().any(|event| matches!(event,
         Event::Craft(crate::harness::CraftEvent::StagnationDetected { similarity })
@@ -906,9 +904,7 @@ async fn empty_reply_without_recent_tool_results_ends_the_run() {
 }
 
 /// The nudge budget runs out: after `MAX_NUDGES` stalled replies the next
-/// stall ends the turn empty-handed instead of nudging again. (Decision 12
-/// retired the old "a nudge eats the turn budget" accounting; the budget
-/// itself is the pin.)
+/// stall ends the turn empty-handed instead of nudging again.
 #[tokio::test]
 async fn nudge_budget_runs_out_after_max_nudges() {
     let dir = tempfile::tempdir().unwrap();

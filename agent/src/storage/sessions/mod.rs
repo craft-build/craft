@@ -3,7 +3,7 @@
 //! Each session is stored as `{uuid}.jsonl`, one JSON record per line.
 //! Messages persist as animist entry records (`entry`, `insert`, `revise`,
 //! `deactivate`, `replace` — see [`records`]); craft writes only `entry`
-//! records today, and the change-feed persister (05) writes the rest. The
+//! records today, and the change-feed persister writes the rest. The
 //! format is crash-safe: on load, each record that fails to parse is
 //! skipped with a stderr warning, wherever it sits in the file (a partial
 //! flush may corrupt multiple records, not just trailing ones). A record
@@ -19,7 +19,7 @@
 //!
 //! Module layout: the [`Session`] model and its API live here, while the
 //! record vocabulary and loader (`records`), the append-only log (`log`),
-//! the pre-animist message enums and their converter (`legacy_messages`),
+//! the legacy message enums and their converter (`legacy_messages`),
 //! archive rotation (`archive`), the cwd index (`index`), header scanning
 //! for the picker (`scan`), and legacy-file migration/removal (`legacy`)
 //! live in sibling modules.
@@ -155,7 +155,7 @@ pub struct SessionMeta {
     pub session_rules: Vec<PermissionRule>,
     #[serde(default)]
     pub context_size: u32,
-    /// Composer text preserved across checkpoints (F.3 draft preservation).
+    /// Composer text preserved across checkpoints.
     /// `None` when the composer is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_draft: Option<String>,
@@ -784,7 +784,7 @@ pub fn latest_model_in(cwd: &str, dir: &Path) -> Result<Option<String>, SessionE
         .and_then(|id| locate_session_file(dir, id))
         // An indexed file whose header is unusable (malformed, or written
         // before headers recorded a model) is stale metadata, not the
-        // answer: fall through to the scan instead of suppressing it (H.28).
+        // answer: fall through to the scan instead of suppressing it.
         .and_then(|path| read_header_model(&path))
     {
         return Ok(Some(model));
@@ -825,7 +825,7 @@ pub fn latest_thinking_in(
         .get(cwd)
         .and_then(|id| id.parse::<CraftId>().ok())
         .and_then(|id| locate_session_file(dir, id))
-        // Same staleness policy as `latest_model_in` (H.28).
+        // Same staleness policy as `latest_model_in`.
         .and_then(|path| read_last_thinking(&path))
     {
         return Ok(Some(thinking));

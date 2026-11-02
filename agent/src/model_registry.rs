@@ -1,14 +1,5 @@
 //! Per-model tier assignments (weak / medium / strong / compaction).
 //!
-//! Ported from the reference `craft-providers/src/model_registry.rs`, adapted
-//! to this repo's animist-based architecture: the reference's per-provider
-//! `manifest.rs` layer is replaced by a compact static table keyed by
-//! `ProviderKind` string, and the models.dev catalog (task 49) carries no
-//! tier metadata — verified against the reference, whose catalog fills only
-//! context/pricing/vision — so `ModelInfo::tier` is set by dynamic-provider
-//! scripts there and stays `None` here; positional auto-assignment covers
-//! the gap.
-//!
 //! Three layers, checked in order: user overrides (persisted, a model may hold
 //! several tiers) > static entries from the provider manifest > auto-assignment
 //! by position in the discovered model list.
@@ -56,8 +47,8 @@ pub struct ModelInfo {
     pub id: String,
     pub context_window: Option<u32>,
     /// Tier metadata, when a source that knows one supplies it. The models.dev
-    /// catalog has none (matching the reference), so in practice this is
-    /// `None` and positional auto-assignment applies.
+    /// catalog has none, so in practice this is `None` and positional
+    /// auto-assignment applies.
     pub tier: Option<ModelTier>,
 }
 
@@ -79,9 +70,8 @@ struct StaticModel {
     default: bool,
 }
 
-/// Minimal replacement for the reference `manifest.rs` layer, keyed by
-/// `ProviderKind::as_str()`. Providers absent from this table are treated as
-/// accepting arbitrary models (reference behavior for unknown slugs).
+/// Per-provider manifest, keyed by `ProviderKind::as_str()`. Providers
+/// absent from this table are treated as accepting arbitrary models.
 struct ProviderManifest {
     accepts_arbitrary_models: bool,
     models: &'static [StaticModel],

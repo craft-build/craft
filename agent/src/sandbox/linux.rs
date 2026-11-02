@@ -2,8 +2,7 @@
 //! argv so the process gets a read-only view of the root filesystem with the
 //! workspace bind-mounted read-write, and (when network is denied) an unshared
 //! network namespace with only loopback. The payload also runs in a fresh PID
-//! namespace (`--unshare-pid`) — see the note where the flag is added. Ported
-//! from reference `craft-sandbox/src/linux.rs`.
+//! namespace (`--unshare-pid`) — see the note where the flag is added.
 
 use std::process::Command;
 

@@ -1,5 +1,4 @@
-//! AGENTS.md instructions discovery (ported from Craft's
-//! `craft-agent/src/agent/instructions.rs`). Collects project, local, and
+//! AGENTS.md instructions discovery. Collects project, local, and
 //! global instruction files into the text that feeds the system prompt's
 //! `{{instructions}}` slot, and provides subdirectory-scoped discovery used by
 //! the read tool to inject instructions on first touch.

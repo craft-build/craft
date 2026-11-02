@@ -261,7 +261,7 @@ async fn compression_disabled_sends_raw_output() {
 }
 
 /// The in-run request rewrites only cover results the current run
-/// produced; everything older arrived pre-altered from history (08). On
+/// produced; everything older arrived pre-altered from history. On
 /// the wire: an old seeded result is durably compressed, a seeded result
 /// still inside the protected recent window stays raw, and a result this
 /// run produced is compressed in the view as before.
@@ -352,14 +352,10 @@ async fn request_view_scope_is_in_run_only() {
     );
 }
 
-/// 08's measurement, pinned: one scripted turn whose run edits a file a
-/// *previous* turn read (the read lives in the request prefix). Compare the
-/// old full-view rewrites (lifecycle + compression recomputed from raw
-/// history every step) against the durable-alteration model (prefix
-/// pre-altered between runs, suffix-only in run): the same request bytes
-/// overall, but the old model mutates already-sent prefix bytes mid-run —
-/// the provider-cache invalidation durable alterations remove — while the
-/// new model changes the prefix exactly once, between runs.
+/// Pinned: one scripted turn whose run edits a file a *previous* turn read
+/// (the read lives in the request prefix). Durable alterations send the
+/// same request bytes overall as full-view rewrites, but change the prefix
+/// exactly once, between runs — never mid-run.
 #[tokio::test]
 async fn durable_alters_match_old_view_bytes_without_mid_run_prefix_mutations() {
     let big = |n: usize| -> String {

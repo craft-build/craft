@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// G.5 ACP permission gate
+// ACP permission gate
 // ---------------------------------------------------------------------------
 
 use agent_client_protocol::{
@@ -16,15 +16,13 @@ use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 use super::turn::tool_title;
 
-/// Permission option ids on `session/request_permission` (G.5). Ported from
-/// the reference `craft-acp/src/permissions.rs`.
+/// Permission option ids on `session/request_permission`.
 const ALLOW_ONCE_ID: &str = "allow_once";
 const ALLOW_ALWAYS_ID: &str = "allow_always";
 const REJECT_ONCE_ID: &str = "reject_once";
 const REJECT_ALWAYS_ID: &str = "reject_always";
 
-/// The four options every `session/request_permission` carries. Ported from
-/// the reference `craft-acp/src/permissions.rs`.
+/// The four options every `session/request_permission` carries.
 pub(super) fn permission_options() -> Vec<PermissionOption> {
     vec![
         PermissionOption::new(
@@ -94,7 +92,7 @@ pub(super) fn permission_request(
 /// The ACP approval responder: where the policy layer would prompt, the
 /// client answers a `session/request_permission` instead of the user
 /// answering the TUI overlay. Permission rules live in the policy layer
-/// (07); this is only the interaction.
+/// this is only the interaction.
 ///
 /// Asks serialize on an async mutex: clients (and their permission UIs)
 /// handle one request at a time, exactly like the TUI's single modal.

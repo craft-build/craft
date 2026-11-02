@@ -1,5 +1,4 @@
-//! In-process argosy integration: the knowledge service (Phase 0 of the
-//! argosy integration plan).
+//! In-process argosy integration: the knowledge service.
 //!
 //! The `argosy` crate is linked directly (no subprocess, no MCP transport):
 //! its `McpState` sync handlers are called from portable builtin tools
@@ -477,9 +476,7 @@ pub fn review_prompt(
     prompt_body("review", Some(&arguments))
 }
 
-/// The vendored reviewer definition written to `.craft/agents/reviewer.md`
-/// (Phase 5). Craft's harness is not an argosy `Harness` variant, so the
-/// definition lives here rather than upstream.
+/// The vendored reviewer definition written to `.craft/agents/reviewer.md`.
 pub const REVIEWER_AGENT_MD: &str = r#"---
 description: Read-only code reviewer that records prioritized findings through the argosy review tools and returns a verdict.
 tools:

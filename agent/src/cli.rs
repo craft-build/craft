@@ -1,8 +1,3 @@
-//! G.1 core CLI flags, ported from the reference `src/cli.rs`. The flag
-//! surface (names, shorts, aliases, value enums) mirrors the reference
-//! exactly; each flag's semantics land with its own subsystem. Print/SDK
-//! flags are parsed and stored here for the full headless mode (task 84).
-
 use std::io::IsTerminal;
 use std::sync::Arc;
 
@@ -42,8 +37,7 @@ pub enum CliMode {
     #[default]
     Build,
     Plan,
-    /// Parsed for compatibility, rejected by [`Cli::validate`] until Flow
-    /// mode is ported (task 99).
+    /// Parsed for compatibility, rejected by [`Cli::validate`].
     Flow,
 }
 
@@ -120,12 +114,12 @@ pub struct Cli {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Include full turn-by-turn messages in --print output (task 84).
+    /// Include full turn-by-turn messages in --print output.
     #[arg(long)]
     pub verbose: bool,
 
     /// Resume the most recent session in this directory (TUI and --print;
-    /// F.3 resume-latest-by-cwd). With no prior session, --print starts a
+    /// resume-latest-by-cwd). With no prior session, --print starts a
     /// fresh one after a stderr warning.
     #[arg(short = 'c', long = "continue")]
     pub continue_session: bool,
@@ -134,7 +128,7 @@ pub struct Cli {
     #[arg(short = 's', long, alias = "resume")]
     pub session: Option<String>,
 
-    /// Output format for --print mode (task 84).
+    /// Output format for --print mode.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
 
@@ -207,7 +201,7 @@ pub struct Cli {
     #[arg(long, value_enum)]
     pub permission_mode: Option<CliPermissionMode>,
 
-    /// Include partial streaming messages in SDK output (task 84).
+    /// Include partial streaming messages in SDK output.
     #[arg(long)]
     pub include_partial_messages: bool,
 
@@ -527,7 +521,7 @@ impl Cli {
         Ok(rules)
     }
 
-    /// Cross-flag validation the reference performs before dispatch.
+    /// Cross-flag validation before dispatch.
     /// Parse-level mistakes (bad enum values, unknown flags) are already
     /// handled by clap.
     pub fn validate(&self) -> Result<()> {
@@ -682,9 +676,8 @@ impl Cli {
     /// The system-prompt text that replaces the config preamble:
     /// `--system-prompt` replaces it, `--append-system-prompt` appends to it,
     /// otherwise the config value passes through unchanged. Empty or
-    /// whitespace-only flag values count as unset (matching the
-    /// predecessor's `sdk_mode.rs` filter), so `--system-prompt ""` never
-    /// wipes the config preamble.
+    /// whitespace-only flag values count as unset, so `--system-prompt ""`
+    /// never wipes the config preamble.
     pub fn effective_preamble(&self, config_preamble: &str) -> String {
         let base = self
             .system_prompt
@@ -719,7 +712,7 @@ impl Cli {
     }
 
     /// Resolve `--session` / `--continue` / `--session-id` /
-    /// `--fork-session` into what a print-mode run should do (H.9).
+    /// `--fork-session` into what a print-mode run should do.
     /// Malformed ids and missing/corrupt records on an explicit resume or
     /// fork are hard errors before any model work; `--continue` with no
     /// session for the cwd starts fresh with a stderr warning (TUI parity).
@@ -759,7 +752,7 @@ impl Cli {
     /// The session a resume/fork loads: the explicit `--session` target, or
     /// the `--continue` latest for `cwd`. `Ok(None)` means genuinely no
     /// session; an unreadable newest record is a hard error, not a silent
-    /// downgrade ("fail fast with actionable errors", H.9).
+    /// downgrade ("fail fast with actionable errors").
     fn resume_source(
         &self,
         dir: &StateDir,
@@ -828,7 +821,7 @@ impl Cli {
     }
 }
 
-/// What a print-mode run should do with sessions (H.9): start fresh
+/// What a print-mode run should do with sessions: start fresh
 /// (optionally under a caller-supplied id), resume a stored session, or run
 /// on a copy that was already written under a new id.
 #[derive(Debug, PartialEq)]
@@ -847,7 +840,7 @@ pub enum ResumePlan {
     },
 }
 
-/// Parse a session id with the shared, actionable error shape (H.9).
+/// Parse a session id with the shared, actionable error shape.
 fn parse_session_ref(raw: &str) -> Result<SessionRef> {
     raw.parse::<SessionRef>().map_err(|_| {
         InvalidSnafu {
@@ -862,7 +855,7 @@ fn parse_session_ref(raw: &str) -> Result<SessionRef> {
 
 /// Load a stored session or turn the storage error into an actionable CLI
 /// error naming the requested id — explicit resume intent never degrades to
-/// an unpersisted run (H.9).
+/// an unpersisted run.
 fn load_or_invalid(
     raw: &str,
     id: crate::id::CraftId,
@@ -1248,7 +1241,7 @@ mod tests {
         );
     }
 
-    // -- H.9 session resolution: real temp state dirs, no network --
+    // -- session resolution: real temp state dirs, no network --
 
     fn plan_for(args: &[&str], tmp: &tempfile::TempDir, cwd: &str) -> Result<ResumePlan> {
         let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
@@ -1287,7 +1280,7 @@ mod tests {
     }
 
     /// `--continue` picks the newest session for the cwd; sessions from
-    /// other cwds never bleed in (H.9 acceptance).
+    /// other cwds never bleed in.
     #[test]
     fn continue_resolves_the_newest_session_for_the_cwd() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1330,7 +1323,7 @@ mod tests {
 
     /// A corrupt source record fails the run up front — both for an explicit
     /// `--session` and for the `--continue` latest, even when an older
-    /// sibling session could have been silently downgraded to (H.9).
+    /// sibling session could have been silently downgraded to.
     #[test]
     fn corrupt_records_fail_explicit_resume() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1362,7 +1355,7 @@ mod tests {
 
     /// A stale cwd-index entry for a deleted session is not corruption:
     /// `--continue` falls back to the scan, and with nothing left it starts
-    /// fresh instead of erroring forever (H.9).
+    /// fresh instead of erroring forever.
     #[test]
     fn continue_survives_a_stale_index_entry() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1376,7 +1369,7 @@ mod tests {
     }
 
     /// Fork copies the source under a new id (or `--session-id`) without
-    /// touching the source file (H.9 acceptance).
+    /// touching the source file.
     #[test]
     fn fork_copies_the_source_without_modifying_it() {
         use crate::storage::sessions::StoredSession;
@@ -1435,9 +1428,8 @@ mod tests {
     }
 
     /// The fork copies the source's entries whole — inactive entries and
-    /// revisions included (hardening/09: fork preserves source history) —
-    /// and the fork's persister starts from a fresh cursor: its first
-    /// checkpoint has nothing to write (11).
+    /// revisions included — and the fork's persister starts from a fresh
+    /// cursor: its first checkpoint has nothing to write.
     #[tokio::test]
     async fn fork_copies_inactive_entries_and_restarts_the_persister() {
         use crate::history::ext;
@@ -1497,7 +1489,7 @@ mod tests {
     }
 
     /// Stored model restores when `--model` is absent; the explicit flag
-    /// wins; `--session-id` rides through as the new persistence id (H.9).
+    /// wins; `--session-id` rides through as the new persistence id.
     #[test]
     fn apply_resume_plan_restores_the_stored_model() {
         let id: SessionRef = "01965087-4c71-7f00-8000-000000000000".parse().unwrap();
@@ -1559,7 +1551,7 @@ mod tests {
         assert!(cli.validate().is_ok());
     }
 
-    /// H.9: `--session-id` names a NEW session; without `--fork-session` it
+    /// `--session-id` names a NEW session; without `--fork-session` it
     /// cannot be combined with the resume flags.
     #[test]
     fn session_id_needs_fork_to_combine_with_resume_flags() {
@@ -1605,8 +1597,8 @@ mod tests {
         assert_eq!(cli.effective_preamble(base), "a\n\nb");
     }
 
-    /// Empty or whitespace-only flag values count as unset (predecessor
-    /// semantics): `--system-prompt ""` never wipes the config preamble.
+    /// Empty or whitespace-only flag values count as unset:
+    /// `--system-prompt ""` never wipes the config preamble.
     #[test]
     fn effective_preamble_treats_empty_flag_values_as_unset() {
         let base = "config text";
@@ -2005,10 +1997,8 @@ mod tests {
         config
     }
 
-    /// Regression (docs/hardening/10): the print path used to re-apply the
-    /// CLI prompt overrides, so `--append-system-prompt` text reached the
-    /// model twice. The final wire request must carry the resolved
-    /// preamble exactly once.
+    /// The final wire request must carry the resolved preamble exactly
+    /// once.
     #[tokio::test]
     async fn print_mode_sends_the_resolved_preamble_exactly_once() {
         let sse = "data: {\"id\":\"t\",\"object\":\"chat.completion.chunk\",\"created\":0,\
@@ -2090,10 +2080,10 @@ pub fn resolve_prompt_input(
     Ok((!trimmed.is_empty()).then_some(trimmed))
 }
 
-/// `craft --print` (G.3): run one prompt to completion against the
+/// `craft --print`: run one prompt to completion against the
 /// configured providers and emit text, JSONL (`--output-format
 /// stream-json`), or a verbose transcript (`--verbose`). SDK-mode
-/// stream-json input remains unported. `config.agent.preamble` must
+/// stream-json input is not supported. `config.agent.preamble` must
 /// already be the effective preamble — `main` applies the CLI prompt
 /// overrides once, before dispatch.
 pub async fn run_print(cli: &Cli, config: crate::config::Config) -> Result<()> {
@@ -2138,7 +2128,7 @@ async fn run_print_with(
         }
     };
 
-    // Session resolution (H.9): --continue / --session / --fork-session get
+    // Session resolution: --continue / --session / --fork-session get
     // their print-mode semantics here, before any model work.
     let cwd = std::env::current_dir().map_err(|e| {
         InvalidSnafu {
@@ -2165,7 +2155,7 @@ async fn run_print_with(
 
 /// Wire a resolved [`ResumePlan`] into the query: the session id the run
 /// persists under, and the stored `provider/model` when `--model` is absent
-/// (an explicit flag always wins, H.9).
+/// (an explicit flag always wins).
 fn apply_resume_plan(cli: &Cli, query: &mut HeadlessQuery, plan: ResumePlan) {
     match plan {
         ResumePlan::Fresh { id } => query.session_id = id,
@@ -2507,7 +2497,7 @@ pub(crate) async fn run_headless_query_with(
         model_spec,
     };
 
-    // G.3 print mode: raw text or stream-json JSONL output. Unlike the
+    // Print mode: raw text or stream-json JSONL output. Unlike the
     // reference (whose print mode exits 0 on agent errors), a failed run is
     // a failure exit.
     match crate::print::emit(run, &q.output_format, q.verbose).await? {

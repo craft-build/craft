@@ -167,8 +167,8 @@ async fn stored(conversation: &Conversation) -> Vec<StoredMessage> {
 }
 
 /// Every tool result committed to history as the tool returned it: the
-/// latest revision craft's durable alterations have not touched (08 may
-/// have marked or compressed the newest one; the agent's squash keeps the
+/// latest revision craft's durable alterations have not touched (compaction
+/// may have marked or compressed the newest one; the agent's squash keeps the
 /// interrupted placeholder as the source, so the verbatim entry is not the
 /// tool's return).
 async fn raw_tool_results(conversation: &Conversation) -> Vec<ContentBlock> {

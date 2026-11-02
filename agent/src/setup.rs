@@ -1,24 +1,15 @@
-//! G.6 setup & first-run flow, ported from the reference `src/setup.rs`.
-//!
-//! The reference resolves a working provider at startup without any config:
-//! `PROVIDER_PRIORITY` walks well-known providers, `provider_available`
-//! checks their credential, and the failure path is an actionable error
-//! ("set an API key … or use -m"). Despite the comparison entry's
-//! "interactive" wording, the reference has no wizard — trust the code.
-//!
-//! Adapted to this repo's config-driven architecture: when `craft.bml`
-//! configures no providers, auto-detect providers from credential
-//! environment variables and inject them as in-memory config entries
-//! (priority order preserved as the config key order, which the default
-//! model selection then walks). Explicit configuration always wins;
-//! auto-detection only fills an empty provider map.
+//! Setup & first-run flow: when `craft.bml` configures no providers,
+//! auto-detect providers from credential environment variables and inject
+//! them as in-memory config entries (priority order preserved as the
+//! config key order, which the default model selection then walks).
+//! Explicit configuration always wins; auto-detection only fills an empty
+//! provider map.
 
 use crate::config::{Config, ProviderConfig, ProviderEntry};
 
-/// Credential-bearing kinds in preference order, adapted from the
-/// reference's `PROVIDER_PRIORITY` to the kinds whose default key env var
-/// the animist configs name. Local kinds (ollama, llama-cpp, omlx) carry
-/// no default key env var and are skipped.
+/// Credential-bearing kinds in preference order, limited to the kinds whose
+/// default key env var the animist configs name. Local kinds (ollama,
+/// llama-cpp, omlx) carry no default key env var and are skipped.
 const PROVIDER_PRIORITY: &[&str] = &["anthropic", "openai", "synthetic", "zai-coding-plan"];
 
 /// The default credential env var for a supported kind, when it has one.

@@ -1,9 +1,6 @@
-//! Append-only cost ledger (I.6), ported from the reference
-//! `craft-storage/src/stats.rs`. One JSONL record per agent run, used by
-//! `/stats`.
-//!
-//! Adapted to this repo: no `tracing` here, so malformed lines warn on stderr;
-//! `format_tokens` is reused from `usage.rs` instead of duplicated.
+//! Append-only cost ledger: one JSONL record per agent run, used by
+//! `/stats`. Malformed lines warn on stderr; `format_tokens` is reused
+//! from `usage.rs`.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

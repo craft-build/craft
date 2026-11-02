@@ -5,8 +5,8 @@
 //! persistence lands on the JSONL
 //! [`Session`](crate::storage::sessions::Session) store behind the storage
 //! layer's [`SessionStore`](crate::storage::sessions::SessionStore). MCP
-//! handles, Flow attachments, and plugin rule stores from the reference
-//! have no counterpart here (yet).
+//! handles, Flow attachments, and plugin rule stores have no counterpart
+//! here.
 
 use crate::permissions::{PermissionError, ToolKey};
 use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
@@ -15,7 +15,7 @@ use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 /// `craft recipe run`): where an interactive surface would prompt, headless
 /// has no one to ask, so every ask fails closed with guidance naming the
 /// deliberate opt-outs instead of hanging or allowing. The permission rules
-/// and the auto-review reviewer live in the policy layer (07), which hands
+/// and the auto-review reviewer live in the policy layer, which hands
 /// this responder only the asks that reached it; the `question` tool
 /// degrades to `DismissAsk` headlessly, so nothing can park on a user.
 pub struct HeadlessGate;
@@ -117,7 +117,7 @@ mod tests {
         );
     }
 
-    /// F.3 draft preservation: a draft-only change waits for its soft-write
+    /// Draft preservation: a draft-only change waits for its soft-write
     /// window on disk, `checkpoint_now` flushes it, and an emptied draft
     /// clears the stored copy.
     #[test]

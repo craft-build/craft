@@ -1,9 +1,7 @@
 //! Size-capped rotating log files (200 MB × 10 by default).
 //!
-//! Ported from the reference `craft-storage/src/log.rs`. Deviation: the
-//! reference takes its cross-process rotation lock with the `fs4` crate;
-//! that crate is not a dependency here, so the same advisory flock is taken
-//! via the stabilized `std::fs::File::lock`.
+//! The cross-process rotation lock is an advisory flock via
+//! `std::fs::File::lock`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -57,8 +55,8 @@ impl Drop for RotationLock {
     }
 }
 
-/// Logs used to live in the state dir. Move any leftover `craft.*.log` files
-/// to the logs dir once. Never overwrites: on any conflict or rename failure
+/// Move any leftover `craft.*.log` files from the state dir to the logs
+/// dir once. Never overwrites: on any conflict or rename failure
 /// the source file stays where it is.
 fn migrate_stale_logs(old_dir: &Path, new_dir: &Path) {
     if old_dir == new_dir {

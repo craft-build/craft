@@ -651,7 +651,7 @@ fn builtin_write_allow_is_outranked_by_deny() {
 
 /// Builtin allows are rules, so they are consulted before `tool_defaults`: a
 /// user default cannot turn an in-project write back into a prompt (use a deny
-/// rule for that). This matches the reference.
+/// rule for that).
 #[test]
 fn builtin_write_allow_beats_tool_default() {
     let tmp = tempfile::tempdir().unwrap();
@@ -804,7 +804,7 @@ fn permission_error_display_has_prefix_and_guidance() {
     assert!(e.to_string().contains("User guidance: use git clean"));
 }
 
-// --- MCP tool annotations (Phase 3) ---
+// --- MCP tool annotations ---
 
 fn mcp_tool(server: &str, tool: &str) -> ToolKey {
     ToolKey::McpTool {

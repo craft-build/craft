@@ -29,7 +29,7 @@ pub struct Config {
     pub compaction_buffer: CompactionBuffer,
     /// Tool-output pre-compression applied to the model's request view.
     pub compression: crate::compression::CompressionConfig,
-    /// User keybinding overlay: snake_case action id → chord list (F.1).
+    /// User keybinding overlay: snake_case action id → chord list.
     /// An empty list disables the action; unknown ids are warned and dropped.
     #[serde(default)]
     pub keybindings: std::collections::BTreeMap<String, Vec<String>>,
@@ -40,8 +40,8 @@ pub struct Config {
     pub sandbox: SandboxConfig,
 }
 
-/// `[sandbox]` section. Mirrors the predecessor `craft-config::SandboxConfig`;
-/// resolved into a [`crate::sandbox::SandboxPolicy`] at session start.
+/// `[sandbox]` section, resolved into a [`crate::sandbox::SandboxPolicy`]
+/// at session start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SandboxConfig {
@@ -67,7 +67,7 @@ impl Default for SandboxConfig {
 pub enum CompactionKind {
     /// LLM-powered summary of the conversation head.
     Llm,
-    /// Deterministic no-LLM summary (ported from Craft's VCC compaction).
+    /// Deterministic no-LLM summary.
     Vcc,
 }
 
@@ -101,8 +101,7 @@ fn de_ratio<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D:
 /// Context reserved for compaction: an absolute token count or a percent of
 /// the context window (BML: `20000` or `"20%"`). Subtracted from the window
 /// when the engine decides whether the context is full, so compaction fires
-/// before the provider would start rejecting requests (ported from Craft's
-/// `craft_config::CompactionBuffer`).
+/// before the provider would start rejecting requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionBuffer {
     Tokens(u32),
@@ -187,7 +186,7 @@ fn default_compaction() -> Vec<CompactionConfig> {
     ]
 }
 
-/// Advisor auto-act severity threshold (C.12). Declaration order doubles as
+/// Advisor auto-act severity threshold. Declaration order doubles as
 /// the severity ranking: `Off < Nit < Concern < Blocker`.
 #[derive(
     Debug,
@@ -211,7 +210,7 @@ pub enum AdvisorAutoAct {
 }
 
 /// Always-on lightweight reviewer that reads the transcript delta after a
-/// terminal reply and emits at most one deduped note (C.12). Off by default.
+/// terminal reply and emits at most one deduped note. Off by default.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdvisorConfig {
@@ -268,17 +267,17 @@ pub struct AgentConfig {
     pub thinking: Option<crate::thinking::ThinkingConfig>,
     /// Bound on model calls per run. `None` keeps each surface's default
     /// (unbounded in the TUI; the headless builder defaults it);
-    /// set by `--max-turns` (G.1).
+    /// set by `--max-turns`.
     pub max_turns: Option<u32>,
     /// Bound on tools executing concurrently within one wave; it bounds both
     /// model-emitted calls and `batch` children (06's scheduling claims).
     #[serde(default = "default_max_concurrent_tools")]
     pub max_concurrent_tools: usize,
-    /// Post-turn advisor (C.12).
+    /// Post-turn advisor.
     pub advisor: AdvisorConfig,
-    /// Post-turn argosy memory extraction (Phase 4 of the argosy
-    /// integration): durable facts from the turn are written into the
-    /// project's local argosy after a successful run. Default on.
+    /// Post-turn argosy memory extraction: durable facts from the turn
+    /// are written into the project's local argosy after a successful run.
+    /// Default on.
     #[serde(default = "default_memory_extraction")]
     pub memory_extraction: bool,
 }
@@ -604,9 +603,7 @@ impl<'de> Deserialize<'de> for ProviderConfig {
     ) -> std::result::Result<Self, D::Error> {
         use serde::de::Error as _;
 
-        // Config blocks always arrive as projected JSON (bml.rs builds a
-        // serde_json::Value), so re-borrowing the value here buys
-        // kind-first parsing: dropped kinds get migration guidance instead
+        // Kind-first parsing: dropped kinds get migration guidance instead
         // of an unknown-variant error, and inline keys are rejected before
         // any provider sees them.
         let value = serde_json::Value::deserialize(deserializer)?;

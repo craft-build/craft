@@ -1,6 +1,4 @@
 //! Rolling user-input history for the prompt line, capped at 100 entries.
-//!
-//! Ported from the reference `craft-storage/src/input_history.rs`.
 
 use std::collections::VecDeque;
 use std::fs;

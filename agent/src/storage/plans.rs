@@ -1,7 +1,4 @@
 //! Plans storage: slug-named markdown plan files under `<state>/plans/`.
-//!
-//! Ported from the reference `craft-storage/src/plans.rs`. Randomness comes
-//! from UUIDv4 bytes instead of `getrandom` (not a dependency here).
 
 use std::path::PathBuf;
 use std::sync::LazyLock;

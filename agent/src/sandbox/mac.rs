@@ -1,7 +1,6 @@
 //! macOS sandbox via the stock `sandbox-exec` binary. Generates a Seatbelt SBPL
 //! profile at runtime that confines writes to the workspace (+ common writable
-//! roots like tmp/cache) and gates network access. Ported from reference
-//! `craft-sandbox/src/mac.rs`.
+//! roots like tmp/cache) and gates network access.
 
 use std::process::Command;
 
