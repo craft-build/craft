@@ -121,7 +121,6 @@ impl CraftProvider {
         let env = crate::runtime::workspace_env(
             cwd,
             crate::runtime::McpStartup::Background(mcp_events),
-            true,
             sandbox,
         )
         .await?;

@@ -346,8 +346,8 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     Keybind {
         action_id: None,
-        label: KeyLabel::Alt("g", "G"),
-        description: "Jump to top / bottom (empty composer)",
+        label: KeyLabel::Alt("Home", "End"),
+        description: "Jump to top / bottom of the transcript",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

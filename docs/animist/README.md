@@ -63,8 +63,8 @@ date, commit range, test counts, review verdict, and any follow-ups.
 
 - **Load the `rust-best-practices` skill before writing any code**, and apply
   it to all Rust you add or change.
-- **When implementation is finished, run the review agent**
-  (`.craft/agents/reviewer.md`) over that prompt's full diff. Fix every blocking
+- **When implementation is finished, run the review agent** over that
+  prompt's full diff. Fix every blocking
   or high finding. Fix each medium finding or justify skipping it in the
   completion note. Re-run validation, then re-review until the verdict is clean.
 - Work in `agent/`. Read `AGENTS.md`/`AGENT.md` files on the touched paths

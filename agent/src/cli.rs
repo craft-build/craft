@@ -2352,7 +2352,6 @@ pub(crate) async fn run_headless_query_with(
     let env = crate::runtime::workspace_env(
         &cwd,
         crate::runtime::McpStartup::Connected,
-        false,
         crate::sandbox::SandboxPolicy::resolve(&config, q.policy == PermissionPolicy::Yolo),
     )
     .await?;

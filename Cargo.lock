@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "craft"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "agent-client-protocol",
  "aho-corasick",

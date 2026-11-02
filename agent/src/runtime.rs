@@ -45,12 +45,11 @@ pub enum McpStartup {
 }
 
 /// Discover instructions and permission rules off the async worker, build
-/// the workspace with the instructions loaded, optionally install the
-/// built-in reviewer definition, and start MCP in the surface's mode.
+/// the workspace with the instructions loaded, and start MCP in the
+/// surface's mode.
 pub async fn workspace_env(
     cwd: &Path,
     mcp: McpStartup,
-    install_reviewer: bool,
     sandbox: crate::sandbox::SandboxPolicy,
 ) -> Result<WorkspaceEnv> {
     let (instructions, permissions) = tokio::task::spawn_blocking({
@@ -72,15 +71,6 @@ pub async fn workspace_env(
     let workspace = Workspace::new(cwd)
         .map_err(crate::error::client_error)?
         .with_loaded_instructions(instructions.loaded.clone());
-    // Best-effort, idempotent install of the built-in reviewer agent
-    // definition into `.craft/agents/`.
-    if install_reviewer {
-        let root = cwd.to_path_buf();
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::knowledge::install_reviewer_definition(&root, false)
-        })
-        .await;
-    }
     let (mcp_handle, mcp_errors) = match mcp {
         McpStartup::Connected => crate::mcp::start_connected(cwd).await,
         McpStartup::Background(events) => crate::mcp::start_with_events(cwd, events).await,
@@ -129,14 +119,9 @@ mod tests {
             } else {
                 McpStartup::Background(crate::mcp::McpEvents::default())
             };
-            let env = workspace_env(
-                dir.path(),
-                mode,
-                false,
-                crate::sandbox::SandboxPolicy::off(),
-            )
-            .await
-            .unwrap();
+            let env = workspace_env(dir.path(), mode, crate::sandbox::SandboxPolicy::off())
+                .await
+                .unwrap();
             assert!(
                 env.instructions
                     .text
@@ -152,32 +137,5 @@ mod tests {
             // The permission engine exists even where nothing consults it.
             assert!(!env.permissions.is_yolo());
         }
-    }
-
-    #[tokio::test]
-    async fn workspace_env_installs_the_reviewer_definition_opt_in() {
-        let dir = tempfile::tempdir().unwrap();
-        workspace_env(
-            dir.path(),
-            McpStartup::Connected,
-            true,
-            crate::sandbox::SandboxPolicy::off(),
-        )
-        .await
-        .unwrap();
-        assert!(
-            dir.path().join(".craft/agents").exists(),
-            "reviewer install is requested by the flag"
-        );
-        let bare = tempfile::tempdir().unwrap();
-        workspace_env(
-            bare.path(),
-            McpStartup::Connected,
-            false,
-            crate::sandbox::SandboxPolicy::off(),
-        )
-        .await
-        .unwrap();
-        assert!(!bare.path().join(".craft/agents").exists());
     }
 }

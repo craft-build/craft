@@ -363,7 +363,6 @@ impl AppState {
         let env = crate::runtime::workspace_env(
             cwd,
             crate::runtime::McpStartup::Connected,
-            false,
             crate::sandbox::SandboxPolicy::resolve(&self.config, false),
         )
         .await

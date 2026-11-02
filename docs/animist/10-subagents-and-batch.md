@@ -9,7 +9,7 @@
   [State ownership](harness-design.md#state-ownership). Start with the
   [test inventory](harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
-  (`.craft/agents/reviewer.md`) as described in [Finish](#finish).
+  as described in [Finish](#finish).
 
 ## Goal
 
@@ -95,8 +95,8 @@ they share the parent's layers, cancellation, budgets and nesting limit.
    - Confirm that 06 removed the `SharedDispatch` back-reference, and delete
      anything left of it.
 4. **Review tool.** `review` (the reviewer subagent) uses the same launcher.
-   Make sure `.craft/agents/reviewer.md`-style agent definitions still load and
-   restrict tools.
+   Make sure the built-in reviewer definition still restricts tools to its
+   budget.
 5. **Limits.** Set `max_child_calls` and `max_tool_depth` so a full batch (find
    today's maximum entry count) fits. Pin it with a test.
 
@@ -133,7 +133,7 @@ they share the parent's layers, cancellation, budgets and nesting limit.
 ## Finish
 
 1. Run fmt, clippy and the tests (see the README).
-2. **Run the review agent** (`.craft/agents/reviewer.md`) over this prompt's
+2. **Run the review agent** over this prompt's
    full diff. Address its findings, re-run validation, and repeat until the
    verdict is clean.
 3. Append a completion note:
@@ -240,10 +240,7 @@ successfully.`).
   process cwd, explicit creation failure.
 - The reviewer: `review` rides the same `SpawnSubagent` launcher; the
   registry serves exactly `REVIEWER_TOOLS` (+ `list_tools`) and every
-  tool the vendored `.craft/agents/reviewer.md` definition advertises is
-  servable (`reviewer_registry_serves_exactly_the_reviewer_budget`,
-  `the_reviewer_definition_admits_only_servable_tools`); the install
-  tests in `runtime.rs` still pass.
+  tool is servable (`reviewer_registry_serves_exactly_the_reviewer_budget`).
 - Filtering: forwarded child events are tagged with the call id; the
   child's `CraftEvent::Done`/`Error`/`PersistenceFailed` and animist
   `ToolProgress`/`Finished` are dropped while `ToolFinished` passes

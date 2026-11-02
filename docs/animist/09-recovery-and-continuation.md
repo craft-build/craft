@@ -11,7 +11,7 @@
 - This prompt now runs **after** compaction (08), so overflow recovery calls
   08's compactors directly.
 - When implementation is finished, **run the review agent**
-  (`.craft/agents/reviewer.md`) as described in [Finish](#finish).
+  as described in [Finish](#finish).
 
 ## Goal
 
@@ -176,7 +176,7 @@ the deliberate changes already listed.
 ## Finish
 
 1. Run fmt, clippy and the tests (see the README).
-2. **Run the review agent** (`.craft/agents/reviewer.md`) over this prompt's
+2. **Run the review agent** over this prompt's
    full diff. Address its findings, re-run validation, and repeat until the
    verdict is clean.
 3. Append a completion note:

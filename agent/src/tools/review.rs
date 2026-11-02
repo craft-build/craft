@@ -1,9 +1,9 @@
 //! `review` tool: spawn a read-only
 //! reviewer subagent over the working-tree diff (or one committed revision),
-//! built from argosy's reviewer material. The reviewer records findings via
-//! the argosy review tools (`start_review` / `review_diff` /
-//! `report_finding` / `review_findings`) and returns a
-//! prioritized verdict.
+//! or over the current state of named paths, built from argosy's reviewer
+//! material. The reviewer records findings via the argosy review tools
+//! (`start_review` / `review_diff` / `report_finding` / `review_findings`)
+//! and returns a prioritized verdict.
 
 use std::sync::Arc;
 
@@ -25,6 +25,12 @@ pub struct ReviewArgs {
     /// Files to focus on; omitted reviews every changed file.
     #[serde(default)]
     pub focus_files: Option<Vec<String>>,
+    /// Repo-relative paths (files or directories) to review as current
+    /// state, not as a diff: every tracked line under them is in scope.
+    /// Set for a whole-area review of unchanged code; omit for a diff
+    /// review of the working tree or a commit named in `task`.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -58,15 +64,41 @@ pub struct Review(pub Arc<dyn SpawnSubagent>);
 impl Review {
     async fn execute(&self, context: &ToolContext<'_>, args: ReviewArgs) -> Result<ReviewOutput> {
         {
+            let state_paths: Vec<String> = args
+                .paths
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
             let mut prompt = String::from(
-                "Review the current changes and report verified defects with priorities.\n\n\
-                 Start with start_review (cwd is this project's root) to snapshot the \
-                 diff, then review_diff for the changed files. Use search_rules \
-                 to find the styleguide rules that govern the changed code, and \
-                 report_finding for every verified defect (P0-P3, file:line, a concrete \
-                 failure scenario, and a fix). Finish with review_findings to audit your \
-                 finding set, then end with a prioritized verdict.\n\nTask:\n",
+                "Report only verified defects, each with a priority (P0-P3), file:line, a \
+                 concrete failure scenario, and a fix. Use search_rules to find the \
+                 styleguide rules that govern the code. Finish with review_findings to \
+                 audit your finding set, then end with a prioritized verdict.\n\n",
             );
+            if state_paths.is_empty() {
+                prompt.push_str(
+                    "Review the current changes: start with start_review (cwd is this \
+                     project's root) to snapshot the diff, then review_diff for the \
+                     changed files.\n\nTask:\n",
+                );
+            } else {
+                prompt.push_str(
+                    "Review the current state of the paths below as a whole, not a diff: \
+                     start with start_review (cwd is this project's root) with \
+                     base \"empty\" and these paths — every tracked line counts as added, \
+                     so any line validates for report_finding — then review_diff per \
+                     file, reading surrounding code as needed.\n\nPaths:\n",
+                );
+                for path in &state_paths {
+                    prompt.push_str("- ");
+                    prompt.push_str(path);
+                    prompt.push('\n');
+                }
+                prompt.push_str("\nTask:\n");
+            }
             prompt.push_str(&args.task);
             if let Some(focus) = args.focus_files.filter(|f| !f.is_empty()) {
                 prompt.push_str("\n\nFocus files:\n");
@@ -99,11 +131,12 @@ impl Review {
     }
 }
 
-const REVIEW_DESCRIPTION: &str = "Spawn a code review subagent for the current working-tree changes (or a commit). Use \
-proactively after completing a feature, bugfix, refactor, or multi-file change. The \
-reviewer is read-only: it snapshots the diff with the argosy review tools, checks \
-styleguide rules, records prioritized findings (P0-P3), and returns a verdict with \
-per-priority counts.";
+const REVIEW_DESCRIPTION: &str = "Spawn a code review subagent. Diff mode reviews the current \
+working-tree changes (or a commit named in the task); state mode reviews the current code of \
+the paths argument as a whole. Use proactively after completing a feature, bugfix, refactor, \
+or multi-file change, or when asked to review an area. The reviewer is read-only: it \
+snapshots the scope with the argosy review tools, checks styleguide rules, records \
+prioritized findings (P0-P3), and returns a verdict with per-priority counts.";
 
 #[async_trait]
 impl ToolImpl for Review {
@@ -165,6 +198,7 @@ mod tests {
                 serde_json::json!({
                     "task": args.task,
                     "focus_files": args.focus_files,
+                    "paths": args.paths,
                 }),
             )
             .await
@@ -178,6 +212,7 @@ mod tests {
         let (text, req) = run(ReviewArgs {
             task: "the auth refactor".into(),
             focus_files: Some(vec!["src/auth.rs".into()]),
+            paths: None,
         })
         .await;
         assert!(text.contains("verdict for: reviewer"));
@@ -185,6 +220,21 @@ mod tests {
         assert_eq!(req.model_tier.as_deref(), Some("strong"));
         assert!(req.prompt.contains("the auth refactor"));
         assert!(req.prompt.contains("src/auth.rs"));
+        assert!(req.prompt.contains("snapshot the diff"));
+    }
+
+    #[tokio::test]
+    async fn paths_switch_the_reviewer_to_whole_state_mode() {
+        let (_text, req) = run(ReviewArgs {
+            task: "audit the harness module".into(),
+            focus_files: None,
+            paths: Some(vec!["agent/src/harness".into()]),
+        })
+        .await;
+        assert!(req.prompt.contains("base \"empty\""));
+        assert!(req.prompt.contains("agent/src/harness"));
+        assert!(req.prompt.contains("audit the harness module"));
+        assert!(!req.prompt.contains("snapshot the diff"));
     }
 
     /// Same claim shape as `task`: resource-less, so sibling review launches

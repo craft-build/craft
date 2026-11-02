@@ -11,7 +11,7 @@
   in full before writing any layer.
 - Start with the [test inventory](harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
-  (`.craft/agents/reviewer.md`) as described in [Finish](#finish).
+  as described in [Finish](#finish).
 
 ## Goal
 
@@ -289,7 +289,7 @@ driven only by tests.
 ## Finish
 
 1. Run fmt, clippy and the tests (see the README).
-2. **Run the review agent** (`.craft/agents/reviewer.md`) over this prompt's
+2. **Run the review agent** over this prompt's
    full diff, with the [test-integrity](harness-design.md#test-integrity)
    instruction. Address its findings, re-run validation, and repeat until
    the verdict is clean.

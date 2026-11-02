@@ -84,7 +84,7 @@ When a request still overflows after compaction, an escalating ladder collapses 
 
 Every execution surface (TUI, `--print` headless, ACP) obtains the shared pieces of a session from `agent/src/runtime.rs`, so equivalent sessions receive equivalent run policies:
 
-- `runtime::workspace_env(cwd, mcp, install_reviewer)` — instruction discovery, the workspace (MCP handle installed), and the permission engine. Every surface constructs the `PermissionManager` and consults it: the TUI prompt overlay, the ACP `session/request_permission`, and the headless gate below.
+- `runtime::workspace_env(cwd, mcp)` — instruction discovery, the workspace (MCP handle installed), and the permission engine. Every surface constructs the `PermissionManager` and consults it: the TUI prompt overlay, the ACP `session/request_permission`, and the headless gate below.
 - `model_selection::resolve_or_default` — a model choice plus its catalog window; output ceilings ride the model handle, where request shaping reads them. Lookup only: `--model` ids the catalog does not list stay usable.
 
 ## The harness
@@ -113,7 +113,7 @@ Execution tools: `bash` (with `bash_status`, `bash_watch`, `bash_kill` for backg
 
 ### Argosy knowledge tools
 
-The `argosy` crate is linked in-process (no subprocess, no MCP transport). It contributes semantic `search` and `ask` (with an optional decision endpoint), document/memory/rule reads and writes, skill discovery (`list_skills` / `get_skill`), and a review toolset (`start_review`, `review_diff`, `report_finding`, `review_findings`). Embeddings run locally (ONNX, via the argosy crate). Argosy keeps its own state keyed by project root — writes from craft are visible to the standalone `argosy mcp`. The `reviewer` subagent snapshots the working-tree diff and returns prioritized P0-P3 findings; `/review`, `/scan`, `/dream`, and `/memory` slash commands expose the same workflows. Post-turn memory extraction (default on, `agent.memory_extraction`) writes durable facts into the project's local argosy.
+The `argosy` crate is linked in-process (no subprocess, no MCP transport). It contributes semantic `search` and `ask` (with an optional decision endpoint), document/memory/rule reads and writes, skill discovery (`list_skills` / `get_skill`), and a review toolset (`start_review`, `review_diff`, `report_finding`, `review_findings`). Embeddings run locally (ONNX, via the argosy crate). Argosy keeps its own state keyed by project root — writes from craft are visible to the standalone `argosy mcp`. The `reviewer` subagent snapshots the working-tree diff (or the current state of named paths) and returns prioritized P0-P3 findings; `/review`, `/scan`, `/dream`, and `/memory` slash commands expose the same workflows. Post-turn memory extraction (default on, `agent.memory_extraction`) writes durable facts into the project's local argosy.
 
 ### Paths and limits
 

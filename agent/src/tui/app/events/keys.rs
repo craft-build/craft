@@ -331,7 +331,8 @@ impl App {
     }
 
     /// Navigation keys: Esc dismissal order, focus cycling, page/edge
-    /// scrolls, and the vim-style g/G jump keys (empty composer only).
+    /// scrolls. Bare letters never scroll — the composer must accept any
+    /// first character of a message.
     fn handle_navigation_key(
         &mut self,
         key: KeyEvent,
@@ -403,16 +404,6 @@ impl App {
                 true
             }
             KeyCode::End => {
-                self.scroll_to_bottom();
-                true
-            }
-            // Vim-style scroll keys, only while the composer is empty so
-            // typing a message never eats a character.
-            KeyCode::Char('g') if self.composer.text.is_empty() => {
-                self.scroll_to_top();
-                true
-            }
-            KeyCode::Char('G') if self.composer.text.is_empty() => {
                 self.scroll_to_bottom();
                 true
             }

@@ -1754,27 +1754,4 @@ mod tests {
             );
         }
     }
-
-    /// The vendored `.craft/agents/reviewer.md` definition and the
-    /// registry's budget cannot drift apart: every tool the definition
-    /// advertises must be servable.
-    #[test]
-    fn the_reviewer_definition_admits_only_servable_tools() {
-        let md = crate::knowledge::REVIEWER_AGENT_MD;
-        let tools = md
-            .split("tools:")
-            .nth(1)
-            .and_then(|section| section.split("---").next())
-            .expect("tools section")
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("- ").map(str::to_string))
-            .collect::<Vec<_>>();
-        assert!(!tools.is_empty(), "definition lists tools");
-        for tool in tools {
-            assert!(
-                REVIEWER_TOOLS.contains(&tool.as_str()),
-                "{tool} is in the definition but not the reviewer budget"
-            );
-        }
-    }
 }

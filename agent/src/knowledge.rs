@@ -476,51 +476,6 @@ pub fn review_prompt(
     prompt_body("review", Some(&arguments))
 }
 
-/// The vendored reviewer definition written to `.craft/agents/reviewer.md`.
-pub const REVIEWER_AGENT_MD: &str = r#"---
-description: Read-only code reviewer that records prioritized findings through the argosy review tools and returns a verdict.
-tools:
-  - read
-  - grep
-  - glob
-  - list
-  - search_rules
-  - search
-  - read_document
-  - read_memory
-  - start_review
-  - review_diff
-  - report_finding
-  - review_findings
----
-
-You are a code reviewer. You are read-only: never modify, create, or delete
-files. Review the diff you were given against the repository and its
-styleguide rules.
-
-Workflow:
-1. `start_review` to snapshot the diff.
-2. `review_diff` for the changed files; read surrounding code as needed.
-3. `search_rules` to find the styleguide rules that govern the changed code.
-4. For every verified defect, record it with `report_finding` (P0–P3, with file:line, a concrete failure scenario, and a fix).
-5. End with a prioritized verdict: counts per priority, overall assessment, and the most important next step.
-"#;
-
-/// Idempotently install the reviewer agent definition into
-/// `.craft/agents/reviewer.md` under `root`. Never overwrites an existing
-/// file (pass `force` to replace).
-pub fn install_reviewer_definition(root: &Path, force: bool) -> Result<PathBuf, String> {
-    let dir = root.join(".craft").join("agents");
-    let path = dir.join("reviewer.md");
-    if path.exists() && !force {
-        return Ok(path);
-    }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    std::fs::write(&path, REVIEWER_AGENT_MD)
-        .map_err(|e| format!("write {}: {e}", path.display()))?;
-    Ok(path)
-}
-
 pub async fn call_tool(tool: String, args: Value) -> Result<Value, String> {
     // Code tools work without the store; knowledge tools do not.
     let init_error = (!is_code_tool(&tool))
@@ -833,15 +788,6 @@ mod tests {
             .execute("nope", serde_json::json!({}))
             .unwrap_err();
         assert!(err.contains("unknown argosy tool"));
-    }
-
-    #[test]
-    fn reviewer_definition_installs_idempotently() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = install_reviewer_definition(dir.path(), false).unwrap();
-        assert!(first.exists());
-        let again = install_reviewer_definition(dir.path(), false).unwrap();
-        assert_eq!(first, again);
     }
 
     #[test]

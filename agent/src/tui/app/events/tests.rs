@@ -636,12 +636,12 @@ fn composer_chords_edit_words_and_lines() {
     assert_eq!(app.composer.cursor, 7);
 }
 
-/// g and G still type into the composer when it holds text.
+/// g and G always type into the composer, even as the first characters of
+/// a message — scroll jumps live on Home/End, never on bare letters.
 #[test]
-fn vim_scroll_keys_type_when_composer_has_text() {
+fn g_and_g_type_even_when_composer_is_empty() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut app = App::new();
-    app.composer.insert_char('a');
     app.handle_key(
         crate::tui::compat::slt_key(KeyCode::Char('g'), KeyModifiers::NONE),
         &tx,
@@ -650,15 +650,7 @@ fn vim_scroll_keys_type_when_composer_has_text() {
         crate::tui::compat::slt_key(KeyCode::Char('G'), KeyModifiers::NONE),
         &tx,
     );
-    assert_eq!(app.composer.text, "agG");
-    app.handle_key(
-        crate::tui::compat::slt_key(KeyCode::Backspace, KeyModifiers::NONE),
-        &tx,
-    );
-    app.handle_key(
-        crate::tui::compat::slt_key(KeyCode::Backspace, KeyModifiers::NONE),
-        &tx,
-    );
+    assert_eq!(app.composer.text, "gG");
 }
 
 /// ↑ recalls older entries, clamps at the oldest, ↓ walks back toward the

@@ -168,14 +168,14 @@ mod tests {
         let mut app = scrolled_app();
         draw_app(&mut app, 80, 24);
 
-        // Top: Home and g.
+        // Top: Home.
         app.handle_key(slt_key(KeyCode::Home, KeyModifiers::NONE), &tx);
         assert_eq!(app.view.scroll, ScrollPos::default());
         app.scroll_by(2);
-        app.handle_key(slt_key(KeyCode::Char('g'), KeyModifiers::NONE), &tx);
+        app.handle_key(slt_key(KeyCode::Home, KeyModifiers::NONE), &tx);
         assert_eq!(app.view.scroll, ScrollPos::default());
 
-        // Bottom: End and G re-pin follow.
+        // Bottom: End re-pins follow.
         app.handle_key(slt_key(KeyCode::End, KeyModifiers::NONE), &tx);
         assert!(app.view.follow);
         let layout = Layout::new(&app.view.segments, app.view.view_width);
@@ -185,8 +185,8 @@ mod tests {
         );
         app.scroll_by(-2);
         assert!(!app.view.follow);
-        app.handle_key(slt_key(KeyCode::Char('G'), KeyModifiers::NONE), &tx);
-        assert!(app.view.follow, "G lands at the bottom and re-pins");
+        app.handle_key(slt_key(KeyCode::End, KeyModifiers::NONE), &tx);
+        assert!(app.view.follow, "End lands at the bottom and re-pins");
 
         // Line, half page, page: positions move by the expected row counts.
         // The arrows are history keys now, so the one-row step goes through
