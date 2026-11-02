@@ -70,8 +70,11 @@ Delete 05's rig bridge and the `rig-core` dependency.
    - Directory walks must conflict with writes beneath them. Pick a key scheme
      (ancestors in the claim, or a conservative workspace-wide `reads` key that
      every write also claims) and document it.
-   - `question`, `batch`, `task` and `bash*` stay `Exclusive`, because shell
-     commands can touch anything.
+   - `question`, `batch` and `bash*` stay `Exclusive`, because shell
+     commands can touch anything; `batch` must be, as `dispatch_all`
+     requires it. `task` and `review` claim empty resources: the child
+     conversation claims its own resources, and cross-agent file ordering
+     is `PathLocks`', so sibling subagents share a wave.
    - Network-only tools (`webfetch`, `websearch`) claim empty resources:
      independent.
    - MCP tools stay `Exclusive` unless the server marks them read-only, and
@@ -197,7 +200,7 @@ addressed) · clippy at the 01 baseline (zero new warnings),
 | `move` (`move_file`) | exclusive (import rewrite touches any file); workspace-wide lock |
 | `bash`, `bash_status`, `bash_watch`, `bash_kill` | exclusive |
 | `question` | exclusive (parks on the host seam) |
-| `task`, `review` | exclusive (child agents touch anything) |
+| `task`, `review` | independent (empty resources; the child conversation claims its own, cross-agent ordering is `PathLocks`') |
 | `batch` | exclusive (required by `dispatch_all`) |
 | `todo_write` | `writes: ["todos"]` |
 | `retrieve`, `skill`, `sessions`, `list_tools` | independent (empty resources) |

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -115,7 +115,14 @@ impl ToolImpl for Review {
         definition::<ReviewArgs>("review", REVIEW_DESCRIPTION)
     }
 
-    // Exclusive: the child reviewer runs with its own tool registry.
+    // Same claim as `task`: sibling reviewers share a wave; the child's
+    // own conversation claims its resources.
+    fn scheduling(&self, _input: &serde_json::Value) -> ToolScheduling {
+        ToolScheduling::Resources {
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
+    }
 
     async fn call(&self, context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
         finish(self.execute(context, args).await)
@@ -125,6 +132,7 @@ impl ToolImpl for Review {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::NoSubagents;
     use std::sync::Mutex;
 
     struct MockSpawn(Mutex<Vec<SubagentRequest>>);
@@ -177,5 +185,17 @@ mod tests {
         assert_eq!(req.model_tier.as_deref(), Some("strong"));
         assert!(req.prompt.contains("the auth refactor"));
         assert!(req.prompt.contains("src/auth.rs"));
+    }
+
+    /// Same claim shape as `task`: resource-less, so sibling review launches
+    /// share a wave.
+    #[test]
+    fn scheduling_lets_siblings_share_a_wave() {
+        let tool = Review(Arc::new(NoSubagents));
+        let claim = <Review as ToolImpl>::scheduling(&tool, &serde_json::json!({}));
+        assert!(matches!(
+            &claim,
+            ToolScheduling::Resources { reads, writes } if reads.is_empty() && writes.is_empty()
+        ));
     }
 }

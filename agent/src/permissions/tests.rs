@@ -604,6 +604,61 @@ fn task_explicit_tool_default_wins_over_builtin_allow() {
     assert!(needs_prompt(&mgr.check(&tool, &["*".to_string()])));
 }
 
+/// `batch` is a builtin allow for the same reason `task` is: every child
+/// call passes through this gate individually, so the wrapper grants
+/// nothing. Without it, auto-review sees only `Tool: batch / scopes: *`,
+/// denies under fail-closed, and `apply_auto_review` turns that one blind
+/// verdict into a session-wide deny rule.
+#[test]
+fn batch_is_allowed_by_default() {
+    let args = serde_json::json!({"tool_calls": [
+        {"tool": "write", "parameters": {"path": "src/a.rs", "content": "x"}},
+    ]});
+    let (scopes, force_prompt) = scope_for_call(Path::new("/w"), "batch", &args);
+    assert!(!force_prompt);
+    assert_eq!(scopes, vec!["*".to_string()]);
+
+    let mgr = PermissionManager::new(PermissionsConfig::default(), std::env::temp_dir());
+    let tool = ToolKey::native("batch");
+    assert_eq!(mgr.check(&tool, &scopes), PermissionCheck::Allowed);
+    // A recorded deny (user rule or a reviewed prompt under a Prompt
+    // default) still outranks the builtin allow.
+    mgr.apply_auto_review(&tool, &["*".to_string()], false);
+    assert_eq!(
+        mgr.check(&tool, &["*".to_string()]),
+        PermissionCheck::Denied
+    );
+}
+
+/// The builtin allow does not outrank an explicit batch deny rule.
+#[test]
+fn batch_deny_rule_still_denies() {
+    let mgr = mgr_with(
+        std::env::temp_dir().as_ref(),
+        vec![deny_rule("batch", None)],
+    );
+    let tool = ToolKey::native("batch");
+    assert_eq!(
+        mgr.check(&tool, &["*".to_string()]),
+        PermissionCheck::Denied
+    );
+}
+
+/// A user `tool_defaults` entry for `batch` still wins over the builtin
+/// allow, so the approval seam stays reachable.
+#[test]
+fn batch_explicit_tool_default_wins_over_builtin_allow() {
+    let config = PermissionsConfig {
+        tool_defaults: [(ToolKey::native("batch"), DefaultEffect::Prompt)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mgr = PermissionManager::new(config, std::env::temp_dir());
+    let tool = ToolKey::native("batch");
+    assert!(needs_prompt(&mgr.check(&tool, &["*".to_string()])));
+}
+
 /// The builtin allow does not outrank an explicit deny.
 #[test]
 fn task_deny_rule_still_denies() {

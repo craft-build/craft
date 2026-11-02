@@ -158,6 +158,18 @@ fn claim_table_matches_the_documented_scheme() {
             &Question(std::sync::Arc::new(DismissAsk)),
             json!({"questions": []}),
         ),
+        claim(&Batch, json!({"tool_calls": []})),
+        claim(
+            &MoveFile(workspace.clone()),
+            json!({"source": "a.rs", "destination": "b.rs"}),
+        ),
+    ] {
+        assert!(matches!(tool, ToolScheduling::Exclusive), "{tool:?}");
+    }
+
+    // Subagent launchers claim no parent-wave resources: the child
+    // conversation claims its own, so sibling launches share a wave.
+    for tool in [
         claim(
             &Task(std::sync::Arc::new(NoSubagents)),
             json!({"description": "d", "prompt": "p"}),
@@ -166,13 +178,12 @@ fn claim_table_matches_the_documented_scheme() {
             &Review(std::sync::Arc::new(NoSubagents)),
             json!({"task": "t"}),
         ),
-        claim(&Batch, json!({"tool_calls": []})),
-        claim(
-            &MoveFile(workspace.clone()),
-            json!({"source": "a.rs", "destination": "b.rs"}),
-        ),
     ] {
-        assert!(matches!(tool, ToolScheduling::Exclusive), "{tool:?}");
+        assert!(
+            matches!(&tool, ToolScheduling::Resources { reads, writes }
+                if reads.is_empty() && writes.is_empty()),
+            "{tool:?}"
+        );
     }
 
     // Session-state and network tools.

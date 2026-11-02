@@ -524,6 +524,30 @@ pub fn context_overflow_http() -> Attempt {
     )
 }
 
+/// A subagent spawner whose spawns park on a shared barrier: N concurrent
+/// spawns meet and all report `overlapped`; serialized spawns exhaust the
+/// bounded wait and report `serialized`. Proves wave overlap without
+/// wall-clock measurement.
+pub struct BarrierSpawn(pub std::sync::Arc<tokio::sync::Barrier>);
+
+const SPAWN_BARRIER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl crate::tools::SpawnSubagent for BarrierSpawn {
+    fn spawn(
+        &self,
+        _req: crate::subagent::SubagentRequest,
+    ) -> crate::run::BoxFuture<std::result::Result<crate::subagent::SubagentResult, String>> {
+        let barrier = self.0.clone();
+        Box::pin(async move {
+            let text = match tokio::time::timeout(SPAWN_BARRIER_WAIT, barrier.wait()).await {
+                Ok(_) => "overlapped",
+                Err(_) => "serialized",
+            };
+            Ok(crate::subagent::SubagentResult::Text(text.to_owned()))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;

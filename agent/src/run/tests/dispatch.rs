@@ -1487,3 +1487,55 @@ async fn permission_denials_decay_the_doom_score() {
         "grace fires at exactly 15 (0.6); without the denial decay it would be 17 (0.68)"
     );
 }
+
+/// Two `task` calls in one reply overlap: both subagents park on a shared
+/// barrier, so serialized waves would exhaust the bounded wait and report
+/// `serialized` instead of meeting. Pins the task tool's wave-compatible
+/// scheduling claim; file safety across agents is PathLocks', not the
+/// parent wave's.
+#[tokio::test]
+async fn subagent_calls_run_concurrently() {
+    let provider = script(vec![
+        crate::testing::tool_turn(vec![
+            tool_event(
+                "t1",
+                "task",
+                serde_json::json!({"description": "first", "prompt": "a"}),
+            ),
+            tool_event(
+                "t2",
+                "task",
+                serde_json::json!({"description": "second", "prompt": "b"}),
+            ),
+        ]),
+        crate::testing::text_turn("done"),
+    ]);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new(dir.path())
+        .unwrap()
+        .with_subagents(Arc::new(crate::testing::BarrierSpawn(Arc::clone(&barrier))));
+    let (conversation, _stream) = conversation_over(
+        &provider,
+        &Config::parse("").unwrap(),
+        &dir.path().display().to_string(),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
+        None,
+    )
+    .await;
+    let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+        run_turn(&conversation, "go").await
+    })
+    .await
+    .expect("the turn must finish");
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let results = tool_results(&conversation).await;
+    let texts: Vec<String> = results.iter().map(result_text).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(
+        texts.iter().all(|text| text == "overlapped"),
+        "both subagents must be in flight at once: {texts:?}"
+    );
+}

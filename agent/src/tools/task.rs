@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput};
+use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -129,8 +129,15 @@ impl ToolImpl for Task {
         definition::<TaskArgs>("task", TASK_DESCRIPTION)
     }
 
-    // Exclusive: the child agent runs with its own tool registry and can
-    // touch anything.
+    // Sibling subagents must share a wave: the child claims its own
+    // resources inside its own conversation, and cross-agent file
+    // ordering is enforced by PathLocks, not the parent's wave.
+    fn scheduling(&self, _input: &Value) -> ToolScheduling {
+        ToolScheduling::Resources {
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
+    }
 
     async fn call(&self, context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {
         finish(self.execute(context, args).await)
@@ -256,5 +263,18 @@ mod tests {
         let output = invoke(&task, args()).await;
         assert!(output.is_error);
         assert!(text(&output).contains("not available"));
+    }
+
+    /// The claim must be resource-shaped and keyless: sibling `task` calls
+    /// share a wave (the behavioral pin is
+    /// `run_tests::dispatch::subagent_calls_run_concurrently`).
+    #[test]
+    fn scheduling_lets_siblings_share_a_wave() {
+        let task = Task(Arc::new(NoSubagents));
+        let claim = <Task as ToolImpl>::scheduling(&task, &serde_json::json!({}));
+        assert!(matches!(
+            &claim,
+            ToolScheduling::Resources { reads, writes } if reads.is_empty() && writes.is_empty()
+        ));
     }
 }

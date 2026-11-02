@@ -824,4 +824,49 @@ mod tests {
             Ok(crate::tools::error::text_output("ran anyway"))
         }
     }
+    /// Two `task` children of one batch overlap: the advertised fan-out
+    /// idiom. Both spawns park on a shared barrier; serialized waves would
+    /// exhaust the bounded wait and report `serialized`.
+    #[tokio::test]
+    async fn task_children_overlap() {
+        use crate::tools::task::Task;
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut registry = ToolRegistry::default();
+        registry
+            .register(Task(Arc::new(crate::testing::BarrierSpawn(Arc::clone(
+                &barrier,
+            )))))
+            .expect("task registers");
+        registry.register(Batch).expect("batch registers");
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .tools(registry)
+            .config(
+                animist::agent::AgentConfig::builder()
+                    .max_concurrent_tools(2_usize)
+                    .build(),
+            )
+            .build()
+            .expect("harness");
+        let output = harness
+            .call(
+                Batch,
+                serde_json::json!({ "tool_calls": [
+                    {"tool": "task", "parameters": {"description": "first", "prompt": "a"}},
+                    {"tool": "task", "parameters": {"description": "second", "prompt": "b"}},
+                ]}),
+            )
+            .await
+            .expect("batch outcome");
+        let text = invoke_text(&output);
+        assert!(!output.is_error, "{text}");
+        assert!(
+            text.matches("overlapped").count() == 2,
+            "both tasks must be in flight at once: {text}"
+        );
+        assert!(
+            text.contains("All 2 tools executed successfully."),
+            "{text}"
+        );
+    }
 }

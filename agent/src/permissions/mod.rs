@@ -78,10 +78,12 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "webfetch",
 ];
 
-/// Builtins allowed without a decision. `task` is not read-only (a
-/// `general` subagent writes), so it lives here, not in [`READ_ONLY_TOOLS`];
-/// the child's own tool calls still pass through this same gate.
-pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task", "review"];
+/// Builtins allowed without a decision. `task`, `review`, and `batch` are
+/// not read-only (a `general` subagent writes), so they live here, not in
+/// [`READ_ONLY_TOOLS`]; every child call still passes through this same
+/// gate, and the wrapper's own scope is an opaque wildcard the reviewer
+/// cannot judge.
+pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task", "review", "batch"];
 
 /// Every argosy tool native name, auto-allowed as the integration plan
 /// requests — except the project-writing code tools (`astgrep` with
