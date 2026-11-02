@@ -29,7 +29,7 @@ pub type Store = argosy::mcp::McpState<
 pub const TOOL_NAMES: &[&str] = &[
     "search",
     "list_skills",
-    "get_skill",
+    "skill",
     "search_rules",
     "read_memory",
     "read_document",
@@ -59,7 +59,7 @@ pub const TOOL_NAMES: &[&str] = &[
 pub const READ_ONLY_TOOLS: &[&str] = &[
     "search",
     "list_skills",
-    "get_skill",
+    "skill",
     "search_rules",
     "read_memory",
     "read_document",
@@ -108,7 +108,7 @@ pub fn is_argosy_tool(name: &str) -> bool {
 }
 
 /// The argosy-visible skills for a project root: `(name, SKILL.md body)`
-/// pairs from `list_skills` + `get_skill`. Empty when the service is down.
+/// pairs from `list_skills` + `skill`. Empty when the service is down.
 pub fn skill_bodies(cwd: &Path) -> Vec<(String, String)> {
     let service = ArgosyService::global();
     if service.init_error().is_some() {
@@ -130,7 +130,7 @@ pub fn skill_bodies(cwd: &Path) -> Vec<(String, String)> {
             let name = s.get("name")?.as_str()?.to_string();
             let params = serde_json::json!({ "cwd": cwd, "name": name });
             service
-                .execute("get_skill", params)
+                .execute("skill", params)
                 .ok()
                 .and_then(|v| v.get("content").and_then(Value::as_str).map(str::to_string))
                 .map(|content| (name, content))
@@ -298,7 +298,7 @@ impl ArgosyService {
             "search_rules" => call!(search_rules, m::RulesParams),
             "ask" => call!(ask, m::AskParams),
             "list_skills" => call!(list_skills, m::ListSkillsParams),
-            "get_skill" => call!(get_skill, m::GetSkillParams),
+            "skill" => call!(skill, m::GetSkillParams),
             "read_memory" => call!(read_memory, m::ReadPathParams),
             "read_document" => call!(read, m::ReadParams),
             "write_memory" => call!(write_memory, m::WriteParams),
@@ -611,7 +611,7 @@ pub fn render_report_text(tool: &str, report: &serde_json::Value) -> String {
             out
         }
         // Content reads: the raw markdown is the whole result.
-        "get_skill" | "read_memory" | "read_document" => report_str(report, "content")
+        "skill" | "read_memory" | "read_document" => report_str(report, "content")
             .map(str::to_string)
             .unwrap_or_else(fallback),
         "promote" => {

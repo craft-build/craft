@@ -9,12 +9,12 @@ resolver = "3"
 members = ["agent"]
 
 [workspace.dependencies]
-agent-client-protocol = { version = "3.4", features = ["stdio", "process"] }
+agent-client-protocol = { version = "3.6", features = ["stdio", "process"] }
 aho-corasick = "1"
 animist = { version = "0.7.0", features = ["bedrock"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 arc-swap = "1"
-argosy = "0.7"
+argosy = "0.8"
 async-trait = "0.1"
 barkml = "0.10"
 base64 = "0.23"
