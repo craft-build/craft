@@ -99,7 +99,7 @@ pub enum Error {
     #[snafu(display("azure requires api_version or AZURE_API_VERSION"))]
     AzureApiVersionMissing,
 
-    /// Rig provider client setup errors, kept behind an opaque boxed source so
+    /// Provider client setup errors, kept behind an opaque boxed source so
     /// one variant covers every provider-specific error type.
     #[snafu(context(false))]
     #[snafu(display("{source}"))]

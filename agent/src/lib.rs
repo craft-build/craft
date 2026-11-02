@@ -7,6 +7,8 @@ pub mod command;
 pub mod compaction;
 pub mod compression;
 pub mod config;
+#[cfg(test)]
+mod conformance;
 pub mod diff;
 pub mod error;
 pub mod harness;

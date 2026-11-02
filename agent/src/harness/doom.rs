@@ -37,19 +37,12 @@ pub(crate) const DOOM_STOP_REASON: &str =
     "doom-stop: the doom-loop score reached the hard-stop threshold";
 
 const SCORE_DOOM_LOOP: u32 = 15;
-// Unwired until embeddings land (Phase 5+); kept so the API is complete.
-#[allow(dead_code)]
-const SCORE_STAGNATION: u32 = 3;
 // Compaction-driven scoring lands with 08's compactors and 09's recovery
 // layer; kept so the API is complete.
-#[allow(dead_code)]
 const SCORE_INEFFECTIVE_COMPACT: u32 = 2;
 const SCORE_TOOL_ERROR: u32 = 1;
 const DECAY_TOOL_SUCCESS: u32 = 1;
-#[allow(dead_code)]
 const DECAY_EFFECTIVE_COMPACT: u32 = 1;
-#[allow(dead_code)]
-const STAGNATION_MIN_UNPRODUCTIVE_TURNS: u32 = 3;
 
 /// Identical repeated calls that constitute a doom loop.
 const DOOM_LOOP_THRESHOLD: usize = 3;
@@ -64,19 +57,12 @@ pub(crate) const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom
 
 /// Compaction that recovers less than this fraction is "ineffective" for
 /// scoring purposes (reference the reference crate's `compaction.rs`).
-#[allow(dead_code)]
 pub(crate) const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
-
-/// Reference also scores validator rejections (+1); no validator exists in
-/// this port yet, so the hook ships unused for API parity.
-#[allow(dead_code)]
-const SCORE_VALIDATOR_REJECT: u32 = 1;
 
 #[derive(Default)]
 pub(crate) struct DoomTracker {
     score: u32,
     grace_called: bool,
-    turns_since_success: u32,
     // Conversation-scoped from 07 on: the window survives a new user turn
     // (via `reset_for_new_user_input`) so loops that span prompts are still
     // detected.
@@ -113,15 +99,6 @@ impl DoomTracker {
         self.add(SCORE_DOOM_LOOP);
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn note_stagnation(&mut self) {
-        self.turns_since_success = self.turns_since_success.saturating_add(1);
-        if self.turns_since_success >= STAGNATION_MIN_UNPRODUCTIVE_TURNS {
-            self.add(SCORE_STAGNATION);
-        }
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn note_ineffective_compaction(&mut self) {
         self.add(SCORE_INEFFECTIVE_COMPACT);
     }
@@ -131,11 +108,9 @@ impl DoomTracker {
     }
 
     pub(crate) fn note_tool_success(&mut self) {
-        self.turns_since_success = 0;
         self.sub(DECAY_TOOL_SUCCESS);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn note_effective_compaction(&mut self) {
         self.sub(DECAY_EFFECTIVE_COMPACT);
     }
@@ -146,7 +121,6 @@ impl DoomTracker {
     pub(crate) fn reset_for_new_user_input(&mut self) {
         self.score = 0;
         self.grace_called = false;
-        self.turns_since_success = 0;
     }
 
     fn add(&mut self, n: u32) {
@@ -202,6 +176,14 @@ impl RecentCalls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recorded(entries: &[(&str, serde_json::Value)]) -> RecentCalls {
+        let mut recent = RecentCalls::default();
+        for (name, input) in entries {
+            recent.record((*name).into(), input);
+        }
+        recent
+    }
 
     #[test]
     fn fresh_tracker_is_clean() {
@@ -269,63 +251,6 @@ mod tests {
                 .is_doom_loop("read", &serde_json::json!({"p":1})),
             "recent calls preserved"
         );
-    }
-
-    #[test]
-    fn stagnation_ignored_while_tools_succeed() {
-        let mut t = DoomTracker::new();
-        for _ in 0..10 {
-            t.note_stagnation();
-            t.note_tool_success();
-        }
-        assert_eq!(
-            t.score(),
-            0,
-            "productive research must not accrue doom score"
-        );
-    }
-
-    #[test]
-    fn stagnation_scores_only_without_progress() {
-        let mut t = DoomTracker::new();
-        for _ in 0..2 {
-            t.note_stagnation();
-        }
-        assert_eq!(t.score(), 0, "below min no score");
-        t.note_stagnation();
-        assert_eq!(t.score(), 3, "at min first score");
-        for _ in 0..2 {
-            t.note_stagnation();
-        }
-        assert_eq!(t.score(), 9, "sustained no progress");
-    }
-
-    #[test]
-    fn stagnation_resumes_after_success_window_closes() {
-        let mut t = DoomTracker::new();
-        for _ in 0..3 {
-            t.note_stagnation();
-        }
-        assert_eq!(t.score(), 3);
-        t.note_tool_success();
-        for _ in 0..2 {
-            t.note_stagnation();
-        }
-        assert_eq!(
-            t.score(),
-            2,
-            "two stagnant turns alone do not re-arm the score"
-        );
-        t.note_stagnation();
-        assert_eq!(t.score(), 5, "third consecutive stagnant turn scores again");
-    }
-
-    fn recorded(entries: &[(&str, serde_json::Value)]) -> RecentCalls {
-        let mut recent = RecentCalls::default();
-        for (name, input) in entries {
-            recent.record((*name).into(), input);
-        }
-        recent
     }
 
     #[test]

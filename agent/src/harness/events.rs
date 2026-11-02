@@ -21,7 +21,6 @@ pub enum Event {
 }
 
 /// Events only craft emits; the variants the animist taxonomy cannot express.
-#[allow(dead_code)] // forward substrate for 08–09 (compaction, recovery)
 #[derive(Clone, Debug)]
 pub enum CraftEvent {
     /// Human-readable, non-fatal status text.

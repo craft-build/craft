@@ -7,7 +7,7 @@
 //! empty, or unparseable output.
 //!
 //! Ported from the reference `craft-agent/src/agent/auto_review.rs`,
-//! re-expressed for this repo's Rig edge: the reviewer call goes through
+//! re-expressed for this repo's provider seam: the reviewer call goes through
 //! [`crate::provider::complete_text`], like the
 //! compaction summarizer. Deviation: no reviewer-side cancel token (the
 //! reference races one); the deadline alone bounds the call.
@@ -186,6 +186,7 @@ pub async fn decide_with_endpoint(
             "Is it safe to run this tool call without asking the user?",
         ),
     );
+    // The argosy decision endpoint is a sync-only API.
     let response = tokio::task::spawn_blocking(move || provider.decide(&request))
         .await
         .map_err(|e| ReviewError::Provider {

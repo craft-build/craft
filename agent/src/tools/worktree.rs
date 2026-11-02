@@ -11,11 +11,18 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::error::{Result, invalid};
 use tracing::{debug, warn};
 
 const WORKTREE_BRANCH_PREFIX: &str = "craft-subagent/";
+
+/// Per-process sequence for worktree names: the wall-clock stamp alone can
+/// repeat (clock granularity), and concurrent creations — parallel isolated
+/// children in one repo, or two craft processes — would then target the
+/// same branch or the same shared worktree directory.
+static WORKTREE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A linked git worktree. `Drop` removes the worktree and its branch.
 pub struct Worktree {
@@ -44,13 +51,19 @@ impl Worktree {
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
+        let seq = WORKTREE_SEQ.fetch_add(1, Ordering::Relaxed);
         let slug = slugify(label);
-        let branch = format!("{WORKTREE_BRANCH_PREFIX}{slug}-{stamp:x}");
+        let branch = format!(
+            "{WORKTREE_BRANCH_PREFIX}{slug}-{stamp:x}-{}-{seq}",
+            std::process::id()
+        );
 
         let parent = std::env::temp_dir().join("craft-worktrees");
         std::fs::create_dir_all(&parent)
             .map_err(|e| invalid(format!("creating {}: {e}", parent.display())))?;
-        let dir_name = format!("craft-{slug}-{stamp:x}");
+        // The directory is global across repos and processes, so the name
+        // carries the pid besides the per-process sequence.
+        let dir_name = format!("craft-{slug}-{stamp:x}-{}-{seq}", std::process::id());
         let path = parent.join(&dir_name);
 
         let output = Command::new("git")

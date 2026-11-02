@@ -8,6 +8,11 @@ license = "MIT"
 name = "crafty"
 path = "src/main.rs"
 
+# superlighttui's lib target is named `slt` (every use is `slt::…`), so
+# cargo-machete cannot see the dependency is used.
+[package.metadata.cargo-machete]
+ignored = ["superlighttui"]
+
 [dependencies]
 agent-client-protocol.workspace = true
 aho-corasick.workspace = true

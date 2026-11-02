@@ -11,7 +11,7 @@ Most coding agents burn context reactively: wait until the window is full, then 
 - Tool output is pre-compressed before it ever enters history (code, logs, diffs, JSON arrays, search results each get a tailored compressor).
 - Stale and superseded file reads are replaced with compact markers before each turn.
 - Deterministic (no-LLM) compaction kicks in at 60% of the context window; an LLM summarization pass only runs at 80% if the cheap stage wasn't enough.
-- Read-only tool results are deduplicated by argument hash, and compressed originals stay retrievable through a content-hash LRU store.
+- Read-only tool results are deduplicated by argument hash, and compressed originals stay retrievable — durably, from the history entry itself — in any later turn or after a session reload.
 - Subagents run in their own context windows, so delegation never pollutes the main session.
 
 ## Features
@@ -19,12 +19,11 @@ Most coding agents burn context reactively: wait until the window is full, then 
 ### Context management
 
 - **Tool output pre-compression** - heuristic content-type detection (code, log, search result, diff, JSON array, plain text) routes each tool result to a dedicated compressor. Log and code compression use an aho-corasick keyword classifier (error, warning, security, definition, import, ...).
-- **Read lifecycle** - fresh reads go stale as the conversation moves on; stale and superseded reads are collapsed into markers on the request path, keeping history intact.
-- **Reversible compression** - originals live in an in-memory, content-hash-keyed store (100 entries by default); the `retrieve` tool fetches them back on demand.
+- **Read lifecycle** - fresh reads go stale as the conversation moves on; stale and superseded reads are collapsed into durable marker revisions, with the verbatim originals kept in the entry source for `retrieve`.
+- **Reversible compression** - originals live in history entry sources, so a compressed marker survives session reloads and `retrieve` restores the full bytes at any later turn.
 - **Two-stage compaction** - `vcc` (deterministic, no LLM) at 60% of `context_length`, then `llm` (one summarization call) at 0.8. Stages, kinds, and thresholds are configurable via `[[compaction]]` blocks. Effectiveness gating skips stages that wouldn't save ≥10% so compaction never cycles.
 - **Overflow ladder** - when a request still overflows, tool results collapse progressively (10%/20%/50%/100%) before anything harder is attempted.
 - **Tool dedup cache** - repeated read-only tool calls with identical arguments return cached output, invalidated structurally when files change.
-- **Recency tail** - a compact `<turn-context>` of recent state rides the last user message instead of duplicating history.
 
 ### Knowledge (argosy, in-process)
 
@@ -46,7 +45,7 @@ The `argosy` crate is linked in-process (no subprocess, no MCP transport): seman
 
 ### Experience
 
-- Native ratatui TUI: fast startup, 60 FPS, no JavaScript.
+- Native terminal UI (superlighttui): fast startup, high frame rate, no JavaScript.
 - 30 built-in themes (`/theme`), rebindable keymaps.
 - Fuzzy search (Ctrl-F), command palette (Ctrl-P), subagent chat windows (Ctrl-N / Ctrl-P, `/tasks` view), clipboard image paste (Ctrl-V), editor integration (Ctrl-O / Alt+O).
 - Plan mode (Ctrl-T) with a plan form and todo cards.
@@ -65,9 +64,9 @@ The `task` tool spawns child agents with their own context windows and cancel to
 
 ## Supported providers
 
-All rig-native provider kinds are supported, configured by alias in the BML config with per-alias credentials, base URLs, and model catalogs: `amazon-bedrock` (AWS credential chain), `anthropic`, `azure`, `chatgpt` (OAuth), `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openai-compatible`, `openrouter`, `perplexity`, `together`, `venice`, `voyageai`, `xai`, `xiaomimimo`, `zai`.
+Nine kinds, configured by alias in the BML config with per-alias credentials, base URLs, and model catalogs: `anthropic`, `openai` (Responses, or Chat Completions via `protocol`), `openai-compatible` (any OpenAI-dialect endpoint; keyless local servers ride the keyless llama.cpp client), `synthetic`, `zai-coding-plan`, `ollama`, `llama-cpp`, `omlx`, and `amazon-bedrock` (AWS credential chain; per-model wire protocol — Anthropic Messages, Responses, Chat Completions, or Converse). The predecessor's other vendor kinds (`azure`, `chatgpt`, `cohere`, `copilot`, `deepseek`, `gemini`, `groq`, `openrouter`, `xai`, `zai`, …) are **dropped**: configs naming them fail with a migration hint pointing at `openai-compatible` + `base_url`. Full tables and migration snippets: [`agent/README.md`](./agent/README.md).
 
-Model discovery merges configured models with live provider listings and the [models.dev](https://models.dev) catalog (cached) for context-window and pricing metadata.
+Model discovery merges configured models with live provider listings and the [models.dev](https://models.dev) catalog (disk-cached 24 h) for context-window and pricing metadata.
 
 ## Configuration
 
@@ -81,6 +80,6 @@ cargo build -p craft --release
 
 Subcommands of note: `craft models`, `craft stats`, `craft doctor`, `craft update` / `rollback`, `craft prompt`, `craft recipe`, `craft term`, `craft acp`, `craft completions <shell>`.
 
-Craft is written from scratch in Rust, on top of the [rig](https://github.com/0xPlaygrounds/rig) model facade, with an in-process argosy knowledge layer, a heuristic compression pipeline, and an ACP server.
+Craft is written from scratch in Rust, on top of the [animist](https://crates.io/crates/animist) provider/agent/history stack (async end to end), with an in-process argosy knowledge layer, a durable history compression pipeline, and an ACP server.
 
 > Honesty note: a large share of the codebase was written by an AI, guided by humans. Being upfront about how software is made matters.

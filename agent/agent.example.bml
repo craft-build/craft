@@ -1,6 +1,6 @@
 # Copy to ~/.config/craft.bml (or split into ~/.config/craft/*.bml) and set
 # credentials in your environment. Provider block labels are your aliases,
-# not fixed Rig provider names.
+# not fixed provider names.
 
 # New-session thinking default. Omitted means off; /thinking opens a picker.
 # Also accepts true/false, any effort level, or a positive token budget.
@@ -30,6 +30,7 @@ compaction "llm" {
 
 provider "openai" {
   kind = "openai"
+  # Responses API by default; protocol = "chat_completions" switches.
   api_key_env = "OPENAI_API_KEY"
 
   model "gpt-5.2" {
@@ -40,11 +41,18 @@ provider "openai" {
   }
 }
 
-# OpenAI Chat Completions protocol, rather than OpenAI's Responses API.
+provider "anthropic" {
+  kind = "anthropic"
+  api_key_env = "ANTHROPIC_API_KEY"
+}
+
+# Any OpenAI-dialect endpoint. A keyless local endpoint (loopback/private
+# host, no key) rides the keyless llama.cpp client automatically.
 provider "local" {
   kind = "openai-compatible"
   base_url = "http://localhost:8080/v1"
-  api_key_env = "LOCAL_LLM_API_KEY"
+  # No api_key_env: a keyless loopback endpoint rides the keyless
+  # llama.cpp client. Set api_key_env only for servers that require a key.
   discover_models = false
 
   model "my-coding-model" {
@@ -52,29 +60,51 @@ provider "local" {
   }
 }
 
-# The native Anthropic client also supports compatible endpoints.
-provider "company" {
-  kind = "anthropic"
-  base_url = "https://llm.example.com"
-  api_key_env = "COMPANY_LLM_API_KEY"
-  discover_models = false
+# Local llama.cpp server (also serves System One decisions on /systemone).
+#provider "llamacpp" {
+#  kind = "llama-cpp"
+#  base_url = "http://localhost:9931/v1"
+#}
 
-  model "company-coder" {
-  }
-}
+# Local oMLX server (thinking knobs map to enable_thinking/thinking_budget).
+#provider "omlx" {
+#  kind = "omlx"
+#  base_url = "http://localhost:8000/v1"
+#  api_key_env = "OMLX_API_KEY"
+#}
 
 # Local Ollama needs no credential unless your server requires one.
 provider "ollama" {
   kind = "ollama"
 }
 
+# Hosted coding plans, as dedicated kinds:
+#provider "synthetic" {
+#  kind = "synthetic"          # env SYNTHETIC_API_KEY
+#}
+#provider "zai" {
+#  kind = "zai-coding-plan"    # env ZHIPU_API_KEY
+#}
+
+# Dropped kinds (azure, chatgpt, cohere, copilot, deepseek, gemini, groq,
+# mistral, openrouter, xai, ...): migrate to openai-compatible + base_url:
+#provider "deepseek" {
+#  kind = "openai-compatible"
+#  base_url = "https://api.deepseek.com/v1"
+#  api_key_env = "DEEPSEEK_API_KEY"
+#}
+
 # AWS Bedrock authenticates through the AWS default credential chain
 # (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, ~/.aws profiles selected by
 # AWS_PROFILE, or SSO) and takes its region from AWS_REGION, the profile,
-# or `region` here. A region that resolves nowhere fails with that
-# guidance instead of an opaque dispatch failure. Model IDs are Bedrock
+# or `region` here. The wire protocol is per model: Claude speaks
+# anthropic_messages, openai.* deployments speak responses, other
+# OpenAI-surface models speak chat_completions, everything else converse —
+# a per-model `protocol` overrides. Converse rejects non-off thinking
+# configs; Claude thinking needs anthropic_messages. Model IDs are Bedrock
 # model IDs or inference-profile ARNs.
 #provider "amazon-bedrock" {
 #  kind = "amazon-bedrock"
 #  model "us.anthropic.claude-sonnet-4-5-v2" { context_length = 200000 }
+#  model "openai.gpt-4.1" { protocol = "responses" }
 #}

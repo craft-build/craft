@@ -935,7 +935,7 @@ fn mcp_contents(output: McpToolOutput) -> ToolContents {
 }
 
 /// The model-visible media type for an MCP image mime. `image/heic`,
-/// `image/heif`, and `image/svg+xml` are served as `image/png`, as the rig
+/// `image/heif`, and `image/svg+xml` are served as `image/png`, as the pre-animist
 /// bridge did.
 fn media_type(mime: &str) -> Option<&'static str> {
     match mime.to_ascii_lowercase().as_str() {

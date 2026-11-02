@@ -1,7 +1,7 @@
 //! G.2 subcommands (`models`, `stats`, `doctor`, `prompt`), ported from the
 //! reference `src/cmd/subcmd.rs` and `src/cmd/subcmd/doctor.rs`. The
 //! reference's plugin-host/model-policy plumbing is replaced by the config
-//! file plus the Rig provider stack; doctor's `Model::from_tier` healing
+//! file plus the animist provider stack; doctor's `Model::from_tier` healing
 //! loop iterates configured providers instead.
 
 use std::path::{Path, PathBuf};

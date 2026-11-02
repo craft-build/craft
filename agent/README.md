@@ -1,8 +1,8 @@
 # craft
 
-The `craft` library and `crafty` binary: Craft's CLI/TUI coding agent, written from scratch in Rust on top of the [rig](https://github.com/0xPlaygrounds/rig) facade (tokio, reqwest), with the `argosy` knowledge crate linked in-process.
+The `craft` library and `crafty` binary: Craft's CLI/TUI coding agent, written from scratch in Rust on top of the [animist](https://crates.io/crates/animist) provider/agent/history stack (async end to end), with the `argosy` knowledge crate linked in-process.
 
-The binary is a full agent: a ratatui TUI (or `--print` headless mode), subagents, MCP, skills, recipes, an ACP server, permissions and snapshots, and a multi-stage context-management pipeline.
+The binary is a full agent: a TUI (or `--print` headless mode), subagents, MCP, skills, recipes, an ACP server, permissions and snapshots, and a multi-stage context-management pipeline.
 
 ## Configuration
 
@@ -10,29 +10,50 @@ Configuration lives in BML format (`barkml`) at `~/.config/craft.bml`, or split 
 
 Each `[providers.<alias>]` chooses a `kind`. Multiple aliases may use the same kind with different credentials, URLs, and model catalogs. `api_key_env` names an environment variable, **not the key itself** — keep secrets in your shell or secret manager.
 
-The following rig-native provider kinds are supported: `amazon-bedrock`, `anthropic`, `azure`, `chatgpt`, `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openai-compatible`, `openrouter`, `perplexity`, `together`, `venice`, `voyageai`, `xai`, `xiaomimimo`, `zai`.
+The supported kinds: `anthropic`, `openai`, `openai-compatible`, `synthetic`, `zai-coding-plan`, `ollama`, `llama-cpp`, `omlx`, `amazon-bedrock`.
 
-- `openai` uses Rig's native Responses API client; use `openai-compatible` for Chat Completions. Both accept `base_url`.
-- `anthropic` accepts `base_url` for Anthropic-compatible services. Supply the complete base URL including any path prefix; URLs cannot contain credentials, query parameters, or fragments.
-- Without explicit credentials/URL, native clients use Rig's environment/auth defaults. With overrides, `api_key_env` defaults to the provider's usual key variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...).
-- Ollama and Llamafile support keyless local use (Llamafile rejects `api_key_env`).
-- `amazon-bedrock` (via `rig-bedrock`) authenticates through the classic AWS default credential chain (env vars, `~/.aws` profiles incl. `AWS_PROFILE`, SSO, assume-role, `credential_process`, web identity, container/IMDS roles) and takes its region from `AWS_REGION`/`AWS_DEFAULT_REGION`, the active profile, or `region` on the provider. A region that resolves nowhere fails with that guidance instead of an opaque "dispatch failure"; `AWS_EC2_METADATA_DISABLED=true` skips the IMDS probe, which is tuned to fail fast on non-EC2 machines. It rejects `api_key_env` and `base_url` (use `AWS_ENDPOINT_URL` to override the endpoint).
-- Azure takes `base_url` + `api_version` (falling back to `AZURE_ENDPOINT` / `AZURE_API_VERSION`), credentials from `AZURE_API_KEY` or `AZURE_TOKEN`.
-- ChatGPT uses Rig OAuth by default; `api_key_env` selects an access token, optionally with `account_id`.
-- Copilot uses Rig's environment/OAuth defaults; an explicit `api_key_env` selects a Copilot API key.
+- `openai` speaks the Responses API by default; `protocol = "chat_completions"` selects Chat Completions. Both accept `base_url`.
+- `openai-compatible` speaks Chat Completions against any OpenAI-dialect endpoint. A **keyless local endpoint** (loopback or private host, no key configured) automatically rides animist's keyless llama.cpp client — local llama.cpp/vLLM/LM Studio servers work with no dummy key. Non-local hosts require a key.
+- `synthetic` and `zai-coding-plan` are dedicated kinds for those hosted plans (default env `SYNTHETIC_API_KEY` / `ZHIPU_API_KEY`); existing `openai-compatible` configs pointing at their endpoints keep working.
+- `anthropic` accepts `base_url` for Anthropic-compatible services. Supply the complete base URL including any path prefix.
+- `ollama`, `llama-cpp`, and `omlx` serve local models; `ollama` needs no credential, the other two accept an optional key (`llama-cpp` also serves System One decisions on `/systemone`).
+- With overrides, `api_key_env` defaults to the provider's usual key variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...).
+- `amazon-bedrock` (feature `bedrock`) authenticates through the AWS default credential chain (env vars, `~/.aws` profiles incl. `AWS_PROFILE`, SSO, assume-role, `credential_process`, web identity, container/IMDS roles) and takes its region from `AWS_REGION`/`AWS_DEFAULT_REGION`, the active profile, or `region` on the provider. Animist owns the HTTP client, signing, in-provider 429/503 retries (`max_attempts`, default 3), and control-plane model listing. Bedrock's wire protocol is per model:
+
+  | Model family | Protocol | Wire |
+  | --- | --- | --- |
+  | Claude (`anthropic.*` or ids containing `claude`) | `anthropic_messages` | `/model/{id}/invoke-with-response-stream` (Anthropic Messages) |
+  | `openai.*` deployments | `responses` | `/openai/v1/responses` |
+  | other OpenAI-surface models (`deepseek.*`, `moonshotai.*`) | `chat_completions` | `/openai/v1/chat/completions` |
+  | everything else | `converse` | `/model/{id}/converse-stream` (AWS Converse) |
+
+  A per-model `protocol` override wins (`protocol = "converse"` in the model block). **Converse caveat:** reasoning configs other than off are rejected on Converse — Claude-on-Bedrock thinking requires the `anthropic_messages` protocol.
+
+**Dropped kinds** (unsupported since the animist cutover): `azure`, `chatgpt`, `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `openrouter`, `perplexity`, `together`, `venice`, `voyageai`, `xai`, `xiaomimimo`, `zai`. A config naming one fails with an actionable error. Migration for OpenAI-dialect vendors — point `openai-compatible` at their base URL:
+
+```bml
+# before: kind = "deepseek"
+provider "deepseek" {
+  kind = "openai-compatible"
+  base_url = "https://api.deepseek.com/v1"
+  api_key_env = "DEEPSEEK_API_KEY"
+}
+```
+
+The OAuth/device flows (`chatgpt`, `copilot`) are gone with their kinds.
 
 ### Model catalogs
 
-`[providers.<alias>.models."<exact-model-id>"]` declares or partially overrides a model (`name`, `description`, `context_length`, `max_output_tokens`). Discovery merges configured models with live listings and the [models.dev](https://models.dev) catalog (disk-cached), sorted by ID; `discover_models = false` disables listing. Discovery errors propagate rather than silently yielding an empty catalog. Token limits are catalog metadata (they feed compaction thresholds and usage display), not request parameters — set `[agent].max_tokens` for an output cap.
+`[providers.<alias>.models."<exact-model-id>"]` declares or partially overrides a model (`name`, `description`, `context_length`, `max_output_tokens`, `supports_thinking`, `requires_thinking`, `protocol`). Discovery merges configured models with live listings and the [models.dev](https://models.dev) catalog (disk-cached 24 h), sorted by ID; `discover_models = false` disables listing. Discovery errors propagate rather than silently yielding an empty catalog. Token limits are catalog metadata (they feed compaction thresholds and usage display), not request parameters — set `[agent].max_tokens` for an output cap.
 
 ## Context management
 
-### Compression (before history)
+### Compression and the read lifecycle (durable, on history)
 
-- **Tool output pre-compression** — heuristic content-type detection routes each tool result to a dedicated compressor: code, logs, search results, diffs, JSON arrays, plain text. Log/code scoring uses a shared aho-corasick keyword classifier (error, warning, security, definition, import, module, comment, closing brace).
-- **Read lifecycle** — file reads are tracked fresh/stale/superseded; stale and superseded reads are collapsed into compact markers on the request path while history stays intact.
-- **Reversible compression** — compressed originals are kept in an in-memory, content-hash-keyed store (100 entries by default); the `retrieve` tool restores them on demand.
+- **Tool-output compression** — between runs, an alteration pass rewrites oversized tool results into compact markers as history *revisions*; the verbatim originals stay in the entry sources, and the `retrieve` tool restores them by content hash (`[N lines compressed from M. Retrieve original: hash=…]`). Nothing lives in a side store: a marker survives session reloads, and retrieval works in any later turn.
+- **Read lifecycle** — file reads are tracked fresh/stale/superseded; stale and superseded reads get durable marker revisions so old snapshots stop occupying context, while `retrieve` still serves the original bytes.
 - **Tool dedup cache** — identical read-only tool invocations return cached output; entries are invalidated structurally when files change.
+- Within a run, the request layer recomputes only the run's own suffix (everything older arrives pre-altered) and relocates tool-result images for Chat Completions targets.
 
 ### Compaction (when the window fills)
 
@@ -48,40 +69,37 @@ kind = "llm"
 context = "0.8"
 ```
 
-Before each turn the harness estimates history size and runs every armed stage whose threshold is crossed, lowest ratio first:
+Between runs the driver estimates history size and runs every armed stage whose threshold is crossed, lowest ratio first:
 
-- `vcc` — deterministic, no-LLM compaction: the head of the history is replaced by a structured summary message; the recent tail is kept verbatim; repeated runs merge with the previous summary.
+- `vcc` — deterministic, no-LLM compaction: the head of the history is replaced by a structured summary entry (tagged `craft.compaction`); the recent tail is kept verbatim; repeated runs merge with the previous summary.
 - `llm` — one-shot summarization call replacing the head with a handoff summary (deterministic fallback if the call fails).
 
-Effectiveness gating skips a stage whose last run saved under 10% of estimated context until another stage compacts effectively. Omitting `[[compaction]]` defaults to vcc at 0.6 then llm at 0.8. Sessions without a known `context_length` never compact.
+Effectiveness gating skips a stage whose last run saved under 10% of estimated context until another stage compacts effectively. Omitting `[[compaction]]` defaults to vcc at 0.6 then llm at 0.8. Sessions without a known `context_length` never compact. Compacted-away entries are *deactivated*, never deleted — their originals stay in entry sources for `retrieve`.
 
 ### Overflow recovery
 
-When a request still overflows after compaction, an escalating ladder collapses tool results progressively (10%, 20%, 50%, 100%) before failing the turn.
+When a request still overflows after compaction, an escalating ladder collapses tool results progressively (10%, 20%, 50%, 100%) before failing the turn; a failed run keeps whatever compaction it did (originals are never lost).
 
 ## Runtime setup contract
 
 Every execution surface (TUI, `--print` headless, ACP) obtains the shared pieces of a session from `agent/src/runtime.rs`, so equivalent sessions receive equivalent run policies:
 
 - `runtime::workspace_env(cwd, mcp, install_reviewer)` — instruction discovery, the workspace (MCP handle installed), and the permission engine. Every surface constructs the `PermissionManager` and consults it: the TUI prompt overlay, the ACP `session/request_permission`, and the headless gate below.
-- `runtime::catalog_metadata` / `runtime::ResolvedModel` — a model choice plus its catalog window (`context_length`; output ceilings ride the model handle, where request shaping reads them). Lookup only: it never enforces catalog membership, so `--model` ids the catalog does not list stay usable.
-- `runtime::new_compaction_state` / `runtime::compaction_ctx` — the session-shared compaction state (linked to the dedup cache and guardrail counters) and the per-run context (stages, buffer, window). Headless `--print` runs carry this too: output caps are clamped into the model's context window and in-run overflow recovery compacts and retries.
-- `runtime::run_policy` — the only `RunParams` constructor: system prompt, sampling, turn bound, continuation bound, compression, compaction, reauth hook, model spec, advisor.
+- `model_selection::resolve_or_default` — a model choice plus its catalog window; output ceilings ride the model handle, where request shaping reads them. Lookup only: `--model` ids the catalog does not list stay usable.
 
-Deliberate surface differences, each pinned by a test: MCP startup waits for servers in headless/ACP (`Connected`) but not in the TUI (`Background`, first turn gates); the reviewer definition installs only in the TUI; model-selection preference stays per-surface; ACP is always unbounded-turns and Build-mode; TUI/headless thread plan mode into the prompt.
+## The harness
 
-## Run loop
+One long-lived `harness::Conversation` per session drives an animist `Agent` over an animist `History`; surfaces never run a loop of their own. Craft policy lives in an ordered `AgentLayer` chain (head → tail):
 
-Rig's runner owns model calls, streaming, and tool execution; craft layers on top:
+1. **PolicyLayer** — permission rules → auto-review → the approval responder → the plan-mode gate.
+2. **GuardrailLayer** — doom-loop detection (grace/hard-stop), per-tool guardrails, dedup `Respond`.
+3. **RequestLayer** — the per-request view: in-run read-lifecycle and compression rewrites, Chat-Completions image relocation, the output-token clamp, sampling options, fallback-model selection.
+4. **RecoveryLayer** — `recover`: linear backoff, API-key rotation, model fallback chain, reauth wait, overflow compaction (calling the compactors above).
+5. **ContinuationLayer** — `MaxTokens` continuation and stalled-turn nudges as `step_end` appends.
+6. **SnapshotLayer** — `/undo` pre-captures at the tail, so only calls that really run are captured.
+7. **PersistLayer** — flushes the history change feed to the session log.
 
-- streaming retries with backoff, API-key rotation, and a model fallback chain;
-- doom-loop detection with grace/hard-stop thresholds;
-- per-tool guardrails that demote or drop tools after decaying failures;
-- a recency tail (`<turn-context>`) appended to the last user message;
-- plan-mode write restriction;
-- subagents (`task` tool): own context window and cancel token, restricted tool table, model tiers (weak/medium/strong, capped at the parent), optional worktree isolation, optional JSON-schema-validated output.
-
-`agent::build(&provider, model_id, &config.agent, &workspace)` returns a native Rig `Agent` with the base tools registered; `agent::builder` returns the builder so more tools and hooks can be attached before `.build()`.
+A thin driver (`harness::driver::run_turn`) does what no hook can: builds the input, runs and awaits the agent, adds terminal markers, runs the between-run alteration/compaction passes, and re-runs for the advisor and `ContextWindowExceeded`. Subagents (`task` tool) run as their own child `Conversation` with a fresh history, a restricted tool registry, and their own layer instances built from the parent's shared services; `batch` fans children out concurrently under the parent's claims and budgets. Model switching happens between runs by rebuilding the agent on the same history handle; fallback models inside a run go through the request layer.
 
 ## Tools
 
@@ -99,58 +117,40 @@ The `argosy` crate is linked in-process (no subprocess, no MCP transport). It co
 
 ### Paths and limits
 
-Paths are workspace-relative or absolute beneath the canonical workspace root; `..`, `.git`, and symlink components are refused. Text tools support UTF-8 files up to 8 MiB, including CRLF. Reads and searches bound excerpts to 64 KiB (individual lines to 2048 bytes) and report incomplete results rather than implying exhaustiveness. Workspace checks are guardrails for a trusted local project, **not an OS security sandbox**; the host supplies approval hooks and sandbox policy before exposing the agent to untrusted workspaces.
+Paths are workspace-relative or absolute beneath the canonical workspace root; `..`, `.git`, and symlink components are refused. Text tools support UTF-8 files up to 8 MiB, including CRLF. Reads and searches bound excerpts to 64 KiB (individual lines to 2048 bytes) and report incomplete results rather than implying exhaustiveness. Workspace checks are guardrails for a trusted local project, **not** an OS security sandbox**;** the host supplies approval hooks and sandbox policy before exposing the agent to untrusted workspaces.
 
 ## Permissions, snapshots, auto-review
 
 - BML rule blocks (allow / deny / ask, scoped to bash or MCP, wildcards). Bash commands are parsed so compound commands request each sub-command's approval. `--yolo` / `--dangerously-skip-permissions` disables prompting.
 - Headless runs (`--print`, `term run`, `recipe run`) enforce the same rules through a permission gate with no interactive approver: unresolved asks fail closed with guidance naming the opt-outs, and denied calls never execute. `--yolo` (bypass everything) and `-A/--auto-review` (an LLM or decision-endpoint reviewer answers asks, fail-closed) are the deliberate opt-outs — mutually exclusive, rejected at `Cli::validate`. The gate covers batch children and subagent dispatch.
 - Auto-review mode (`-A/--auto-review`): an LLM reviewer answers permission prompts, fail-closed below a confidence threshold.
-- Snapshots: files are snapshotted before mutations (first-wins, ≤5 MiB, text only) and `/undo` walks them back.
+- Snapshots: files are snapshotted before mutations (first-wins, ≤5 MiB, text only) and `/undo` walks them back. Undo restores file contents only; deactivated history entries survive in session sources but are not restored.
 
 ## TUI
 
-ratatui interface: 30 built-in themes (`/theme`), rebindable keymaps, command palette (Ctrl-P), fuzzy search (Ctrl-F), subagent chat windows (Ctrl-N / Ctrl-P), clipboard image paste (Ctrl-V), editor integration, plan mode with a plan form and todo cards, `!` / `!!` bash passthrough, input history, and session resume. Slash commands: `/new`, `/resume`, `/continue`, `/sessions`, `/model`, `/clear`, `/undo`, `/mcp`, `/compact`, `/usage`, `/stats`, `/auto-review`, `/theme`, `/recipe`, `/review`, `/scan`, `/dream`, `/memory`, plus custom namespaced commands.
+TUI (superlighttui): 30 built-in themes (`/theme`), rebindable keymaps, command palette (Ctrl-P), fuzzy search (Ctrl-F), subagent chat windows (Ctrl-N / Ctrl-P), clipboard image paste (Ctrl-V), editor integration, plan mode with a plan form and todo cards, `!` / `!!` bash passthrough, input history, and session resume. Slash commands: `/new`, `/resume`, `/continue`, `/sessions`, `/model`, `/clear`, `/undo`, `/mcp`, `/compact`, `/usage`, `/stats`, `/auto-review`, `/theme`, `/recipe`, `/review`, `/scan`, `/dream`, `/memory`, plus custom namespaced commands.
 
-Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (`craft stats`, `/stats`). Messages persist as animist entry records (format version 4); sessions saved by older `crafty` builds (message records, `.json` files) load transparently and rewrite to the current format on next save. The rewrite is one-way: older `crafty` builds cannot read the new saves.
+## Sessions
+
+Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (`craft stats`, `/stats`). Messages persist as animist **entry records** (log format 4): `entry`, `insert`, `revise`, `deactivate`, `replace`, mapping one to one onto the history change feed — plus `sub_entry` subagent histories and the trailing meta record. One loader reads every older shape (pre-animist message records, `.json` files) and folds their raw `tool_outputs` copies into entry sources; saving rewrites the current shape. A corrupt or truncated trailing record is skipped with a warning; a record whose index is out of range for the replayed list **fails the load** with an actionable error. **One-way upgrade:** older `crafty` builds cannot read the new saves — upgrade before rolling back. Resume (`/sessions`, `-c`, `-s`, ACP `session/load`) replays the same shared transcript builder: inactive entries hidden, compaction summaries as cards, markers by tag, altered tool results showing their altered text with the verbatim original one click away. `--fork-session` copies a `--session`/`--continue` source under a new id without touching the source.
 
 ## CLI
 
 ### Thinking controls
 
-`/thinking` opens the TUI selector; `/thinking low`, `/thinking adaptive`,
-`/thinking off`, or `/thinking 4096` apply directly. Alt+E cycles the same
-settings. The preference is persisted with the session, restored on resume,
-and inherited by subagents. ACP exposes a **Thinking** session option.
+`/thinking` opens the TUI selector; `/thinking low`, `/thinking adaptive`, `/thinking off`, or `/thinking 4096` apply directly. Alt+E cycles the same settings. The preference is persisted with the session, restored on resume, and inherited by subagents. ACP exposes a **Thinking** session option.
 
-For headless or startup overrides use one of `--thinking <setting>`,
-`--effort <level>`, or `--max-thinking-tokens <positive-count>`. They are
-mutually exclusive. Seed new sessions in `craft.bml`:
+For headless or startup overrides use one of `--thinking <setting>`, `--effort <level>`, or `--max-thinking-tokens <positive-count>`. They are mutually exclusive. Seed new sessions in `craft.bml`:
 
 ```bml
 always_thinking = "low"
 ```
 
-Modes are `off`, `adaptive`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
-or a positive token count. An unset preference means **off**, matching the
-reference. Providers that cannot disable reasoning use their lowest supported
-mode; “off” is not a universal promise of zero reasoning.
+Modes are `off`, `adaptive`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or a positive token count. An unset preference means **off**, matching the reference. Providers that cannot disable reasoning use their lowest supported mode; "off" is not a universal promise of zero reasoning.
 
-Per-model `models.dev` reasoning metadata resolves accepted effort levels.
-Requests snap to the closest lower supported level, or the minimum accepted
-level if none is lower. Effort-only and toggle-only APIs cannot enforce a
-thinking-token budget; numeric settings map to an effort/toggle there.
-Budget APIs clamp to their published limits and half the effective output
-window, reserving room for an answer. No wall-clock thinking cutoff is added:
-transport timeouts and cancellation remain separate.
+Per-model `models.dev` reasoning metadata resolves accepted effort levels. Requests snap to the closest lower supported level, or the minimum accepted level if none is lower. Effort-only and toggle-only APIs cannot enforce a thinking-token budget; numeric settings map to an effort/toggle there. Budget APIs clamp to their published limits and half the effective output window, reserving room for an answer. No wall-clock thinking cutoff is added: transport timeouts and cancellation remain separate.
 
-Manual model declarations can override `supports_thinking`,
-`requires_thinking`, and `reasoning_options` (e.g.
-`[{ type = "effort", values = ["low", "high"] }]`). Local backends can declare
-`thinking_fields` with JSON-shaped BML fragments keyed by `off`, `adaptive`,
-or effort level. Those fragments are deep-merged into the request. Unknown
-models fall back to provider/family dialects; discovery is advisory, not a
-reason to reject an otherwise usable model ID.
+Manual model declarations can override `supports_thinking`, `requires_thinking`, and `reasoning_options` (e.g. `[{ type = "effort", values = ["low", "high"] }]`). Local backends can declare `thinking_fields` with JSON-shaped BML fragments keyed by `off`, `adaptive`, or effort level. Those fragments are deep-merged into the request. Unknown models fall back to provider/family dialects; discovery is advisory, not a reason to reject an otherwise usable model ID.
 
 `crafty` (binary) supports `--print` (headless, `--output-format text|stream-json`, Claude Code-compatible), `--image PATH`, `-m/--model provider/model`, `-c` continue, `-s/--session` resume, `--fork-session` (copy a `--session`/`--continue` source under a new id without touching the source file), `--session-id` (persistence id for a NEW session; it never resumes), `--mode build|plan`, `--allowedTools` / `--disallowed-tools`, `--permission-mode default|plan|bypassPermissions` (`acceptEdits` rejected as unsupported), `--no-commands`, `--max-turns`, `--system-prompt` overrides, `--yolo` / `-A/--auto-review` (permission policy; enforced in headless runs too), and a set of accepted-but-ignored Claude Code SDK compatibility flags.
 
@@ -172,4 +172,17 @@ cargo fmt -p craft --check
 cargo clippy -p craft --all-targets -- -D warnings
 ```
 
-`Provider::from_config` builds only the selected native Rig client; parsing configuration never constructs clients or initiates interactive authentication.
+`ProviderHandle::from_config` builds only the selected animist provider; parsing configuration never constructs clients or initiates interactive authentication.
+
+**Provider conformance (offline).** `src/conformance/` drives every supported kind through a real `Conversation` against a local mock HTTP server speaking each protocol (Anthropic Messages, OpenAI Responses/Chat Completions, Bedrock Converse with AWS eventstream framing): text, thinking and tool-call round trips, tool-result image placement (inline where accepted, relocated for Chat Completions), retry/reauth/overflow recovery, Bedrock's in-provider retries, usage, and catalog pricing. It is part of `cargo test` and needs no credentials.
+
+**Opt-in live smoke tests.** Real model calls, `#[ignore]`d and env-gated so CI never pays for inference:
+
+```sh
+CRAFT_LIVE_BASE_URL=http://127.0.0.1:8000/v1 \
+CRAFT_LIVE_MODEL=orion-26b \
+CRAFT_LIVE_API_KEY=…            # optional for keyless local servers
+  cargo test -p craft --lib conformance::live -- --ignored --nocapture
+```
+
+`CRAFT_LIVE_KIND` selects the config kind (default `openai-compatible`; `llama-cpp`, `omlx`, `ollama`, `anthropic`, ...). The two tests: a plain text round trip, and a tool round trip that must read a file and quote it back. The same env serves a manual QA session: run the TUI against a local model (`provider` block with the same `kind`/`base_url`), exercise tool calls, cancel (`Esc`), resume (`/sessions`), and `/compact`.

@@ -1,7 +1,7 @@
 //! Per-model tier assignments (weak / medium / strong / compaction).
 //!
 //! Ported from the reference `craft-providers/src/model_registry.rs`, adapted
-//! to this repo's Rig-based architecture: the reference's per-provider
+//! to this repo's animist-based architecture: the reference's per-provider
 //! `manifest.rs` layer is replaced by a compact static table keyed by
 //! `ProviderKind` string, and the models.dev catalog (task 49) carries no
 //! tier metadata — verified against the reference, whose catalog fills only

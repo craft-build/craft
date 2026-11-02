@@ -222,6 +222,7 @@ pub fn spawn_extraction(
             }
         };
         for fact in &facts {
+            // argosy's fact writer is a sync API over its on-disk state.
             if let Err(err) = tokio::task::spawn_blocking({
                 let fact = fact.clone();
                 let cwd = cwd.clone();

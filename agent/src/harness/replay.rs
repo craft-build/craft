@@ -100,8 +100,7 @@ pub fn transcript(entries: &[HistoryEntry]) -> Vec<ReplayItem> {
                     let text = ext::tool_content_text(content);
                     // The verbatim original, when an alteration or compaction
                     // revised what the entry shows.
-                    let full = verbatim_result_text(entry, tool_use_id)
-                        .filter(|verbatim| *verbatim != text);
+                    let full = verbatim_result_text(entry, tool_use_id, &text);
                     let name = name
                         .as_deref()
                         .or_else(|| calls.get(tool_use_id.as_str()).copied())
@@ -122,21 +121,37 @@ pub fn transcript(entries: &[HistoryEntry]) -> Vec<ReplayItem> {
     items
 }
 
-/// The verbatim tool-result text for `id`, from the entry's source.
-fn verbatim_result_text(entry: &HistoryEntry, id: &str) -> Option<String> {
-    entry
-        .verbatim()
-        .message()
-        .content
-        .iter()
-        .find_map(|block| match block {
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                ..
-            } if tool_use_id == id => Some(ext::tool_content_text(content)),
-            _ => None,
-        })
+/// Animist's agent commits every tool-result entry with a placeholder
+/// source ("Tool execution interrupted…", `is_error`) that the final
+/// revision replaces; the agent squashes to exactly placeholder + final
+/// (F04). A placeholder is never the "full output" the affordance promises.
+const INTERRUPT_PLACEHOLDER: &str =
+    "Tool execution interrupted or not completed; external effects may have occurred";
+
+/// The verbatim original for `id`: the richest copy among the entry's
+/// source and revisions that differs from the text being shown, skipping
+/// the placeholder. `None` when nothing richer than the shown text exists
+/// (an unaltered result whose only other copy is the placeholder).
+fn verbatim_result_text(entry: &HistoryEntry, id: &str, shown: &str) -> Option<String> {
+    let candidate = |stored: &animist::history::StoredMessage| {
+        stored
+            .message()
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == id => Some(ext::tool_content_text(content)),
+                _ => None,
+            })
+    };
+    std::iter::once(entry.verbatim())
+        .chain(entry.revisions())
+        .filter_map(candidate)
+        .filter(|text| text != shown && text != INTERRUPT_PLACEHOLDER)
+        .max_by_key(|text| text.len())
 }
 
 #[cfg(test)]
@@ -233,6 +248,77 @@ mod tests {
                 name: "bash".into(),
                 text: "[4 lines compressed from 4096 | retrieve: hash=abc]".into(),
                 full: Some("the original long output".into()),
+                is_error: false,
+            }]
+        );
+    }
+
+    /// The production entry shape: animist commits a placeholder source
+    /// and squashes to placeholder + one final revision (F04). An
+    /// unaltered result must NOT offer the placeholder as its "full
+    /// output", and an altered one must surface the pre-alteration
+    /// revision, not the placeholder source.
+    #[test]
+    fn placeholder_backed_entries_resolve_full_output_from_revisions() {
+        let placeholder = ext::stored(ext::observation(vec![ext::tool_result(
+            "t9",
+            Some("bash"),
+            INTERRUPT_PLACEHOLDER,
+            true,
+        )]));
+        // Unaltered: placeholder source + the real output as final revision.
+        let done = HistoryEntry::builder()
+            .source(placeholder.clone())
+            .revisions(vec![ext::stored(ext::observation(vec![ext::tool_result(
+                "t9",
+                Some("bash"),
+                "the finished output",
+                false,
+            )]))])
+            .build();
+        assert_eq!(
+            transcript(&[done]),
+            vec![ReplayItem::ToolResult {
+                id: "t9".into(),
+                name: "bash".into(),
+                text: "the finished output".into(),
+                // The placeholder is never offered as the original.
+                full: None,
+                is_error: false,
+            }]
+        );
+
+        // Altered: placeholder source, real output, then the compression
+        // revision (the durable 08 pass revises the squashed entry).
+        let mut altered_stored = ext::stored(ext::observation(vec![ext::tool_result(
+            "t9",
+            Some("bash"),
+            "[9 lines compressed from 9001 | retrieve: hash=ab12]",
+            false,
+        )]));
+        altered_stored.tags_mut().insert(
+            crate::compaction::alter::ALTER_TAG.to_owned(),
+            "compressed".into(),
+        );
+        let altered = HistoryEntry::builder()
+            .source(placeholder)
+            .revisions(vec![
+                ext::stored(ext::observation(vec![ext::tool_result(
+                    "t9",
+                    Some("bash"),
+                    "the finished output",
+                    false,
+                )])),
+                altered_stored,
+            ])
+            .build();
+        assert_eq!(
+            transcript(&[altered]),
+            vec![ReplayItem::ToolResult {
+                id: "t9".into(),
+                name: "bash".into(),
+                text: "[9 lines compressed from 9001 | retrieve: hash=ab12]".into(),
+                full: Some("the finished output".into()),
                 is_error: false,
             }]
         );

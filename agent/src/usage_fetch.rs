@@ -1,6 +1,6 @@
 //! Provider usage panels (the TUI `/usage` overlay): per-plan limits and
 //! today's per-model spend. Every provider-specific usage endpoint from
-//! the rig era is gone; [`fetch_usage`] keeps the `Ok(None)` contract
+//! the pre-animist endpoint is gone; [`fetch_usage`] keeps the `Ok(None)` contract
 //! every surface already handles, so panels render local session data
 //! until a provider ships a usage API worth wiring (animist owns provider
 //! clients; a revival lands there first).

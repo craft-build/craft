@@ -267,12 +267,11 @@ pub struct AgentConfig {
     /// Run default and inherited subagent preference.
     pub thinking: Option<crate::thinking::ThinkingConfig>,
     /// Bound on model calls per run. `None` keeps each surface's default
-    /// (unbounded in the TUI, [`crate::run::RunParams`] defaults headless);
+    /// (unbounded in the TUI; the headless builder defaults it);
     /// set by `--max-turns` (G.1).
     pub max_turns: Option<u32>,
-    /// Bound on tools executing concurrently within one wave. Rig tools are
-    /// bridged as exclusive until 06, so this only bites once tools carry
-    /// scheduling claims.
+    /// Bound on tools executing concurrently within one wave; it bounds both
+    /// model-emitted calls and `batch` children (06's scheduling claims).
     #[serde(default = "default_max_concurrent_tools")]
     pub max_concurrent_tools: usize,
     /// Post-turn advisor (C.12).
@@ -322,7 +321,7 @@ impl AgentConfig {
             .fail();
         }
         // Providers have different upper bounds (and some disallow temperature).
-        // Validate the portable constraint here; leave model-specific rules to Rig.
+        // Validate the portable constraint here; providers enforce their own bounds.
         if self
             .temperature
             .is_some_and(|value| !value.is_finite() || value < 0.0)

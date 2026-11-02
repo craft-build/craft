@@ -2102,6 +2102,10 @@ pub async fn run_print(cli: &Cli, config: crate::config::Config) -> Result<()> {
 
 /// [`run_print`] with an injectable state dir: tests pass `None` so runs
 /// never touch the developer's session storage.
+#[expect(
+    clippy::result_large_err,
+    reason = "the crate error type is deliberately unboxed"
+)]
 async fn run_print_with(
     cli: &Cli,
     mut config: crate::config::Config,
@@ -2250,13 +2254,20 @@ impl HeadlessQuery {
     }
 }
 
+/// One headless agent query in print mode. Both `--print` and
+/// `craft term run` funnel through here; `config.agent.preamble` must
+/// already be the effective preamble.
+#[expect(
+    clippy::result_large_err,
+    reason = "the crate error type is deliberately unboxed"
+)]
 pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery) -> Result<()> {
     run_headless_query_with(config, q, crate::storage::StateDir::resolve().ok()).await
 }
 
 /// [`run_headless_query`] with an injectable state dir: tests pass `None`
 /// so runs never touch the developer's session storage.
-async fn run_headless_query_with(
+pub(crate) async fn run_headless_query_with(
     config: crate::config::Config,
     q: HeadlessQuery,
     state_dir: Option<StateDir>,
@@ -2439,6 +2450,11 @@ async fn run_headless_query_with(
     .mode(mode)
     .policy(policy.clone())
     .workspace(workspace.clone())
+    // The change-feed persister writes the run's entry records; without
+    // it the session file keeps only the fresh header the store wrote on
+    // open (found by 12's perf harness: 50-turn --print runs persisted
+    // nothing).
+    .persist(persister.clone())
     .build()?;
     // Arm the subagent seam on the conversation (one registry rebuild at
     // startup; headless carries no provider configs beyond the selection,
