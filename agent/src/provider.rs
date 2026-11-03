@@ -253,6 +253,58 @@ pub async fn complete_text(
     Ok(String::new())
 }
 
+/// The longest provider error body an auxiliary failure line carries.
+const FAILURE_BODY_LIMIT: usize = 1024;
+
+/// The failure line auxiliary callers show: the error's display plus the
+/// body of a Bedrock HTTP error from the chain. Animist's generic HTTP
+/// display carries the body; its Bedrock one carries only status, request
+/// ID, and error type — and the body holds the ValidationException
+/// message naming the rejected field.
+pub(crate) fn provider_failure_text(error: &crate::error::Error) -> String {
+    let mut text = error.to_string();
+    // `ProviderClient` boxes its source behind `Box<dyn Error>`, which the
+    // snafu chain does not surface, and animist's transparent Bedrock
+    // variant hides its own source the same way, so both steps destructure.
+    let root: &dyn std::error::Error = match error {
+        crate::error::Error::ProviderClient { source } => source.as_ref(),
+        _ => return text,
+    };
+    let mut provider = root.downcast_ref::<animist::provider::ProviderError>();
+    let mut source = Some(root);
+    let body = loop {
+        if let Some(animist::provider::bedrock::BedrockError::Http { body, .. }) =
+            source.and_then(|err| err.downcast_ref())
+        {
+            break Some(body);
+        }
+        if let Some(animist::provider::ProviderError::Bedrock {
+            source: animist::provider::bedrock::BedrockError::Http { body, .. },
+        }) = provider
+        {
+            break Some(body);
+        }
+        source = source.and_then(|err| err.source());
+        provider = None;
+        if source.is_none() {
+            break None;
+        }
+    };
+    if let Some(body) = body {
+        let body = String::from_utf8_lossy(body);
+        let body = body.trim();
+        if !body.is_empty() && !text.contains(body) {
+            let cap = body
+                .char_indices()
+                .nth(FAILURE_BODY_LIMIT)
+                .map_or(body.len(), |(index, _)| index);
+            text.push_str(": ");
+            text.push_str(&body[..cap]);
+        }
+    }
+    text
+}
+
 // --- Construction --------------------------------------------------------------
 
 /// A constructed provider for one config entry.
@@ -915,6 +967,56 @@ fn moves_system_to_preamble(config: &ProviderConfig, id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snafu::GenerateImplicitData;
+
+    // --- provider failure lines ---
+
+    fn bedrock_http_error(status: u16, body: &str) -> crate::error::Error {
+        crate::error::Error::ProviderClient {
+            source: Box::new(animist::provider::ProviderError::Bedrock {
+                source: animist::provider::bedrock::BedrockError::Http {
+                    status,
+                    request_id: Some("req-1".to_owned()),
+                    error_type: Some("ValidationException".to_owned()),
+                    body: body.as_bytes().to_vec(),
+                    backtrace: snafu::Backtrace::generate(),
+                },
+            }),
+        }
+    }
+
+    /// A Bedrock HTTP failure carries the response body — the
+    /// ValidationException message — that animist's display drops.
+    #[test]
+    fn failure_line_carries_the_bedrock_error_body() {
+        let error = bedrock_http_error(
+            400,
+            "{\"message\":\"max_tokens: requested 8192, max allowed 4096\"}",
+        );
+        let text = provider_failure_text(&error);
+        assert!(text.contains("HTTP 400"), "{text}");
+        assert!(
+            text.contains("max allowed 4096"),
+            "the body naming the rejected field must ride the failure line: {text}"
+        );
+    }
+
+    /// A non-Bedrock failure keeps its own display untouched, and a huge
+    /// body is capped so one denial line cannot flood the surface.
+    #[test]
+    fn failure_line_caps_bodies_and_leaves_other_errors_alone() {
+        let error = bedrock_http_error(400, &"x".repeat(4_096));
+        assert!(provider_failure_text(&error).len() < 1_400);
+        let other = crate::error::Error::ProviderClient {
+            source: Box::new(animist::provider::ProviderError::Http {
+                status: 400,
+                body: "maximum context length exceeded".to_owned(),
+                body_truncated: false,
+                backtrace: snafu::Backtrace::generate(),
+            }),
+        };
+        assert_eq!(provider_failure_text(&other), other.to_string());
+    }
 
     // --- catalog cache policy ---
 

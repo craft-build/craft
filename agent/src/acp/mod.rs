@@ -3,8 +3,10 @@
 //!
 //! Every capability of the conversation (`harness::run_turn` with
 //! read/grep/edit/delete tools, streaming output, per-turn usage) is
-//! surfaced here: provider and model selection travel as session config options, model
-//! output streams as `session/update` notifications, and `session/cancel`
+//! surfaced here: model selection travels as one grouped session config
+//! option (one group per provider, `{provider}/{model}` values) and the
+//! reasoning policy as a `thought_level` option, model output streams as
+//! `session/update` notifications, and `session/cancel`
 //! stops the in-flight turn. Gated tool calls ask the client over
 //! `session/request_permission`, the `question` tool is mapped onto
 //! `elicitation/create` forms, the `task` tool spawns subagents under the
@@ -32,9 +34,10 @@ use agent_client_protocol::{
             CloseSessionResponse, ConfigOptionUpdate, ContentBlock, Implementation,
             InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
             NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
-            PromptResponse as AcpPromptResponse, SessionConfigOption, SessionConfigOptionCategory,
-            SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionNotification,
-            SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+            PromptResponse as AcpPromptResponse, SessionCapabilities, SessionCloseCapabilities,
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
+            SessionConfigSelectOption, SessionId, SessionNotification, SessionUpdate,
+            SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
         },
     },
 };
@@ -53,7 +56,6 @@ use crate::{
     provider::ProviderHandle, tools::Workspace,
 };
 
-pub const PROVIDER_OPTION_ID: &str = "provider";
 pub const MODEL_OPTION_ID: &str = "model";
 pub const THINKING_OPTION_ID: &str = "thinking";
 
@@ -94,21 +96,10 @@ impl Session {
     fn config_options(
         &self,
         config: &Config,
-        provider_names: &[String],
+        listings: &BTreeMap<String, Vec<animist::provider::ModelInfo>>,
     ) -> Vec<SessionConfigOption> {
         vec![
-            SessionConfigOption::select(
-                PROVIDER_OPTION_ID,
-                "Provider",
-                self.provider_name.clone(),
-                provider_names
-                    .iter()
-                    .map(|name| SessionConfigSelectOption::new(name.clone(), name.clone()))
-                    .collect::<Vec<_>>(),
-            )
-            .category(SessionConfigOptionCategory::ModelConfig)
-            .description("Configured inference provider from ~/.config/craft.bml"),
-            model_option(&self.model_rows(config), &self.model),
+            model_option(config, listings, &self.provider_name, &self.model),
             thinking_option(self.thinking, self.model_info(&self.model)),
         ]
     }
@@ -132,48 +123,71 @@ fn thinking_option(
             })
             .collect::<Vec<_>>(),
     )
-    .category(SessionConfigOptionCategory::ModelConfig)
+    .category(SessionConfigOptionCategory::ThoughtLevel)
     .description("Reasoning policy for this session and its subagents")
 }
 
-fn model_option(models: &[CatalogModel], current: &str) -> SessionConfigOption {
-    SessionConfigOption::select(
-        MODEL_OPTION_ID,
-        "Model",
-        SessionConfigValueId::new(current),
-        models
-            .iter()
-            .map(|model| {
-                let mut option =
-                    SessionConfigSelectOption::new(model.id.clone(), model.label().to_owned());
-                if let Some(description) = &model.description {
-                    option = option.description(description.clone());
-                }
-                option
-            })
-            .collect::<Vec<_>>(),
-    )
-    .category(SessionConfigOptionCategory::Model)
-    .description("Model on the selected provider; the provider validates the ID on first use")
+/// The spec-intended multi-provider shape: one `model` select whose
+/// options are grouped per provider with `"{provider}/{model}"` values,
+/// so a single pick switches both. Providers whose listing could not be
+/// resolved are omitted — the option degrades instead of failing the
+/// session.
+fn model_option(
+    config: &Config,
+    listings: &BTreeMap<String, Vec<animist::provider::ModelInfo>>,
+    provider_name: &str,
+    model: &str,
+) -> SessionConfigOption {
+    let mut current_value = String::new();
+    let groups = listings
+        .iter()
+        .map(|(name, models)| {
+            let options = CatalogModel::rows(models, config.providers.get(name))
+                .into_iter()
+                .map(|row| {
+                    let value = format!("{name}/{}", row.id);
+                    if name == provider_name && row.id == model {
+                        current_value = value.clone();
+                    }
+                    let mut option = SessionConfigSelectOption::new(value, row.label());
+                    if let Some(description) = &row.description {
+                        option = option.description(description.clone());
+                    }
+                    option
+                })
+                .collect::<Vec<_>>();
+            SessionConfigSelectGroup::new(name.clone(), name.clone(), options)
+        })
+        .filter(|group| !group.options.is_empty())
+        .collect::<Vec<_>>();
+    if current_value.is_empty() {
+        // The current model's row is missing (a listing that dropped the
+        // id); keep the `{provider}/{model}` invariant so clients can
+        // still display the selection.
+        current_value = format!("{provider_name}/{model}");
+    }
+    SessionConfigOption::select(MODEL_OPTION_ID, "Model", current_value, groups)
+        .category(SessionConfigOptionCategory::Model)
+        .description("Model across the configured providers; one pick switches provider and model")
 }
 
 impl Session {
-    /// The listing rows as pickers see them.
-    fn model_rows(&self, config: &Config) -> Vec<CatalogModel> {
-        CatalogModel::rows(&self.models, config.providers.get(&self.provider_name))
-    }
-
-    /// The animist info for a model id, when the listing carries it.
+    /// The animist info for a model id, when the listing carries it. Any
+    /// of the entry's ids matches, so aliases resolve too.
     fn model_info(&self, id: &str) -> Option<&animist::provider::ModelInfo> {
         self.models
             .iter()
-            .find(|info| info.ids.first().is_some_and(|listed| listed == id))
+            .find(|info| info.ids.iter().any(|listed| listed == id))
     }
 }
 
 struct AppState {
     config: Config,
     sessions: Mutex<BTreeMap<String, Session>>,
+    /// Provider handles and listings by provider name, cached for the
+    /// process lifetime so option building and per-turn resolution stop
+    /// re-fetching. Never held across an await.
+    catalogs: Mutex<BTreeMap<String, (ProviderHandle, Vec<animist::provider::ModelInfo>)>>,
     next_session: AtomicU64,
     /// Monotonic source of per-session in-flight turn ids.
     next_turn: AtomicU64,
@@ -186,17 +200,16 @@ impl AppState {
         Self {
             config,
             sessions: Mutex::new(BTreeMap::new()),
+            catalogs: Mutex::new(BTreeMap::new()),
             next_session: AtomicU64::new(1),
             next_turn: AtomicU64::new(1),
             client_caps: Mutex::new(None),
         }
     }
 
-    fn provider_names(&self) -> Vec<String> {
-        self.config.providers.keys().cloned().collect()
-    }
-
-    /// Resolve a configured provider and its merged model catalog.
+    /// Resolve a configured provider and its merged model catalog,
+    /// serving and populating the process-wide cache. A failed fetch is
+    /// not cached, so the next call retries.
     async fn provider_catalog(
         &self,
         name: &str,
@@ -206,6 +219,9 @@ impl AppState {
             .providers
             .get(name)
             .ok_or_else(|| format!("unknown provider {name:?}"))?;
+        if let Some(cached) = self.catalogs.lock().await.get(name) {
+            return Ok(cached.clone());
+        }
         let catalog = crate::provider::load_catalog().await;
         let provider = ProviderHandle::from_config(config, Some(&catalog))
             .await
@@ -214,7 +230,42 @@ impl AppState {
             .models(config, Some(&catalog))
             .await
             .map_err(report)?;
-        Ok((provider, models))
+        let entry = {
+            let mut catalogs = self.catalogs.lock().await;
+            catalogs
+                .entry(name.to_owned())
+                .or_insert((provider, models))
+                .clone()
+        };
+        Ok(entry)
+    }
+
+    /// Every configured provider's listing for the grouped model option,
+    /// fetched in parallel on first use and cached thereafter. A provider
+    /// that cannot be resolved is omitted, never fatal.
+    async fn listings(&self) -> BTreeMap<String, Vec<animist::provider::ModelInfo>> {
+        let names: Vec<String> = self.config.providers.keys().cloned().collect();
+        futures::future::join_all(names.iter().map(|name| async move {
+            self.provider_catalog(name)
+                .await
+                .ok()
+                .map(|(_, models)| (name.clone(), models))
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The cached listings only; never fetches, so turn-time option
+    /// rebuilds stay off the network.
+    async fn cached_listings(&self) -> BTreeMap<String, Vec<animist::provider::ModelInfo>> {
+        self.catalogs
+            .lock()
+            .await
+            .iter()
+            .map(|(name, (_, models))| (name.clone(), models.clone()))
+            .collect()
     }
 
     async fn open_session(
@@ -557,7 +608,13 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     .agent_capabilities(
                         AgentCapabilities::new()
                             .load_session(true)
-                            .prompt_capabilities(PromptCapabilities::new()),
+                            .prompt_capabilities(PromptCapabilities::new())
+                            // The close handler exists; advertising it lets
+                            // capable clients actually release sessions.
+                            .session_capabilities(
+                                SessionCapabilities::new()
+                                    .close(SessionCloseCapabilities::new()),
+                            ),
                     )
                     .agent_info(Implementation::new("craft-acp", env!("CARGO_PKG_VERSION")));
                 responder.respond(response)
@@ -594,8 +651,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Err(message) => return respond_setup_error(responder, message),
                 };
                 // `mcp_servers` is ignored.
-                let options =
-                    session.config_options(&new_state.config, &new_state.provider_names());
+                let listings = new_state.listings().await;
+                let options = session.config_options(&new_state.config, &listings);
                 let response =
                     NewSessionResponse::new(SessionId::new(id.clone())).config_options(options);
                 new_state.sessions.lock().await.insert(id, session);
@@ -628,8 +685,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Ok(session) => session,
                     Err(message) => return respond_setup_error(responder, message),
                 };
-                let options =
-                    session.config_options(&load_state.config, &load_state.provider_names());
+                let listings = load_state.listings().await;
+                let options = session.config_options(&load_state.config, &listings);
                 load_state.sessions.lock().await.insert(stored_id, session);
                 responder.respond(LoadSessionResponse::new().config_options(options))
             },
@@ -645,78 +702,108 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         "expected a configuration value id".into(),
                     );
                 };
-                let mut sessions = set_state.sessions.lock().await;
-                let Some(session) = sessions.get_mut(request.session_id.0.as_ref()) else {
-                    drop(sessions);
-                    return respond_setup_error(responder, "unknown session".into());
-                };
-                let outcome = match request.config_id.0.as_ref() {
-                    PROVIDER_OPTION_ID => {
-                        if !set_state.config.providers.contains_key(&value) {
-                            Err(format!("unknown provider {value:?}"))
-                        } else {
-                            match set_state.provider_catalog(&value).await {
-                                Ok((_provider, models)) => {
-                                    let resolved =
-                                        crate::model_selection::resolve_or_default(&models, None);
-                                    match resolved {
-                                        Some(r) => {
-                                            session.model = r.model;
-                                            session.context_length = r.context_length;
-                                        }
-                                        None => {
-                                            session.model = String::new();
-                                            session.context_length = None;
-                                        }
-                                    }
-                                    session.models = models;
-                                    session.provider_name = value;
-                                    Ok(())
-                                }
-                                Err(message) => Err(message),
+                // What the resolved change should apply to the session.
+                enum ConfigChange {
+                    Model {
+                        provider: String,
+                        resolved: crate::model_selection::ResolvedModel,
+                        models: Vec<animist::provider::ModelInfo>,
+                    },
+                    Thinking(crate::thinking::ThinkingConfig),
+                }
+                // Resolution happens outside the sessions lock: the model
+                // arm may fetch a provider listing (network I/O), and
+                // prompt/cancel must not stall behind a provider switch.
+                let resolve = match request.config_id.0.as_ref() {
+                    MODEL_OPTION_ID => match value.split_once('/') {
+                        None => Err(format!("model values are \"provider/model\"; got {value:?}")),
+                        Some((provider, model)) => {
+                            if !set_state.config.providers.contains_key(provider) {
+                                Err(format!("unknown provider {provider:?}"))
+                            } else {
+                                set_state
+                                    .provider_catalog(provider)
+                                    .await
+                                    .and_then(|(_, models)| {
+                                        resolve_model_in_listing(&models, model)
+                                            .map(|resolved| ConfigChange::Model {
+                                                provider: provider.to_owned(),
+                                                resolved,
+                                                models,
+                                            })
+                                            .ok_or_else(|| {
+                                                format!(
+                                                    "unknown model {model:?} on provider {provider:?}"
+                                                )
+                                            })
+                                    })
                             }
                         }
-                    }
-                    MODEL_OPTION_ID => {
-                        if let Some(info) = session.model_info(&value) {
-                            session.context_length = info.config.context_window;
-                            session.model = value;
-                            Ok(())
-                        } else {
-                            Err(format!("unknown model {value:?}"))
-                        }
-                    }
+                    },
                     THINKING_OPTION_ID => {
-                        crate::thinking::ThinkingConfig::parse(&value, session.thinking)
-                            .map(|thinking| session.thinking = thinking)
+                        // Spec: clients must send one of the offered
+                        // values; anything else is a client bug.
+                        let sessions = set_state.sessions.lock().await;
+                        let Some(session) = sessions.get(request.session_id.0.as_ref()) else {
+                            drop(sessions);
+                            return respond_setup_error(responder, "unknown session".into());
+                        };
+                        offered_thinking(
+                            &value,
+                            session.thinking,
+                            session.model_info(&session.model),
+                        )
+                        .map(ConfigChange::Thinking)
                     }
                     other => Err(format!("unknown configuration option {other:?}")),
                 };
-                if let Err(message) = outcome {
-                    drop(sessions);
-                    return respond_setup_error(responder, message);
-                }
-                session.thinking = crate::thinking::reconcile_for(
-                    session.thinking,
-                    session.model_info(&session.model),
-                );
-                session
-                    .conversation
-                    .update_settings(|settings| settings.thinking = session.thinking);
-                if let Some(persister) = &session.persister {
-                    let mut persister = persister.lock().await;
-                    persister.store_mut().set_thinking(session.thinking);
-                    persister
-                        .store_mut()
-                        .set_model(format!("{}/{}", session.provider_name, session.model));
-                }
-                let options =
-                    session.config_options(&set_state.config, &set_state.provider_names());
+                let change = match resolve {
+                    Ok(change) => change,
+                    Err(message) => return respond_setup_error(responder, message),
+                };
+                // Session open populated the cache (the model arm may have
+                // just refreshed one provider); never fetch under a config
+                // change.
+                let listings = set_state.cached_listings().await;
+                let options = {
+                    let mut sessions = set_state.sessions.lock().await;
+                    let Some(session) = sessions.get_mut(request.session_id.0.as_ref()) else {
+                        drop(sessions);
+                        return respond_setup_error(responder, "unknown session".into());
+                    };
+                    match change {
+                        ConfigChange::Model {
+                            provider,
+                            resolved,
+                            models,
+                        } => {
+                            session.provider_name = provider;
+                            session.model = resolved.model;
+                            session.context_length = resolved.context_length;
+                            session.models = models;
+                        }
+                        ConfigChange::Thinking(thinking) => session.thinking = thinking,
+                    }
+                    session.thinking = crate::thinking::reconcile_for(
+                        session.thinking,
+                        session.model_info(&session.model),
+                    );
+                    session
+                        .conversation
+                        .update_settings(|settings| settings.thinking = session.thinking);
+                    if let Some(persister) = &session.persister {
+                        let mut persister = persister.lock().await;
+                        persister.store_mut().set_thinking(session.thinking);
+                        persister
+                            .store_mut()
+                            .set_model(format!("{}/{}", session.provider_name, session.model));
+                    }
+                    session.config_options(&set_state.config, &listings)
+                };
                 let notification = SessionNotification::new(
                     request.session_id.clone(),
                     SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options.clone())),
                 );
-                drop(sessions);
                 connection.send_notification(notification)?;
                 responder.respond(SetSessionConfigOptionResponse::new(options))
             },
@@ -730,7 +817,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Ok(text) => text,
                     Err(message) => return respond_setup_error(responder, message),
                 };
-                let (conversation, mut events, provider_name, model, turn_cancel, turn_id) = {
+                let (conversation, mut events, provider_name, model, thinking, turn_cancel, turn_id) = {
                     let mut sessions = prompt_state.sessions.lock().await;
                     let Some(session) = sessions.get_mut(request.session_id.0.as_ref()) else {
                         drop(sessions);
@@ -754,6 +841,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         std::mem::replace(&mut session.events, crate::harness::EventSink::new().1),
                         session.provider_name.clone(),
                         session.model.clone(),
+                        session.thinking,
                         turn_cancel,
                         turn_id,
                     )
@@ -772,6 +860,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         &mut events,
                         provider_name,
                         model,
+                        thinking,
                         turn_cancel,
                         turn_id,
                         responder,
@@ -827,6 +916,46 @@ fn respond_setup_error<T: JsonRpcResponse>(
     message: String,
 ) -> std::result::Result<(), Error> {
     responder.respond_with_error(invalid_params(message))
+}
+
+/// Spec rule for `session/set_config_option`: the client must send one of
+/// the option's offered values. Parses and enforces that for the thinking
+/// option.
+fn offered_thinking(
+    value: &str,
+    current: crate::thinking::ThinkingConfig,
+    info: Option<&animist::provider::ModelInfo>,
+) -> std::result::Result<crate::thinking::ThinkingConfig, String> {
+    let choices = crate::thinking::choices_for(current, info);
+    crate::thinking::ThinkingConfig::parse(value, current).and_then(|thinking| {
+        choices
+            .contains(&thinking)
+            .then_some(thinking)
+            .ok_or_else(|| format!("{value:?} is not one of the offered thinking levels"))
+    })
+}
+
+/// Resolve the model half of a `"{provider}/{model}"` option value
+/// against a fetched listing. Strict like [`crate::model_selection::resolve_spec`]:
+/// the listing must still carry the id (any of its aliases), else the
+/// pick is stale and the client should re-pick. The canonical first id is
+/// what gets stored.
+fn resolve_model_in_listing(
+    models: &[animist::provider::ModelInfo],
+    model: &str,
+) -> Option<crate::model_selection::ResolvedModel> {
+    models
+        .iter()
+        .find(|info| info.ids.iter().any(|listed| listed == model))
+        .map(|info| crate::model_selection::ResolvedModel {
+            // A listed id matched, so `ids` is non-empty.
+            model: info
+                .ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| model.to_owned()),
+            context_length: info.config.context_window,
+        })
 }
 
 /// Render an error and its sources as one client-facing message.

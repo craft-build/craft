@@ -275,6 +275,54 @@ pub fn choices_for(
     choices
 }
 
+/// The value a turn actually sends for a preference: [`reconcile_for`]
+/// plus snapping to what the resolved model can express — an effort the
+/// listing does not report snaps to the closest supported one, and a
+/// token budget maps onto the nearest supported effort (effort-only
+/// dialects reject explicit budgets), or `adaptive` when the model
+/// reports no discrete efforts. The stored preference is never rewritten:
+/// switching back to a model that supports it restores it.
+pub fn effective_for(
+    config: ThinkingConfig,
+    info: Option<&animist::provider::ModelInfo>,
+) -> ThinkingConfig {
+    let config = reconcile_for(config, info);
+    let Some(info) = info else {
+        return config;
+    };
+    let thinking = &info.features.thinking;
+    if !thinking.supported && !thinking.required {
+        return ThinkingConfig::Off;
+    }
+    let efforts: Vec<Effort> = thinking
+        .efforts
+        .iter()
+        .filter_map(|effort| Effort::from_animist(effort.clone()))
+        .collect();
+    match config {
+        ThinkingConfig::Effort(effort) => {
+            if efforts.is_empty() {
+                // No discrete efforts to express: adaptive is the knob
+                // every reasoning dialect accepts.
+                ThinkingConfig::Adaptive
+            } else {
+                ThinkingConfig::Effort(effort.snap(&efforts))
+            }
+        }
+        ThinkingConfig::Budget(budget) => {
+            if efforts.is_empty() {
+                ThinkingConfig::Adaptive
+            } else {
+                // Without a reported window the proportional mapping is
+                // unknown; the lowest supported effort is the safe read.
+                let window = info.config.context_window.unwrap_or(u32::MAX);
+                ThinkingConfig::Effort(Effort::from_budget(budget, window).snap(&efforts))
+            }
+        }
+        other => other,
+    }
+}
+
 /// Capability reconciliation for session surfaces: a model that cannot
 /// reason never keeps an enabled preference; a model that must reason
 /// never keeps `off`. `None` leaves the preference untouched, like the
@@ -465,6 +513,82 @@ mod tests {
             selected_choice(ThinkingConfig::Adaptive, &choices),
             ThinkingConfig::Effort(Effort::Low),
             "an enabled preference stays on the enabled axis"
+        );
+    }
+
+    #[test]
+    fn effective_for_snaps_to_expressible_levels() {
+        let info = efforts_info(
+            &[
+                animist::provider::Effort::Low,
+                animist::provider::Effort::High,
+            ],
+            true,
+            false,
+        );
+        // A listed effort passes through; an unlisted one snaps down.
+        assert_eq!(
+            effective_for(ThinkingConfig::Effort(Effort::Low), Some(&info)),
+            ThinkingConfig::Effort(Effort::Low)
+        );
+        assert_eq!(
+            effective_for(ThinkingConfig::Effort(Effort::Max), Some(&info)),
+            ThinkingConfig::Effort(Effort::High)
+        );
+        assert_eq!(
+            effective_for(ThinkingConfig::Effort(Effort::Minimal), Some(&info)),
+            ThinkingConfig::Effort(Effort::Low),
+            "snaps up to the lowest supported when nothing lower exists"
+        );
+        // A budget maps onto the nearest supported effort.
+        assert_eq!(
+            effective_for(ThinkingConfig::Budget(2_000), Some(&info)),
+            ThinkingConfig::Effort(Effort::Low)
+        );
+        assert_eq!(
+            effective_for(ThinkingConfig::Budget(1024), Some(&info)),
+            ThinkingConfig::Effort(Effort::Low)
+        );
+        // Off and adaptive are already expressible.
+        assert_eq!(
+            effective_for(ThinkingConfig::Off, Some(&info)),
+            ThinkingConfig::Off
+        );
+        assert_eq!(
+            effective_for(ThinkingConfig::Adaptive, Some(&info)),
+            ThinkingConfig::Adaptive
+        );
+    }
+
+    #[test]
+    fn effective_for_degrades_budgets_and_efforts_without_listed_efforts() {
+        let info = efforts_info(&[], true, false);
+        // No discrete efforts: adaptive is the one knob every dialect
+        // accepts, and a budget cannot be expressed as an effort.
+        assert_eq!(
+            effective_for(ThinkingConfig::Effort(Effort::High), Some(&info)),
+            ThinkingConfig::Adaptive
+        );
+        assert_eq!(
+            effective_for(ThinkingConfig::Budget(8192), Some(&info)),
+            ThinkingConfig::Adaptive
+        );
+        assert_eq!(
+            effective_for(ThinkingConfig::Adaptive, Some(&info)),
+            ThinkingConfig::Adaptive
+        );
+        // No metadata at all: the preference passes through untouched.
+        assert_eq!(
+            effective_for(ThinkingConfig::Effort(Effort::Max), None),
+            ThinkingConfig::Effort(Effort::Max)
+        );
+        // An incapable model never sends an enabled value (reconcile).
+        assert_eq!(
+            effective_for(
+                ThinkingConfig::Effort(Effort::High),
+                Some(&efforts_info(&[], false, false))
+            ),
+            ThinkingConfig::Off
         );
     }
 }

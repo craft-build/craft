@@ -295,7 +295,7 @@ pub(crate) async fn review_with_deadline(
         Ok(Ok(text)) => text,
         Ok(Err(e)) => {
             return Err(ReviewError::Provider {
-                message: e.to_string(),
+                message: crate::provider::provider_failure_text(&e),
             });
         }
         Err(_) => return Err(ReviewError::Timeout { deadline }),

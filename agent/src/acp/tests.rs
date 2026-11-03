@@ -37,14 +37,123 @@ fn prompt_text_rejects_unsupported_blocks() {
 }
 
 #[test]
-fn config_options_expose_provider_model_and_thinking() {
+fn config_options_carry_the_grouped_model_and_thought_level_shape() {
+    let mut session = test_session();
+    let mut info = crate::testing::model_info("gpt-x", 128_000, 8_192, true, false);
+    info.ids = vec!["gpt-x".into(), "gpt-x-alias".into()];
+    session.models = vec![info];
+    let listings = BTreeMap::from([
+        ("openai".to_string(), session.models.clone()),
+        (
+            "llamafile".to_string(),
+            vec![crate::testing::model_info(
+                "local-model",
+                32_000,
+                4_096,
+                false,
+                false,
+            )],
+        ),
+    ]);
+    let options = session.config_options(&Config::default(), &listings);
+    assert_eq!(options.len(), 2);
+
+    // The model option leads, is categorized `model`, and groups one
+    // block per provider with `{provider}/{model}` values.
+    let model = serde_json::to_value(&options[0]).unwrap();
+    assert_eq!(model["id"], "model");
+    assert_eq!(model["category"], "model");
+    // Untagged select options: a grouped list serializes as a bare array
+    // of group objects.
+    let groups = model["options"].as_array().unwrap();
+    assert_eq!(
+        groups
+            .iter()
+            .filter_map(|group| group["name"].as_str())
+            .collect::<Vec<_>>(),
+        ["llamafile", "openai"],
+        "one group per provider, listing order"
+    );
+    let values: Vec<_> = groups
+        .iter()
+        .flat_map(|group| group["options"].as_array().unwrap())
+        .map(|option| option["value"].as_str().unwrap())
+        .collect();
+    assert_eq!(values, ["llamafile/local-model", "openai/gpt-x"]);
+    assert_eq!(model["currentValue"], "openai/gpt-x");
+    assert!(
+        values.contains(&model["currentValue"].as_str().unwrap()),
+        "currentValue must be one of the flattened choices"
+    );
+
+    // The thinking option is second and categorized `thought_level`.
+    let thinking = serde_json::to_value(&options[1]).unwrap();
+    assert_eq!(thinking["id"], "thinking");
+    assert_eq!(thinking["category"], "thought_level");
+    assert_eq!(
+        thinking["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|option| option["value"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["off", "adaptive"]
+    );
+}
+
+#[test]
+fn model_option_degrades_when_the_current_model_is_unlisted() {
     let session = test_session();
-    let options =
-        session.config_options(&Config::default(), &["openai".into(), "llamafile".into()]);
-    assert_eq!(options.len(), 3);
-    assert_eq!(options[0].id.0.as_ref(), "provider");
-    assert_eq!(options[1].id.0.as_ref(), "model");
-    assert_eq!(options[2].id.0.as_ref(), "thinking");
+    let listings = BTreeMap::from([(
+        "openai".to_string(),
+        vec![crate::testing::model_info(
+            "other-model",
+            128_000,
+            8_192,
+            false,
+            false,
+        )],
+    )]);
+    let options = session.config_options(&Config::default(), &listings);
+    let model = serde_json::to_value(&options[0]).unwrap();
+    // The `{provider}/{model}` invariant holds even when the row is gone.
+    assert_eq!(model["currentValue"], "openai/gpt-x");
+}
+
+#[test]
+fn offered_thinking_rejects_values_the_option_never_listed() {
+    let info = efforts_info(&["low", "high"]);
+    // Off, adaptive, and the listed efforts are accepted.
+    for value in ["off", "adaptive", "low", "high"] {
+        assert!(
+            offered_thinking(value, crate::thinking::ThinkingConfig::Off, Some(&info)).is_ok(),
+            "{value} is offered"
+        );
+    }
+    // Anything else the client might send is a spec violation.
+    for value in ["max", "minimal", "4096"] {
+        let error =
+            offered_thinking(value, crate::thinking::ThinkingConfig::Off, Some(&info)).unwrap_err();
+        assert!(error.contains("offered"), "unexpected: {error}");
+    }
+    assert!(offered_thinking("bogus", crate::thinking::ThinkingConfig::Off, Some(&info)).is_err());
+    // An explicit budget stays editable only while it is the current
+    // value, exactly as the option lists it.
+    let current = crate::thinking::ThinkingConfig::Budget(4096);
+    assert!(offered_thinking("4096", current, Some(&info)).is_ok());
+    assert!(offered_thinking("8192", current, Some(&info)).is_err());
+}
+
+#[test]
+fn model_values_resolve_by_any_listed_alias() {
+    let mut info = crate::testing::model_info("gpt-x", 128_000, 8_192, false, false);
+    info.ids = vec!["gpt-x".into(), "gpt-x-alias".into()];
+    let models = vec![info];
+    let resolved = resolve_model_in_listing(&models, "gpt-x-alias").unwrap();
+    // The canonical first id is stored, not the alias the client sent.
+    assert_eq!(resolved.model, "gpt-x");
+    assert_eq!(resolved.context_length, Some(128_000));
+    assert!(resolve_model_in_listing(&models, "gone").is_none());
 }
 
 fn mock_model() -> crate::provider::ModelHandle {
@@ -128,10 +237,11 @@ fn efforts_info(efforts: &[&str]) -> animist::provider::ModelInfo {
 fn thinking_options_filter_levels_without_restoring_unsupported_current_effort() {
     let info = efforts_info(&["low", "high"]);
     let mut session = test_session();
-    session.models = vec![info];
+    session.models = vec![info.clone()];
     session.thinking = crate::thinking::ThinkingConfig::Effort(crate::thinking::Effort::Max);
-    let options = session.config_options(&Config::default(), &["openai".into()]);
-    let json = serde_json::to_value(&options[2]).unwrap();
+    let listings = BTreeMap::from([("openai".to_string(), session.models.clone())]);
+    let options = session.config_options(&Config::default(), &listings);
+    let json = serde_json::to_value(&options[1]).unwrap();
     assert_eq!(json["currentValue"], "high");
     assert_eq!(
         session.thinking,
@@ -144,6 +254,12 @@ fn thinking_options_filter_levels_without_restoring_unsupported_current_effort()
         .map(|option| option["value"].as_str().unwrap())
         .collect();
     assert_eq!(values, ["off", "adaptive", "low", "high"]);
+    // The display projection matches what a turn actually sends: the raw
+    // preference stays stored, the effective value is snapped.
+    assert_eq!(
+        crate::thinking::effective_for(session.thinking, Some(&info)),
+        crate::thinking::ThinkingConfig::Effort(crate::thinking::Effort::High)
+    );
 }
 
 #[test]

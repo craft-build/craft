@@ -1,10 +1,10 @@
 use agent_client_protocol::{
     Client as AcpClient, ConnectionTo, Responder,
     schema::v1::{
-        Content, ContentBlock, ContentChunk, PromptResponse as AcpPromptResponse, SessionId,
-        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall as AcpToolCall,
-        ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-        ToolKind, UsageUpdate,
+        ConfigOptionUpdate, Content, ContentBlock, ContentChunk,
+        PromptResponse as AcpPromptResponse, SessionId, SessionNotification, SessionUpdate,
+        StopReason, TextContent, ToolCall as AcpToolCall, ToolCallContent, ToolCallId,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
     },
 };
 use std::collections::HashMap;
@@ -14,11 +14,13 @@ use animist::agent::AgentEvent;
 use animist::provider::ProviderEvent;
 
 use crate::harness::{Conversation, CraftEvent, Event, EventStream, ReplayItem};
+use crate::thinking::ThinkingConfig;
 
 use super::{AppState, clear_turn, internal_error, report};
 
 /// One ACP prompt turn on the session's conversation. `stream` is the
-/// conversation's single event stream, lent by the session for the turn.
+/// conversation's single event stream, lent by the session for the turn;
+/// `thinking` is the session's stored preference.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_turn(
     state: Arc<AppState>,
@@ -29,6 +31,7 @@ pub(super) async fn run_turn(
     stream: &mut EventStream,
     provider_name: String,
     model: String,
+    thinking: ThinkingConfig,
     turn_cancel: animist::agent::Cancellation,
     turn_id: u64,
     responder: Responder<AcpPromptResponse>,
@@ -60,6 +63,39 @@ pub(super) async fn run_turn(
         fail!(report(error));
     }
     let context_length = conversation.model().context_length();
+
+    // The stored preference was reconciled against the *listing*; the
+    // resolved model is authoritative, so what goes on the wire is the
+    // snapped effective value. The preference itself is kept — switching
+    // back to a model that supports it restores it.
+    let mut resolved_info = model.model.info.clone();
+    // Fold the resolved capability (manual `supports_thinking` config
+    // applied): the raw catalog info alone misses it, and the snap logic
+    // below would wrongly disable thinking for such models.
+    resolved_info.features.thinking.supported = model.model.thinking_supported();
+    resolved_info.features.thinking.required = model.model.thinking_required();
+    let effective = crate::thinking::effective_for(thinking, Some(&resolved_info));
+    conversation.update_settings(|settings| settings.thinking = effective);
+    if effective != thinking {
+        if let Some(persister) = conversation.persister() {
+            persister.lock().await.store_mut().set_thinking(effective);
+        }
+        // Rebuild the options so the client's picker shows the level
+        // actually in effect.
+        let listings = state.cached_listings().await;
+        let options = {
+            let sessions = state.sessions.lock().await;
+            sessions
+                .get(session_id.0.as_ref())
+                .map(|session| session.config_options(&state.config, &listings))
+        };
+        if let Some(options) = options {
+            let _ = connection.send_notification(SessionNotification::new(
+                session_id.clone(),
+                SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options)),
+            ));
+        }
+    }
 
     // MCP tool annotations were registered when the session's
     // tool set was armed; the gate consults the same hints as the TUI.

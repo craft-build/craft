@@ -186,6 +186,25 @@ async fn converse_with(
     catalog: Option<animist::catalog::Catalog>,
     reauth: Option<Arc<dyn crate::harness::ReauthHook>>,
 ) -> (MockServer, Vec<Event>, TurnOutcome) {
+    converse_configured(
+        bml,
+        replies,
+        catalog,
+        reauth,
+        crate::thinking::ThinkingConfig::Off,
+    )
+    .await
+}
+
+/// [`converse_with`] plus the request thinking, mirroring what an ACP
+/// turn sends for a stored preference.
+async fn converse_configured(
+    bml: &str,
+    replies: Vec<Reply>,
+    catalog: Option<animist::catalog::Catalog>,
+    reauth: Option<Arc<dyn crate::harness::ReauthHook>>,
+    thinking: crate::thinking::ThinkingConfig,
+) -> (MockServer, Vec<Event>, TurnOutcome) {
     let server = MockServer::spawn(replies).await;
     let config_text = format!(
         "compression {{ enabled = false }}\n{}",
@@ -223,6 +242,7 @@ async fn converse_with(
         builder = builder.reauth(reauth);
     }
     let conversation: Conversation = builder.build().expect("conversation builds");
+    conversation.update_settings(|settings| settings.thinking = thinking);
     let mut stream = stream;
 
     // The driver emits the terminal Done just after the run resolves, so
@@ -507,6 +527,186 @@ async fn thinking_surfaces_as_reasoning_deltas() {
             "{name}: the thinking delta streamed through"
         );
     }
+}
+
+/// A models.dev-style catalog with one reasoning model `m` reporting the
+/// given effort values, mirroring what the provider family's real entries
+/// carry (hosted OpenAI never lists `max`; converse models carry no
+/// reasoning metadata at all).
+fn reasoning_catalog(key: &str, efforts: &[&str]) -> animist::catalog::Catalog {
+    let doc = json!({ key: {
+        "id": key,
+        "name": key,
+        "models": {"m": {
+            "reasoning": !efforts.is_empty(),
+            "reasoning_options": [{"type": "effort", "values": efforts}],
+            "limit": {"context": 100_000, "output": 8_192}
+        }}
+    }});
+    animist::catalog::Catalog::from_slice(&serde_json::to_vec(&doc).expect("catalog serializes"))
+        .expect("catalog parses")
+}
+
+/// Reasoning effort values models.dev reports for the kind's provider
+/// family; an empty slice marks a family whose models carry no thinking
+/// metadata (only `off` is offered).
+fn family_efforts(kind: &Kind) -> Vec<&'static str> {
+    match kind.dialect {
+        Dialect::Anthropic => vec!["low", "medium", "high", "max"],
+        Dialect::Responses | Dialect::Chat => vec!["minimal", "low", "medium", "high"],
+        Dialect::Converse => vec![],
+    }
+}
+
+/// Whether a recorded request's reasoning fields are valid for the
+/// dialect: the thinking knob, when present, must be a shape the wire
+/// accepts, never a value the dialect rejects.
+fn reasoning_wire_is_valid(dialect: Dialect, body: &Value) -> bool {
+    match dialect {
+        Dialect::Anthropic => {
+            let valid_effort = body["output_config"]["effort"]
+                .as_str()
+                .is_none_or(|effort| ["low", "medium", "high", "xhigh", "max"].contains(&effort));
+            let valid_thinking = match &body["thinking"] {
+                Value::Null => true,
+                thinking => {
+                    thinking["type"].is_string()
+                        && ["disabled", "adaptive", "enabled"]
+                            .contains(&thinking["type"].as_str().unwrap_or_default())
+                }
+            };
+            valid_effort && valid_thinking
+        }
+        Dialect::Chat | Dialect::Responses => {
+            body["reasoning_effort"].as_str().is_none_or(|effort| {
+                ["none", "minimal", "low", "medium", "high", "xhigh"].contains(&effort)
+            })
+        }
+        // Converse rejects every non-off thinking config, so a valid
+        // request carries no reasoning fields at all.
+        Dialect::Converse => {
+            body.get("reasoning_config").is_none()
+                && body["additionalModelRequestFields"]["thinking"].is_null()
+        }
+    }
+}
+
+/// Every offered thinking choice, driven through the same
+/// preference-to-effective path an ACP turn applies, completes the turn
+/// and lands dialect-valid reasoning fields on the request: no offered
+/// level can fail the turn with an "agent turn failed" error.
+#[tokio::test]
+async fn offered_thinking_choices_complete_turns_with_valid_wire_fields() {
+    for (name, kind) in kinds() {
+        let key = crate::provider::catalog_key(&kind_config(&kind));
+        let efforts = family_efforts(&kind);
+        let catalog = reasoning_catalog(key, &efforts);
+        let info = catalog.model(key, "m").expect("catalog model").info.clone();
+        let offered =
+            crate::thinking::choices_for(crate::thinking::ThinkingConfig::Off, Some(&info));
+        assert!(
+            !offered.is_empty(),
+            "{name}: the option always offers something"
+        );
+        // Plus the stale-preference case that motivated the fix: values a
+        // different model offered (or an explicit budget) must still snap
+        // to something the dialect accepts.
+        let mut driven = offered;
+        driven.extend([
+            crate::thinking::ThinkingConfig::Effort(crate::thinking::Effort::Max),
+            crate::thinking::ThinkingConfig::Effort(crate::thinking::Effort::Minimal),
+            crate::thinking::ThinkingConfig::Budget(4096),
+        ]);
+        for choice in driven {
+            let effective = crate::thinking::effective_for(choice, Some(&info));
+            let (server, _events, outcome) = converse_configured(
+                kind.bml,
+                vec![sse_reply(thinking_reply(kind.dialect, Usage::new(10, 5)))],
+                Some(catalog.clone()),
+                None,
+                effective,
+            )
+            .await;
+            assert!(
+                matches!(outcome, TurnOutcome::Done { .. }),
+                "{name}: {choice:?} (effective {effective:?}): {outcome:?}"
+            );
+            let requests = server.recorded();
+            assert_eq!(requests.len(), 1, "{name}: one request");
+            assert!(
+                reasoning_wire_is_valid(kind.dialect, &requests[0].body),
+                "{name}: {choice:?} (effective {effective:?}) produced invalid reasoning fields: {}",
+                requests[0].body
+            );
+        }
+    }
+}
+
+/// A manual `supports_thinking` override must not be lost by the
+/// turn-time snap: the resolved capability (override applied) governs, so
+/// an adaptive preference still reaches the wire even though no catalog
+/// metadata reports the model as reasoning-capable.
+#[tokio::test]
+async fn manual_thinking_overrides_survive_the_turn_time_snap() {
+    for (name, kind) in kinds() {
+        if kind.dialect == Dialect::Converse {
+            // Converse rejects every non-off thinking config regardless of
+            // overrides; the manual override is not expressible there.
+            continue;
+        }
+        // The kind BMLs embed the manual model block in two shapes (with
+        // and without a trailing protocol field); patch the field itself.
+        let bml = kind.bml.replace(
+            "context_length = 100000",
+            "context_length = 100000 supports_thinking = true",
+        );
+        let effective = crate::thinking::effective_for(
+            crate::thinking::ThinkingConfig::Adaptive,
+            Some(&crate::testing::model_info(
+                "m", 100_000, 8_192, true, false,
+            )),
+        );
+        let (server, events, outcome) = converse_configured(
+            &bml,
+            vec![sse_reply(thinking_reply(kind.dialect, Usage::new(10, 5)))],
+            None,
+            None,
+            effective,
+        )
+        .await;
+        assert!(
+            matches!(outcome, TurnOutcome::Done { .. }),
+            "{name}: {outcome:?}"
+        );
+        let requests = server.recorded();
+        assert_eq!(requests.len(), 1, "{name}: one request");
+        assert!(
+            reasoning_wire_is_valid(kind.dialect, &requests[0].body),
+            "{name}: invalid reasoning fields: {}",
+            requests[0].body
+        );
+        // And thinking actually streamed, proving it was on.
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Agent(AgentEvent::Provider {
+                    event: ProviderEvent::ThinkingDelta { .. },
+                    ..
+                })
+            )),
+            "{name}: the thinking delta streamed through"
+        );
+    }
+}
+
+/// A kind's provider config, for the models.dev catalog key.
+fn kind_config(kind: &Kind) -> crate::config::ProviderConfig {
+    let config = Config::parse(&format!(
+        "compression {{ enabled = false }}\n{}",
+        kind.bml.replace("{port}", "0"),
+    ))
+    .expect("kind config parses");
+    config.providers.get("t").expect("provider alias t").clone()
 }
 
 // --- Tool-result images ---------------------------------------------------------------
@@ -881,4 +1081,79 @@ async fn the_print_path_persists_its_entries() {
         "entry records persisted: {body}"
     );
     assert_eq!(server.request_count(), 1);
+}
+
+/// The auto-review LLM path (decision endpoint disabled) round-trips
+/// through the Bedrock provider: one no-tools request on the model's own
+/// protocol, the reviewer system prompt, and a scripted verdict parsed
+/// into a decision.
+#[tokio::test]
+async fn bedrock_serves_the_auto_review_llm_path() {
+    for name in [
+        "amazon-bedrock (converse)",
+        "amazon-bedrock (anthropic_messages)",
+        "amazon-bedrock (chat_completions)",
+    ] {
+        let kind = kinds()
+            .into_iter()
+            .find(|(kind_name, _)| *kind_name == name)
+            .expect("bedrock kind")
+            .1;
+        let verdict = "{\"verdict\":\"allow\",\"risk\":\"low\",\"rationale\":\"fine\"}";
+        let reply = match kind.dialect {
+            Dialect::Converse => scripts::converse_text(verdict, Usage::new(10, 5)),
+            Dialect::Anthropic => scripts::anthropic_text(verdict, Usage::new(10, 5)),
+            Dialect::Chat | Dialect::Responses => scripts::chat_text(verdict, Usage::new(10, 5)),
+        };
+        let server = MockServer::spawn(vec![sse_reply(reply)]).await;
+        let config_text = format!(
+            "compression {{ enabled = false }}\n{}",
+            kind.bml.replace("{port}", &server.port().to_string())
+        );
+        let config = Config::parse(&config_text).expect("config parses");
+        let provider_config = config.providers.get("t").expect("provider t").clone();
+        let handle = ProviderHandle::from_config_with(&provider_config, None, &injected_key)
+            .await
+            .expect("provider constructs against the mock");
+        let model = handle
+            .model(&provider_config, None, "m")
+            .await
+            .expect("model builds");
+        let decision = crate::auto_review::review(&model, "write", &["/tmp/x".into()])
+            .await
+            .unwrap_or_else(|error| panic!("{name}: reviewer call failed: {error}"));
+        assert_eq!(
+            decision.verdict,
+            crate::auto_review::Verdict::Allow,
+            "{name}"
+        );
+        assert_eq!(decision.risk, crate::auto_review::Risk::Low, "{name}");
+        let requests = server.recorded();
+        assert_eq!(requests.len(), 1, "{name}: one reviewer request");
+        assert!(
+            requests[0].path.ends_with(kind.dialect.path()),
+            "{name}: path"
+        );
+        assert!(
+            requests[0]
+                .authorization
+                .as_deref()
+                .is_some_and(|value| value.starts_with("AWS4-HMAC-SHA256")),
+            "{name}: the reviewer request is signed"
+        );
+        let system = match kind.dialect {
+            Dialect::Converse => requests[0].body["system"][0]["text"].as_str(),
+            _ => requests[0].body["system"].as_str().or_else(|| {
+                requests[0].body["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.first())
+                    .filter(|message| message["role"] == "system")
+                    .and_then(|message| message["content"].as_str())
+            }),
+        };
+        assert!(
+            system.is_some_and(|text| text.contains("permission reviewer")),
+            "{name}: the reviewer system prompt rides the request"
+        );
+    }
 }

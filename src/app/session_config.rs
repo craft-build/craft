@@ -40,16 +40,33 @@ pub(crate) fn session_config_controls(
                 SessionConfigKind::Select(select) => {
                     let current_value = select.current_value.to_string();
                     let options = match select.options {
-                        SessionConfigSelectOptions::Ungrouped(options) => options,
-                        SessionConfigSelectOptions::Grouped(groups) => {
-                            groups.into_iter().flat_map(|group| group.options).collect()
-                        }
+                        SessionConfigSelectOptions::Ungrouped(options) => options
+                            .into_iter()
+                            .map(|choice| (None, choice))
+                            .collect::<Vec<_>>(),
+                        // Grouped model lists flatten, but the choice names
+                        // keep their provider so bare model ids stay
+                        // distinguishable in one picker.
+                        SessionConfigSelectOptions::Grouped(groups) => groups
+                            .into_iter()
+                            .flat_map(|group| {
+                                let options = group.options;
+                                let group = group.name;
+                                options
+                                    .into_iter()
+                                    .map(move |choice| (Some(group.clone()), choice))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect(),
                         _ => vec![],
                     };
                     let choices = options
                         .into_iter()
-                        .map(|choice| SessionConfigChoice {
-                            name: choice.name,
+                        .map(|(group, choice)| SessionConfigChoice {
+                            name: match group {
+                                Some(group) => format!("{group} · {}", choice.name),
+                                None => choice.name,
+                            },
                             value: SessionConfigOptionValue::value_id(choice.value),
                         })
                         .collect::<Vec<_>>();

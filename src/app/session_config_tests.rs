@@ -5,8 +5,9 @@
 use super::*;
 use agent_client_protocol::schema::v1::{
     Content, ContentBlock, ContentChunk, Diff as AcpDiff, ElicitationContentValue,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionUpdate,
-    TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
+    SessionConfigSelectOption, SessionUpdate, TextContent, ToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 
 fn calls(message: &Message) -> Vec<ToolCall> {
@@ -664,10 +665,18 @@ fn preserves_each_acp_session_option_as_a_distinct_control() {
         SessionConfigOption::select(
             "model",
             "Model",
-            "large",
+            "openai/gpt-x",
             vec![
-                SessionConfigSelectOption::new("small", "Small"),
-                SessionConfigSelectOption::new("large", "Large"),
+                SessionConfigSelectGroup::new(
+                    "anthropic",
+                    "anthropic",
+                    vec![SessionConfigSelectOption::new("anthropic/claude", "Claude")],
+                ),
+                SessionConfigSelectGroup::new(
+                    "openai",
+                    "openai",
+                    vec![SessionConfigSelectOption::new("openai/gpt-x", "GPT-X")],
+                ),
             ],
         )
         .category(SessionConfigOptionCategory::Model),
@@ -684,9 +693,27 @@ fn preserves_each_acp_session_option_as_a_distinct_control() {
     ]);
 
     assert_eq!(controls.len(), 3);
+    // A grouped model option flattens into one searchable picker whose
+    // choice names carry their provider.
     assert_eq!(controls[0].id, "model");
-    assert_eq!(controls[0].selected_name, "Large");
     assert!(controls[0].searchable);
+    assert_eq!(controls[0].selected_name, "openai · GPT-X");
+    assert_eq!(
+        controls[0]
+            .choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice.name.as_str(),
+                    choice.value.as_value_id().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        [
+            ("anthropic · Claude", "anthropic/claude".to_owned()),
+            ("openai · GPT-X", "openai/gpt-x".to_owned()),
+        ]
+    );
     assert_eq!(controls[1].id, "thought-level");
     assert_eq!(controls[1].selected_name, "High");
     assert!(!controls[1].searchable);

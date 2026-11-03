@@ -425,7 +425,8 @@ impl App {
         // A deleted session takes its review comments and drafts with it.
         let scope = comments::comment_scope_prefix(Some(session_id));
         self.comments.retain(|key, _| !key.starts_with(&scope));
-        self.comment_drafts.retain(|key, _| !key.starts_with(&scope));
+        self.comment_drafts
+            .retain(|key, _| !key.starts_with(&scope));
 
         let Some(sessions) = self.sessions_by_project.get_mut(project_id) else {
             return;
