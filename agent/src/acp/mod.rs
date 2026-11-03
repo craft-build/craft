@@ -25,11 +25,12 @@ mod turn;
 use turn::run_turn;
 
 use agent_client_protocol::{
-    Agent as AcpRole, Client as AcpClient, ConnectionTo, Error, JsonRpcResponse, Responder, Stdio,
+    Agent as AcpRole, Client as AcpClient, Error, JsonRpcResponse, Stdio,
     on_receive_notification, on_receive_request,
-    schema::{
-        ProtocolVersion,
-        v1::{
+    schema::ProtocolVersion,
+    v1::{
+        ConnectionTo, Responder,
+        schema::{
             AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest,
             CloseSessionResponse, ConfigOptionUpdate, ContentBlock, Implementation,
             InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
@@ -591,7 +592,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
     let cancel_state = state.clone();
 
     AcpRole
-        .builder()
+        .v1()
         .name("craft-acp")
         .on_receive_request(
             async move |request: InitializeRequest,

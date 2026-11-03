@@ -6,7 +6,7 @@ use crate::history;
 use crate::permissions::{PermissionAnswer, PermissionCheck, ToolKey, scope_for_call};
 use crate::harness;
 use crate::tools::{QuestionOption, QuestionSpec};
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     Content, RequestPermissionOutcome, ResourceLink, TextContent, ToolCallContent, ToolKind,
 };
 
@@ -580,7 +580,7 @@ fn tool_result_text_pretty_prints_json_results() {
 
 fn selected(option_id: &str) -> RequestPermissionOutcome {
     RequestPermissionOutcome::Selected(
-        agent_client_protocol::schema::v1::SelectedPermissionOutcome::new(option_id.to_string()),
+        agent_client_protocol::v1::schema::SelectedPermissionOutcome::new(option_id.to_string()),
     )
 }
 
@@ -880,7 +880,7 @@ async fn load_session_rejects_unknown_ids() {
 /// no ACP translation live either, so they replay as nothing.
 #[test]
 fn replay_updates_carry_the_shared_transcript() {
-    use agent_client_protocol::schema::v1::{SessionUpdate, ToolCallStatus};
+    use agent_client_protocol::v1::schema::{SessionUpdate, ToolCallStatus};
 
     let items = vec![
         crate::harness::ReplayItem::User {

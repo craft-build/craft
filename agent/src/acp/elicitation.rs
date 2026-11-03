@@ -3,11 +3,15 @@
 // ---------------------------------------------------------------------------
 
 use agent_client_protocol::{
-    Client as AcpClient, ConnectionTo, Error,
-    schema::v1::{
-        ClientCapabilities, CreateElicitationRequest, ElicitationContentValue, ElicitationFormMode,
-        ElicitationPropertySchema, ElicitationSchema, ElicitationScope, ElicitationSessionScope,
-        EnumOption, MultiSelectPropertySchema, SessionId, StringPropertySchema, ToolCallId,
+    Client as AcpClient, Error,
+    v1::{
+        ConnectionTo,
+        schema::{
+            ClientCapabilities, CreateElicitationRequest, ElicitationContentValue,
+            ElicitationFormMode, ElicitationPropertySchema, ElicitationSchema, ElicitationScope,
+            ElicitationSessionScope, EnumOption, MultiSelectPropertySchema, SessionId,
+            StringPropertySchema, ToolCallId,
+        },
     },
 };
 
@@ -123,17 +127,12 @@ impl agent_client_protocol::JsonRpcMessage for RawElicitationRequest {
 
     fn parse_message(
         method: &str,
-        params: &impl serde::Serialize,
+        params: &serde_json::Value,
     ) -> Result<Self, agent_client_protocol::Error> {
         if !Self::matches_method(method) {
             return Err(Error::method_not_found());
         }
-        let value = serde_json::to_value(params).map_err(|e| {
-            let mut error = Error::invalid_params();
-            error.message = e.to_string();
-            error
-        })?;
-        serde_json::from_value(value)
+        serde_json::from_value(params.clone())
             .map(RawElicitationRequest)
             .map_err(|e| {
                 let mut error = Error::invalid_params();

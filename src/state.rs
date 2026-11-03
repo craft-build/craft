@@ -1,6 +1,6 @@
 //! Persisted Craft project, session, and conversation data.
 
-use agent_client_protocol::schema::v1::{ToolCall, ToolCallUpdate};
+use agent_client_protocol::v1::schema::{ToolCall, ToolCallUpdate};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq)]

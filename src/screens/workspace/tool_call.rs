@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::{ContentBlock, ToolCall, ToolCallContent, ToolCallStatus};
+use agent_client_protocol::v1::schema::{ContentBlock, ToolCall, ToolCallContent, ToolCallStatus};
 use gpui::prelude::*;
 use gpui::{Context, FontWeight, HighlightStyle, SharedString, StyledText, div, px, rgb, rgba};
 
@@ -28,7 +28,7 @@ fn with_rendered_acp_diff<R>(
     scope: String,
     tool_call_id: impl std::fmt::Display,
     index: usize,
-    diff: &agent_client_protocol::schema::v1::Diff,
+    diff: &agent_client_protocol::v1::schema::Diff,
     f: impl FnOnce(&Diff) -> R,
 ) -> R {
     ACP_DIFF_CACHE.with(|cache| {

@@ -3,7 +3,7 @@
 // the same gpui window scaffolding.
 #![cfg(test)]
 use super::*;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     Content, ContentBlock, ContentChunk, Diff as AcpDiff, ElicitationContentValue,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
     SessionConfigSelectOption, SessionUpdate, TextContent, ToolCall, ToolCallContent,

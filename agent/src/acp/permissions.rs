@@ -3,11 +3,14 @@
 // ---------------------------------------------------------------------------
 
 use agent_client_protocol::{
-    Client as AcpClient, ConnectionTo,
-    schema::v1::{
-        Content, ContentBlock, PermissionOption, PermissionOptionId, PermissionOptionKind,
-        RequestPermissionOutcome, RequestPermissionRequest, SessionId, TextContent,
-        ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    Client as AcpClient,
+    v1::{
+        ConnectionTo,
+        schema::{
+            Content, ContentBlock, PermissionOption, PermissionOptionId, PermissionOptionKind,
+            RequestPermissionOutcome, RequestPermissionRequest, SessionId, TextContent,
+            ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        },
     },
 };
 use std::sync::Arc;

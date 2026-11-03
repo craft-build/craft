@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
 };
 use gpui::{Context, prelude::*};
@@ -282,7 +282,7 @@ impl App {
 
 pub(crate) fn json_elicitation_value(
     value: serde_json::Value,
-) -> Option<agent_client_protocol::schema::v1::ElicitationContentValue> {
+) -> Option<agent_client_protocol::v1::schema::ElicitationContentValue> {
     match value {
         serde_json::Value::String(value) => Some(ElicitationContentValue::String(value)),
         serde_json::Value::Bool(value) => Some(ElicitationContentValue::Boolean(value)),

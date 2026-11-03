@@ -593,7 +593,7 @@ impl App {
                     .file_snapshot(&diff_path)
                     .map(|(old_text, new_text)| {
                         render_acp_diff(
-                            agent_client_protocol::schema::v1::Diff::new(&diff_path, new_text)
+                            agent_client_protocol::v1::schema::Diff::new(&diff_path, new_text)
                                 .old_text(old_text),
                         )
                     })
@@ -956,7 +956,7 @@ pub fn flush_state_saves() {
     }
 }
 
-pub(crate) fn render_acp_diff(diff: agent_client_protocol::schema::v1::Diff) -> Diff {
+pub(crate) fn render_acp_diff(diff: agent_client_protocol::v1::schema::Diff) -> Diff {
     use similar::{ChangeTag, TextDiff};
 
     let old = diff.old_text.unwrap_or_default();

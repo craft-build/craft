@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
     ElicitationAction, ElicitationCapabilities, ElicitationContentValue,
@@ -19,7 +19,8 @@ use agent_client_protocol::schema::v1::{
     SessionConfigOptionValue, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     StopReason, TextContent,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo, Error, Responder};
+use agent_client_protocol::v1::{ConnectionTo, Responder};
+use agent_client_protocol::{Agent, Client, Error};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::async_runtime;
@@ -132,7 +133,7 @@ pub async fn validate_agent(config: AgentConfig) -> Result<(), String> {
     let agent = config.agent()?;
     let handshake =
         Client
-            .builder()
+            .v1()
             .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
                 connection
                     .send_request(
@@ -264,7 +265,7 @@ async fn run_connection(
         .map_err(|message| Error::internal_error().data(message))?;
 
     Client
-        .builder()
+        .v1()
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
                 permission_events
@@ -357,9 +358,9 @@ async fn run_connection(
             let (session_id, config_options) = if let Some(session_id) =
                 resume_session.filter(|_| initialized.agent_capabilities.load_session)
             {
-                let session_id = agent_client_protocol::schema::v1::SessionId::new(session_id);
+                let session_id = agent_client_protocol::v1::schema::SessionId::new(session_id);
                 let loaded = connection
-                    .send_request(agent_client_protocol::schema::v1::LoadSessionRequest::new(
+                    .send_request(agent_client_protocol::v1::schema::LoadSessionRequest::new(
                         session_id.clone(),
                         workspace,
                     ))

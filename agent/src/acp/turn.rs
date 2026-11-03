@@ -1,10 +1,13 @@
 use agent_client_protocol::{
-    Client as AcpClient, ConnectionTo, Responder,
-    schema::v1::{
-        ConfigOptionUpdate, Content, ContentBlock, ContentChunk,
-        PromptResponse as AcpPromptResponse, SessionId, SessionNotification, SessionUpdate,
-        StopReason, TextContent, ToolCall as AcpToolCall, ToolCallContent, ToolCallId,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+    Client as AcpClient,
+    v1::{
+        ConnectionTo, Responder,
+        schema::{
+            ConfigOptionUpdate, Content, ContentBlock, ContentChunk,
+            PromptResponse as AcpPromptResponse, SessionId, SessionNotification, SessionUpdate,
+            StopReason, TextContent, ToolCall as AcpToolCall, ToolCallContent, ToolCallId,
+            ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+        },
     },
 };
 use std::collections::HashMap;

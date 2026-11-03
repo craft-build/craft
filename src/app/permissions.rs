@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::PermissionOptionKind;
+use agent_client_protocol::v1::schema::PermissionOptionKind;
 use gpui::Context;
 
 use crate::acp::PermissionDecision;
