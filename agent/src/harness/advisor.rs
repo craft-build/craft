@@ -100,7 +100,7 @@ pub struct AdvisorNote {
 
 /// Bounded FIFO that drops content-free phrases and exact duplicates.
 #[derive(Debug, Default)]
-pub struct EmissionGuard {
+struct EmissionGuard {
     seen: VecDeque<String>,
     capacity: usize,
 }
@@ -151,7 +151,7 @@ fn is_content_free(s: &str) -> bool {
 #[derive(Debug)]
 pub struct AdvisorState {
     pub last_reviewed: usize,
-    pub guard: EmissionGuard,
+    guard: EmissionGuard,
 }
 
 impl AdvisorState {

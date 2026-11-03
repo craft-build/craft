@@ -1,10 +1,10 @@
 //! Mode cycling: Build / Plan, toggled with Tab. Plan mode restricts
-//! the agent to writing its allocated plan file (`run::AgentMode::Plan`).
+//! the agent to writing its allocated plan file (`harness::AgentMode::Plan`).
 //! Flow mode is deliberately absent.
 
 use std::path::PathBuf;
 
-use crate::run::AgentMode;
+use crate::harness::AgentMode;
 use crate::tui::style::Color;
 use crate::tui::ui::theme;
 

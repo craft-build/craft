@@ -285,7 +285,7 @@ mod tests {
             crate::prompt::today_utc(),
         );
         let build = RequestLayer::system_prompt(
-            &settings(crate::run::mode::AgentMode::Build),
+            &settings(crate::harness::mode::AgentMode::Build),
             base,
             "/project",
         );
@@ -299,7 +299,7 @@ mod tests {
         );
         assert!(!build.contains("{cwd}"), "no template var leaks: {build:?}");
         let plan = RequestLayer::system_prompt(
-            &settings(crate::run::mode::AgentMode::Plan(std::path::PathBuf::from(
+            &settings(crate::harness::mode::AgentMode::Plan(std::path::PathBuf::from(
                 "/project/plan.md",
             ))),
             base,

@@ -5,9 +5,9 @@
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
-  and the [harness design rules](harness-design.md), especially
-  [Layers](harness-design.md#layers). Start with the
-  [test inventory](harness-design.md#test-integrity).
+  and the [harness design rules](../../animist/harness-design.md), especially
+  [Layers](../../animist/harness-design.md#layers). Start with the
+  [test inventory](../../animist/harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
   as described in [Finish](#finish).
 
@@ -20,7 +20,7 @@ headless policy) through one narrow craft trait. The layers own sequencing
 and state.
 
 Only two policy layers exist, `PolicyLayer` and `GuardrailLayer`, in that
-order at the head of the [chain](harness-design.md#chain). Don't add a layer
+order at the head of the [chain](../../animist/harness-design.md#chain). Don't add a layer
 per rule. A denial short-circuits everything after it, so the order *is* the
 policy, and it must read top to bottom in one place.
 

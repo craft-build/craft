@@ -174,7 +174,7 @@ mod tests {
         fn spawn(
             &self,
             req: SubagentRequest,
-        ) -> crate::run::BoxFuture<std::result::Result<SubagentResult, String>> {
+        ) -> crate::harness::BoxFuture<std::result::Result<SubagentResult, String>> {
             self.0.lock().unwrap().push(req.clone());
             Box::pin(async move {
                 Ok(SubagentResult::Text(format!(

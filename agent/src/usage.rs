@@ -1,26 +1,16 @@
 //! Usage & cost accounting.
 //!
 //! A turn is priced once, when it runs, and that number is what gets stored,
-//! summed and shown; history is never re-priced, because rates move. The
-//! only thing that moves them today is a provider's [`PricingSchedule`]
-//! (DeepSeek's peak-hours surcharge), which scales the quoted off-peak
-//! table rates inside its windows. A static [`PricedModel`] table holds
-//! the rates; unknown models are unpriced: callers get `None` and show no
-//! cost instead of a made-up "$0.000".
+//! summed and shown; history is never re-priced, because rates move. A
+//! static [`PricedModel`] table holds the rates; unknown models are unpriced:
+//! callers get `None` and show no cost instead of a made-up "$0.000".
 
 use std::collections::HashMap;
-use std::fmt;
 use std::ops::AddAssign;
 
-use jiff::Timestamp;
-use jiff::civil::Weekday;
-use jiff::tz::Offset;
 use serde::{Deserialize, Serialize};
 
-const HOURS_PER_DAY: u8 = 24;
 const PER_MILLION: f64 = 1_000_000.0;
-/// Multiplier of a provider that bills the same rate around the clock.
-pub(crate) const FLAT_RATE: f64 = 1.0;
 
 /// Token usage reported by the provider for one model call: animist's
 /// counters, re-exported so every surface reads one type. Pricing stays
@@ -85,8 +75,6 @@ fn format_cost(usage: &TokenUsage, cost: Option<f64>, prefix: &str) -> String {
     }
 }
 
-/// Crate-private on purpose: pricing outside a priced model skips the
-/// provider's schedule.
 pub(crate) fn cost(usage: &TokenUsage, pricing: &ModelPricing, fast: bool) -> f64 {
     let (input, output, cache_write, cache_read) = match &pricing.fast {
         Some(f) if fast => (
@@ -176,7 +164,7 @@ pub fn format_tokens(tokens: impl Into<u64>) -> String {
     }
 }
 
-/// Per-million-token rates, quoted off-peak.
+/// Per-million-token rates.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelPricing {
     pub input: f64,
@@ -213,117 +201,6 @@ impl ModelPricing {
     const CACHE_READ_MULTIPLIER: f64 = 0.10;
 }
 
-/// Rates that move with the wall clock. DeepSeek doubles everything during its
-/// peak UTC hours, so model tables quote the off-peak rates and the provider's
-/// schedule scales the bill inside its windows.
-///
-/// One multiplier is enough while providers move all four rates together.
-#[derive(Debug)]
-pub struct PricingSchedule {
-    windows: &'static [PricingWindow],
-    weekdays_only: bool,
-    multiplier: f64,
-}
-
-/// Half-open `[start, end)` in whole UTC hours. `start > end` wraps past
-/// midnight, so a window never needs splitting in two.
-#[derive(Debug)]
-pub struct PricingWindow {
-    start: u8,
-    end: u8,
-}
-
-impl PricingWindow {
-    /// `hours(22, 2)` wraps past midnight. Every window is a `const`, so a typo
-    /// here is a build error rather than a mispriced turn.
-    pub const fn hours(start: u8, end: u8) -> Self {
-        assert!(start < HOURS_PER_DAY, "window starts after the day ends");
-        assert!(end <= HOURS_PER_DAY, "window ends after the day ends");
-        assert!(start != end, "window covers no time at all");
-        Self { start, end }
-    }
-
-    fn contains(&self, hour: u8) -> bool {
-        if self.start < self.end {
-            hour >= self.start && hour < self.end
-        } else {
-            hour >= self.start || hour < self.end
-        }
-    }
-}
-
-/// `01:00-04:00`, the shape provider docs quote peak hours in.
-impl fmt::Display for PricingWindow {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:02}:00-{:02}:00", self.start, self.end)
-    }
-}
-
-impl PricingSchedule {
-    pub const fn new(windows: &'static [PricingWindow], multiplier: f64) -> Self {
-        assert!(
-            !windows.is_empty(),
-            "a schedule with no windows never applies; drop it instead"
-        );
-        assert!(
-            multiplier > FLAT_RATE,
-            "model tables quote the off-peak rates, so a schedule only ever adds a surcharge"
-        );
-        Self {
-            windows,
-            weekdays_only: false,
-            multiplier,
-        }
-    }
-
-    /// Keeps the surcharge off Saturday and Sunday, the way DeepSeek words its
-    /// peak hours.
-    pub const fn weekdays_only(mut self) -> Self {
-        let mut i = 0;
-        while i < self.windows.len() {
-            assert!(
-                self.windows[i].start < self.windows[i].end,
-                "a wrapping window leaves its tail on the next day, which no run of weekdays can bill"
-            );
-            i += 1;
-        }
-        self.weekdays_only = true;
-        self
-    }
-
-    /// DeepSeek publishes the days in UTC next to the hours, so the UTC
-    /// weekday is the rule itself and not an approximation.
-    pub(crate) fn multiplier_at(&self, at: Timestamp) -> f64 {
-        let at = Offset::UTC.to_datetime(at);
-        if self.weekdays_only && matches!(at.weekday(), Weekday::Saturday | Weekday::Sunday) {
-            return FLAT_RATE;
-        }
-        if self.windows.iter().any(|w| w.contains(at.hour() as u8)) {
-            self.multiplier
-        } else {
-            FLAT_RATE
-        }
-    }
-}
-
-/// `2x during 01:00-04:00, 06:00-10:00 UTC, Mon-Fri`.
-impl fmt::Display for PricingSchedule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}x during ", self.multiplier)?;
-        for (i, window) in self.windows.iter().enumerate() {
-            if i > 0 {
-                f.write_str(", ")?;
-            }
-            write!(f, "{window}")?;
-        }
-        f.write_str(" UTC")?;
-        if self.weekdays_only {
-            f.write_str(", Mon-Fri")?;
-        }
-        Ok(())
-    }
-}
-
 /// A model and its rates: the registry-free model data that pricing
 /// needs. `id` is the canonical entry name; `prefixes` match
 /// dated snapshots without registry churn.
@@ -333,13 +210,10 @@ pub struct PricedModel {
     pub id: &'static str,
     pub prefixes: &'static [&'static str],
     pub pricing: ModelPricing,
-    /// Set by the providers whose rates move with the wall clock, so the hours
-    /// sit next to the prices they scale. Everyone else bills flat.
-    pub schedule: Option<&'static PricingSchedule>,
 }
 
 impl PricedModel {
-    /// The quoted rates, with no wall-clock surcharge — the honest guess
+    /// The quoted rates — the honest guess
     /// when re-pricing a session whose turns never recorded what they paid.
     ///
     /// `fast` arrives as the user's raw preference and is gated here,
@@ -349,36 +223,7 @@ impl PricedModel {
         let fast = fast && self.pricing.fast.is_some();
         (!self.pricing.is_zero()).then(|| cost(usage, &self.pricing, fast))
     }
-
-    /// What the provider charges right now, so it is only ever correct for a
-    /// turn that just finished: under a schedule the answer moves with the
-    /// clock. Anything historical wants [`Self::list_cost`].
-    ///
-    /// `None` on an unpriced model, so callers can hide the cost instead of
-    /// showing a misleading "$0.000".
-    pub fn billed_cost(&self, usage: &TokenUsage, fast: bool) -> Option<f64> {
-        let cost = self.list_cost(usage, fast)?;
-        Some(
-            self.schedule
-                .map_or(cost, |s| cost * s.multiplier_at(Timestamp::now())),
-        )
-    }
-
-    /// [`Self::billed_cost`] at an explicit instant, for callers that know
-    /// when the turn ran (and for tests, which need determinism).
-    pub fn billed_cost_at(&self, usage: &TokenUsage, fast: bool, at: Timestamp) -> Option<f64> {
-        let cost = self.list_cost(usage, fast)?;
-        Some(self.schedule.map_or(cost, |s| cost * s.multiplier_at(at)))
-    }
 }
-
-/// DeepSeek peak hours double every rate; the tables quote the off-peak ones.
-/// The weekend stays off-peak around the clock.
-/// <https://api-docs.deepseek.com/quick_start/pricing/>
-const DEEPSEEK_PEAK_WINDOWS: &[PricingWindow] =
-    &[PricingWindow::hours(1, 4), PricingWindow::hours(6, 10)];
-pub(crate) const DEEPSEEK_PEAK_HOURS: PricingSchedule =
-    PricingSchedule::new(DEEPSEEK_PEAK_WINDOWS, 2.0).weekdays_only();
 
 /// Rates for the providers this repo talks to natively; everything else
 /// is unpriced.
@@ -395,7 +240,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 0.10,
             fast: None,
         },
-        schedule: None,
     },
     PricedModel {
         provider: "anthropic",
@@ -408,7 +252,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 0.20,
             fast: None,
         },
-        schedule: None,
     },
     PricedModel {
         provider: "anthropic",
@@ -424,7 +267,6 @@ static PRICED_MODELS: &[PricedModel] = &[
                 output: 50.00,
             }),
         },
-        schedule: None,
     },
     PricedModel {
         provider: "anthropic",
@@ -440,7 +282,6 @@ static PRICED_MODELS: &[PricedModel] = &[
                 output: 50.00,
             }),
         },
-        schedule: None,
     },
     PricedModel {
         provider: "anthropic",
@@ -453,7 +294,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 1.00,
             fast: None,
         },
-        schedule: None,
     },
     // OpenAI
     PricedModel {
@@ -467,7 +307,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 0.10,
             fast: None,
         },
-        schedule: None,
     },
     PricedModel {
         provider: "openai",
@@ -480,7 +319,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 0.25,
             fast: None,
         },
-        schedule: None,
     },
     PricedModel {
         provider: "openai",
@@ -493,7 +331,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 0.50,
             fast: None,
         },
-        schedule: None,
     },
     PricedModel {
         provider: "openai",
@@ -506,7 +343,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 1.00,
             fast: None,
         },
-        schedule: None,
     },
     PricedModel {
         provider: "openai",
@@ -519,7 +355,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 0.02,
             fast: None,
         },
-        schedule: None,
     },
     // DeepSeek
     PricedModel {
@@ -533,7 +368,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 0.007,
             fast: None,
         },
-        schedule: Some(&DEEPSEEK_PEAK_HOURS),
     },
     PricedModel {
         provider: "deepseek",
@@ -546,7 +380,6 @@ static PRICED_MODELS: &[PricedModel] = &[
             cache_read: 0.022,
             fast: None,
         },
-        schedule: Some(&DEEPSEEK_PEAK_HOURS),
     },
 ];
 
@@ -623,19 +456,6 @@ mod tests {
     use super::*;
     use test_case::test_case;
 
-    const SECONDS_PER_MINUTE: i64 = 60;
-    const SECONDS_PER_HOUR: i64 = 60 * SECONDS_PER_MINUTE;
-    const SECONDS_PER_DAY: i64 = HOURS_PER_DAY as i64 * SECONDS_PER_HOUR;
-    const PEAK: f64 = 2.0;
-    const DAYS_SINCE_EPOCH: i64 = 20_000;
-    const PEAK_WINDOWS: &[PricingWindow] =
-        &[PricingWindow::hours(1, 4), PricingWindow::hours(6, 10)];
-    const WRAPPING_WINDOW: &[PricingWindow] = &[PricingWindow::hours(22, 2)];
-    const UNTIL_MIDNIGHT_WINDOW: &[PricingWindow] = &[PricingWindow::hours(22, HOURS_PER_DAY)];
-    const WHOLE_DAY_WINDOW: &[PricingWindow] = &[PricingWindow::hours(0, HOURS_PER_DAY)];
-    const LAST_MINUTE: i64 = 59;
-    const LAST_SECOND: i64 = 59;
-
     const MILLION: u32 = 1_000_000;
     /// Four counters that cannot be confused with each other.
     const COUNTERS: TokenUsage = TokenUsage {
@@ -646,78 +466,6 @@ mod tests {
         cost: None,
     };
 
-    fn utc(day: i64, hour: i64, minute: i64, second: i64) -> Timestamp {
-        Timestamp::from_second(
-            day * SECONDS_PER_DAY + hour * SECONDS_PER_HOUR + minute * SECONDS_PER_MINUTE + second,
-        )
-        .expect("timestamp in range")
-    }
-
-    /// Windows are half-open down to the second, since an off-by-one bills a
-    /// whole hour at the wrong rate. Every case also runs on a day before the
-    /// epoch, where the timestamp is negative and must not wrap into another
-    /// window.
-    #[test_case(PEAK_WINDOWS, 0, LAST_MINUTE, LAST_SECOND, FLAT_RATE ; "last_second_before_the_start")]
-    #[test_case(PEAK_WINDOWS, 1, 0, 0, PEAK                          ; "first_second_of_a_window")]
-    #[test_case(PEAK_WINDOWS, 3, LAST_MINUTE, LAST_SECOND, PEAK      ; "last_second_inside")]
-    #[test_case(PEAK_WINDOWS, 4, 0, 0, FLAT_RATE                     ; "first_second_after_the_end")]
-    #[test_case(PEAK_WINDOWS, 7, 15, 0, PEAK                         ; "second_window")]
-    #[test_case(PEAK_WINDOWS, 23, 0, 0, FLAT_RATE                    ; "after_the_last_window")]
-    #[test_case(WRAPPING_WINDOW, 23, 0, 0, PEAK                      ; "wrapping_before_midnight")]
-    #[test_case(WRAPPING_WINDOW, 0, 0, 0, PEAK                       ; "wrapping_across_midnight")]
-    #[test_case(WRAPPING_WINDOW, 21, LAST_MINUTE, LAST_SECOND, FLAT_RATE ; "wrapping_start_is_half_open")]
-    #[test_case(WRAPPING_WINDOW, 2, 0, 0, FLAT_RATE                  ; "wrapping_end_is_half_open")]
-    #[test_case(UNTIL_MIDNIGHT_WINDOW, 23, LAST_MINUTE, LAST_SECOND, PEAK ; "ends_at_midnight")]
-    #[test_case(UNTIL_MIDNIGHT_WINDOW, 0, 0, 0, FLAT_RATE            ; "ending_at_midnight_does_not_wrap")]
-    #[test_case(WHOLE_DAY_WINDOW, 0, 0, 0, PEAK                      ; "whole_day_starts_at_midnight")]
-    #[test_case(WHOLE_DAY_WINDOW, 23, LAST_MINUTE, LAST_SECOND, PEAK ; "whole_day_never_leaves_peak")]
-    fn windows_price_by_the_utc_clock(
-        windows: &'static [PricingWindow],
-        hour: i64,
-        minute: i64,
-        second: i64,
-        expected: f64,
-    ) {
-        let schedule = PricingSchedule::new(windows, PEAK);
-        for day in [DAYS_SINCE_EPOCH, -DAYS_SINCE_EPOCH] {
-            assert_eq!(
-                schedule.multiplier_at(utc(day, hour, minute, second)),
-                expected,
-                "day {day}"
-            );
-        }
-    }
-
-    /// The weekend bills the very same hour a second way, so the day has to be
-    /// read before the clock. `07:00` sits inside [`PEAK_WINDOWS`], `12:00`
-    /// outside every one of them.
-    #[test_case("2024-01-01T07:00:00Z", PEAK      ; "monday_inside_a_window")]
-    #[test_case("2024-01-06T07:00:00Z", FLAT_RATE ; "saturday_inside_the_same_window")]
-    #[test_case("2024-01-07T07:00:00Z", FLAT_RATE ; "sunday_inside_the_same_window")]
-    #[test_case("2024-01-01T12:00:00Z", FLAT_RATE ; "monday_outside_every_window")]
-    fn a_weekdays_only_schedule_leaves_the_weekend_alone(at: &str, expected: f64) {
-        let schedule = PricingSchedule::new(PEAK_WINDOWS, PEAK).weekdays_only();
-        let at: Timestamp = at.parse().expect("a valid timestamp");
-        assert_eq!(schedule.multiplier_at(at), expected);
-    }
-
-    #[test]
-    fn schedules_render_the_hours_and_days_they_bill() {
-        assert_eq!(
-            PricingSchedule::new(PEAK_WINDOWS, PEAK).to_string(),
-            "2x during 01:00-04:00, 06:00-10:00 UTC"
-        );
-        assert_eq!(
-            PricingSchedule::new(PEAK_WINDOWS, PEAK)
-                .weekdays_only()
-                .to_string(),
-            "2x during 01:00-04:00, 06:00-10:00 UTC, Mon-Fri"
-        );
-        assert_eq!(
-            PricingSchedule::new(WRAPPING_WINDOW, PEAK).to_string(),
-            "2x during 22:00-02:00 UTC"
-        );
-    }
 
     #[test_case(999, "999"         ; "under_thousand")]
     #[test_case(1_000, "1.0k"      ; "thousand")]
@@ -811,7 +559,6 @@ mod tests {
             id: "free",
             prefixes: &["free"],
             pricing: ModelPricing::ZERO,
-            schedule: None,
         };
         let usage = TokenUsage {
             input: MILLION,
@@ -829,19 +576,6 @@ mod tests {
             resolve_spec("deepseek/deepseek-v4-pro").map(|m| m.id),
             resolve("deepseek", "deepseek-v4-pro").map(|m| m.id)
         );
-    }
-
-    #[test_case("2026-01-05T07:00:00Z", 1.32 ; "monday_peak")]
-    #[test_case("2026-01-03T07:00:00Z", 0.66 ; "saturday_off_peak")]
-    fn deepseek_peaks_double_the_off_peak_table(at: &str, expected: f64) {
-        let model = resolve("deepseek", "deepseek-v4-pro").unwrap();
-        let usage = TokenUsage {
-            input: MILLION,
-            ..Default::default()
-        };
-        let at: Timestamp = at.parse().unwrap();
-        assert_eq!(model.list_cost(&usage, false), Some(0.66));
-        assert_eq!(model.billed_cost_at(&usage, false, at), Some(expected));
     }
 
     const CURRENT: &str = "anthropic/claude-sonnet-5";

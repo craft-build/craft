@@ -10,7 +10,6 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-pub const MIN_THINKING_BUDGET: u32 = 1024;
 pub const THINKING_USAGE: &str =
     "Use off, adaptive, minimal, low, medium, high, xhigh, max, or a positive token budget";
 
@@ -55,11 +54,6 @@ impl Effort {
             Self::XHigh => 80,
             Self::Max => 100,
         }
-    }
-
-    pub fn budget(self, max: u32) -> u32 {
-        let max = max.max(MIN_THINKING_BUDGET);
-        ((u64::from(max) * u64::from(self.percent()) / 100) as u32).clamp(MIN_THINKING_BUDGET, max)
     }
 
     pub fn from_budget(n: u32, max: u32) -> Self {
@@ -395,9 +389,6 @@ mod tests {
 
     #[test]
     fn effort_math_and_snapping() {
-        assert_eq!(Effort::Low.budget(10_000), 2_000);
-        // The budget never drops below the floor.
-        assert_eq!(Effort::Minimal.budget(500), MIN_THINKING_BUDGET);
         assert_eq!(Effort::from_budget(2_000, 10_000), Effort::Low);
         assert_eq!(Effort::from_budget(9_999, 10_000), Effort::Max);
         // Exact match stays; unsupported snaps to the closest lower level,

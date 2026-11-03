@@ -5,9 +5,9 @@
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
-  and the [harness design rules](harness-design.md). The design rules win
+  and the [harness design rules](../../animist/harness-design.md). The design rules win
   where they disagree with the README. Start with the
-  [test inventory](harness-design.md#test-integrity).
+  [test inventory](../../animist/harness-design.md#test-integrity).
 - Read the 02/03 completion notes first. If the merged 02/03 cutover already
   removed `edge.rs` or changed `crate::history`, skip the steps below that it
   already covered, and say so in the completion note.
@@ -162,7 +162,7 @@ writes into it.
    verdict is clean.
 3. Append a completion note: how captions and `Usage` were decided, the new
    format version, the downgrade caveat, the test-inventory diff, and the
-   [indirection rows](harness-design.md#no-indirection-without-a-job) closed.
+   [indirection rows](../../animist/harness-design.md#no-indirection-without-a-job) closed.
 
 ## Completion note
 

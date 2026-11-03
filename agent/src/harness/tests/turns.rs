@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::history::{ContentBlock, Role, ext, marker};
-use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
+use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
 use animist::agent::AgentEvent;
 use std::sync::Arc;
 
@@ -737,7 +737,7 @@ async fn stop_decision_at_the_dispatch_boundary_commits_the_interrupted_call() {
     // closing it, and a failure note.
     struct StopAll;
     impl ApprovalResponder for StopAll {
-        fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+        fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
             Box::pin(async {
                 Approval::Stop {
                     reason: "cancelled".into(),

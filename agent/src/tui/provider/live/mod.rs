@@ -29,7 +29,7 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use crate::config::Config;
 use crate::harness::Conversation;
 use crate::permissions::{PermissionAnswer, PermissionManager};
-use crate::run;
+use crate::harness;
 use crate::tools::{QuestionAnswer, Workspace};
 use animist::agent::Cancellation;
 use animist::provider::ModelInfo;
@@ -125,7 +125,7 @@ pub(super) struct SessionKit {
     pub(super) cancel_cell: Arc<ArcSwap<Cancellation>>,
     /// Per-tool-call subagent cancellation, shared with every
     /// session's task-tool launcher; `Command::CancelSubagent` fires here.
-    pub(super) subagent_cancels: Arc<run::cancel::CancelMap<String>>,
+    pub(super) subagent_cancels: Arc<harness::cancel::CancelMap<String>>,
     /// The gates' parking slots; answers land here from the command loop.
     pub(super) park: SharedPark,
     pub(super) evt_tx: mpsc::UnboundedSender<AgentEvent>,

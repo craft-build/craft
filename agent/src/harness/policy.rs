@@ -25,7 +25,7 @@ use crate::permissions::{
     PermissionAnswer, PermissionCheck, PermissionError, PermissionManager, ToolKey,
     append_permission_rule, scope_for_call,
 };
-use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
+use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 use super::conversation::TurnSettings;
 use super::events::{CraftEvent, EventSink};
@@ -72,7 +72,7 @@ pub(crate) struct PolicyLayer {
     /// The run's plan-mode gate, snapshotted from the settings at
     /// `turn_start` so a mid-run mode switch cannot take effect inside a
     /// step. Switching modes does not rebuild the agent.
-    plan: Mutex<crate::run::AgentMode>,
+    plan: Mutex<crate::harness::AgentMode>,
 }
 
 impl PolicyLayer {
@@ -89,7 +89,7 @@ impl PolicyLayer {
             write_root,
             guardrails,
             sink,
-            plan: Mutex::new(crate::run::AgentMode::default()),
+            plan: Mutex::new(crate::harness::AgentMode::default()),
         }
     }
 
@@ -302,7 +302,7 @@ mod tests {
     use super::*;
     use crate::harness::{Conversation, ConversationBuilder, Event, EventSink, EventStream};
     use crate::permissions::{PermissionsConfig, READ_ONLY_TOOLS};
-    use crate::run::approval::ApprovalResponder;
+    use crate::harness::approval::ApprovalResponder;
     use crate::tools::Workspace;
     use std::path::Path;
     use std::sync::Arc;
@@ -315,7 +315,7 @@ mod tests {
     }
 
     impl ApprovalResponder for AllowAll {
-        fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+        fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
             self.asks.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Approval::Allow { remember: None } })
         }
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn plan_gate_blocks_writes_outside_the_plan_file() {
-        use crate::run::mode::{AgentMode, PLAN_WRITE_RESTRICTED};
+        use crate::harness::mode::{AgentMode, PLAN_WRITE_RESTRICTED};
 
         let mode = AgentMode::Plan(std::path::PathBuf::from("/w/plans/a.md"));
         let blocked = mode.plan_block_reason(
@@ -705,7 +705,7 @@ mod tests {
         /// Allows every ask once, remembering it as a session grant.
         struct AllowSessionOnce(Arc<AtomicUsize>);
         impl ApprovalResponder for AllowSessionOnce {
-            fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+            fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Box::pin(std::future::ready(Approval::Allow {
                     remember: Some(crate::permissions::PermissionAnswer::AllowSession),
@@ -791,7 +791,7 @@ mod tests {
         #[derive(Clone)]
         struct AllowOnceAlways;
         impl ApprovalResponder for AllowOnceAlways {
-            fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+            fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
                 Box::pin(std::future::ready(Approval::Allow {
                     remember: Some(crate::permissions::PermissionAnswer::AllowOnce),
                 }))
@@ -802,7 +802,7 @@ mod tests {
         /// Wraps the counting around the allow-once responder.
         struct Counting(Arc<AtomicUsize>);
         impl ApprovalResponder for Counting {
-            fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+            fn ask(&self, ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 AllowOnceAlways.ask(ask)
             }
@@ -838,7 +838,7 @@ mod tests {
         #[derive(Clone)]
         struct GrantSession;
         impl ApprovalResponder for GrantSession {
-            fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+            fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
                 Box::pin(std::future::ready(Approval::Allow {
                     remember: Some(crate::permissions::PermissionAnswer::AllowSession),
                 }))
@@ -1107,7 +1107,7 @@ mod tests {
             arrivals_under_flight: Arc<std::sync::atomic::AtomicUsize>,
         }
         impl ApprovalResponder for Recorder {
-            fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+            fn ask(&self, ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
                 // The TUI/ACP responders hold their one interaction slot
                 // across the whole ask; a queued child waits instead of
                 // showing a second prompt. Only the gated children count:

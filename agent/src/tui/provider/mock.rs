@@ -458,7 +458,7 @@ impl Provider for MockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::AgentMode;
+    use crate::harness::AgentMode;
 
     async fn recv(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> AgentEvent {
         tokio::time::timeout(Duration::from_secs(15), rx.recv())

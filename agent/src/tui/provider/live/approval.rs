@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::permissions::{ASK_TIMEOUT, FILE_WRITE_TOOLS, PermissionAnswer};
-use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
+use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 use super::SharedPark;
 use crate::tui::provider::cards;
@@ -46,7 +46,7 @@ impl ApprovalGate {
 }
 
 impl ApprovalResponder for ApprovalGate {
-    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
         // Owned copies: the boxed future outlives the borrowed ask.
         let id = ask.id.to_owned();
         let name = ask.name.to_owned();
@@ -182,7 +182,7 @@ pub(super) async fn decide(park: &SharedPark, id: String, answer: PermissionAnsw
 mod tests {
     use super::super::ParkSlots;
     use super::*;
-    use crate::run::approval::ApprovalResponder;
+    use crate::harness::approval::ApprovalResponder;
 
     type Cell = std::sync::Arc<arc_swap::ArcSwap<animist::agent::Cancellation>>;
 

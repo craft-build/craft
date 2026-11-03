@@ -530,7 +530,7 @@ impl AppState {
             base_prompt: format!("{}{}", self.config.agent.preamble, instructions.text),
             workspace: workspace.clone(),
             cancel: cancel_cell.clone(),
-            cancels: Arc::new(crate::run::cancel::CancelMap::new()),
+            cancels: Arc::new(crate::harness::cancel::CancelMap::new()),
             sink: conversation.sink(),
             policy,
             cwd: cwd.clone(),

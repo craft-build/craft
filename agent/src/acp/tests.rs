@@ -4,7 +4,7 @@ use super::turn::*;
 use super::*;
 use crate::history;
 use crate::permissions::{PermissionAnswer, PermissionCheck, ToolKey, scope_for_call};
-use crate::run;
+use crate::harness;
 use crate::tools::{QuestionOption, QuestionSpec};
 use agent_client_protocol::schema::v1::{
     Content, RequestPermissionOutcome, ResourceLink, TextContent, ToolCallContent, ToolKind,
@@ -359,7 +359,7 @@ async fn registered_tools_route_task_calls_to_the_installed_launcher() {
         cancel: Arc::new(arc_swap::ArcSwap::from_pointee(
             animist::agent::Cancellation::default(),
         )),
-        cancels: Arc::new(run::cancel::CancelMap::new()),
+        cancels: Arc::new(harness::cancel::CancelMap::new()),
         sink,
         policy: crate::harness::PolicyLayerInputs::new(
             Arc::new(crate::permissions::PermissionManager::new(

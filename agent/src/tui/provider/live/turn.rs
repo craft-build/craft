@@ -12,7 +12,7 @@ use animist::provider::ProviderEvent;
 
 use crate::harness::{self, CraftEvent, Event, EventStream};
 use crate::history;
-use crate::run::AgentMode;
+use crate::harness::AgentMode;
 
 use super::super::cards::{self, Files};
 use super::usage_recorder::record_run_usage;

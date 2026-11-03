@@ -12,7 +12,7 @@ use agent_client_protocol::{
 };
 use std::sync::Arc;
 
-use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
+use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 use super::turn::tool_title;
 
@@ -122,7 +122,7 @@ impl AcpPermissionGate {
 }
 
 impl ApprovalResponder for AcpPermissionGate {
-    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
         // Owned copies: the boxed future outlives the borrowed ask.
         let id = ask.id.to_owned();
         let name = ask.name.to_owned();

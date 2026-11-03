@@ -150,7 +150,7 @@ pub fn parse_decision(text: &str) -> Result<Decision, ReviewError> {
 /// probability itself (llama.cpp's decision router reports only that).
 /// Anything below, and any endpoint failure, fails closed exactly like
 /// the LLM reviewer.
-pub const DECISION_ALLOW_CONFIDENCE: f32 = 0.5;
+const DECISION_ALLOW_CONFIDENCE: f32 = 0.5;
 
 /// The calibrated P(safe) to threshold. `answer_confidence` when the
 /// endpoint reports it; otherwise the noul probability, which for a
@@ -216,13 +216,13 @@ pub async fn decide_with_endpoint(
 
 /// One-shot reviewer call answering a NeedsPrompt decision.
 pub(crate) type Reviewer = Arc<
-    dyn Fn(String, Vec<String>) -> crate::run::BoxFuture<Result<Decision, ReviewError>>
+    dyn Fn(String, Vec<String>) -> crate::harness::BoxFuture<Result<Decision, ReviewError>>
         + Send
         + Sync,
 >;
 
 /// Production reviewer: one locked-down model call per NeedsPrompt decision.
-pub(crate) fn model_reviewer(model: crate::provider::ModelHandle) -> Reviewer {
+fn model_reviewer(model: crate::provider::ModelHandle) -> Reviewer {
     Arc::new(move |tool, scopes| {
         let model = model.clone();
         Box::pin(async move { review(&model, &tool, &scopes).await })
@@ -234,7 +234,7 @@ pub(crate) fn model_reviewer(model: crate::provider::ModelHandle) -> Reviewer {
 /// are answered by the Jev/laya endpoint via the argosy decision API
 /// instead of the LLM reviewer. Failures deny without recording a rule,
 /// exactly like the model reviewer.
-pub(crate) fn endpoint_reviewer(provider: Arc<dyn argosy::decision::DecisionProvider>) -> Reviewer {
+fn endpoint_reviewer(provider: Arc<dyn argosy::decision::DecisionProvider>) -> Reviewer {
     Arc::new(move |tool, scopes| {
         let provider = provider.clone();
         Box::pin(async move { decide_with_endpoint(provider, &tool, &scopes).await })
@@ -279,7 +279,7 @@ pub async fn review(
 
 /// Deadline-parameterized core so tests can exercise the timeout path
 /// without waiting the full 30 seconds.
-pub(crate) async fn review_with_deadline(
+async fn review_with_deadline(
     model: &crate::provider::ModelHandle,
     tool: &str,
     scopes: &[String],

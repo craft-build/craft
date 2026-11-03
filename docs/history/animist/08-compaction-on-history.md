@@ -6,8 +6,8 @@
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt),
   including the [async rules](README.md#async-native), and the
-  [harness design rules](harness-design.md). Start with the
-  [test inventory](harness-design.md#test-integrity).
+  [harness design rules](../../animist/harness-design.md). Start with the
+  [test inventory](../../animist/harness-design.md#test-integrity).
 - This prompt now comes **before** recovery (09). Compaction has been off
   since 05; this prompt brings it back natively, so no Vec-rewrite adapter
   ever exists.

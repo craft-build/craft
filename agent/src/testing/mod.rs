@@ -536,7 +536,7 @@ impl crate::tools::SpawnSubagent for BarrierSpawn {
     fn spawn(
         &self,
         _req: crate::subagent::SubagentRequest,
-    ) -> crate::run::BoxFuture<std::result::Result<crate::subagent::SubagentResult, String>> {
+    ) -> crate::harness::BoxFuture<std::result::Result<crate::subagent::SubagentResult, String>> {
         let barrier = self.0.clone();
         Box::pin(async move {
             let text = match tokio::time::timeout(SPAWN_BARRIER_WAIT, barrier.wait()).await {

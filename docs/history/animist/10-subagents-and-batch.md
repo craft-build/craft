@@ -5,9 +5,9 @@
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
-  and the [harness design rules](harness-design.md), especially
-  [State ownership](harness-design.md#state-ownership). Start with the
-  [test inventory](harness-design.md#test-integrity).
+  and the [harness design rules](../../animist/harness-design.md), especially
+  [State ownership](../../animist/harness-design.md#state-ownership). Start with the
+  [test inventory](../../animist/harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
   as described in [Finish](#finish).
 

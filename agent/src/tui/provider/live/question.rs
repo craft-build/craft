@@ -33,7 +33,7 @@ fn dismissed() -> QuestionAnswer {
 }
 
 impl AskQuestions for QuestionAsker {
-    fn ask(&self, questions: Vec<QuestionSpec>) -> crate::run::BoxFuture<QuestionAnswer> {
+    fn ask(&self, questions: Vec<QuestionSpec>) -> crate::harness::BoxFuture<QuestionAnswer> {
         let QuestionAsker { park, tx, cancel } = QuestionAsker {
             park: self.park.clone(),
             tx: self.tx.clone(),

@@ -30,7 +30,6 @@ pub mod print;
 pub mod prompt;
 pub mod provider;
 pub mod recipe;
-pub mod run;
 pub mod runtime;
 pub mod sandbox;
 pub mod setup;

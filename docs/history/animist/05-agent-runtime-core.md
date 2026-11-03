@@ -6,10 +6,10 @@
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt),
   including the [async rules](README.md#async-native), and the
-  [harness design rules](harness-design.md), which win where the two
-  disagree. Read the design rules' [Layers](harness-design.md#layers) section
+  [harness design rules](../../animist/harness-design.md), which win where the two
+  disagree. Read the design rules' [Layers](../../animist/harness-design.md#layers) section
   in full before writing any layer.
-- Start with the [test inventory](harness-design.md#test-integrity).
+- Start with the [test inventory](../../animist/harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
   as described in [Finish](#finish).
 
@@ -32,7 +32,7 @@ This prompt:
 - moves TUI, ACP, headless, print and the subagent launcher onto the
   conversation, and deletes the old loop;
 - removes the indirection rows assigned to 05 in the
-  [inventory](harness-design.md#no-indirection-without-a-job).
+  [inventory](../../animist/harness-design.md#no-indirection-without-a-job).
 
 Work in three phases. **Each phase ends with a green commit.**
 
@@ -83,7 +83,7 @@ driven only by tests.
 1. **`Conversation`** (`harness/conversation.rs`):
    - Owns the `History`, the current model (the type 02/03 landed), the tool
      registry inputs, the layer instances (with typed handles to their state;
-     see [State ownership](harness-design.md#state-ownership)), the
+     see [State ownership](../../animist/harness-design.md#state-ownership)), the
      `ArcSwap<TurnSettings>`, and the event sink.
    - Builds its `Agent` with `Agent::builder().history(history.clone())`.
      Rebuilds it only when the model or tool set changes, between runs, on
@@ -111,7 +111,7 @@ driven only by tests.
    - **The event sink** is conversation-scoped: one `flume` sender that
      surfaces subscribe to once. Layers send `CraftEvent`s into it. The
      driver forwards each run's animist channel into it. Follow the
-     [ordering rule](harness-design.md#events-from-layers).
+     [ordering rule](../../animist/harness-design.md#events-from-layers).
 3. **Driver** (`harness/driver.rs`):
    `run_turn(&Conversation, input, cancel: Cancellation) -> TurnOutcome`.
    - Builds the input `StoredMessage`, runs `Agent::run` with a bounded
@@ -134,12 +134,12 @@ driven only by tests.
      `History` would need the throwaway rewrite adapter this plan avoids. 08
      brings it back as `Compactor` plans called from this spot. Delete the
      surfaces' copies now, and leave a single `// 08: compaction` call site.
-   - Nothing else. See [the driver's job](harness-design.md#pick-the-hook-by-what-the-behaviour-is).
+   - Nothing else. See [the driver's job](../../animist/harness-design.md#pick-the-hook-by-what-the-behaviour-is).
 4. **Cancellation.** Runs use `animist::agent::Cancellation`. Delete the
    `CancelToken`/`CancelFlag` epoch re-arm and `CancelTrigger` where
    `Cancellation` covers them. Keep `CancelMap` only if per-subagent cancel
    needs grouping, and document why.
-5. **Layers** (head to tail, as in the [chain](harness-design.md#chain)):
+5. **Layers** (head to tail, as in the [chain](../../animist/harness-design.md#chain)):
    - **`PolicyLayer` (interim)**: `pre_tool_exec` calls today's
      `BeforeExecute::decide` and maps `Decision` onto `ToolDecision`. 07
      replaces the body; keep this to a few lines.
@@ -222,7 +222,7 @@ driven only by tests.
       SDK consumers (hardening/18). If a field must change, version it.
     - **Subagent launcher**: a child `Conversation` with its own layer
       instances (never the parent's; see
-      [State ownership](harness-design.md#state-ownership)), run through
+      [State ownership](../../animist/harness-design.md#state-ownership)), run through
       `run_turn`. 10 finishes subagents and `batch`.
     - Teardown calls `Conversation::shutdown().await` on every exit path:
       TUI quit, ACP session close, headless end, child end.
@@ -290,7 +290,7 @@ driven only by tests.
 
 1. Run fmt, clippy and the tests (see the README).
 2. **Run the review agent** over this prompt's
-   full diff, with the [test-integrity](harness-design.md#test-integrity)
+   full diff, with the [test-integrity](../../animist/harness-design.md#test-integrity)
    instruction. Address its findings, re-run validation, and repeat until
    the verdict is clean.
 3. Append a completion note:

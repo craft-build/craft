@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::history::{ContentBlock, Role, ext};
-use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
+use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 /// Whether a result block reports an error.
 fn result_is_error(result: &ContentBlock) -> bool {
@@ -69,7 +69,7 @@ async fn unknown_tool_surfaces_error_and_run_continues() {
 async fn responder_denial_reports_reason_to_model() {
     struct Deny;
     impl ApprovalResponder for Deny {
-        fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+        fn ask(&self, _ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
             Box::pin(async {
                 Approval::Deny {
                     message: "not allowed".into(),
@@ -875,13 +875,13 @@ struct AllowAll {
     asks: Arc<StdMutex<usize>>,
 }
 
-impl crate::run::ApprovalResponder for AllowAll {
+impl crate::harness::ApprovalResponder for AllowAll {
     fn ask(
         &self,
-        _ask: crate::run::ApprovalAsk<'_>,
-    ) -> crate::run::BoxFuture<crate::run::Approval> {
+        _ask: crate::harness::ApprovalAsk<'_>,
+    ) -> crate::harness::BoxFuture<crate::harness::Approval> {
         *self.asks.lock().unwrap() += 1;
-        Box::pin(std::future::ready(crate::run::Approval::Allow {
+        Box::pin(std::future::ready(crate::harness::Approval::Allow {
             remember: None,
         }))
     }
@@ -991,7 +991,7 @@ async fn plan_mode_blocks_a_responder_allowed_write() {
     let provider = &provider;
     let (conversation, responder) = policy_conversation(&dir, permissions, provider).await;
     conversation.update_settings(|settings| {
-        settings.mode = crate::run::AgentMode::Plan(root.join("plans/alpha.md"));
+        settings.mode = crate::harness::AgentMode::Plan(root.join("plans/alpha.md"));
     });
 
     let outcome = run_turn(&conversation, "go").await;
@@ -1002,7 +1002,7 @@ async fn plan_mode_blocks_a_responder_allowed_write() {
     assert_eq!(results.len(), 1);
     assert_eq!(
         result_text(&results[0]),
-        format!("[error] {}", crate::run::PLAN_WRITE_RESTRICTED),
+        format!("[error] {}", crate::harness::PLAN_WRITE_RESTRICTED),
         "the plan gate has the final word after the responder allows"
     );
     assert!(

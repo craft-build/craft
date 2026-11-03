@@ -864,7 +864,7 @@ mod tests {
         let sent = sent_messages(&mut cmd_rx);
         assert_eq!(sent.len(), 1, "one submission, two Dones notwithstanding");
         assert!(
-            matches!(sent[0].1, crate::run::AgentMode::Plan(_)),
+            matches!(sent[0].1, crate::harness::AgentMode::Plan(_)),
             "the first turn after resume runs in the restored plan mode"
         );
     }
@@ -897,7 +897,7 @@ mod tests {
         let sent = sent_messages(&mut cmd_rx);
         assert_eq!(sent.len(), 1);
         assert!(
-            matches!(sent[0].1, crate::run::AgentMode::Plan(_)),
+            matches!(sent[0].1, crate::harness::AgentMode::Plan(_)),
             "the CLI-seeded plan mode carries the failed-resume first turn"
         );
     }
@@ -941,7 +941,7 @@ fn initial_mode_seeds_the_app() {
 #[cfg(test)]
 fn sent_messages(
     rx: &mut mpsc::UnboundedReceiver<Command>,
-) -> Vec<(String, crate::run::AgentMode)> {
+) -> Vec<(String, crate::harness::AgentMode)> {
     let mut sent = Vec::new();
     while let Ok(cmd) = rx.try_recv() {
         if let Command::SendMessage(text, mode, images) = cmd {
@@ -966,7 +966,7 @@ fn startup_prompt_submits_in_plan_mode_exactly_once() {
     assert_eq!(sent.len(), 1, "the startup prompt submits exactly once");
     assert_eq!(sent[0].0, "do x");
     assert!(
-        matches!(sent[0].1, crate::run::AgentMode::Plan(_)),
+        matches!(sent[0].1, crate::harness::AgentMode::Plan(_)),
         "a plan-seeded session's first turn must run in plan mode"
     );
     assert!(app.mode == app::Mode::Plan);
@@ -989,7 +989,7 @@ fn startup_prompt_submits_build_mode_and_none_submits_nothing() {
     submit_startup_prompt(&mut app, &cmd_tx, &mut pending);
     let sent = sent_messages(&mut cmd_rx);
     assert_eq!(sent.len(), 1);
-    assert!(matches!(sent[0].1, crate::run::AgentMode::Build));
+    assert!(matches!(sent[0].1, crate::harness::AgentMode::Build));
 
     let mut pending: Option<String> = None;
     submit_startup_prompt(&mut app, &cmd_tx, &mut pending);

@@ -5,8 +5,8 @@
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
-  and the [harness design rules](harness-design.md). Start with the
-  [test inventory](harness-design.md#test-integrity).
+  and the [harness design rules](../../animist/harness-design.md). Start with the
+  [test inventory](../../animist/harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
   as described in [Finish](#finish).
 
@@ -75,7 +75,7 @@ After this prompt the migration branch can merge.
    leave all of them in `run/`. Pick one layout, make it coherent, and
    delete `run/` if it's empty. A module that only re-exports is deleted.
 6. **Leftover indirection.** Go through the
-   [inventory](harness-design.md#no-indirection-without-a-job). Close every
+   [inventory](../../animist/harness-design.md#no-indirection-without-a-job). Close every
    row that is still open, or record why it stays.
 
 ## Tests

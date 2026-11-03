@@ -26,7 +26,7 @@ use animist::agent::tool::ToolRegistry;
 use crate::compaction::SharedCompactionState;
 use crate::harness::guardrails::GuardrailState;
 use crate::harness::retry::RetryCtx;
-use crate::run::AgentMode;
+use crate::harness::AgentMode;
 use crate::snapshot::SnapshotManager;
 use crate::thinking::ThinkingConfig;
 

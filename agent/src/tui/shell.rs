@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 
 use crate::child_guard::ChildGuard;
 use crate::history;
-use crate::run::CancelToken;
-use crate::run::cancel::CancelTrigger;
+use crate::harness::CancelToken;
+use crate::harness::cancel::CancelTrigger;
 
 use super::provider::{AgentEvent, LineKind, ToolCallData, ToolKind, ToolLine};
 
@@ -393,7 +393,7 @@ mod tests {
     /// queues the `I ran: …` message only for visible runs.
     #[tokio::test]
     async fn run_shell_streams_cards_and_queues_visible_result() {
-        use crate::run::cancel_channel;
+        use crate::harness::cancel_channel;
         use crate::tui::provider::AgentEvent;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -443,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_shell_hidden_and_errors_do_not_queue_results() {
-        use crate::run::cancel_channel;
+        use crate::harness::cancel_channel;
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let (_flag, cancel) = cancel_channel();
@@ -468,7 +468,7 @@ mod tests {
     /// with `is_error` set.
     #[tokio::test]
     async fn cancelled_shell_kills_the_command() {
-        use crate::run::cancel_channel;
+        use crate::harness::cancel_channel;
         use crate::tui::provider::AgentEvent;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -532,7 +532,7 @@ mod tests {
     /// trigger is already gone and cannot be re-cancelled.
     #[tokio::test]
     async fn shell_state_cancel_all_cancels_in_flight_runs() {
-        use crate::run::cancel::cancel_pair;
+        use crate::harness::cancel::cancel_pair;
 
         let mut state = ShellState::default();
         let id_a = state.reserve_id();

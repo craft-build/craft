@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::AbortHandle;
 
 use crate::permissions::PermissionAnswer;
-use crate::run;
+use crate::harness;
 
 use super::approval::decide;
 use super::bootstrap::{install_session, open_session};
@@ -55,7 +55,7 @@ impl CraftProvider {
             cancel_cell: Arc::new(ArcSwap::from_pointee(
                 animist::agent::Cancellation::default(),
             )),
-            subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
+            subagent_cancels: Arc::new(harness::cancel::CancelMap::new()),
             park: Arc::new(Mutex::new(ParkSlots::default())),
             evt_tx: evt_tx.clone(),
             files: super::cards::Files::default(),
@@ -281,7 +281,7 @@ impl CraftProvider {
 /// settle before it is sent.
 pub(super) type PendingMessage = (
     String,
-    crate::run::AgentMode,
+    crate::harness::AgentMode,
     Vec<crate::history::ContentBlock>,
 );
 
@@ -293,7 +293,7 @@ pub(super) async fn handle_send_message(
     current_turn: &mut Option<AbortHandle>,
     pending: &mut VecDeque<PendingMessage>,
     text: String,
-    mode: crate::run::AgentMode,
+    mode: crate::harness::AgentMode,
     images: Vec<crate::history::ContentBlock>,
 ) {
     if text.trim().is_empty() {
@@ -320,7 +320,7 @@ async fn handle_mcp_prompt(
     pending: &mut VecDeque<PendingMessage>,
     qualified: String,
     arguments: std::collections::HashMap<String, String>,
-    mode: crate::run::AgentMode,
+    mode: crate::harness::AgentMode,
 ) {
     let Some(handle) = ctx.kit.workspace.mcp() else {
         notice(ctx, Tone::Danger, "no MCP servers are running").await;
@@ -396,7 +396,7 @@ pub(super) async fn maybe_send_next(
 fn start_turn(
     ctx: &LoopCtx,
     text: String,
-    mode: crate::run::AgentMode,
+    mode: crate::harness::AgentMode,
     images: Vec<crate::history::ContentBlock>,
 ) -> AbortHandle {
     let handle = tokio::spawn(run_turn(
@@ -425,7 +425,7 @@ fn handle_shell(ctx: &LoopCtx, command: String, visible: bool) {
     let (id, cancel) = {
         let mut shell = ctx.shell.lock().unwrap_or_else(|e| e.into_inner());
         let id = shell.reserve_id();
-        let (trigger, cancel) = run::cancel::cancel_pair();
+        let (trigger, cancel) = harness::cancel::cancel_pair();
         shell.add_trigger(&id, trigger);
         (id, cancel)
     };

@@ -5,8 +5,8 @@
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
-  and the [harness design rules](harness-design.md). Start with the
-  [test inventory](harness-design.md#test-integrity).
+  and the [harness design rules](../../animist/harness-design.md). Start with the
+  [test inventory](../../animist/harness-design.md#test-integrity).
 - When implementation is finished, **run the review agent**
   as described in [Finish](#finish).
 
@@ -79,9 +79,9 @@ survived.
    - List every remaining `spawn_blocking` with its reason, and confirm each
      is CPU-bound or a sync-only library.
    - `clippy::await_holding_lock` is clean.
-7. **Indirection and layer audit** ([design rules](harness-design.md)):
+7. **Indirection and layer audit** ([design rules](../../animist/harness-design.md)):
    - Every row of the
-     [inventory](harness-design.md#no-indirection-without-a-job) is closed,
+     [inventory](../../animist/harness-design.md#no-indirection-without-a-job) is closed,
      or its reason for staying is written down.
    - `grep -rn 'RunScope\|HarnessExecutor\|SharedDispatch\|SharedDedupCache\|SharedGuardrails\|SharedCompactionState\|RunParams\|run_policy\|BeforeExecute\|AfterExecute' agent/src`
      is empty (or each hit has a reason).
@@ -89,7 +89,7 @@ survived.
      trait with one non-test implementation is inlined unless it is a
      deliberate test seam, and the note says which.
    - Walk the layer chain. Each layer's hooks match the
-     [hook table](harness-design.md#pick-the-hook-by-what-the-behaviour-is).
+     [hook table](../../animist/harness-design.md#pick-the-hook-by-what-the-behaviour-is).
      No layer instance is shared between agents. The driver does only its
      listed jobs.
    - Count the channel hops from provider delta to the TUI cell and to the
@@ -253,7 +253,7 @@ models.dev cache) — unchanged by this prompt.
 
 ### Indirection and layer audit
 
-- The [inventory](harness-design.md#no-indirection-without-a-job) is fully
+- The [inventory](../../animist/harness-design.md#no-indirection-without-a-job) is fully
   closed (11's note lists the rows; this prompt found none reopened).
   `grep -rn 'RunScope|HarnessExecutor|SharedDispatch|SharedDedupCache|
   SharedGuardrails|SharedCompactionState.*run|RunParams|run_policy|
@@ -279,7 +279,7 @@ models.dev cache) — unchanged by this prompt.
   `prepare_request`+`response`; recovery `turn_start`+`recover`;
   continuation `turn_start`+`step_end`; snapshot `pre_tool_exec`+
   `turn_end`; persist `step_end`+`turn_end`. Every hook matches the
-  [hook table](harness-design.md#pick-the-hook-by-what-the-behaviour-is);
+  [hook table](../../animist/harness-design.md#pick-the-hook-by-what-the-behaviour-is);
   no layer instance is shared between agents (10's pin).
 - **Channel hops**, provider text delta → surface: animist run channel
   (flume, driver) → harness `EventSink` (flume) → TUI session forwarder →

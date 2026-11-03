@@ -1,7 +1,7 @@
 # Harness design rules for prompts 04–12
 
 Every prompt from 04 onward links here. Where this file and the
-[README](README.md) disagree, this file wins. The README was written before
+[README](../history/animist/README.md) disagree, this file wins. The README was written before
 02 and 03 were merged into one hard cutover, and before the facade was
 dropped. [README overrides](#readme-overrides) lists each conflict.
 

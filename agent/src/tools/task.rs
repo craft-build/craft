@@ -22,7 +22,7 @@ pub trait SpawnSubagent: Send + Sync {
     fn spawn(
         &self,
         req: SubagentRequest,
-    ) -> crate::run::BoxFuture<std::result::Result<SubagentResult, String>>;
+    ) -> crate::harness::BoxFuture<std::result::Result<SubagentResult, String>>;
 }
 
 /// Default seam: no host installed, so the tool cannot run.
@@ -32,7 +32,7 @@ impl SpawnSubagent for NoSubagents {
     fn spawn(
         &self,
         _req: SubagentRequest,
-    ) -> crate::run::BoxFuture<std::result::Result<SubagentResult, String>> {
+    ) -> crate::harness::BoxFuture<std::result::Result<SubagentResult, String>> {
         Box::pin(async { Err("task tool is not available in this session".to_string()) })
     }
 }
@@ -158,7 +158,7 @@ mod tests {
         fn spawn(
             &self,
             req: SubagentRequest,
-        ) -> crate::run::BoxFuture<std::result::Result<SubagentResult, String>> {
+        ) -> crate::harness::BoxFuture<std::result::Result<SubagentResult, String>> {
             self.seen.lock().unwrap().push(req);
             let result = match &self.result {
                 SubagentResult::Text(t) => SubagentResult::Text(t.clone()),
@@ -247,7 +247,7 @@ mod tests {
             fn spawn(
                 &self,
                 _req: SubagentRequest,
-            ) -> crate::run::BoxFuture<std::result::Result<SubagentResult, String>> {
+            ) -> crate::harness::BoxFuture<std::result::Result<SubagentResult, String>> {
                 Box::pin(async { Err("sub-agent error: boom".into()) })
             }
         }
@@ -267,7 +267,7 @@ mod tests {
 
     /// The claim must be resource-shaped and keyless: sibling `task` calls
     /// share a wave (the behavioral pin is
-    /// `run_tests::dispatch::subagent_calls_run_concurrently`).
+    /// `harness::tests::dispatch::subagent_calls_run_concurrently`).
     #[test]
     fn scheduling_lets_siblings_share_a_wave() {
         let task = Task(Arc::new(NoSubagents));

@@ -2382,13 +2382,13 @@ pub(crate) async fn run_headless_query_with(
     let workspace = env.workspace;
 
     let mode = match q.mode {
-        CliMode::Plan => crate::run::AgentMode::Plan(
+        CliMode::Plan => crate::harness::AgentMode::Plan(
             state_dir
                 .as_ref()
                 .and_then(|dir| crate::storage::plans::new_plan_path(dir).ok())
                 .unwrap_or_else(|| std::path::PathBuf::from("plans/plan.md")),
         ),
-        _ => crate::run::AgentMode::Build,
+        _ => crate::harness::AgentMode::Build,
     };
 
     // The session: one conversation, restored from the persisted entries,
@@ -2462,7 +2462,7 @@ pub(crate) async fn run_headless_query_with(
         base_prompt: format!("{}{}", config.agent.preamble, env.instructions.text),
         workspace: workspace.clone(),
         cancel: cancel_cell.clone(),
-        cancels: Arc::new(crate::run::cancel::CancelMap::new()),
+        cancels: Arc::new(crate::harness::cancel::CancelMap::new()),
         sink: conversation.sink(),
         policy,
         cwd: cwd_str.clone(),

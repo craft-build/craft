@@ -228,7 +228,7 @@ async fn submit_mid_turn_queues_without_aborting() {
             &mut current_turn,
             &mut pending,
             text.to_string(),
-            crate::run::AgentMode::Build,
+            crate::harness::AgentMode::Build,
             Vec::new(),
         )
         .await;
@@ -300,7 +300,7 @@ async fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
             cancel_cell: Arc::new(ArcSwap::from_pointee(
                 animist::agent::Cancellation::default(),
             )),
-            subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
+            subagent_cancels: Arc::new(harness::cancel::CancelMap::new()),
             park: Arc::new(Mutex::new(ParkSlots::default())),
             evt_tx: mpsc::unbounded_channel().0,
             files: Files::default(),
@@ -333,7 +333,7 @@ fn offline_kit(
         cancel_cell: Arc::new(ArcSwap::from_pointee(
             animist::agent::Cancellation::default(),
         )),
-        subagent_cancels: Arc::new(run::cancel::CancelMap::new()),
+        subagent_cancels: Arc::new(harness::cancel::CancelMap::new()),
         park: Arc::new(Mutex::new(ParkSlots::default())),
         evt_tx,
         files: Files::default(),
@@ -963,7 +963,7 @@ async fn run_turn_sends_the_resolved_preamble_exactly_once() {
         TurnCtx {
             kit,
             state,
-            mode: crate::run::AgentMode::Build,
+            mode: crate::harness::AgentMode::Build,
         },
         "hi".into(),
         Vec::new(),

@@ -890,7 +890,7 @@ async fn auth_failures_wait_for_reauth_then_resume() {
 /// not as a transient error: with nothing left to compact the run fails
 /// fast carrying the provider's message, and no backoff retries fire (a
 /// misclassification would burn transient retries against the mock's
-/// fallback 500s — the ladder itself is pinned in `run_tests::overflow`).
+/// fallback 500s — the ladder itself is pinned in `harness::tests::overflow`).
 #[tokio::test]
 async fn overflow_bodies_classify_as_overflow_not_transient() {
     let bml = "compaction \"vcc\" { context = \"0.6\" }\nprovider \"t\" { kind = \"anthropic\"\n  base_url = \"http://127.0.0.1:{port}/v1\"\n  api_key_env = \"CONF_PRINT_PATH_KEY\"\n  discover_models = false\n  model \"m\" { context_length = 900 } }\n";

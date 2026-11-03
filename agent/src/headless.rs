@@ -9,7 +9,7 @@
 //! here.
 
 use crate::permissions::{PermissionError, ToolKey};
-use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
+use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 /// The headless approval responder (`--print`, `craft term run`,
 /// `craft recipe run`): where an interactive surface would prompt, headless
@@ -21,7 +21,7 @@ use crate::run::approval::{Approval, ApprovalAsk, ApprovalResponder};
 pub struct HeadlessGate;
 
 impl ApprovalResponder for HeadlessGate {
-    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::run::BoxFuture<Approval> {
+    fn ask(&self, ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
         let tool = ToolKey::parse(ask.name);
         let message = headless_deny_message(&tool, ask.scopes);
         Box::pin(async move {

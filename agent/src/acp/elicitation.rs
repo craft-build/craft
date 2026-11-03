@@ -12,8 +12,8 @@ use agent_client_protocol::{
 };
 
 use crate::{
+    harness,
     permissions::ASK_TIMEOUT,
-    run,
     tools::{AskQuestions, QuestionAnswer, QuestionOption, QuestionSpec},
 };
 
@@ -198,7 +198,7 @@ pub(super) struct ElicitationAsker {
 }
 
 impl AskQuestions for ElicitationAsker {
-    fn ask(&self, questions: Vec<QuestionSpec>) -> run::BoxFuture<QuestionAnswer> {
+    fn ask(&self, questions: Vec<QuestionSpec>) -> harness::BoxFuture<QuestionAnswer> {
         let asker = ElicitationAsker {
             connection: self.connection.clone(),
             session_id: self.session_id.clone(),

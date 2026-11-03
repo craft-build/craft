@@ -286,12 +286,12 @@ async fn recover_stop_reason_overflow(
 async fn advisor_followup(
     conversation: &Conversation,
     cancel: &Cancellation,
-    state: &mut crate::run::advisor::AdvisorState,
+    state: &mut crate::harness::advisor::AdvisorState,
     config: &crate::config::AdvisorConfig,
     continuations: u32,
 ) -> Option<StoredMessage> {
     conversation.sink().craft(CraftEvent::Info(
-        crate::run::advisor::ADVISOR_REVIEWING_INFO.to_owned(),
+        crate::harness::advisor::ADVISOR_REVIEWING_INFO.to_owned(),
     ));
     // No cancel race: the deadline bounds the call and the token is
     // checked after.
@@ -308,7 +308,7 @@ async fn advisor_followup(
         .filter_map(|entry| entry.current())
         .cloned()
         .collect();
-    let note = crate::run::advisor::review(&model, state, &entries).await;
+    let note = crate::harness::advisor::review(&model, state, &entries).await;
     if cancel.is_cancelled() {
         return None;
     }
@@ -317,18 +317,18 @@ async fn advisor_followup(
         severity: note.severity.as_str().to_owned(),
         message: note.message.clone(),
     });
-    match crate::run::advisor::advisor_turn_action(Some(note), config, continuations) {
-        crate::run::advisor::AdvisorTurnAction::Continue(note) => {
+    match crate::harness::advisor::advisor_turn_action(Some(note), config, continuations) {
+        crate::harness::advisor::AdvisorTurnAction::Continue(note) => {
             conversation.sink().craft(CraftEvent::Info(
-                crate::run::advisor::advisor_continuation_info(
+                crate::harness::advisor::advisor_continuation_info(
                     &note,
                     continuations + 1,
                     config.max_act_turns,
                 ),
             ));
-            Some(crate::run::advisor::advisor_followup_message(&note))
+            Some(crate::harness::advisor::advisor_followup_message(&note))
         }
-        crate::run::advisor::AdvisorTurnAction::Stop => None,
+        crate::harness::advisor::AdvisorTurnAction::Stop => None,
     }
 }
 
@@ -357,7 +357,7 @@ pub async fn run_turn(
     let advisor_config = conversation.advisor_config();
     let mut advisor_state = advisor_config
         .enabled
-        .then(|| crate::run::advisor::AdvisorState::with_dedup(advisor_config.dedup_size));
+        .then(|| crate::harness::advisor::AdvisorState::with_dedup(advisor_config.dedup_size));
     if let Some(state) = advisor_state.as_mut() {
         state.last_reviewed = conversation.history().snapshot().await.entries().len();
     }

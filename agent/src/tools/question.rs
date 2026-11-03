@@ -51,7 +51,7 @@ pub struct QuestionAnswer {
 /// The TUI implementation opens the question form; the default
 /// ([`DismissAsk`]) is the headless fallback.
 pub trait AskQuestions: Send + Sync {
-    fn ask(&self, questions: Vec<QuestionSpec>) -> crate::run::BoxFuture<QuestionAnswer>;
+    fn ask(&self, questions: Vec<QuestionSpec>) -> crate::harness::BoxFuture<QuestionAnswer>;
 }
 
 /// Headless default: nobody is there to ask, so the question reads as
@@ -59,7 +59,7 @@ pub trait AskQuestions: Send + Sync {
 pub struct DismissAsk;
 
 impl AskQuestions for DismissAsk {
-    fn ask(&self, _questions: Vec<QuestionSpec>) -> crate::run::BoxFuture<QuestionAnswer> {
+    fn ask(&self, _questions: Vec<QuestionSpec>) -> crate::harness::BoxFuture<QuestionAnswer> {
         Box::pin(async {
             QuestionAnswer {
                 dismissed: true,
@@ -226,7 +226,7 @@ mod tests {
     struct Scripted(std::sync::Mutex<Option<QuestionAnswer>>);
 
     impl AskQuestions for Scripted {
-        fn ask(&self, _questions: Vec<QuestionSpec>) -> crate::run::BoxFuture<QuestionAnswer> {
+        fn ask(&self, _questions: Vec<QuestionSpec>) -> crate::harness::BoxFuture<QuestionAnswer> {
             let answer = self.0.lock().unwrap().take().unwrap_or(QuestionAnswer {
                 dismissed: true,
                 answers: vec![],

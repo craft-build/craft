@@ -5,9 +5,9 @@
 - **Load the `rust-best-practices` skill before writing any code** and apply it
   to every Rust change in this prompt.
 - Follow [README → Instructions for every prompt](README.md#instructions-for-every-prompt)
-  and the [harness design rules](harness-design.md), especially
-  [Layers](harness-design.md#layers). Start with the
-  [test inventory](harness-design.md#test-integrity).
+  and the [harness design rules](../../animist/harness-design.md), especially
+  [Layers](../../animist/harness-design.md#layers). Start with the
+  [test inventory](../../animist/harness-design.md#test-integrity).
 - This prompt now runs **after** compaction (08), so overflow recovery calls
   08's compactors directly.
 - When implementation is finished, **run the review agent**

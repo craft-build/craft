@@ -683,8 +683,8 @@ mod tests {
     }
 
     /// Table-driven test over the shared classifier, mined from both former
-    /// implementations (`run::stream::is_context_overflow` and this file's
-    /// provider table). Where the two disagreed, this superset's semantics
+    /// implementations (the deleted pre-animist stream classifier and this
+    /// file's provider table). Where the two disagreed, this superset's semantics
     /// win — notably output-cap complaints (`max_tokens`) are never prompt
     /// overflow, and a bare "maximum tokens per request" tier message is.
     #[test]
@@ -703,7 +703,7 @@ mod tests {
                 true,
             ),
             ("Input is too long for requested model", true),
-            // former run::stream positives
+            // former stream-classifier positives
             (
                 "Error: prompt is too long: 210744 tokens > 200000 maximum",
                 true,

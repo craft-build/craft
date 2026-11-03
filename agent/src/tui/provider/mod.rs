@@ -12,7 +12,7 @@ pub mod mock;
 
 use tokio::sync::mpsc;
 
-use crate::run::AgentMode;
+use crate::harness::AgentMode;
 
 /// Commands sent UI -> provider.
 #[derive(Clone, Debug)]

@@ -14,7 +14,7 @@ use crate::config::{AgentConfig, ProviderConfig};
 use crate::history::{StoredMessage, ext};
 use crate::model_registry::ModelTier;
 use crate::provider::ModelHandle;
-use crate::run;
+use crate::harness;
 use crate::tools::Workspace;
 use crate::tools::worktree::Worktree;
 
@@ -192,7 +192,7 @@ pub struct SubagentLauncher {
     /// Per-tool-call child cancellation: every spawn registers
     /// its child trigger here under the spawning call's id, so a surface
     /// can cancel one subagent without stopping the parent turn.
-    pub cancels: Arc<run::cancel::CancelMap<String>>,
+    pub cancels: Arc<harness::cancel::CancelMap<String>>,
     /// The parent conversation's event sink; filtered child events are
     /// forwarded into it as `CraftEvent::Subagent`.
     pub sink: crate::harness::EventSink,
@@ -208,7 +208,7 @@ impl crate::tools::SpawnSubagent for SubagentLauncher {
     fn spawn(
         &self,
         req: SubagentRequest,
-    ) -> crate::run::BoxFuture<std::result::Result<SubagentResult, String>> {
+    ) -> crate::harness::BoxFuture<std::result::Result<SubagentResult, String>> {
         let launcher = self.clone();
         Box::pin(async move { launcher.spawn(&req).await })
     }
@@ -416,7 +416,7 @@ impl SubagentLauncher {
         let mut cancel_slot = None;
         let mut slot_token = None;
         if !req.tool_use_id.is_empty() {
-            let (trigger, token) = crate::run::cancel::cancel_pair();
+            let (trigger, token) = crate::harness::cancel::cancel_pair();
             cancel_slot = Some(self.cancels.insert(req.tool_use_id.clone(), trigger));
             slot_token = Some(token);
         }
@@ -600,7 +600,7 @@ fn parse_tier(tier: &str) -> Result<ModelTier, String> {
 }
 
 /// The last assistant text of the run: what the tool returns verbatim.
-pub fn final_text(messages: &[StoredMessage]) -> String {
+fn final_text(messages: &[StoredMessage]) -> String {
     messages
         .iter()
         .rev()
@@ -630,7 +630,7 @@ async fn run_linked(
     message: &str,
     child: &animist::agent::Cancellation,
     parent: &animist::agent::Cancellation,
-    slot: Option<&crate::run::cancel::CancelToken>,
+    slot: Option<&crate::harness::cancel::CancelToken>,
 ) -> crate::harness::TurnOutcome {
     // A link that already fired resolves the race at once, before the run
     // spends a model call.
@@ -666,7 +666,7 @@ async fn run_linked(
 /// `required`, `items`, and `enum`. No JSON-Schema validator crate is a
 /// dependency, and the schemas models compose are simple objects, so a
 /// small recursive check suffices.
-pub fn validate_schema(schema: &Value, value: &Value) -> Result<(), String> {
+fn validate_schema(schema: &Value, value: &Value) -> Result<(), String> {
     let Some(obj) = schema.as_object() else {
         return Ok(());
     };
@@ -910,7 +910,7 @@ mod tests {
             cancel: Arc::new(arc_swap::ArcSwap::from_pointee(
                 animist::agent::Cancellation::default(),
             )),
-            cancels: Arc::new(run::cancel::CancelMap::new()),
+            cancels: Arc::new(harness::cancel::CancelMap::new()),
             sink,
             policy: crate::harness::PolicyLayerInputs::new(
                 Arc::new(crate::permissions::PermissionManager::new(
