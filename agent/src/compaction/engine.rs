@@ -206,7 +206,8 @@ impl CompactionEngine {
     /// A stage runs when either its proactive fill threshold is crossed or
     /// the estimated context has already overflowed the buffer-subtracted
     /// window — overflow forces every armed stage in order (VCC first, then
-    /// LLM), regardless of its ratio threshold. This is the seam
+    /// LLM) regardless of its ratio threshold, until a pass leaves the
+    /// history under its stage target. This is the seam
     /// `RecoveryLayer::recover` calls for overflow compaction.
     pub async fn maybe_compact(
         &self,
@@ -220,10 +221,11 @@ impl CompactionEngine {
             .await
     }
 
-    /// Manual compaction (`/compact`): every armed stage runs regardless of
-    /// fill, following the same rule the overflow-forced path uses. Stages
-    /// whose mechanics decline to run (too-short history) still leave the
-    /// history untouched, so an already-compact history returns `false`.
+    /// Manual compaction (`/compact`): the forcing applies until a stage
+    /// runs, regardless of fill; once one has, the overflow cascade rule
+    /// decides the heavier stages. Stages whose mechanics decline to run
+    /// (too-short history) still leave the history untouched, so an
+    /// already-compact history returns `false`.
     pub async fn force_compact(
         &self,
         state: &SharedCompactionState,
@@ -333,11 +335,12 @@ impl CompactionEngine {
                 state.disarmed.insert(stage.kind);
             }
             // A VCC pass that left the history over its limit is not a
-            // sufficient pass: force the heavier stages to run too. The
-            // check uses the raw estimate against the stage target.
-            if stage.kind == CompactionKind::Vcc && estimate_tokens(&after_view) > stage_target {
-                forced = true;
-            }
+            // sufficient pass: force the heavier stages to run too. Any
+            // other outcome ends the forcing — a manual /compact whose
+            // first pass fit stops there. The check uses the raw estimate
+            // against the stage target.
+            forced =
+                stage.kind == CompactionKind::Vcc && estimate_tokens(&after_view) > stage_target;
         }
         ran
     }
@@ -563,6 +566,71 @@ mod tests {
             .force_compact(&state, &summary_model("x"), &history, None, &sink)
             .await;
         assert!(!ran);
+    }
+
+    #[tokio::test]
+    async fn forced_compact_stops_once_a_pass_fits_the_context() {
+        // /compact on a wide window: the forced VCC pass shrinks the history
+        // below every threshold, so the heavier LLM stage must not run —
+        // one compaction, no summarizer call, nothing disarmed.
+        let engine = CompactionEngine::new(vec![
+            stage(CompactionKind::Vcc, 0.6),
+            stage(CompactionKind::Llm, 0.8),
+        ]);
+        let state = shared(CompactionState::default());
+        let (model, calls) = summary_script("llm summary text");
+        let (sink, _stream) = EventSink::new();
+        let history = history_of(long_history());
+        let ran = engine
+            .force_compact(&state, &model, &history, Some(1_000_000), &sink)
+            .await;
+        assert!(ran, "the forced VCC pass runs");
+        let view = view(&history).await;
+        assert!(ext::message_text(&view[0]).contains("Earlier conversation"));
+        assert!(
+            !view
+                .iter()
+                .any(|m| ext::message_text(m).contains(LLM_SUMMARY_PREFIX)),
+            "a sufficient forced pass must not cascade into the LLM stage"
+        );
+        assert!(calls.requests().is_empty(), "no summarizer call was made");
+        let state = state.lock().await;
+        assert!(
+            !state.disarmed.contains(&CompactionKind::Llm),
+            "a skipped stage stays armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn vcc_pass_left_over_target_forces_the_heavier_stage() {
+        // The VCC pass barely shrinks the tight history, leaving it over the
+        // VCC stage's target while under both the LLM threshold and the
+        // usable window: only the cascade can bring the LLM stage in.
+        let engine = CompactionEngine::new(vec![
+            stage(CompactionKind::Vcc, 0.1),
+            stage(CompactionKind::Llm, 0.99),
+        ])
+        .with_buffer(crate::config::CompactionBuffer::Tokens(0));
+        let state = shared(CompactionState::default());
+        let (sink, _stream) = EventSink::new();
+        let seeded = tight_history();
+        let tokens = estimate_tokens(&seeded);
+        let context_length = ((tokens as f64 / 0.9) as u32).max(1);
+        let history = history_of(seeded);
+        let ran = engine
+            .maybe_compact(
+                &state,
+                &summary_model("llm summary text"),
+                &history,
+                Some(context_length),
+                &sink,
+            )
+            .await;
+        assert!(ran);
+        assert!(
+            ext::message_text(&view(&history).await[0]).contains(LLM_SUMMARY_PREFIX),
+            "an insufficient VCC pass must cascade into the LLM stage"
+        );
     }
 
     #[tokio::test]

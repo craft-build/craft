@@ -545,8 +545,8 @@ async fn handle_fetch_usage(ctx: &LoopCtx, usage_gen: &Arc<std::sync::atomic::At
 }
 
 /// `Command::Compact`: refuse while a turn is running, then force the
-/// between-runs history edits (alteration passes, then every armed
-/// compaction stage) through the same driver function the turn loop uses.
+/// between-runs history edits (alteration passes, then the forced
+/// compaction cascade) through the same driver function the turn loop uses.
 async fn handle_compact(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
     if current_turn.is_some() {
         let _ = ctx.kit.evt_tx.send(AgentEvent::Notice {
