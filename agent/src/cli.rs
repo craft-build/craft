@@ -32,6 +32,23 @@ pub enum PromptVariant {
     General,
 }
 
+/// `--format` preview override for `craft prompt`; `None` uses
+/// `config.agent.prompt_format`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PromptFormatArg {
+    Markdown,
+    Xml,
+}
+
+impl PromptFormatArg {
+    pub fn to_prompt_format(self) -> crate::prompt::PromptFormat {
+        match self {
+            Self::Markdown => crate::prompt::PromptFormat::Markdown,
+            Self::Xml => crate::prompt::PromptFormat::Xml,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum CliMode {
     #[default]
@@ -290,6 +307,10 @@ pub enum Commands {
         /// Append the plan mode reminder to the system prompt.
         #[arg(long)]
         plan: bool,
+        /// Render in this format instead of the configured
+        /// `agent.prompt_format`, for preview.
+        #[arg(long, value_enum)]
+        format: Option<PromptFormatArg>,
         /// Show tool definitions (JSON) instead of prompt text.
         #[arg(long)]
         tools: bool,
@@ -1687,6 +1708,7 @@ mod tests {
                 plan: false,
                 tools: false,
                 names: false,
+                format: None,
             })
         ));
         let cli = parse(&["prompt", "research"]).unwrap();
@@ -2371,7 +2393,7 @@ pub(crate) async fn run_headless_query_with(
         env.permissions.sync_mcp_annotations(&mcp);
     }
     let reviewer = (q.policy == PermissionPolicy::AutoReview)
-        .then(|| crate::auto_review::reviewer_for(model.clone()));
+        .then(|| crate::auto_review::reviewer_for(model.clone(), config.agent.prompt_format));
     let mut policy = crate::harness::PolicyLayerInputs::new(
         Arc::clone(&env.permissions),
         Arc::new(crate::headless::HeadlessGate),

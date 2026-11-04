@@ -48,9 +48,19 @@ async fn main() -> Result<(), Error> {
         Some(Commands::Prompt {
             variant,
             plan,
+            format,
             tools,
             names,
-        }) => craft::subcmd::prompt(variant.clone(), *plan, *tools, *names).await,
+        }) => {
+            craft::subcmd::prompt(
+                variant.clone(),
+                *plan,
+                *tools,
+                *names,
+                format.map(craft::cli::PromptFormatArg::to_prompt_format),
+            )
+            .await
+        }
         Some(Commands::Term { action }) => {
             craft::term::run(action.clone(), cli.permission_policy()?).await
         }

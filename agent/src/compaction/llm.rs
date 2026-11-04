@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use snafu::ResultExt;
 
 use crate::history::{Message, Role, ext};
-use crate::prompt::{COMPACTION_SYSTEM, COMPACTION_TARGETED_USER, COMPACTION_USER};
+use crate::prompt::{COMPACTION_TARGETED_USER, COMPACTION_USER, PromptFormat};
 use crate::provider::ModelHandle;
 
 use super::strip::{
@@ -69,6 +69,7 @@ pub(crate) async fn build_llm_plan(
     snapshot: &HistorySnapshot,
     summarize_end: usize,
     relevance_scores: Option<RelevanceScores<'_>>,
+    prompt_format: PromptFormat,
 ) -> Option<CompactionPlan> {
     let active = active_entries(snapshot);
     if active.len() <= 2 {
@@ -85,7 +86,7 @@ pub(crate) async fn build_llm_plan(
     }
     let head: Vec<&StoredMessage> = active[..tail_start].iter().map(|(_, m)| *m).collect();
 
-    let summary = match summarize(model, &head, relevance_scores).await {
+    let summary = match summarize(model, &head, relevance_scores, prompt_format).await {
         Ok(text) if !text.trim().is_empty() => text,
         _ => build_static_summary(&head),
     };
@@ -225,7 +226,9 @@ async fn summarize(
     model: &ModelHandle,
     head: &[&StoredMessage],
     relevance_scores: Option<RelevanceScores<'_>>,
+    prompt_format: PromptFormat,
 ) -> Result<String> {
+    let system = prompt_format.render(&crate::prompt::compaction());
     let mut request_messages: Vec<Message> =
         head.iter().map(|stored| stored.message().clone()).collect();
     strip_thinking(&mut request_messages);
@@ -237,32 +240,31 @@ async fn summarize(
     let mut removal_step = 0;
 
     loop {
-        let response =
-            match crate::provider::complete_text(model, &request_messages, COMPACTION_SYSTEM).await
-            {
-                Ok(response) => response,
-                Err(e) if is_context_overflow(&e) => {
-                    // Truncation eats from the front, so it can never shrink an
-                    // oversized result sitting in the tail. Collapse that first,
-                    // and once there is nothing left to collapse, drop the
-                    // oldest round rather than resend the same request.
-                    if overflow_retries < MAX_OVERFLOW_RETRIES && request_messages.len() > 1 {
-                        overflow_retries += 1;
-                        if !collapse_tool_results(&mut request_messages, 0) {
-                            truncate_oldest_round(&mut request_messages);
-                        }
-                        continue;
+        let response = match crate::provider::complete_text(model, &request_messages, &system).await
+        {
+            Ok(response) => response,
+            Err(e) if is_context_overflow(&e) => {
+                // Truncation eats from the front, so it can never shrink an
+                // oversized result sitting in the tail. Collapse that first,
+                // and once there is nothing left to collapse, drop the
+                // oldest round rather than resend the same request.
+                if overflow_retries < MAX_OVERFLOW_RETRIES && request_messages.len() > 1 {
+                    overflow_retries += 1;
+                    if !collapse_tool_results(&mut request_messages, 0) {
+                        truncate_oldest_round(&mut request_messages);
                     }
-                    if removal_step < super::PROGRESSIVE_TOOL_REMOVAL_RATIOS.len() {
-                        let ratio = super::PROGRESSIVE_TOOL_REMOVAL_RATIOS[removal_step];
-                        removal_step += 1;
-                        strip_tool_results_by_ratio(&mut request_messages, ratio);
-                        continue;
-                    }
-                    return Err(e).context(SummarizeSnafu);
+                    continue;
                 }
-                Err(e) => return Err(e).context(SummarizeSnafu),
-            };
+                if removal_step < super::PROGRESSIVE_TOOL_REMOVAL_RATIOS.len() {
+                    let ratio = super::PROGRESSIVE_TOOL_REMOVAL_RATIOS[removal_step];
+                    removal_step += 1;
+                    strip_tool_results_by_ratio(&mut request_messages, ratio);
+                    continue;
+                }
+                return Err(e).context(SummarizeSnafu);
+            }
+            Err(e) => return Err(e).context(SummarizeSnafu),
+        };
         return Ok(response);
     }
 }
@@ -431,7 +433,7 @@ mod tests {
         let (model, provider) = script(vec![crate::testing::text_turn("condensed summary")]);
         let messages = history();
         let snap = snapshot(&messages).await;
-        let plan = build_llm_plan(&model, &snap, messages.len(), None)
+        let plan = build_llm_plan(&model, &snap, messages.len(), None, PromptFormat::Markdown)
             .await
             .expect("plan");
         let removes = plan
@@ -463,7 +465,10 @@ mod tests {
         assert_eq!(provider.requests().len(), 1);
         let request = &provider.requests()[0];
         // The preamble travels as the request's preamble field.
-        assert_eq!(request.system, COMPACTION_SYSTEM);
+        assert_eq!(
+            request.system,
+            PromptFormat::Markdown.render(&crate::prompt::compaction()),
+        );
         assert_eq!(
             request.messages.last().map(ext::text).as_deref(),
             Some(COMPACTION_USER)
@@ -476,7 +481,9 @@ mod tests {
         let messages = history();
         let snap = snapshot(&messages).await;
         // Protect everything from message 10 on: the head is messages 0..10.
-        let plan = build_llm_plan(&model, &snap, 10, None).await.expect("plan");
+        let plan = build_llm_plan(&model, &snap, 10, None, PromptFormat::Markdown)
+            .await
+            .expect("plan");
         for edit in &plan.edits {
             match edit {
                 CompactionEdit::Remove { index } => assert!(*index < 10),
@@ -498,7 +505,9 @@ mod tests {
         let messages = history();
         let snap = snapshot(&messages).await;
         assert!(
-            build_llm_plan(&model, &snap, 0, None).await.is_none(),
+            build_llm_plan(&model, &snap, 0, None, PromptFormat::Markdown)
+                .await
+                .is_none(),
             "nothing compactable ahead of the protection"
         );
         assert!(provider.requests().is_empty());
@@ -510,7 +519,7 @@ mod tests {
         let messages = vec![user("hi"), user("there")];
         let snap = snapshot(&messages).await;
         assert!(
-            build_llm_plan(&model, &snap, messages.len(), None)
+            build_llm_plan(&model, &snap, messages.len(), None, PromptFormat::Markdown)
                 .await
                 .is_none()
         );
@@ -521,7 +530,7 @@ mod tests {
         let (model, _provider) = script(vec![crate::testing::text_turn("")]);
         let messages = history();
         let snap = snapshot(&messages).await;
-        let plan = build_llm_plan(&model, &snap, messages.len(), None)
+        let plan = build_llm_plan(&model, &snap, messages.len(), None, PromptFormat::Markdown)
             .await
             .expect("plan");
         let insert = plan.edits.iter().find_map(|edit| match edit {
@@ -546,9 +555,15 @@ mod tests {
         let messages = history();
         let snap = snapshot(&messages).await;
         let scores: Vec<(usize, f32)> = (0..15).map(|i| (i, 0.9)).collect();
-        build_llm_plan(&model, &snap, messages.len(), Some(&scores))
-            .await
-            .expect("plan");
+        build_llm_plan(
+            &model,
+            &snap,
+            messages.len(),
+            Some(&scores),
+            PromptFormat::Markdown,
+        )
+        .await
+        .expect("plan");
         let last = request_texts(&provider)[0].clone();
         assert!(last.contains("msg#0 (relevance: 0.90)"));
         assert!(last.contains("msg#9 (relevance: 0.90)"), "top ten kept");
@@ -562,9 +577,15 @@ mod tests {
         let messages = history();
         let snap = snapshot(&messages).await;
         let scores = vec![(0usize, 0.4f32), (1, 0.5)];
-        build_llm_plan(&model, &snap, messages.len(), Some(&scores))
-            .await
-            .expect("plan");
+        build_llm_plan(
+            &model,
+            &snap,
+            messages.len(),
+            Some(&scores),
+            PromptFormat::Markdown,
+        )
+        .await
+        .expect("plan");
         let last = request_texts(&provider)[0].clone();
         assert!(last.contains(COMPACTION_USER));
         assert!(!last.contains("relevance"));
@@ -579,7 +600,7 @@ mod tests {
         ]);
         let messages = tool_history();
         let snap = snapshot(&messages).await;
-        let plan = build_llm_plan(&model, &snap, messages.len(), None)
+        let plan = build_llm_plan(&model, &snap, messages.len(), None, PromptFormat::Markdown)
             .await
             .expect("plan");
 
@@ -615,7 +636,7 @@ mod tests {
         let (model, provider) = script(turns);
         let messages = tool_history();
         let snap = snapshot(&messages).await;
-        let plan = build_llm_plan(&model, &snap, messages.len(), None)
+        let plan = build_llm_plan(&model, &snap, messages.len(), None, PromptFormat::Markdown)
             .await
             .expect("plan");
         // One collapse + one truncate (which drains the whole tool middle,
@@ -640,7 +661,7 @@ mod tests {
         let (model, provider) = script(vec![crate::testing::http_error(429, "rate limited")]);
         let messages = tool_history();
         let snap = snapshot(&messages).await;
-        let plan = build_llm_plan(&model, &snap, messages.len(), None)
+        let plan = build_llm_plan(&model, &snap, messages.len(), None, PromptFormat::Markdown)
             .await
             .expect("plan");
         assert_eq!(provider.requests().len(), 1, "only errors are not retried");

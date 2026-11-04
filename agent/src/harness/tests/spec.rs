@@ -78,17 +78,17 @@ async fn output_cap_clamp_counts_request_overhead() {
         .registry(&animist::history::History::new())
         .unwrap();
     let cwd = dir.path().display().to_string();
-    // The system bytes the request layer will send, mirrored from its own
-    // construction so the overhead below is the one the clamp sees.
-    let system = crate::prompt::build_system_prompt(
-        &crate::prompt::Vars::new()
-            .set("{cwd}", cwd.as_str())
-            .set("{platform}", std::env::consts::OS)
-            .set("{date}", crate::prompt::today_utc()),
-        "",
-        &crate::prompt::ResolvedSlots::default(),
-        None,
-    );
+    // The system bytes the request layer will send: the conversation's
+    // base prompt for this cwd, rendered in the default (markdown)
+    // format.
+    let date = crate::prompt::today_utc();
+    let ctx = crate::prompt::Context {
+        cwd: cwd.as_str(),
+        platform: std::env::consts::OS,
+        date: &date,
+        instructions: "",
+    };
+    let system = crate::prompt::PromptFormat::Markdown.render(&crate::prompt::system(&ctx, None));
     let overhead = crate::compaction::RequestOverhead::from_parts(
         Some(system.as_str()),
         &dispatch.definitions(),
@@ -173,5 +173,38 @@ async fn unknown_window_leaves_the_cap_and_skips_compaction() {
                 Event::Craft(crate::harness::CraftEvent::AutoCompacting { .. })
             )),
         "no window: compaction never triggers"
+    );
+}
+
+/// Same conversation, two runs: plan mode carries the plan path in the
+/// system prompt, build mode has no plan section at all, with no agent
+/// rebuild in between.
+#[tokio::test]
+async fn plan_mode_appends_the_plan_path_to_the_request_system() {
+    let provider = script(vec![
+        crate::testing::text_turn("first"),
+        crate::testing::text_turn("second"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
+
+    let outcome = run_turn(&conversation, "hi").await;
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    conversation.update_settings(|settings| {
+        settings.mode =
+            crate::harness::AgentMode::Plan(std::path::PathBuf::from("/project/plan.md"));
+    });
+    let outcome = run_turn(&conversation, "again").await;
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests[0].system.contains("/project/plan.md"),
+        "build mode contains no plan section"
+    );
+    assert!(
+        requests[1].system.contains("/project/plan.md"),
+        "plan mode names the plan path"
     );
 }

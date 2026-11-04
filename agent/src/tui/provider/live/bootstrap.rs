@@ -331,8 +331,10 @@ pub(super) async fn build_session_state(
         kit.evt_tx.clone(),
         kit.cancel_cell.clone(),
     ));
-    let policy = crate::harness::PolicyLayerInputs::new(kit.permissions.clone(), approval.clone())
-        .reviewer(crate::auto_review::reviewer_for(model.clone()));
+    let policy =
+        crate::harness::PolicyLayerInputs::new(kit.permissions.clone(), approval.clone()).reviewer(
+            crate::auto_review::reviewer_for(model.clone(), kit.config.agent.prompt_format),
+        );
     // The question seam parks on the same slots the loop answers.
     let asker = Arc::new(QuestionAsker::new(
         kit.park.clone(),

@@ -10,6 +10,8 @@ agent {
   # Extra instructions appended to the assembled system prompt's instructions
   # slot. Empty keeps the built-in defaults.
   preamble = ""
+  # System prompt rendering for the session: "markdown" (default) or "xml".
+  # prompt_format = "xml"
   # Optional generation settings; omitted by default for provider/model defaults.
   # temperature = 0.2
   # max_tokens = 8192

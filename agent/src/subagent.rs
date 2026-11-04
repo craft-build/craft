@@ -11,10 +11,10 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::config::{AgentConfig, ProviderConfig};
+use crate::harness;
 use crate::history::{StoredMessage, ext};
 use crate::model_registry::ModelTier;
 use crate::provider::ModelHandle;
-use crate::harness;
 use crate::tools::Workspace;
 use crate::tools::worktree::Worktree;
 
@@ -107,7 +107,7 @@ const MAX_SCHEMA_RETRIES: u32 = 3;
 
 /// Which restricted tool budget and preamble a subagent runs with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubagentKind {
+pub(crate) enum SubagentKind {
     Research,
     General,
     Reviewer,
@@ -330,23 +330,17 @@ impl SubagentLauncher {
             prompt_text.push_str(SCHEMA_INSTRUCTION_TAIL);
         }
 
-        let base = format!(
-            "{}\n\n{}",
-            self.base_prompt,
-            match kind {
-                SubagentKind::General => GENERAL_PROMPT,
-                SubagentKind::Reviewer => crate::tools::REVIEWER_PROMPT,
-                SubagentKind::Research => RESEARCH_PROMPT,
-            }
-        );
         // The child's config: defaults plus exactly the knobs the parent
         // passes down, so its request pipeline behaves like the parent's.
+        // The role rides as a `Subagent role` prompt section (appended
+        // below), not inside the preamble string.
         let mut config = crate::config::Config::default();
-        config.agent.preamble = base;
+        config.agent.preamble = self.base_prompt.clone();
         config.agent.temperature = self.agent.temperature;
         config.agent.max_tokens = self.agent.max_tokens;
         config.agent.thinking = self.agent.thinking;
         config.agent.advisor = self.agent.advisor.clone();
+        config.agent.prompt_format = self.agent.prompt_format;
         config.compression = self.compression.clone();
 
         // The child's own history: retrieve reads the child's entry
@@ -370,7 +364,8 @@ impl SubagentLauncher {
             crate::harness::ConversationBuilder::new(&config, &cwd, "", model, tools, sink)
                 .history(history)
                 .max_turns(crate::harness::MaxTurns::Unbounded)
-                .workspace(workspace);
+                .workspace(workspace)
+                .section(crate::prompt::subagent_role(kind));
         builder = builder.policy(self.policy.clone());
         let conversation = builder.build().map_err(|e| e.to_string())?;
 

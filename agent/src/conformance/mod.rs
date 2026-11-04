@@ -1119,9 +1119,14 @@ async fn bedrock_serves_the_auto_review_llm_path() {
             .model(&provider_config, None, "m")
             .await
             .expect("model builds");
-        let decision = crate::auto_review::review(&model, "write", &["/tmp/x".into()])
-            .await
-            .unwrap_or_else(|error| panic!("{name}: reviewer call failed: {error}"));
+        let decision = crate::auto_review::review(
+            &model,
+            "write",
+            &["/tmp/x".into()],
+            config.agent.prompt_format,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name}: reviewer call failed: {error}"));
         assert_eq!(
             decision.verdict,
             crate::auto_review::Verdict::Allow,

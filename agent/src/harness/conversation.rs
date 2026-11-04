@@ -24,9 +24,9 @@ use crate::provider::ModelHandle;
 use animist::agent::tool::ToolRegistry;
 
 use crate::compaction::SharedCompactionState;
+use crate::harness::AgentMode;
 use crate::harness::guardrails::GuardrailState;
 use crate::harness::retry::RetryCtx;
-use crate::harness::AgentMode;
 use crate::snapshot::SnapshotManager;
 use crate::thinking::ThinkingConfig;
 
@@ -213,6 +213,10 @@ pub struct ConversationBuilder<'a> {
     /// Test seam: one extra layer at the chain's head; `None` outside
     /// tests (the setter is test-only).
     test_layer: Option<Layer>,
+    /// Prompt sections appended after `Instructions` (subagent role
+    /// sections ride here); the `Plan mode` section still appends per run
+    /// at `turn_start`.
+    sections: Vec<animist::agent::Section>,
 }
 
 impl<'a> ConversationBuilder<'a> {
@@ -247,6 +251,7 @@ impl<'a> ConversationBuilder<'a> {
             persist: None,
             workspace: None,
             test_layer: None,
+            sections: Vec::new(),
         }
     }
 
@@ -332,6 +337,14 @@ impl<'a> ConversationBuilder<'a> {
         self
     }
 
+    /// Append a section to the base prompt after `Instructions` (a
+    /// subagent's role section is the one caller); plan mode still
+    /// appends its own section last, per run.
+    pub fn section(mut self, section: animist::agent::Section) -> Self {
+        self.sections.push(section);
+        self
+    }
+
     /// Test seam: mount one extra layer at the chain's head so a test
     /// can observe hook calls on a conversation's own instances.
     #[cfg(test)]
@@ -366,6 +379,7 @@ impl<'a> ConversationBuilder<'a> {
             persist,
             workspace,
             test_layer,
+            sections,
         } = self;
         let write_root = workspace
             .as_ref()
@@ -425,7 +439,8 @@ impl<'a> ConversationBuilder<'a> {
                 .with_guardrail_state(Arc::clone(&guardrails)),
         ));
         let engine = crate::compaction::CompactionEngine::new(config.compaction.clone())
-            .with_buffer(config.compaction_buffer);
+            .with_buffer(config.compaction_buffer)
+            .with_prompt_format(config.agent.prompt_format);
         let model_cell = Arc::new(ArcSwap::from_pointee(model));
         let recovery_state = Arc::new(std::sync::Mutex::new(
             super::recovery::RecoveryRunState::default(),
@@ -433,6 +448,10 @@ impl<'a> ConversationBuilder<'a> {
         let continuation_state = Arc::new(std::sync::Mutex::new(
             super::continuation::ContinuationRunState::default(),
         ));
+        // The pieces the request layer rebuilds the system prompt from,
+        // per run: `config.agent.preamble` followed by the discovered
+        // instructions is the `Instructions` section, verbatim.
+        let instructions = format!("{}{instructions_text}", config.agent.preamble);
         let layers = LayerSet {
             test: test_layer,
             policy: Layer::new(PolicyLayer::new(
@@ -452,8 +471,10 @@ impl<'a> ConversationBuilder<'a> {
                     .map(|path| path.to_string_lossy().into_owned()),
                 compression: config.compression.clone(),
                 compaction: Arc::clone(&compaction),
-                preamble_base: format!("{}{instructions_text}", config.agent.preamble),
+                instructions,
                 cwd: cwd.to_owned(),
+                sections,
+                prompt_format: config.agent.prompt_format,
             })),
             recovery: Layer::new(RecoveryLayer::new(
                 retry,

@@ -73,9 +73,15 @@ pub(crate) struct RequestLayerInputs {
     pub write_root: Option<String>,
     pub compression: CompressionConfig,
     pub compaction: SharedCompactionState,
-    /// `config.agent.preamble` followed by the discovered instructions.
-    pub preamble_base: String,
+    /// `config.agent.preamble` followed by the discovered instructions;
+    /// becomes the `Instructions` section of the per-run prompt build.
+    pub instructions: String,
     pub cwd: String,
+    /// Extra sections appended after `Instructions` (a subagent's role
+    /// section); `Plan mode` still lands last, per run.
+    pub sections: Vec<animist::agent::Section>,
+    /// The rendering surface every system prompt in this conversation uses.
+    pub prompt_format: crate::prompt::PromptFormat,
 }
 
 /// Per-run state, snapshotted at `turn_start`.
@@ -105,17 +111,30 @@ impl RequestLayer {
         }
     }
 
-    /// The system prompt for the current settings.
-    fn system_prompt(settings: &TurnSettings, base: &str, cwd: &str) -> String {
-        crate::prompt::build_system_prompt(
-            &crate::prompt::Vars::new()
-                .set("{cwd}", cwd)
-                .set("{platform}", std::env::consts::OS)
-                .set("{date}", crate::prompt::today_utc()),
-            base,
-            &crate::prompt::ResolvedSlots::default(),
-            settings.mode.plan_path(),
-        )
+    /// The system prompt for the current settings, built per run (the
+    /// date is run-scoped): the chat prompt, extra sections after
+    /// `Instructions`, and `Plan mode` last when the mode carries a path.
+    /// A free function so tests exercise exactly what `turn_start` sends.
+    fn system_prompt(
+        settings: &TurnSettings,
+        cwd: &str,
+        instructions: &str,
+        extra_sections: &[animist::agent::Section],
+        format: crate::prompt::PromptFormat,
+    ) -> String {
+        let date = crate::prompt::today_utc();
+        let ctx = crate::prompt::Context {
+            cwd,
+            platform: std::env::consts::OS,
+            date: &date,
+            instructions,
+        };
+        let mut prompt = crate::prompt::system(&ctx, None);
+        prompt.sections.extend(extra_sections.iter().cloned());
+        if let Some(plan) = settings.mode.plan_path() {
+            prompt.sections.push(crate::prompt::plan_section(plan));
+        }
+        format.render(&prompt)
     }
 }
 
@@ -128,7 +147,13 @@ impl LayerImpl for RequestLayer {
         message: &StoredMessage,
     ) -> Result<StoredMessage> {
         let settings = self.inputs.settings.load_full();
-        let system = Self::system_prompt(&settings, &self.inputs.preamble_base, &self.inputs.cwd);
+        let system = Self::system_prompt(
+            &settings,
+            &self.inputs.cwd,
+            &self.inputs.instructions,
+            &self.inputs.sections,
+            self.inputs.prompt_format,
+        );
         // The run's own messages start after the current view (the input is
         // admitted after this hook); everything before it arrived
         // pre-altered from history by the between-runs passes.
@@ -263,14 +288,12 @@ pub(crate) fn request_options(
 mod tests {
     use super::*;
 
-    /// The layer's system prompt must be byte-identical to the one the old
-    /// `run_policy` produced for the same inputs.
+    /// The layer's system prompt is exactly the conversation's base prompt,
+    /// plus the `Plan mode` section only in plan mode, rendered in the
+    /// configured format. Runs once per format: the request is the
+    /// contract, both ways.
     #[test]
     fn system_prompt_bytes_match_the_old_policy_output() {
-        // Literal byte invariants, not a call to the same builder the
-        // layer uses: the env section is threaded verbatim (cwd, platform,
-        // date), the base follows it, and the plan prompt only rides plan
-        // mode. The template itself is prompt.rs's own tested surface.
         let settings = |mode| TurnSettings {
             mode,
             thinking: ThinkingConfig::default(),
@@ -278,36 +301,48 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        let base = "preamble text";
-        let env_section = format!(
-            "\n\nEnvironment:\n- Working directory: /project\n- Platform: {}\n- Date: {}",
-            std::env::consts::OS,
-            crate::prompt::today_utc(),
-        );
-        let build = RequestLayer::system_prompt(
-            &settings(crate::harness::mode::AgentMode::Build),
-            base,
-            "/project",
-        );
-        assert_eq!(build.matches(&env_section).count(), 1);
-        let after_env = build
-            .split_once(&env_section)
-            .expect("the env section leads the instructions");
-        assert!(
-            after_env.1.starts_with(base),
-            "the preamble+instructions base follows the env section verbatim"
-        );
-        assert!(!build.contains("{cwd}"), "no template var leaks: {build:?}");
-        let plan = RequestLayer::system_prompt(
-            &settings(crate::harness::mode::AgentMode::Plan(std::path::PathBuf::from(
-                "/project/plan.md",
-            ))),
-            base,
-            "/project",
-        );
-        assert!(
-            plan.len() > build.len() && plan.contains("/project/plan.md"),
-            "plan mode appends the plan prompt with the resolved path"
-        );
+        let date = crate::prompt::today_utc();
+        let ctx = crate::prompt::Context {
+            cwd: "/project",
+            platform: std::env::consts::OS,
+            date: &date,
+            instructions: "preamble text",
+        };
+        for format in [
+            crate::prompt::PromptFormat::Markdown,
+            crate::prompt::PromptFormat::Xml,
+        ] {
+            let build = RequestLayer::system_prompt(
+                &settings(crate::harness::mode::AgentMode::Build),
+                "/project",
+                "preamble text",
+                &[],
+                format,
+            );
+            assert_eq!(
+                build,
+                format.render(&crate::prompt::system(&ctx, None)),
+                "{format:?}"
+            );
+            assert!(!build.contains("/project/plan.md"), "{format:?}");
+            let plan = RequestLayer::system_prompt(
+                &settings(crate::harness::mode::AgentMode::Plan(
+                    std::path::PathBuf::from("/project/plan.md"),
+                )),
+                "/project",
+                "preamble text",
+                &[],
+                format,
+            );
+            assert_eq!(
+                plan,
+                format.render(&crate::prompt::system(
+                    &ctx,
+                    Some(std::path::Path::new("/project/plan.md")),
+                )),
+                "{format:?}"
+            );
+            assert!(plan.contains("/project/plan.md"), "{format:?}");
+        }
     }
 }

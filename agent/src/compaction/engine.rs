@@ -40,6 +40,8 @@ pub const INEFFECTIVE_SAVINGS: f32 = 0.1;
 pub struct CompactionEngine {
     stages: Vec<CompactionConfig>,
     buffer: CompactionBuffer,
+    /// Rendering surface for the summarizer's system prompt.
+    prompt_format: crate::prompt::PromptFormat,
 }
 
 /// Per-session effectiveness state, persisted across turns.
@@ -189,6 +191,7 @@ impl CompactionEngine {
         Self {
             stages,
             buffer: DEFAULT_ENGINE_BUFFER,
+            prompt_format: crate::prompt::PromptFormat::default(),
         }
     }
 
@@ -196,6 +199,13 @@ impl CompactionEngine {
     /// (defaults to 20% of the window).
     pub fn with_buffer(mut self, buffer: CompactionBuffer) -> Self {
         self.buffer = buffer;
+        self
+    }
+
+    /// Set the rendering surface for the summarizer's system prompt (the
+    /// conversation's `agent.prompt_format`; defaults to markdown).
+    pub fn with_prompt_format(mut self, prompt_format: crate::prompt::PromptFormat) -> Self {
+        self.prompt_format = prompt_format;
         self
     }
 
@@ -289,7 +299,9 @@ impl CompactionEngine {
             });
             let plan = match stage.kind {
                 CompactionKind::Vcc => build_vcc_plan(&snapshot, summarize_end).await,
-                CompactionKind::Llm => build_llm_plan(model, &snapshot, summarize_end, None).await,
+                CompactionKind::Llm => {
+                    build_llm_plan(model, &snapshot, summarize_end, None, self.prompt_format).await
+                }
             };
             let Some(plan) = plan else {
                 // A stage that declined to run (too-short history, empty

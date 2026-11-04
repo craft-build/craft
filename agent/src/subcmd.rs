@@ -8,7 +8,7 @@ use crate::cli::PromptVariant;
 use crate::config::Config;
 use crate::error::{InvalidSnafu, Result};
 use crate::paths;
-use crate::prompt::{self, PromptId, ResolvedSlots, Vars};
+use crate::prompt::{self};
 use crate::provider::ProviderHandle;
 use crate::storage::StateDir;
 use crate::storage::model as model_store;
@@ -381,8 +381,14 @@ fn print_doctor_report(report: &Value) {
     }
 }
 
-/// `craft prompt [system|research|general] [--plan] [--tools] [--names]`.
-pub async fn prompt(variant: PromptVariant, plan: bool, tools: bool, names: bool) -> Result<()> {
+/// `craft prompt [system|research|general] [--plan] [--format] [--tools] [--names]`.
+pub async fn prompt(
+    variant: PromptVariant,
+    plan: bool,
+    tools: bool,
+    names: bool,
+    format: Option<crate::prompt::PromptFormat>,
+) -> Result<()> {
     if plan && !matches!(variant, PromptVariant::System) {
         return InvalidSnafu {
             reason: "--plan can only be used with the 'system' prompt variant".to_string(),
@@ -434,32 +440,35 @@ pub async fn prompt(variant: PromptVariant, plan: bool, tools: bool, names: bool
     let cwd_str = cwd.display().to_string();
     let instructions = crate::instructions::load_instructions(&cwd_str);
     let config = Config::load().await?;
+    let format = format.unwrap_or(config.agent.prompt_format);
+    let date = prompt::today_utc();
 
     let output = match variant {
         PromptVariant::System => {
+            let system_instructions = format!("{}{}", config.agent.preamble, instructions.text);
+            let ctx = prompt::Context {
+                cwd: &cwd_str,
+                platform: std::env::consts::OS,
+                date: &date,
+                instructions: &system_instructions,
+            };
             let plan_path = plan.then(|| PathBuf::from("plan.md"));
-            prompt::build_system_prompt(
-                &Vars::new()
-                    .set("{cwd}", &cwd_str)
-                    .set("{platform}", std::env::consts::OS)
-                    .set("{date}", prompt::today_utc()),
-                &format!("{}{}", config.agent.preamble, instructions.text),
-                &ResolvedSlots::default(),
-                plan_path.as_deref(),
-            )
+            format.render(&prompt::system(&ctx, plan_path.as_deref()))
         }
-        PromptVariant::Research => prompt::assemble(
-            PromptId::Research,
-            &ResolvedSlots::default(),
-            &instructions.text,
-        ),
-        PromptVariant::General => prompt::assemble(
-            PromptId::General,
-            &ResolvedSlots::default(),
-            &instructions.text,
-        ),
+        PromptVariant::Research => format.render(&prompt::research(&prompt::Context {
+            cwd: &cwd_str,
+            platform: std::env::consts::OS,
+            date: &date,
+            instructions: &instructions.text,
+        })),
+        PromptVariant::General => format.render(&prompt::general(&prompt::Context {
+            cwd: &cwd_str,
+            platform: std::env::consts::OS,
+            date: &date,
+            instructions: &instructions.text,
+        })),
     };
-    print!("{output}");
+    println!("{output}");
     Ok(())
 }
 

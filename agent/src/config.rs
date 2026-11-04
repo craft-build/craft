@@ -275,6 +275,10 @@ pub struct AgentConfig {
     pub max_concurrent_tools: usize,
     /// Post-turn advisor.
     pub advisor: AdvisorConfig,
+    /// System prompt rendering for every prompt in the session; fixed at
+    /// conversation build.
+    #[serde(default)]
+    pub prompt_format: crate::prompt::PromptFormat,
     /// Post-turn argosy memory extraction: durable facts from the turn
     /// are written into the project's local argosy after a successful run.
     /// Default on.
@@ -300,6 +304,7 @@ impl Default for AgentConfig {
             max_turns: None,
             max_concurrent_tools: default_max_concurrent_tools(),
             advisor: AdvisorConfig::default(),
+            prompt_format: crate::prompt::PromptFormat::default(),
             memory_extraction: default_memory_extraction(),
         }
     }
@@ -1065,6 +1070,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn prompt_format_parses_both_values_and_rejects_unknown() {
+        use crate::prompt::PromptFormat;
+        let xml = Config::parse("agent { prompt_format = \"xml\" }").unwrap();
+        assert_eq!(xml.agent.prompt_format, PromptFormat::Xml);
+        let markdown = Config::parse("agent { prompt_format = \"markdown\" }").unwrap();
+        assert_eq!(markdown.agent.prompt_format, PromptFormat::Markdown);
+        assert!(
+            Config::parse("agent { prompt_format = \"yaml\" }").is_err(),
+            "an unknown format is rejected, not defaulted"
+        );
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.agent.prompt_format, PromptFormat::Markdown);
     }
 
     #[test]

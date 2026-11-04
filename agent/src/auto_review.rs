@@ -19,22 +19,6 @@ use crate::history::ext;
 
 const REVIEWER_DEADLINE: Duration = Duration::from_secs(30);
 
-const REVIEWER_SYSTEM_PROMPT: &str = concat!(
-    "You are a permission reviewer for an AI coding agent. ",
-    "A tool is about to run that is not pre-approved. Decide whether it is safe ",
-    "to let it run without asking the user.\n\n",
-    "Evaluate the proposed action against these risks:\n",
-    "- destructive or irreversible filesystem changes (deletes, overwrites outside the project)\n",
-    "- running shell commands with broad or dangerous effects\n",
-    "- network egress to unexpected hosts\n",
-    "- anything that could exfiltrate data, persist malware, or brick the environment\n",
-    "Inside-project edits, reads, and ordinary dev commands are usually fine.\n\n",
-    "Reply with ONLY a JSON object, no prose, of this exact shape:\n",
-    "{\"verdict\": \"allow\" | \"deny\", \"risk\": \"low\" | \"medium\" | \"high\" | \"critical\", ",
-    "\"rationale\": \"one short sentence\"}\n",
-    "When in doubt, deny."
-);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Allow,
@@ -222,10 +206,13 @@ pub(crate) type Reviewer = Arc<
 >;
 
 /// Production reviewer: one locked-down model call per NeedsPrompt decision.
-fn model_reviewer(model: crate::provider::ModelHandle) -> Reviewer {
+fn model_reviewer(
+    model: crate::provider::ModelHandle,
+    prompt_format: crate::prompt::PromptFormat,
+) -> Reviewer {
     Arc::new(move |tool, scopes| {
         let model = model.clone();
-        Box::pin(async move { review(&model, &tool, &scopes).await })
+        Box::pin(async move { review(&model, &tool, &scopes, prompt_format).await })
     })
 }
 
@@ -243,12 +230,15 @@ fn endpoint_reviewer(provider: Arc<dyn argosy::decision::DecisionProvider>) -> R
 
 /// The auto-review reviewer for a session: the decision endpoint when it is
 /// enabled, otherwise the locked-down LLM reviewer.
-pub(crate) fn reviewer_for(model: crate::provider::ModelHandle) -> Reviewer {
+pub(crate) fn reviewer_for(
+    model: crate::provider::ModelHandle,
+    prompt_format: crate::prompt::PromptFormat,
+) -> Reviewer {
     let decision = crate::knowledge::ArgosyService::global().decision();
     if decision.is_enabled() {
         endpoint_reviewer(decision)
     } else {
-        model_reviewer(model)
+        model_reviewer(model, prompt_format)
     }
 }
 
@@ -273,8 +263,9 @@ pub async fn review(
     model: &crate::provider::ModelHandle,
     tool: &str,
     scopes: &[String],
+    prompt_format: crate::prompt::PromptFormat,
 ) -> Result<Decision, ReviewError> {
-    review_with_deadline(model, tool, scopes, REVIEWER_DEADLINE).await
+    review_with_deadline(model, tool, scopes, prompt_format, REVIEWER_DEADLINE).await
 }
 
 /// Deadline-parameterized core so tests can exercise the timeout path
@@ -283,12 +274,14 @@ async fn review_with_deadline(
     model: &crate::provider::ModelHandle,
     tool: &str,
     scopes: &[String],
+    prompt_format: crate::prompt::PromptFormat,
     deadline: Duration,
 ) -> Result<Decision, ReviewError> {
     let messages = vec![review_message(tool, scopes)];
+    let system = prompt_format.render(&crate::prompt::reviewer());
     let text = match timeout(
         deadline,
-        crate::provider::complete_text(model, &messages, REVIEWER_SYSTEM_PROMPT),
+        crate::provider::complete_text(model, &messages, &system),
     )
     .await
     {
@@ -470,7 +463,14 @@ mod tests {
             "low",
             "read-only",
         )));
-        let d = review(&model, "write", &["/tmp/x".into()]).await.unwrap();
+        let d = review(
+            &model,
+            "write",
+            &["/tmp/x".into()],
+            crate::prompt::PromptFormat::Markdown,
+        )
+        .await
+        .unwrap();
         assert_eq!(d.verdict, Verdict::Allow);
         assert_eq!(d.risk, Risk::Low);
         assert_eq!(d.rationale, "read-only");
@@ -478,14 +478,23 @@ mod tests {
         assert_eq!(provider.requests().len(), 1);
         let request = &provider.requests()[0];
         assert!(request.tools.is_empty());
-        assert_eq!(request.system, REVIEWER_SYSTEM_PROMPT);
+        assert_eq!(
+            request.system,
+            crate::prompt::PromptFormat::Markdown.render(&crate::prompt::reviewer()),
+        );
     }
 
     #[tokio::test]
     async fn provider_error_fails_closed() {
         let (model, _provider) = reviewer_model(crate::testing::http_error(429, "rate limited"));
         assert!(matches!(
-            review(&model, "bash", &["rm -rf /".into()]).await,
+            review(
+                &model,
+                "bash",
+                &["rm -rf /".into()],
+                crate::prompt::PromptFormat::Markdown,
+            )
+            .await,
             Err(ReviewError::Provider { .. })
         ));
     }
@@ -495,9 +504,15 @@ mod tests {
         // An attempt that streams its events and then holds: the deadline
         // is the only way out.
         let (model, _provider) = reviewer_model(crate::testing::text_turn("never").blocked());
-        let err = review_with_deadline(&model, "bash", &[], Duration::from_millis(10))
-            .await
-            .unwrap_err();
+        let err = review_with_deadline(
+            &model,
+            "bash",
+            &[],
+            crate::prompt::PromptFormat::Markdown,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ReviewError::Timeout { .. }));
     }
 
