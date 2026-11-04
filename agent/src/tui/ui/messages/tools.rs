@@ -59,6 +59,9 @@ pub(super) fn styled_diff_spans(
     let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     fn plain(chars: &[char], start: usize, end: usize, style: Style, out: &mut Vec<Span<'static>>) {
+        // Clamp: malformed emph ranges or mismatched segment lengths must
+        // never panic the render task.
+        let end = end.min(chars.len());
         if end > start {
             out.push(Span::styled(
                 chars[start..end].iter().collect::<String>(),

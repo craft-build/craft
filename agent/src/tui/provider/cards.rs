@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::history;
+use crate::markdown::highlight::normalize_text;
 
 use super::{LineKind, Tone, ToolCallData, ToolKind, ToolLine, TouchedFile};
 
@@ -373,7 +374,7 @@ fn strip_untrusted_markers(text: &str) -> impl Iterator<Item = &str> {
 
 fn context_lines(text: &str) -> Vec<ToolLine> {
     strip_untrusted_markers(text)
-        .map(|line| ToolLine::new(LineKind::Context, line))
+        .map(|line| ToolLine::new(LineKind::Context, normalize_text(line)))
         .collect()
 }
 
@@ -435,6 +436,9 @@ fn diff_lines(text: &str) -> Vec<ToolLine> {
             }
             continue;
         }
+        // ToolLine text must be tab-normalized before storage: highlighting
+        // (normalize_text) and word-emphasis offsets both operate on this
+        // string, so a raw `\t` would push char ranges out of bounds.
         let (kind, body) = match line.as_bytes().first() {
             Some(b'+') if !line.starts_with("+++") => (LineKind::Add, &line[1..]),
             Some(b'-') if !line.starts_with("---") => (LineKind::Del, &line[1..]),
@@ -442,7 +446,7 @@ fn diff_lines(text: &str) -> Vec<ToolLine> {
             _ => {
                 // Summary header line before the first hunk.
                 if !saw_hunk {
-                    lines.push(ToolLine::new(LineKind::Context, line));
+                    lines.push(ToolLine::new(LineKind::Context, normalize_text(line)));
                 }
                 continue;
             }
@@ -458,7 +462,7 @@ fn diff_lines(text: &str) -> Vec<ToolLine> {
         }
         lines.push(ToolLine {
             kind,
-            text: body.to_string(),
+            text: normalize_text(body),
             nr,
             emph: Vec::new(),
         });
@@ -784,6 +788,27 @@ mod tests {
             vec![LineKind::Add, LineKind::Del, LineKind::Context]
         );
         assert!(lines.iter().all(|l| l.nr == 0));
+    }
+
+    /// Tabs are expanded at parse time so text, emphasis ranges, and
+    /// highlight segments all index the same chars (regression: a tabbed
+    /// diff line panicked styled_diff_spans with out-of-range offsets).
+    #[test]
+    fn diff_lines_normalizes_tabs_and_keeps_emph_in_bounds() {
+        let text = "@@ -1 +1 @@\n-\tlet one = 1;\n+\tlet two = 2;";
+        let lines = diff_lines(text);
+        let (del, add) = (&lines[0], &lines[1]);
+        assert!(del.text.starts_with("  let"));
+        for l in [del, add] {
+            let len = l.text.chars().count();
+            assert!(l.emph.iter().all(|&(s, e)| s <= e && e <= len));
+        }
+        assert_eq!(slice_text(del, del.emph[0]), "one");
+        assert_eq!(slice_text(add, add.emph[0]), "two");
+    }
+
+    fn slice_text(l: &ToolLine, (s, e): (usize, usize)) -> String {
+        l.text.chars().skip(s).take(e - s).collect()
     }
     /// A view_image result's image block rides on the card for inline
     /// rendering; the leading text block stays as the card body.
