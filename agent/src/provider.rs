@@ -218,6 +218,14 @@ pub async fn complete_text(
         crate::harness::view::shape_messages(messages.to_vec(), handle.relocates_tool_images());
     let model = handle.model.clone();
     let mut options = animist::provider::RequestOptions::builder().build();
+    // Aux calls carry no user preference; a model that refuses to answer
+    // without reasoning (Bedrock validates the field server-side) needs a
+    // real level, so default to the lowest supported one instead of none.
+    options.thinking = crate::thinking::effective_for(
+        crate::thinking::ThinkingConfig::default(),
+        Some(&handle.model.info),
+    )
+    .to_animist();
     if handle.moves_system_to_preamble() {
         options.system_message_policy = animist::provider::SystemMessagePolicy::MoveToPreamble;
     }

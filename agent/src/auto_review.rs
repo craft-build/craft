@@ -484,6 +484,50 @@ mod tests {
         );
     }
 
+    /// A model that refuses to answer without reasoning (Bedrock validates
+    /// the thinking field server-side) gets the lowest supported level sent
+    /// on the reviewer call instead of none at all.
+    #[tokio::test]
+    async fn required_thinking_defaults_to_the_lowest_supported_level() {
+        let provider = ScriptedProvider::new(Vec::new());
+        provider.push(crate::testing::text_turn(&decision_json(
+            "allow", "low", "fine",
+        )));
+        let mut info = crate::testing::model_info("reviewer", 200_000, 8_192, true, false);
+        info.features.thinking = animist::provider::Thinking::builder()
+            .supported(true)
+            .required(true)
+            .efforts(vec![
+                animist::provider::Effort::Low,
+                animist::provider::Effort::High,
+            ])
+            .build();
+        let model = ModelHandle::scripted(crate::testing::scripted_model(&provider, info));
+        review(&model, "write", &[], crate::prompt::PromptFormat::Markdown)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.requests()[0].options.thinking,
+            animist::provider::ThinkingConfig::Effort(animist::provider::Effort::Low),
+        );
+    }
+
+    /// A model that can reason but does not require it still sends no
+    /// thinking level on the reviewer call.
+    #[tokio::test]
+    async fn optional_thinking_stays_off() {
+        let (model, provider) = reviewer_model(crate::testing::text_turn(&decision_json(
+            "allow", "low", "fine",
+        )));
+        review(&model, "write", &[], crate::prompt::PromptFormat::Markdown)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.requests()[0].options.thinking,
+            animist::provider::ThinkingConfig::Off,
+        );
+    }
+
     #[tokio::test]
     async fn provider_error_fails_closed() {
         let (model, _provider) = reviewer_model(crate::testing::http_error(429, "rate limited"));
