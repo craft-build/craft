@@ -20,12 +20,12 @@ use animist::agent::{Agent, LayerImpl, Result, RunContext, ToolDecision};
 use animist::history::StoredMessage;
 
 use crate::auto_review::{Reviewer, Verdict};
+use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
 use crate::harness::guardrails::GuardrailState;
 use crate::permissions::{
     PermissionAnswer, PermissionCheck, PermissionError, PermissionManager, ToolKey,
     append_permission_rule, scope_for_call,
 };
-use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
 
 use super::conversation::TurnSettings;
 use super::events::{CraftEvent, EventSink};
@@ -300,9 +300,9 @@ impl LayerImpl for PolicyLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::approval::ApprovalResponder;
     use crate::harness::{Conversation, ConversationBuilder, Event, EventSink, EventStream};
     use crate::permissions::{PermissionsConfig, READ_ONLY_TOOLS};
-    use crate::harness::approval::ApprovalResponder;
     use crate::tools::Workspace;
     use std::path::Path;
     use std::sync::Arc;

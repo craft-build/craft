@@ -466,7 +466,6 @@ mod tests {
         cost: None,
     };
 
-
     #[test_case(999, "999"         ; "under_thousand")]
     #[test_case(1_000, "1.0k"      ; "thousand")]
     #[test_case(999_999, "1000.0k" ; "just_under_million")]

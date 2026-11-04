@@ -10,9 +10,9 @@ use crate::config::Config;
 use animist::agent::AgentEvent as RuntimeEvent;
 use animist::provider::ProviderEvent;
 
+use crate::harness::AgentMode;
 use crate::harness::{self, CraftEvent, Event, EventStream};
 use crate::history;
-use crate::harness::AgentMode;
 
 use super::super::cards::{self, Files};
 use super::usage_recorder::record_run_usage;

@@ -247,7 +247,8 @@ mod tests {
             fn spawn(
                 &self,
                 _req: SubagentRequest,
-            ) -> crate::harness::BoxFuture<std::result::Result<SubagentResult, String>> {
+            ) -> crate::harness::BoxFuture<std::result::Result<SubagentResult, String>>
+            {
                 Box::pin(async { Err("sub-agent error: boom".into()) })
             }
         }

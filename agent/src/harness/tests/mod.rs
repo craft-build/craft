@@ -1000,7 +1000,6 @@ async fn parallel_tool_calls_squash_and_reload_to_the_same_current_view() {
     assert!(size > 100_000, "the ten large outputs are on disk: {size}");
 }
 
-
 /// A scripted provider with `turns` queued, recording every request it
 /// serves.
 fn script(turns: Vec<Attempt>) -> ScriptedProvider {

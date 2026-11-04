@@ -25,8 +25,8 @@ mod turn;
 use turn::run_turn;
 
 use agent_client_protocol::{
-    Agent as AcpRole, Client as AcpClient, Error, JsonRpcResponse, Stdio,
-    on_receive_notification, on_receive_request,
+    Agent as AcpRole, Client as AcpClient, Error, JsonRpcResponse, Stdio, on_receive_notification,
+    on_receive_request,
     schema::ProtocolVersion,
     v1::{
         ConnectionTo, Responder,

@@ -870,7 +870,8 @@ impl Config {
 
     /// Extract a [`Config`] from a merged BarkML document, taking only the
     /// sections that belong to the main config (`agent`, `provider`,
-    /// `compaction`, `compression`, `keybind`/`keybindings`); unrelated
+    /// `compaction`, `compression`, `sandbox`, `keybind`/`keybindings`);
+    /// unrelated
     /// blocks (`mcp`, `permissions`) are left for their own loaders.
     pub fn from_statement(doc: &barkml::Statement) -> Result<Self> {
         use serde_json::Value as Json;
@@ -880,7 +881,7 @@ impl Config {
         if let Some(value) = root.get("always_thinking") {
             map.insert("always_thinking".into(), value.clone());
         }
-        for section in ["agent", "compression"] {
+        for section in ["agent", "compression", "sandbox"] {
             if let Some(child) = doc.get_child(section, &[]) {
                 map.insert(section.to_string(), crate::bml::container_json(child));
             }
@@ -1070,6 +1071,20 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn sandbox_block_is_honored() {
+        let config = Config::parse(
+            "sandbox { enabled = false\n mode = \"read_only\"\n network = false }",
+        )
+        .unwrap();
+        assert!(!config.sandbox.enabled);
+        assert_eq!(config.sandbox.mode, crate::sandbox::SandboxMode::ReadOnly);
+        assert!(!config.sandbox.network);
+
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.sandbox, SandboxConfig::default());
     }
 
     #[test]

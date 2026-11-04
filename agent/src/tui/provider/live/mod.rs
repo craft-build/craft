@@ -27,9 +27,9 @@ use arc_swap::ArcSwap;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 
 use crate::config::Config;
+use crate::harness;
 use crate::harness::Conversation;
 use crate::permissions::{PermissionAnswer, PermissionManager};
-use crate::harness;
 use crate::tools::{QuestionAnswer, Workspace};
 use animist::agent::Cancellation;
 use animist::provider::ModelInfo;

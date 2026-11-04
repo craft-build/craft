@@ -131,7 +131,8 @@ mod tests {
 
     #[test]
     fn run_resumes_the_job_panic() {
-        let payload = catch_unwind(|| -> () { run(|| panic!("{BOOM}")) }).expect_err("job must panic");
+        let payload =
+            catch_unwind(|| -> () { run(|| panic!("{BOOM}")) }).expect_err("job must panic");
         assert_eq!(panic_message(&*payload), BOOM);
     }
 }

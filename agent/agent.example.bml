@@ -1,27 +1,50 @@
 # Copy to ~/.config/craft.bml (or split into ~/.config/craft/*.bml) and set
-# credentials in your environment. Provider block labels are your aliases,
-# not fixed provider names.
+# credentials in your environment. Provider and mcp block labels are names
+# you choose. Permissions live in a separate permissions.bml next to this
+# file or in a project's .craft/ directory.
 
-# New-session thinking default. Omitted means off; /thinking opens a picker.
-# Also accepts true/false, any effort level, or a positive token budget.
+# New-session thinking default; /thinking opens a picker. Accepts true/false,
+# "off", "adaptive", "minimal", "low", "medium", "high", "xhigh", "max", or a
+# positive token budget.
 # always_thinking = "low"
 
+# Context reserved so compaction fires before the window fills: an absolute
+# token count (>= 1000) or a quoted percent. Default "20%".
+# compaction_buffer = "20%"
+
 agent {
-  # Extra instructions appended to the assembled system prompt's instructions
-  # slot. Empty keeps the built-in defaults.
+  # Extra instructions appended to the system prompt; empty keeps defaults.
   preamble = ""
-  # System prompt rendering for the session: "markdown" (default) or "xml".
+  # System prompt rendering: "markdown" (default) or "xml".
   # prompt_format = "xml"
-  # Optional generation settings; omitted by default for provider/model defaults.
+  # Generation overrides; omitted keeps provider/model defaults.
   # temperature = 0.2
   # max_tokens = 8192
+  # Default thinking for runs and inherited subagents (same values as
+  # always_thinking).
+  # thinking = "medium"
+  # Bounds on a single run.
+  # max_turns = 50
+  # max_concurrent_tools = 8
+  # Write durable facts to the project argosy after each run. Default true.
+  # memory_extraction = false
+
+  # Post-turn advisor: a lightweight reviewer that reads each reply and emits
+  # at most one note. Off by default.
+  # advisor {
+  #   enabled = true
+  #   dedup_size = 8
+  #   # Minimum severity that triggers an automatic follow-up turn instead of
+  #   # stopping: "off", "nit", "concern" (default), "blocker".
+  #   auto_act = "concern"
+  #   max_act_turns = 2
+  # }
 }
 
-# Compaction stages, ascending by context fill ratio. Omitted entirely, this
-# defaults to vcc at 0.6 then llm at 0.8. "vcc" is a deterministic no-LLM
-# summary; "llm" runs a one-shot summarization call. A stage whose last run
-# saved under 10% of the context is skipped until another stage compacts
-# effectively.
+# Compaction stages, ascending by context fill ratio (0-1). "vcc" is a
+# deterministic no-LLM summary; "llm" runs a summarization call. This is the
+# default; omit to keep it. A stage that saved under 10% last run is skipped
+# until another stage compacts effectively.
 compaction "vcc" {
   context = "0.6"
 }
@@ -30,31 +53,78 @@ compaction "llm" {
   context = "0.8"
 }
 
+# Tool-output pre-compression applied to the model's request view; history
+# keeps raw outputs. These are the defaults.
+# compression {
+#   enabled = true
+#   code_compression_rate = 0.3
+#   max_log_lines = 50
+#   max_search_files = 20
+#   max_matches_per_file = 5
+#   max_diff_lines = 100
+#   max_json_items = 15
+#   json_first_keep = 5
+#   json_last_keep = 3
+#   protect_recent_tool_outputs = 2
+# }
+
+# OS command sandbox for the bash tool. Modes: "workspace_write" (default),
+# "read_only", "danger_full_access", "off". Setting network to false blocks
+# sandboxed network access. These are the defaults.
+# sandbox {
+#   enabled = true
+#   mode = "workspace_write"
+#   network = true
+# }
+
+# TUI keybinding overlay: action id → chord list. An empty list disables the
+# action; unknown ids are warned and dropped. Actions: quit, help, palette,
+# sidebar, model_menu, search, file_picker, plan_toggle, open_editor,
+# scroll_half_up, scroll_half_down, delete_word, kill_line, line_start,
+# line_end, edit_input, cycle_effort, paste_image, task_chat_picker.
+# keybind "palette" {
+#   keys = ["ctrl+p", "ctrl+k"]
+# }
+# keybind "sidebar" {
+#   keys = []
+# }
+
+# Providers
+# 
+# Common keys for every provider block:
+#   kind            required, one of the kinds below
+#   api_key_env     env var holding the key (never store api_key in this file)
+#   base_url        endpoint origin (where the kind allows overriding)
+#   discover_models fetch the server's model list (default true)
+#   model "id" {}   register or override one model's catalog metadata:
+#                   name, description, context_length, max_output_tokens,
+#                   supports_thinking, requires_thinking
+
+# The "openai" kind also accepts protocol ("responses" default,
+# "chat_completions"), organization, project.
 provider "openai" {
   kind = "openai"
-  # Responses API by default; protocol = "chat_completions" switches.
   api_key_env = "OPENAI_API_KEY"
 
   model "gpt-5.2" {
     name = "GPT-5.2"
-    # These are catalog metadata overrides, not generation request parameters.
     context_length = 400000
     max_output_tokens = 32768
   }
 }
 
+# The "anthropic" kind also accepts version, beta, max_output_tokens.
 provider "anthropic" {
   kind = "anthropic"
   api_key_env = "ANTHROPIC_API_KEY"
 }
 
-# Any OpenAI-dialect endpoint. A keyless local endpoint (loopback/private
-# host, no key) rides the keyless llama.cpp client automatically.
+# Any OpenAI-dialect endpoint; chat_completions is the default protocol here.
+# A keyless loopback/private endpoint rides the keyless llama.cpp client
+# automatically; set api_key_env only for servers that require a key.
 provider "local" {
   kind = "openai-compatible"
   base_url = "http://localhost:8080/v1"
-  # No api_key_env: a keyless loopback endpoint rides the keyless
-  # llama.cpp client. Set api_key_env only for servers that require a key.
   discover_models = false
 
   model "my-coding-model" {
@@ -62,51 +132,80 @@ provider "local" {
   }
 }
 
-# Local llama.cpp server (also serves System One decisions on /systemone).
-#provider "llamacpp" {
-#  kind = "llama-cpp"
-#  base_url = "http://localhost:9931/v1"
-#}
+# provider "llamacpp" {
+#   kind = "llama-cpp"
+#   base_url = "http://localhost:9931/v1"
+# }
 
-# Local oMLX server (thinking knobs map to enable_thinking/thinking_budget).
-#provider "omlx" {
-#  kind = "omlx"
-#  base_url = "http://localhost:8000/v1"
-#  api_key_env = "OMLX_API_KEY"
-#}
+# The "omlx" kind maps thinking knobs to enable_thinking/thinking_budget.
+# provider "omlx" {
+#   kind = "omlx"
+#   base_url = "http://localhost:8000/v1"
+#   api_key_env = "OMLX_API_KEY"
+# }
 
-# Local Ollama needs no credential unless your server requires one.
 provider "ollama" {
   kind = "ollama"
 }
 
-# Hosted coding plans, as dedicated kinds:
-#provider "synthetic" {
-#  kind = "synthetic"          # env SYNTHETIC_API_KEY
-#}
-#provider "zai" {
-#  kind = "zai-coding-plan"    # env ZHIPU_API_KEY
-#}
+# Hosted coding plans; both also accept base_url and max_output_tokens.
+# provider "synthetic" {
+#   kind = "synthetic"          # env SYNTHETIC_API_KEY by default
+# }
+# provider "zai" {
+#   kind = "zai-coding-plan"    # env ZHIPU_API_KEY by default
+# }
 
-# Dropped kinds (azure, chatgpt, cohere, copilot, deepseek, gemini, groq,
-# mistral, openrouter, xai, ...): migrate to openai-compatible + base_url:
-#provider "deepseek" {
-#  kind = "openai-compatible"
-#  base_url = "https://api.deepseek.com/v1"
-#  api_key_env = "DEEPSEEK_API_KEY"
-#}
+# AWS Bedrock: authenticates through the AWS default credential chain and
+# takes its region from AWS_REGION, the profile, or `region`. Also accepts
+# profile, endpoint_url, protocol, max_attempts, anthropic_version,
+# anthropic_beta. Model ids are Bedrock model ids or inference-profile ARNs;
+# a per-model protocol ("anthropic_messages", "chat_completions",
+# "responses", "converse") overrides the family default.
+# provider "amazon-bedrock" {
+#   kind = "amazon-bedrock"
+#   region = "us-east-1"
+#   model "us.anthropic.claude-sonnet-4-5-v2" { context_length = 200000 }
+#   model "openai.gpt-4.1" { protocol = "responses" }
+# }
 
-# AWS Bedrock authenticates through the AWS default credential chain
-# (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, ~/.aws profiles selected by
-# AWS_PROFILE, or SSO) and takes its region from AWS_REGION, the profile,
-# or `region` here. The wire protocol is per model: Claude speaks
-# anthropic_messages, openai.* deployments speak responses, other
-# OpenAI-surface models speak chat_completions, everything else converse —
-# a per-model `protocol` overrides. Converse rejects non-off thinking
-# configs; Claude thinking needs anthropic_messages. Model IDs are Bedrock
-# model IDs or inference-profile ARNs.
-#provider "amazon-bedrock" {
-#  kind = "amazon-bedrock"
-#  model "us.anthropic.claude-sonnet-4-5-v2" { context_length = 200000 }
-#  model "openai.gpt-4.1" { protocol = "responses" }
-#}
+# Other vendors (deepseek, groq, mistral, openrouter, xai, gemini, cohere,
+# azure, ...): use openai-compatible with the vendor's base_url.
+# provider "deepseek" {
+#   kind = "openai-compatible"
+#   base_url = "https://api.deepseek.com/v1"
+#   api_key_env = "DEEPSEEK_API_KEY"
+# }
+
+# MCP servers
+# 
+# mcp blocks merge from this file, other files in ~/.config/craft/, and the
+# project's .craft/mcp.bml (project wins on name conflicts). Names are ASCII
+# alphanumeric + hyphens and must not collide with built-in tools. `${VAR}`
+# in environment/headers values expands from the process environment.
+
+# Stdio transport: command is the program plus arguments.
+# mcp "filesystem" {
+#   command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#   environment = { API_TOKEN = "${MY_MCP_TOKEN}" }
+#   enabled = true           # default
+#   timeout = 30000          # ms, 1..=300000
+# }
+
+# HTTP transport.
+# mcp "remote" {
+#   url = "https://mcp.example.com/mcp"
+#   headers = { Authorization = "Bearer ${EXAMPLE_TOKEN}" }
+# }
+
+# Static OAuth client for servers without a registration endpoint; the
+# callback listener always binds loopback.
+# mcp "acme" {
+#   url = "https://mcp.acme.example.com/mcp"
+#   oauth {
+#     client_id = "acme-client"
+#     client_secret = "${ACME_CLIENT_SECRET}"
+#     callback_port = 3118               # fixes the redirect URI's port
+#     callback_path = "/callback"        # default /mcp/oauth/callback
+#   }
+# }

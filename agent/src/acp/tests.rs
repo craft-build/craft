@@ -2,9 +2,9 @@ use super::elicitation::*;
 use super::permissions::*;
 use super::turn::*;
 use super::*;
+use crate::harness;
 use crate::history;
 use crate::permissions::{PermissionAnswer, PermissionCheck, ToolKey, scope_for_call};
-use crate::harness;
 use crate::tools::{QuestionOption, QuestionSpec};
 use agent_client_protocol::v1::schema::{
     Content, RequestPermissionOutcome, ResourceLink, TextContent, ToolCallContent, ToolKind,

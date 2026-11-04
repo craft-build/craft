@@ -10,9 +10,9 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
 use crate::child_guard::ChildGuard;
-use crate::history;
 use crate::harness::CancelToken;
 use crate::harness::cancel::CancelTrigger;
+use crate::history;
 
 use super::provider::{AgentEvent, LineKind, ToolCallData, ToolKind, ToolLine};
 

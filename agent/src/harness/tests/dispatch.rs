@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::*;
-use crate::history::{ContentBlock, Role, ext};
 use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
+use crate::history::{ContentBlock, Role, ext};
 
 /// Whether a result block reports an error.
 fn result_is_error(result: &ContentBlock) -> bool {

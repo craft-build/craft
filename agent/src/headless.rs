@@ -8,8 +8,8 @@
 //! handles, Flow attachments, and plugin rule stores have no counterpart
 //! here.
 
-use crate::permissions::{PermissionError, ToolKey};
 use crate::harness::approval::{Approval, ApprovalAsk, ApprovalResponder};
+use crate::permissions::{PermissionError, ToolKey};
 
 /// The headless approval responder (`--print`, `craft term run`,
 /// `craft recipe run`): where an interactive surface would prompt, headless

@@ -131,20 +131,19 @@ pub enum AcpEvent {
 
 pub async fn validate_agent(config: AgentConfig) -> Result<(), String> {
     let agent = config.agent()?;
-    let handshake =
-        Client
-            .v1()
-            .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
-                connection
-                    .send_request(
-                        InitializeRequest::new(ProtocolVersion::V1)
-                            .client_capabilities(ClientCapabilities::default())
-                            .client_info(Implementation::new("Craft", env!("CARGO_PKG_VERSION"))),
-                    )
-                    .block_task()
-                    .await?;
-                Ok::<(), Error>(())
-            });
+    let handshake = Client
+        .v1()
+        .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
+            connection
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1)
+                        .client_capabilities(ClientCapabilities::default())
+                        .client_info(Implementation::new("Craft", env!("CARGO_PKG_VERSION"))),
+                )
+                .block_task()
+                .await?;
+            Ok::<(), Error>(())
+        });
 
     match tokio::time::timeout(VALIDATION_TIMEOUT, handshake).await {
         Ok(Ok(())) => Ok(()),

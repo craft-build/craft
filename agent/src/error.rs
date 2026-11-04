@@ -90,15 +90,6 @@ pub enum Error {
         source: Box<Error>,
     },
 
-    #[snafu(display("provider does not support completion models"))]
-    NoCompletion,
-
-    #[snafu(display("azure requires base_url or AZURE_ENDPOINT"))]
-    AzureEndpointMissing,
-
-    #[snafu(display("azure requires api_version or AZURE_API_VERSION"))]
-    AzureApiVersionMissing,
-
     /// Provider client setup errors, kept behind an opaque boxed source so
     /// one variant covers every provider-specific error type.
     #[snafu(context(false))]
