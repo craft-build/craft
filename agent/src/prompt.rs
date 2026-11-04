@@ -38,6 +38,8 @@ const TOOL_USAGE_RULES: &[&str] = &[
     "Prefer edits over full file writes.",
 ];
 
+const BUILTIN_TOOL_PREFERENCE_RULE: &str = "Prioritize built-in tools over shelling out to `bash` or running Python via `bash` whenever a built-in tool can perform the task.";
+
 const SUBAGENT_BRIEFING_INTRO: &str = r#"A subagent starts with none of this conversation's context. Write its prompt like a briefing for a smart colleague who just walked into the room:"#;
 
 const SUBAGENT_BRIEFING_RULES: &[&str] = &[
@@ -125,10 +127,11 @@ fn section_vec(
         .build()
 }
 
-/// The static rules with the efficient-tools line appended (the old
-/// template's `{{efficient_tools}}` slot).
-fn with_efficient_tools(rules: &[&str]) -> Vec<String> {
+/// The variant-specific rules with the shared built-in preference and
+/// efficient-tools lines appended.
+fn with_shared_tool_rules(rules: &[&str]) -> Vec<String> {
     let mut rules: Vec<String> = rules.iter().map(ToString::to_string).collect();
+    rules.push(BUILTIN_TOOL_PREFERENCE_RULE.to_string());
     rules.push(efficient_tools_rule());
     rules
 }
@@ -215,7 +218,7 @@ pub fn system(ctx: &Context<'_>, plan: Option<&Path>) -> Prompt {
             "Tool usage",
             "how to use the tools",
             "",
-            with_efficient_tools(TOOL_USAGE_RULES),
+            with_shared_tool_rules(TOOL_USAGE_RULES),
         ),
         section(
             "Delegating to subagents",
@@ -306,7 +309,7 @@ pub fn research(ctx: &Context<'_>) -> Prompt {
                 "Tool usage",
                 "how to use the tools",
                 "",
-                with_efficient_tools(&[
+                with_shared_tool_rules(&[
                     "Every tool result grows your context. Minimize use of verbose tool calls, prefer compact results.",
                 ]),
             ),
@@ -359,7 +362,7 @@ pub fn general(ctx: &Context<'_>) -> Prompt {
                 "Tool usage",
                 "how to use the tools",
                 "",
-                with_efficient_tools(&[
+                with_shared_tool_rules(&[
                     "Every tool result grows your context. Minimize use of verbose tool calls, prefer compact results.",
                     "Use batch for 2+ independent parallel calls,",
                     "Read files before editing them. Look at surrounding context and imports to match conventions.",
@@ -531,6 +534,7 @@ Prioritize technical accuracy over validating the user's beliefs. Provide direct
 - Combine batch and task: launch multiple tasks in a batch to parallelize research or implementation.
 - Read files before editing them. Match surrounding context, conventions, and imports.
 - Prefer edits over full file writes.
+- Prioritize built-in tools over shelling out to `bash` or running Python via `bash` whenever a built-in tool can perform the task.
 - Most efficient tools: search, search_rules, ask, read_document, outline, zoom, astgrep, review.
 # Delegating to subagents - brief like a colleague
 A subagent starts with none of this conversation's context. Write its prompt like a briefing for a smart colleague who just walked into the room:
@@ -579,6 +583,7 @@ Prioritize technical accuracy over validating the user's beliefs. Provide direct
 - Combine batch and task: launch multiple tasks in a batch to parallelize research or implementation.
 - Read files before editing them. Match surrounding context, conventions, and imports.
 - Prefer edits over full file writes.
+- Prioritize built-in tools over shelling out to `bash` or running Python via `bash` whenever a built-in tool can perform the task.
 - Most efficient tools: search, search_rules, ask, read_document, outline, zoom, astgrep, review.
 # Delegating to subagents - brief like a colleague
 A subagent starts with none of this conversation's context. Write its prompt like a briefing for a smart colleague who just walked into the room:
@@ -669,6 +674,7 @@ You must NEVER generate or guess URLs unless they are for helping the user with 
     <rule>Combine batch and task: launch multiple tasks in a batch to parallelize research or implementation.</rule>
     <rule>Read files before editing them. Match surrounding context, conventions, and imports.</rule>
     <rule>Prefer edits over full file writes.</rule>
+    <rule>Prioritize built-in tools over shelling out to `bash` or running Python via `bash` whenever a built-in tool can perform the task.</rule>
     <rule>Most efficient tools: search, search_rules, ask, read_document, outline, zoom, astgrep, review.</rule>
   </rules>
 </section>
@@ -789,6 +795,7 @@ You must NEVER generate or guess URLs unless they are for helping the user with 
     <rule>Combine batch and task: launch multiple tasks in a batch to parallelize research or implementation.</rule>
     <rule>Read files before editing them. Match surrounding context, conventions, and imports.</rule>
     <rule>Prefer edits over full file writes.</rule>
+    <rule>Prioritize built-in tools over shelling out to `bash` or running Python via `bash` whenever a built-in tool can perform the task.</rule>
     <rule>Most efficient tools: search, search_rules, ask, read_document, outline, zoom, astgrep, review.</rule>
   </rules>
 </section>
