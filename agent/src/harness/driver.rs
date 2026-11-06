@@ -233,15 +233,6 @@ async fn execute_run(
     }
 }
 
-/// Charge one overflow recovery against the shared budget; `false` means
-/// the cap is spent and the overflow is the honest answer. `rearm` closes
-/// the previous episode (the last series iteration was not itself a
-/// recovered overflow), so a stop-reason overflow after an error-form
-/// recovery plus real progress still gets its own compact-and-retry.
-fn charge_overflow(recovery: &super::recovery::RecoveryHandle, rearm: bool) -> bool {
-    lock_recovery(recovery).charge_overflow(rearm)
-}
-
 /// Lock the recovery state without exposing the poison dance at call sites.
 fn lock_recovery(
     recovery: &super::recovery::RecoveryHandle,
@@ -256,10 +247,9 @@ fn lock_recovery(
 async fn recover_stop_reason_overflow(
     conversation: &Conversation,
     report: &RunReport,
-    rearm: bool,
 ) -> Option<StoredMessage> {
     let recovery = conversation.recovery();
-    if !charge_overflow(&recovery, rearm) {
+    if !lock_recovery(&recovery).try_charge_stop_reason_overflow(report.stats.steps) {
         return None;
     }
     let model = lock_recovery(&recovery)
@@ -363,10 +353,6 @@ pub async fn run_turn(
     }
     let mut advisor_continuations = 0_u32;
     let mut next_input = input;
-    // Whether the previous series iteration was itself a recovered
-    // stop-reason overflow: consecutive ones are one episode, and the
-    // second surfaces the error.
-    let mut previous_was_overflow = false;
     let (outcome, done): (TurnOutcome, Option<RunReport>) = loop {
         let report = match execute_run(
             conversation,
@@ -389,12 +375,7 @@ pub async fn run_turn(
         // may not continue from it. Handle it exactly like the overflow
         // error — compact, then re-run with a continuation observation.
         if report.status == RunStatus::ContextWindowExceeded {
-            // The episode closed unless the previous iteration was itself a
-            // recovered overflow AND this run made no progress beyond its
-            // own terminal step — a follow-up that ran real tool steps
-            // between the overflows has earned a fresh compact-and-retry.
-            let rearm = !previous_was_overflow || report.stats.steps > 1;
-            match recover_stop_reason_overflow(conversation, &report, rearm).await {
+            match recover_stop_reason_overflow(conversation, &report).await {
                 Some(continuation) => {
                     // A cancel landing during the forced compaction ends
                     // the turn here, before the mark: a follow-up whose
@@ -406,7 +387,6 @@ pub async fn run_turn(
                             .await;
                         break (TurnOutcome::Cancelled, None);
                     }
-                    previous_was_overflow = true;
                     mark_follow_up(conversation);
                     next_input = continuation;
                     continue;
@@ -426,7 +406,7 @@ pub async fn run_turn(
                 }
             }
         }
-        previous_was_overflow = false;
+        lock_recovery(&conversation.recovery()).close_stop_reason_episode();
         let outcome = finish_report(&sink, &conversation.history(), &report).await;
         // The advisor reviews after a terminal Completed that was not
         // cancelled, and its follow-up message re-runs the agent.
@@ -456,9 +436,8 @@ pub async fn run_turn(
         }
         break (outcome, Some(report));
     };
-    // The turn's overflow episode is over whatever way it ended; a later
-    // turn's overflow gets its own attempt.
-    lock_recovery(&conversation.recovery()).overflow_recoveries = 0;
+    // The turn's overflow episode is over whatever way it ended.
+    lock_recovery(&conversation.recovery()).end_turn_overflow_episode();
     // Carry anchoring: a turn that did not complete
     // leaves its input unanswered — everything from it on must stay out of
     // any summary until a later turn answers it. A completed turn answers

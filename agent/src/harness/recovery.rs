@@ -381,9 +381,9 @@ fn numbers_in(text: &str) -> Vec<(u64, usize, usize)> {
 // --- Shared run state ---------------------------------------------------------------
 
 /// Per-run recovery state, shared as a typed handle: the request layer
-/// reads the model override, the driver charges the overflow budget for
-/// stop-reason re-runs and marks follow-up runs. Guarded by a `std` mutex;
-/// the layer never holds it across an `.await`.
+/// reads the model override, the driver asks it to charge the overflow
+/// budget for stop-reason re-runs and marks follow-up runs. Guarded by a
+/// `std` mutex; the layer never holds it across an `.await`.
 pub(crate) struct RecoveryRunState {
     /// The model serving this run's requests: a reauth swap or an active
     /// fallback hop. `None` is the conversation's model.
@@ -407,7 +407,12 @@ pub(crate) struct RecoveryRunState {
     reauth_attempts: u32,
     /// Consecutive overflow recoveries; resets after a successful stream.
     /// The driver charges the same budget for stop-reason re-runs.
-    pub(crate) overflow_recoveries: u32,
+    overflow_recoveries: u32,
+    /// Whether the previous driver series iteration was itself a recovered
+    /// stop-reason overflow: consecutive ones are one episode, and the
+    /// second surfaces the error. Only the driver's stop-reason path sets
+    /// it.
+    previous_stop_reason_overflow: bool,
     /// Completed steps observed at the last `recover` call: a higher count
     /// on entry means a stream succeeded since, re-arming the budgets.
     last_seen_steps: u64,
@@ -428,6 +433,7 @@ impl Default for RecoveryRunState {
             retry: RetryState::new(),
             reauth_attempts: 0,
             overflow_recoveries: 0,
+            previous_stop_reason_overflow: false,
             last_seen_steps: 0,
             follow_up: false,
         }
@@ -449,7 +455,7 @@ impl RecoveryRunState {
     /// Charge one overflow recovery against the shared budget, re-arming
     /// first when the caller says the last episode closed (a successful
     /// stream followed the previous charge, or a new episode opened).
-    pub(crate) fn charge_overflow(&mut self, rearm: bool) -> bool {
+    fn charge_overflow(&mut self, rearm: bool) -> bool {
         if rearm {
             self.rearm_after_success();
         }
@@ -458,6 +464,33 @@ impl RecoveryRunState {
         }
         self.overflow_recoveries += 1;
         true
+    }
+
+    /// Charge the budget for a stop-reason overflow re-run, deriving the
+    /// re-arm from the episode this state saw: the episode closed unless
+    /// the previous series iteration was itself a recovered overflow AND
+    /// this run made no progress beyond its own terminal step — a
+    /// follow-up that ran real tool steps between the overflows has earned
+    /// a fresh compact-and-retry. Records a successful charge as the
+    /// episode's first iteration.
+    pub(crate) fn try_charge_stop_reason_overflow(&mut self, steps: u64) -> bool {
+        let rearm = !self.previous_stop_reason_overflow || steps > 1;
+        let charged = self.charge_overflow(rearm);
+        self.previous_stop_reason_overflow |= charged;
+        charged
+    }
+
+    /// A driver series iteration settled without a stop-reason overflow:
+    /// the next overflow opens a fresh episode.
+    pub(crate) fn close_stop_reason_episode(&mut self) {
+        self.previous_stop_reason_overflow = false;
+    }
+
+    /// The turn's overflow episode is over whatever way it ended; a later
+    /// turn's overflow gets its own attempt.
+    pub(crate) fn end_turn_overflow_episode(&mut self) {
+        self.close_stop_reason_episode();
+        self.overflow_recoveries = 0;
     }
 }
 
@@ -1153,17 +1186,28 @@ mod tests {
     }
 
     #[test]
-    fn charge_overflow_rearms_only_when_the_episode_closed() {
+    fn stop_reason_charges_rearm_only_when_the_episode_closed() {
         let mut state = RecoveryRunState::default();
-        assert!(state.charge_overflow(false), "first charge allowed");
         assert!(
-            !state.charge_overflow(false),
+            state.try_charge_stop_reason_overflow(1),
+            "first charge allowed"
+        );
+        assert!(
+            !state.try_charge_stop_reason_overflow(1),
             "second consecutive charge denied"
         );
         assert!(
-            state.charge_overflow(true),
-            "a closed episode rearms the budget"
+            state.try_charge_stop_reason_overflow(2),
+            "real progress between overflows rearms the budget"
         );
-        assert!(!state.charge_overflow(false));
+        assert!(!state.try_charge_stop_reason_overflow(1));
+
+        // A settled iteration closes the episode; the turn's end clears
+        // both the episode flag and the charged budget.
+        state.close_stop_reason_episode();
+        assert!(state.try_charge_stop_reason_overflow(1));
+        state.end_turn_overflow_episode();
+        assert_eq!(state.overflow_recoveries, 0);
+        assert!(state.try_charge_stop_reason_overflow(1));
     }
 }
