@@ -57,7 +57,8 @@ pub struct CostRecord {
 pub struct CostSummary {
     pub total_cost: f64,
     pub total_tokens: u64,
-    pub by_model: Vec<(String, f64, u64)>,
+    /// (spec, priced total, tokens, records with `cost_usd: None`).
+    pub by_model: Vec<(String, f64, u64, usize)>,
     pub by_session: Vec<(String, f64, u64)>,
     pub records: usize,
     /// Records whose cost could not be priced (`cost_usd: None`). These are
@@ -154,7 +155,7 @@ fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
     let mut total_cost = 0.0f64;
     let mut total_tokens = 0u64;
     let mut unpriced_records = 0usize;
-    let mut by_model: HashMap<String, (f64, u64)> = HashMap::new();
+    let mut by_model: HashMap<String, (f64, u64, usize)> = HashMap::new();
     let mut by_session: HashMap<String, (f64, u64)> = HashMap::new();
 
     for r in &records {
@@ -163,6 +164,7 @@ fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
         // it contributes tokens but no dollars — flattening it into the
         // totals would silently under-report a period's real spend.
         let cost = r.cost_usd.unwrap_or(0.0);
+        let unpriced = usize::from(r.cost_usd.is_none());
         if r.cost_usd.is_none() {
             unpriced_records += 1;
         }
@@ -177,11 +179,12 @@ fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
         total_tokens += tokens;
         by_model
             .entry(spec)
-            .and_modify(|(c, t)| {
+            .and_modify(|(c, t, u)| {
                 *c += cost;
                 *t += tokens;
+                *u += unpriced;
             })
-            .or_insert((cost, tokens));
+            .or_insert((cost, tokens, unpriced));
         by_session
             .entry(r.session_id.clone())
             .and_modify(|(c, t)| {
@@ -191,8 +194,10 @@ fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
             .or_insert((cost, tokens));
     }
 
-    let mut by_model: Vec<(String, f64, u64)> =
-        by_model.into_iter().map(|(k, (c, t))| (k, c, t)).collect();
+    let mut by_model: Vec<(String, f64, u64, usize)> = by_model
+        .into_iter()
+        .map(|(k, (c, t, u))| (k, c, t, u))
+        .collect();
     by_model.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut by_session: Vec<(String, f64, u64)> = by_session

@@ -106,12 +106,13 @@ fn render_stats(summary: &CostSummary, ledger_path: &Path, sessions: bool) -> St
         }
     } else {
         out.push_str("Per model:\n");
-        for (model, cost, tokens) in &summary.by_model {
-            out.push_str(&format!(
-                "  {model}  {}  {}\n",
-                format_usd(*cost),
-                format_tokens(*tokens)
-            ));
+        for (model, cost, tokens, unpriced) in &summary.by_model {
+            let cost = if *unpriced > 0 && *cost == 0.0 {
+                "n/a".to_string()
+            } else {
+                format_usd(*cost)
+            };
+            out.push_str(&format!("  {model}  {cost}  {}\n", format_tokens(*tokens)));
         }
     }
     out
@@ -675,7 +676,7 @@ mod tests {
         let summary = CostSummary {
             total_cost: 1.5,
             total_tokens: 3_000_000,
-            by_model: vec![("anthropic/m".into(), 1.5, 3_000_000)],
+            by_model: vec![("anthropic/m".into(), 1.5, 3_000_000, 0)],
             by_session: vec![("s1".into(), 1.0, 2_000_000), ("s2".into(), 0.5, 1_000_000)],
             records: 2,
             unpriced_records: 0,

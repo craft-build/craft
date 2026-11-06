@@ -649,11 +649,10 @@ fn emit_done(
         TurnOutcome::Failed(_) => DoneReason::Error,
     };
     // A fallback hop or a reauth swap may have served the runs; the
-    // window shown is the serving model's.
-    let context_window = serving_model(conversation)
-        .context_length()
-        .map(u64::from)
-        .unwrap_or(0);
+    // window shown is the serving model's, and its catalog rates price
+    // the rows that carry no recorded cost.
+    let serving = serving_model(conversation);
+    let context_window = serving.context_length().map(u64::from).unwrap_or(0);
     let Some(_report) = report else {
         // Error paths carry no settled report; the outcome still names the
         // reason (a doom stop is a controlled end, not an error) and the
@@ -671,6 +670,7 @@ fn emit_done(
         return;
     };
     let fast = conversation.settings().fast;
+    let serving_spec = format!("{}/{}", serving.model.provider.name(), serving.model.id);
     let mut by_model = series.by_model.clone();
     let cost = if by_model.is_empty() {
         None
@@ -678,7 +678,8 @@ fn emit_done(
         crate::usage::settle_session(
             &TokenUsage::default(),
             &mut by_model,
-            &conversation.model_spec(),
+            &serving_spec,
+            &serving.model.info.pricing,
             fast,
         )
     };

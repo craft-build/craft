@@ -1,20 +1,28 @@
 //! Usage & cost accounting.
 //!
 //! A turn is priced once, when it runs, and that number is what gets stored,
-//! summed and shown; history is never re-priced, because rates move. A
-//! static [`PricedModel`] table holds the rates; unknown models are unpriced:
-//! callers get `None` and show no cost instead of a made-up "$0.000".
+//! summed and shown; history is never re-priced, because rates move. Rates
+//! come from the serving model's catalog entry (`ModelInfo.pricing`):
+//! a model the catalog leaves unreported is unpriced — callers get `None`
+//! and show no cost instead of a made-up "$0.000".
 
 use std::collections::HashMap;
 use std::ops::AddAssign;
 
+use animist::provider::Pricing;
 use serde::{Deserialize, Serialize};
 
 const PER_MILLION: f64 = 1_000_000.0;
 
+/// Cache multipliers Anthropic apply on top of the base input rate; animist
+/// keeps the same consts private pending F08.
+pub(crate) const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
+pub(crate) const CACHE_READ_MULTIPLIER: f64 = 0.10;
+
 /// Token usage reported by the provider for one model call: animist's
-/// counters, re-exported so every surface reads one type. Pricing stays
-/// here because animist 0.7.0 leaves `cost` unset (followup F08 is open).
+/// counters, re-exported so every surface reads one type. The rate math
+/// stays here because animist 0.7.0 leaves `cost` unset (followup F08 is
+/// open).
 pub use animist::provider::TokenUsage;
 
 /// Whether every counter is zero.
@@ -75,25 +83,34 @@ fn format_cost(usage: &TokenUsage, cost: Option<f64>, prefix: &str) -> String {
     }
 }
 
-pub(crate) fn cost(usage: &TokenUsage, pricing: &ModelPricing, fast: bool) -> f64 {
+/// One model call's cost from catalog rates: `None` when the catalog does
+/// not report the input and output rates, and when every reported rate is
+/// zero — unpriced, not free. Missing cache rates contribute nothing. Fast
+/// mode swaps in the fast tier's rates when one exists, with its cache
+/// rates derived from its own input rate.
+pub(crate) fn cost(usage: &TokenUsage, pricing: &Pricing, fast: bool) -> Option<f64> {
     let (input, output, cache_write, cache_read) = match &pricing.fast {
         Some(f) if fast => (
             f.input,
             f.output,
-            f.input * ModelPricing::CACHE_WRITE_MULTIPLIER,
-            f.input * ModelPricing::CACHE_READ_MULTIPLIER,
+            Some(f.input * CACHE_WRITE_MULTIPLIER),
+            Some(f.input * CACHE_READ_MULTIPLIER),
         ),
         _ => (
-            pricing.input,
-            pricing.output,
+            pricing.input?,
+            pricing.output?,
             pricing.cache_write,
             pricing.cache_read,
         ),
     };
-    usage.input as f64 * input / PER_MILLION
-        + usage.output as f64 * output / PER_MILLION
-        + usage.cache_creation as f64 * cache_write / PER_MILLION
-        + usage.cache_read as f64 * cache_read / PER_MILLION
+    let (cache_write, cache_read) = (cache_write.unwrap_or(0.0), cache_read.unwrap_or(0.0));
+    let known_zero = input == 0.0 && output == 0.0 && cache_write == 0.0 && cache_read == 0.0;
+    (!known_zero).then(|| {
+        usage.input as f64 * input / PER_MILLION
+            + usage.output as f64 * output / PER_MILLION
+            + usage.cache_creation as f64 * cache_write / PER_MILLION
+            + usage.cache_read as f64 * cache_read / PER_MILLION
+    })
 }
 
 /// A [`TokenUsage`] plus what it was billed, ready for the session ledger.
@@ -164,263 +181,27 @@ pub fn format_tokens(tokens: impl Into<u64>) -> String {
     }
 }
 
-/// Per-million-token rates.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ModelPricing {
-    pub input: f64,
-    pub output: f64,
-    pub cache_write: f64,
-    pub cache_read: f64,
-    /// A premium tier that differs per model. `None` means the model has no
-    /// fast tier, so asking for fast mode quietly falls back to standard
-    /// rates instead of overcharging.
-    #[serde(default)]
-    pub fast: Option<FastPricing>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct FastPricing {
-    pub input: f64,
-    pub output: f64,
-}
-
-impl ModelPricing {
-    pub const ZERO: Self = Self {
-        input: 0.0,
-        output: 0.0,
-        cache_write: 0.0,
-        cache_read: 0.0,
-        fast: None,
-    };
-
-    pub fn is_zero(&self) -> bool {
-        self.input == 0.0 && self.output == 0.0 && self.cache_write == 0.0 && self.cache_read == 0.0
-    }
-
-    const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
-    const CACHE_READ_MULTIPLIER: f64 = 0.10;
-}
-
-/// A model and its rates: the registry-free model data that pricing
-/// needs. `id` is the canonical entry name; `prefixes` match
-/// dated snapshots without registry churn.
-#[derive(Debug)]
-pub struct PricedModel {
-    pub provider: &'static str,
-    pub id: &'static str,
-    pub prefixes: &'static [&'static str],
-    pub pricing: ModelPricing,
-}
-
-impl PricedModel {
-    /// The quoted rates — the honest guess
-    /// when re-pricing a session whose turns never recorded what they paid.
-    ///
-    /// `fast` arrives as the user's raw preference and is gated here,
-    /// against *this* model; callers often price a model they are not
-    /// running.
-    pub fn list_cost(&self, usage: &TokenUsage, fast: bool) -> Option<f64> {
-        let fast = fast && self.pricing.fast.is_some();
-        (!self.pricing.is_zero()).then(|| cost(usage, &self.pricing, fast))
-    }
-}
-
-/// Rates for the providers this repo talks to natively; everything else
-/// is unpriced.
-static PRICED_MODELS: &[PricedModel] = &[
-    // Anthropic
-    PricedModel {
-        provider: "anthropic",
-        id: "claude-haiku-4-5",
-        prefixes: &["claude-haiku-4-5"],
-        pricing: ModelPricing {
-            input: 1.00,
-            output: 5.00,
-            cache_write: 1.25,
-            cache_read: 0.10,
-            fast: None,
-        },
-    },
-    PricedModel {
-        provider: "anthropic",
-        id: "claude-sonnet-5",
-        prefixes: &["claude-sonnet-5"],
-        pricing: ModelPricing {
-            input: 2.00,
-            output: 10.00,
-            cache_write: 2.50,
-            cache_read: 0.20,
-            fast: None,
-        },
-    },
-    PricedModel {
-        provider: "anthropic",
-        id: "claude-opus-4-8",
-        prefixes: &["claude-opus-4-8"],
-        pricing: ModelPricing {
-            input: 5.00,
-            output: 25.00,
-            cache_write: 6.25,
-            cache_read: 0.50,
-            fast: Some(FastPricing {
-                input: 10.00,
-                output: 50.00,
-            }),
-        },
-    },
-    PricedModel {
-        provider: "anthropic",
-        id: "claude-opus-5",
-        prefixes: &["claude-opus-5"],
-        pricing: ModelPricing {
-            input: 5.00,
-            output: 25.00,
-            cache_write: 6.25,
-            cache_read: 0.50,
-            fast: Some(FastPricing {
-                input: 10.00,
-                output: 50.00,
-            }),
-        },
-    },
-    PricedModel {
-        provider: "anthropic",
-        id: "claude-fable-5",
-        prefixes: &["claude-fable-5"],
-        pricing: ModelPricing {
-            input: 10.00,
-            output: 50.00,
-            cache_write: 12.50,
-            cache_read: 1.00,
-            fast: None,
-        },
-    },
-    // OpenAI
-    PricedModel {
-        provider: "openai",
-        id: "gpt-5.6-luna",
-        prefixes: &["gpt-5.6-luna"],
-        pricing: ModelPricing {
-            input: 1.00,
-            output: 6.00,
-            cache_write: 1.25,
-            cache_read: 0.10,
-            fast: None,
-        },
-    },
-    PricedModel {
-        provider: "openai",
-        id: "gpt-5.6-terra",
-        prefixes: &["gpt-5.6-terra"],
-        pricing: ModelPricing {
-            input: 2.50,
-            output: 15.00,
-            cache_write: 3.125,
-            cache_read: 0.25,
-            fast: None,
-        },
-    },
-    PricedModel {
-        provider: "openai",
-        id: "gpt-5.6-sol",
-        prefixes: &["gpt-5.6-sol"],
-        pricing: ModelPricing {
-            input: 5.00,
-            output: 30.00,
-            cache_write: 6.25,
-            cache_read: 0.50,
-            fast: None,
-        },
-    },
-    PricedModel {
-        provider: "openai",
-        id: "gpt-6-astra",
-        prefixes: &["gpt-6-astra"],
-        pricing: ModelPricing {
-            input: 10.00,
-            output: 50.00,
-            cache_write: 12.50,
-            cache_read: 1.00,
-            fast: None,
-        },
-    },
-    PricedModel {
-        provider: "openai",
-        id: "gpt-5.4-nano",
-        prefixes: &["gpt-5.4-nano"],
-        pricing: ModelPricing {
-            input: 0.20,
-            output: 1.25,
-            cache_write: 0.00,
-            cache_read: 0.02,
-            fast: None,
-        },
-    },
-    // DeepSeek
-    PricedModel {
-        provider: "deepseek",
-        id: "deepseek-v4-flash",
-        prefixes: &["deepseek-v4-flash"],
-        pricing: ModelPricing {
-            input: 0.22,
-            output: 0.66,
-            cache_write: 0.00,
-            cache_read: 0.007,
-            fast: None,
-        },
-    },
-    PricedModel {
-        provider: "deepseek",
-        id: "deepseek-v4-pro",
-        prefixes: &["deepseek-v4-pro"],
-        pricing: ModelPricing {
-            input: 0.66,
-            output: 1.98,
-            cache_write: 0.00,
-            cache_read: 0.022,
-            fast: None,
-        },
-    },
-];
-
-/// Resolve a `provider/model` spec against the static table, longest prefix
-/// first so dated snapshots match without registry churn.
-pub fn resolve_spec(spec: &str) -> Option<&'static PricedModel> {
-    let (provider, model_id) = spec.split_once('/')?;
-    resolve(provider, model_id)
-}
-
-/// Resolve a bare model id under a known provider slug.
-pub fn resolve(provider: &str, model_id: &str) -> Option<&'static PricedModel> {
-    PRICED_MODELS
-        .iter()
-        .filter(|m| m.provider == provider)
-        .flat_map(|m| m.prefixes.iter().map(move |p| (p, m)))
-        .filter(|(p, _)| model_id.starts_with(*p))
-        .max_by_key(|(p, _)| p.len())
-        .map(|(_, m)| m)
-}
-
 /// The bill a session ran up; status bar, `/usage`, ACP and headless all
 /// come here so they cannot disagree.
 ///
 /// Turns record what they paid, so summing those is the truth. Counters
-/// written before that kept no cost; their estimate against today's table is
-/// settled into the entry once — after a later turn merges its own cost in,
-/// the counters no longer say which of them was already paid for, so
-/// estimating again would drop everything the entry had before. `None` when
-/// nothing here is priced.
+/// written before that kept no cost; the serving model's rates estimate
+/// them once — after a later turn merges its own cost in, the counters no
+/// longer say which of them was already paid for, so estimating again would
+/// drop everything the entry had before. `None` when nothing here is
+/// priced.
 pub fn settle_session(
     total: &TokenUsage,
     by_model: &mut HashMap<String, StoredTokenUsage>,
     current_spec: &str,
+    pricing: &Pricing,
     fast: bool,
 ) -> Option<f64> {
     if by_model.is_empty() && !is_zero(total) {
         by_model.insert(current_spec.to_owned(), billed(total, None));
     }
     for (spec, usage) in by_model.iter_mut() {
-        usage.cost = model_cost(spec, usage, current_spec, fast);
+        usage.cost = model_cost(spec, usage, current_spec, pricing, fast);
     }
     by_model
         .values()
@@ -429,26 +210,35 @@ pub fn settle_session(
 }
 
 /// One model's slice of [`settle_session`], as `/usage` breaks it down per
-/// row. Keys are `provider/model` specs, but a bare model id written by an
-/// older era resolves against the current model's provider.
+/// row. A recorded cost always wins; otherwise only the serving model's row
+/// is priced, from the rates the caller supplies for it. Everything else —
+/// a spec another provider served, or another model of the same provider —
+/// keeps `None`: those counters price from what their own turns recorded.
 pub fn model_cost(
     spec: &str,
     usage: &StoredTokenUsage,
     current_spec: &str,
+    pricing: &Pricing,
     fast: bool,
 ) -> Option<f64> {
     if let Some(cost) = usage.cost {
         return Some(cost);
     }
-    let resolved = if let Some(model) = resolve_spec(spec) {
-        Some(model)
-    } else if !spec.contains('/') {
-        let provider = current_spec.split_once('/').map_or("", |(p, _)| p);
-        resolve(provider, spec)
-    } else {
-        None
-    }?;
-    resolved.list_cost(&(*usage).into(), fast)
+    identifies_serving_model(spec, current_spec)?;
+    cost(&(*usage).into(), pricing, fast)
+}
+
+/// Whether `spec` names the model `current_spec` does: the provider half
+/// (implicit in a bare legacy id) must match, and the id must be the
+/// serving id or a dated snapshot of it (`claude-x-20260101` extends
+/// `claude-x`).
+fn identifies_serving_model(spec: &str, current_spec: &str) -> Option<()> {
+    let (current_provider, current_id) = current_spec.split_once('/')?;
+    let (spec_provider, spec_id) = match spec.split_once('/') {
+        Some((provider, id)) => (provider, id),
+        None => (current_provider, spec),
+    };
+    (spec_provider == current_provider && spec_id.starts_with(current_id)).then_some(())
 }
 
 #[cfg(test)]
@@ -465,6 +255,16 @@ mod tests {
         cache_read: 44,
         cost: None,
     };
+
+    fn pricing(input: f64, output: f64) -> Pricing {
+        Pricing {
+            input: Some(input),
+            output: Some(output),
+            cache_write: None,
+            cache_read: None,
+            fast: None,
+        }
+    }
 
     #[test_case(999, "999"         ; "under_thousand")]
     #[test_case(1_000, "1.0k"      ; "thousand")]
@@ -490,25 +290,78 @@ mod tests {
             cache_read: MILLION,
             cost: None,
         };
-        let pricing = ModelPricing {
-            input: 1.0,
-            output: 10.0,
-            cache_write: 1.25,
-            cache_read: 0.1,
+        let rates = Pricing {
+            input: Some(1.0),
+            output: Some(10.0),
+            cache_write: Some(1.25),
+            cache_read: Some(0.1),
             fast: None,
         };
-        assert_eq!(cost(&usage, &pricing, false), 1.0 + 10.0 + 1.25 + 0.1);
+        assert_eq!(cost(&usage, &rates, false), Some(1.0 + 10.0 + 1.25 + 0.1));
+    }
+
+    #[test_case(None, Some(10.0) ; "missing_input")]
+    #[test_case(Some(1.0), None  ; "missing_output")]
+    #[test_case(None, None       ; "missing_both")]
+    fn unreported_rates_price_to_none(input: Option<f64>, output: Option<f64>) {
+        let usage = TokenUsage {
+            input: MILLION,
+            output: MILLION,
+            cost: None,
+            ..Default::default()
+        };
+        let rates = Pricing {
+            input,
+            output,
+            cache_write: Some(1.0),
+            cache_read: Some(0.1),
+            fast: None,
+        };
+        assert_eq!(cost(&usage, &rates, false), None);
+    }
+
+    /// A catalog that reports every rate as zero is not a confident "$0.000".
+    #[test]
+    fn all_zero_rates_price_to_none() {
+        let usage = TokenUsage {
+            input: MILLION,
+            cost: None,
+            ..Default::default()
+        };
+        let rates = Pricing {
+            input: Some(0.0),
+            output: Some(0.0),
+            cache_write: Some(0.0),
+            cache_read: Some(0.0),
+            fast: None,
+        };
+        assert_eq!(cost(&usage, &rates, false), None);
+        assert_eq!(cost(&usage, &rates, true), None);
+    }
+
+    /// Cache rates the catalog omits contribute zero, not an error.
+    #[test]
+    fn missing_cache_rates_contribute_nothing() {
+        let usage = TokenUsage {
+            input: MILLION,
+            cache_creation: MILLION,
+            cache_read: MILLION,
+            cost: None,
+            ..Default::default()
+        };
+        let rates = pricing(2.0, 10.0);
+        assert_eq!(cost(&usage, &rates, false), Some(2.0));
     }
 
     #[test_case(false ; "standard_rates")]
     #[test_case(true ; "fast_rates")]
-    fn fast_mode_replaces_the_table_rates(fast: bool) {
-        let pricing = ModelPricing {
-            input: 1.0,
-            output: 2.0,
-            cache_write: 0.0,
-            cache_read: 0.0,
-            fast: Some(FastPricing {
+    fn fast_mode_replaces_the_reported_rates(fast: bool) {
+        let rates = Pricing {
+            input: Some(1.0),
+            output: Some(2.0),
+            cache_write: Some(0.0),
+            cache_read: Some(0.0),
+            fast: Some(animist::provider::FastPricing {
                 input: 4.0,
                 output: 8.0,
             }),
@@ -522,11 +375,24 @@ mod tests {
         };
         // Cache rates under fast mode derive from the fast input rate.
         let expected = if fast {
-            4.0 + 8.0 + 4.0 * 1.25 + 4.0 * 0.10
+            Some(4.0 + 8.0 + 4.0 * CACHE_WRITE_MULTIPLIER + 4.0 * CACHE_READ_MULTIPLIER)
         } else {
-            1.0 + 2.0
+            Some(1.0 + 2.0)
         };
-        assert_eq!(cost(&usage, &pricing, fast), expected);
+        assert_eq!(cost(&usage, &rates, fast), expected);
+    }
+
+    /// Asking a model with no fast tier for fast mode quietly falls back to
+    /// the standard rates instead of overcharging.
+    #[test]
+    fn fast_preference_without_a_fast_tier_uses_standard_rates() {
+        let usage = TokenUsage {
+            input: MILLION,
+            cost: None,
+            ..Default::default()
+        };
+        let rates = pricing(3.0, 15.0);
+        assert_eq!(cost(&usage, &rates, true), cost(&usage, &rates, false));
     }
 
     #[test]
@@ -551,38 +417,19 @@ mod tests {
         assert_eq!(sum.output, COUNTERS.output);
     }
 
-    #[test]
-    fn unpriced_models_hide_their_cost() {
-        let model = PricedModel {
-            provider: "test",
-            id: "free",
-            prefixes: &["free"],
-            pricing: ModelPricing::ZERO,
-        };
-        let usage = TokenUsage {
-            input: MILLION,
-            ..Default::default()
-        };
-        assert_eq!(model.list_cost(&usage, false), None);
-    }
-
-    #[test]
-    fn dated_snapshots_resolve_by_prefix() {
-        let model = resolve("anthropic", "claude-opus-5-20260101").expect("prefix match");
-        assert_eq!(model.id, "claude-opus-5");
-        assert!(resolve("anthropic", "no-such-model").is_none());
-        assert_eq!(
-            resolve_spec("deepseek/deepseek-v4-pro").map(|m| m.id),
-            resolve("deepseek", "deepseek-v4-pro").map(|m| m.id)
-        );
-    }
-
     const CURRENT: &str = "anthropic/claude-sonnet-5";
-    /// 1M input tokens at the current model's input rate (2.00).
+    const RATES: Pricing = Pricing {
+        input: Some(2.0),
+        output: Some(10.0),
+        cache_write: Some(2.5),
+        cache_read: Some(0.2),
+        fast: None,
+    };
+    /// 1M input tokens at the serving model's input rate (2.00).
     const LIST_PRICE: f64 = 2.0;
     const RECORDED: f64 = 0.5;
-    const UNRESOLVABLE: &str = "test/a-model-no-table-has-ever-heard-of";
-    const ALSO_UNRESOLVABLE: &str = "test/another-model-no-table-has-ever-heard-of";
+    const UNRESOLVABLE: &str = "test/a-model-no-catalog-has-ever-heard-of";
+    const ALSO_UNRESOLVABLE: &str = "test/another-model-no-catalog-has-ever-heard-of";
 
     fn stored(cost: Option<f64>) -> StoredTokenUsage {
         StoredTokenUsage {
@@ -600,11 +447,11 @@ mod tests {
     }
 
     /// Each entry bills 1M input tokens, so a row worth [`LIST_PRICE`] came
-    /// from the price table and [`RECORDED`] came from the turn itself. A
+    /// from the serving rates and [`RECORDED`] came from the turn itself. A
     /// breakdown nothing can price is not a free session: `Some(0.0)` would
     /// put a confident "$0.000" on screen.
-    #[test_case(&[(UNRESOLVABLE, Some(RECORDED)), (ALSO_UNRESOLVABLE, Some(RECORDED))], Some(2.0 * RECORDED) ; "recorded_costs_win_over_the_price_table")]
-    #[test_case(&[(CURRENT, None), (UNRESOLVABLE, None)], Some(LIST_PRICE)                                   ; "legacy_counters_use_each_models_own_rates")]
+    #[test_case(&[(UNRESOLVABLE, Some(RECORDED)), (ALSO_UNRESOLVABLE, Some(RECORDED))], Some(2.0 * RECORDED) ; "recorded_costs_win_over_the_serving_rates")]
+    #[test_case(&[(CURRENT, None), (UNRESOLVABLE, None)], Some(LIST_PRICE)                                   ; "legacy_counters_use_the_serving_rates")]
     #[test_case(&[(UNRESOLVABLE, Some(RECORDED)), (CURRENT, None), (ALSO_UNRESOLVABLE, None)], Some(RECORDED + LIST_PRICE) ; "mixed_eras_sum_recorded_and_listed")]
     #[test_case(&[(UNRESOLVABLE, None)], None                                                                ; "a_breakdown_that_prices_to_nothing")]
     #[test_case(&[], Some(LIST_PRICE)                                                                        ; "no_breakdown_prices_the_total")]
@@ -626,7 +473,7 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                settle_session(&total, &mut by_model, CURRENT, false),
+                settle_session(&total, &mut by_model, CURRENT, &RATES, false),
                 expected,
                 "total of {input} input tokens"
             );
@@ -645,14 +492,14 @@ mod tests {
         };
 
         assert_eq!(
-            settle_session(&total, &mut by_model, CURRENT, false),
+            settle_session(&total, &mut by_model, CURRENT, &RATES, false),
             Some(LIST_PRICE)
         );
 
         *by_model.entry(CURRENT.to_owned()).or_default() += stored(Some(RECORDED));
 
         assert_eq!(
-            settle_session(&total, &mut by_model, CURRENT, false),
+            settle_session(&total, &mut by_model, CURRENT, &RATES, false),
             Some(LIST_PRICE + RECORDED)
         );
     }
@@ -665,50 +512,50 @@ mod tests {
             input: MILLION,
             ..Default::default()
         };
-        assert_eq!(settle_session(&total, &mut by_model, unpriced, false), None);
+        let rates = Pricing::default();
+        assert_eq!(
+            settle_session(&total, &mut by_model, unpriced, &rates, false),
+            None
+        );
         // Seeded with no price, like any other unresolvable entry.
         assert_eq!(by_model[unpriced].cost, None);
     }
 
-    /// The sibling is priced differently on purpose, so passing here cannot be
-    /// the current model's rates leaking through.
-    #[test]
-    fn bare_ids_resolve_against_the_current_provider() {
-        let current = resolve_spec("anthropic/claude-sonnet-5").unwrap();
-        let sibling_id = "claude-opus-5";
-        let sibling = resolve("anthropic", sibling_id).unwrap();
-        let usage = stored(None);
-
-        let cost = model_cost(sibling_id, &usage, CURRENT, false);
-        assert_eq!(cost, sibling.list_cost(&usage.into(), false));
-        assert_ne!(cost, current.list_cost(&usage.into(), false));
+    #[test_case("anthropic/claude-sonnet-5"             ; "the_serving_spec")]
+    #[test_case("anthropic/claude-sonnet-5-20260101"    ; "a_dated_snapshot_of_the_serving_id")]
+    #[test_case("claude-sonnet-5"                       ; "a_bare_legacy_id")]
+    #[test_case("claude-sonnet-5-20260101"              ; "a_bare_dated_snapshot")]
+    #[test_case("anthropic/claude-opus-5"               ; "another_model_of_the_serving_provider")]
+    #[test_case("openai/claude-sonnet-5"                ; "the_serving_id_under_another_provider")]
+    #[test_case("anthropic/gpt-6-astra"                 ; "another_model_entirely")]
+    fn only_the_serving_model_prices_from_the_callers_rates(spec: &str) {
+        let serving = matches!(
+            spec,
+            "anthropic/claude-sonnet-5"
+                | "anthropic/claude-sonnet-5-20260101"
+                | "claude-sonnet-5"
+                | "claude-sonnet-5-20260101"
+        );
+        assert_eq!(
+            model_cost(spec, &stored(None), CURRENT, &RATES, false),
+            serving.then_some(LIST_PRICE)
+        );
     }
 
     /// What was paid is what was paid, even for a model that prices to
     /// nothing today.
     #[test]
-    fn a_recorded_cost_short_circuits_the_price_table() {
+    fn a_recorded_cost_short_circuits_the_serving_rates() {
         assert_eq!(
-            model_cost(CURRENT, &stored(Some(RECORDED)), CURRENT, false),
+            model_cost(
+                UNRESOLVABLE,
+                &stored(Some(RECORDED)),
+                CURRENT,
+                &RATES,
+                false
+            ),
             Some(RECORDED)
         );
-    }
-
-    #[test_case("anthropic/claude-opus-5" ; "fast_model")]
-    #[test_case("anthropic/claude-sonnet-5" ; "model_without_a_fast_tier")]
-    fn fast_preference_is_gated_per_model(spec: &str) {
-        let model = resolve_spec(spec).unwrap();
-        let usage = TokenUsage {
-            input: MILLION,
-            ..Default::default()
-        };
-        let standard = model.list_cost(&usage, false).unwrap();
-        let fast = model.list_cost(&usage, true).unwrap();
-        if model.pricing.fast.is_some() {
-            assert!(fast > standard);
-        } else {
-            assert_eq!(fast, standard);
-        }
     }
 
     #[test]

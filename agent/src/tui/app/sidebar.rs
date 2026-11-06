@@ -41,14 +41,10 @@ fn stats_view(summary: crate::storage::stats::CostSummary) -> StatsView {
             .by_model
             .into_iter()
             .take(MAX_MODEL_ROWS)
-            .map(|(model, cost, tokens)| {
-                // A $0 total on a spec the pricing table does not know
-                // means unpriced, not free — show "—" like `/usage`.
-                let cost = if cost == 0.0 && crate::usage::resolve_spec(&model).is_none() {
-                    None
-                } else {
-                    Some(cost)
-                };
+            .map(|(model, cost, tokens, unpriced)| {
+                // A $0 total on a row with unpriced records means
+                // unpriced, not free — show "—" like `/usage`.
+                let cost = (cost > 0.0 || unpriced == 0).then_some(cost);
                 UsageRow {
                     model,
                     tokens,
@@ -114,7 +110,7 @@ mod tests {
         let summary = CostSummary {
             total_cost: 3.0,
             total_tokens: 10_000,
-            by_model: (0..15).map(|i| (format!("p/m{i}"), 0.1, 100)).collect(),
+            by_model: (0..15).map(|i| (format!("p/m{i}"), 0.1, 100, 0)).collect(),
             by_session: (0..10).map(|i| (format!("s{i}"), 0.2, 200)).collect(),
             records: 25,
             unpriced_records: 0,
