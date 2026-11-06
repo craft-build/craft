@@ -960,6 +960,8 @@ fn bare_info(id: &str) -> ModelInfo {
 }
 
 // --- Protocol quirks ----------------------------------------------------------------
+// Adapter edge policies re-derived here until animist exposes them on the
+// model (F19).
 
 /// Whether the target protocol rejects images inside tool results.
 fn chat_completions_target(config: &ProviderConfig, id: &str) -> bool {

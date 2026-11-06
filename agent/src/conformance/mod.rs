@@ -560,7 +560,8 @@ fn family_efforts(kind: &Kind) -> Vec<&'static str> {
 
 /// Whether a recorded request's reasoning fields are valid for the
 /// dialect: the thinking knob, when present, must be a shape the wire
-/// accepts, never a value the dialect rejects.
+/// accepts, never a value the dialect rejects. Mirrors animist's wire
+/// vocabularies until they export them (F18).
 fn reasoning_wire_is_valid(dialect: Dialect, body: &Value) -> bool {
     match dialect {
         Dialect::Anthropic => {

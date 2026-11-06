@@ -159,6 +159,7 @@ pub(crate) fn record_of(change: &animist::history::HistoryChange) -> Record {
 /// the time of the record, as animist defines them, so replaying records in
 /// order reproduces the snapshot. An out-of-range index is a corrupt
 /// record: the caller fails the load with it ([`SessionError::RecordOutOfRange`]).
+/// Mirrors animist's record semantics until it exposes a replay API (F16).
 pub(crate) fn apply_record(entries: &mut Vec<HistoryEntry>, record: &Record) -> Result<(), ()> {
     match record {
         Record::Entry { entry } => {

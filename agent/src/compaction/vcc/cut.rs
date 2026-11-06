@@ -1,3 +1,6 @@
+//! Task-boundary-aware cut policy: the pairing scan below is deliberately
+//! local (animist F17 would export it), the boundary rule itself is craft's.
+
 use std::collections::HashSet;
 
 use crate::history::{Role, StoredMessage, ext};
