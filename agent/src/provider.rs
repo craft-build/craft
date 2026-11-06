@@ -221,9 +221,14 @@ pub async fn complete_text(
     // Aux calls carry no user preference; a model that refuses to answer
     // without reasoning (Bedrock validates the field server-side) needs a
     // real level, so default to the lowest supported one instead of none.
+    // The capability comes from the Model's override-aware accessors —
+    // the raw catalog info misses manual `requires_thinking` config.
+    let mut resolved_info = handle.model.info.clone();
+    resolved_info.features.thinking.supported = handle.model.thinking_supported();
+    resolved_info.features.thinking.required = handle.model.thinking_required();
     options.thinking = crate::thinking::effective_for(
         crate::thinking::ThinkingConfig::default(),
-        Some(&handle.model.info),
+        Some(&resolved_info),
     )
     .to_animist();
     if handle.moves_system_to_preamble() {
@@ -863,19 +868,25 @@ fn bedrock_openai_surface(lower_id: &str) -> bool {
 
 // --- Model metadata ----------------------------------------------------------------
 
-/// Config-driven thinking overrides layered over the catalog's claims.
-fn thinking_overrides(settings: Option<&ModelConfig>) -> Overrides {
-    let mut overrides = Overrides::default();
-    let Some(settings) = settings else {
-        return overrides;
-    };
-    overrides.thinking = match (settings.supports_thinking, settings.requires_thinking) {
+/// One interpretation of the manual table's thinking switches: the
+/// capability claim they make about the model. [`thinking_overrides`]
+/// folds it into the built `Model` (what the adapters read) and
+/// [`apply_thinking_settings`] into the listing (what the pickers read).
+fn thinking_support(settings: &ModelConfig) -> Option<ThinkingSupport> {
+    match (settings.supports_thinking, settings.requires_thinking) {
         (_, Some(true)) => Some(ThinkingSupport::Required),
         (Some(false), _) => Some(ThinkingSupport::No),
         (Some(true), _) => Some(ThinkingSupport::Yes),
         (None, Some(false) | None) => None,
-    };
-    overrides
+    }
+}
+
+/// Config-driven thinking overrides layered over the catalog's claims.
+fn thinking_overrides(settings: Option<&ModelConfig>) -> Overrides {
+    Overrides {
+        thinking: settings.and_then(thinking_support),
+        ..Default::default()
+    }
 }
 
 /// Fold the config's manual models table into a discovery listing.
@@ -923,11 +934,20 @@ fn merge_manual_models(
 
 /// The manual table's thinking switches override the listing's claims.
 fn apply_thinking_settings(info: &mut ModelInfo, settings: &crate::config::ModelConfig) {
-    if let Some(supported) = settings.supports_thinking {
-        info.features.thinking.supported = supported;
-    }
-    if let Some(required) = settings.requires_thinking {
-        info.features.thinking.required = required;
+    match thinking_support(settings) {
+        Some(ThinkingSupport::Required) => {
+            info.features.thinking.supported = true;
+            info.features.thinking.required = true;
+        }
+        Some(ThinkingSupport::Yes) => {
+            info.features.thinking.supported = true;
+            info.features.thinking.required = false;
+        }
+        Some(ThinkingSupport::No) => {
+            info.features.thinking.supported = false;
+            info.features.thinking.required = false;
+        }
+        None => {}
     }
 }
 
@@ -1024,6 +1044,47 @@ mod tests {
             }),
         };
         assert_eq!(provider_failure_text(&other), other.to_string());
+    }
+
+    // --- aux completions ---
+
+    /// A manual `requires_thinking` config rides the Model's overrides,
+    /// not its catalog info; the aux call must still see the capability
+    /// and send a real level, because Bedrock validates the field
+    /// server-side and rejects a thinking-less request.
+    #[tokio::test]
+    async fn aux_completions_honor_thinking_overrides() {
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        provider.push(crate::testing::text_turn("aux"));
+        // Raw info claims the model cannot reason; the overrides force it.
+        let mut info = crate::testing::model_info("m", 200_000, 8_192, false, false);
+        info.features.thinking = animist::provider::Thinking::builder()
+            .supported(false)
+            .required(false)
+            .efforts(vec![
+                animist::provider::Effort::Low,
+                animist::provider::Effort::High,
+            ])
+            .build();
+        let model = animist::provider::Model::builder()
+            .id("m".to_owned())
+            .provider(std::sync::Arc::new(animist::provider::Provider::new(
+                provider.clone(),
+            )))
+            .info(info)
+            .overrides(Overrides {
+                thinking: Some(ThinkingSupport::Required),
+                ..Default::default()
+            })
+            .build();
+        let handle = ModelHandle::scripted(model);
+        let messages = vec![crate::history::ext::user_text("hello".to_owned())];
+        complete_text(&handle, &messages, "system").await.unwrap();
+        assert_eq!(
+            provider.requests()[0].options.thinking,
+            animist::provider::ThinkingConfig::Effort(animist::provider::Effort::Low),
+            "the override-forced capability must reach the aux request"
+        );
     }
 
     // --- catalog cache policy ---
