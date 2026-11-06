@@ -406,14 +406,15 @@ impl SubagentLauncher {
         let parent_cancel = (*self.cancel.load_full()).clone();
         // The cancel-map slot: the surface can cancel one
         // subagent without stopping the parent turn. Retiring the slot at
-        // exit drops the trigger, which fires the token — the linked run
-        // observes both through the same select.
+        // exit drops the trigger, which cancels its cancellation — the
+        // linked run observes both through the same select.
         let mut cancel_slot = None;
-        let mut slot_token = None;
+        let mut slot_cancel = None;
         if !req.tool_use_id.is_empty() {
-            let (trigger, token) = crate::harness::cancel::cancel_pair();
+            let slot_cancellation = animist::agent::Cancellation::default();
+            let trigger = crate::harness::cancel::CancelTrigger::new(slot_cancellation.clone());
             cancel_slot = Some(self.cancels.insert(req.tool_use_id.clone(), trigger));
-            slot_token = Some(token);
+            slot_cancel = Some(slot_cancellation);
         }
         // Stop the child at every exit path, whether it is owned by the
         // cancel map (retire drops the trigger) or linked only to the
@@ -453,7 +454,7 @@ impl SubagentLauncher {
                 &message,
                 &child_cancel,
                 &parent_cancel,
-                slot_token.as_ref(),
+                slot_cancel.as_ref(),
             )
             .await;
             if matches!(
@@ -625,11 +626,11 @@ async fn run_linked(
     message: &str,
     child: &animist::agent::Cancellation,
     parent: &animist::agent::Cancellation,
-    slot: Option<&crate::harness::cancel::CancelToken>,
+    slot: Option<&animist::agent::Cancellation>,
 ) -> crate::harness::TurnOutcome {
     // A link that already fired resolves the race at once, before the run
     // spends a model call.
-    if parent.is_cancelled() || slot.is_some_and(|slot| slot.cancelled()) {
+    if parent.is_cancelled() || slot.is_some_and(|slot| slot.is_cancelled()) {
         child.cancel();
     }
     let run = crate::harness::run_turn(conversation, message, &[], child.clone());
@@ -640,7 +641,7 @@ async fn run_linked(
             () = parent.cancelled() => {}
             () = async {
                 match slot {
-                    Some(slot) => slot.wait().await,
+                    Some(slot) => slot.cancelled().await,
                     None => std::future::pending().await,
                 }
             } => {}

@@ -32,7 +32,6 @@ mod tests;
 pub(crate) mod view;
 
 pub use approval::{Approval, ApprovalAsk, ApprovalResponder};
-pub use cancel::{CancelFlag, CancelToken, cancel_channel};
 pub use conversation::{Conversation, ConversationBuilder, MaxTurns, TurnSettings};
 pub use driver::{TurnOutcome, compact_between_runs, run_turn};
 pub use events::{CraftEvent, DoneReason, Event, EventSink, EventStream};

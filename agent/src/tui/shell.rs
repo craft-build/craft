@@ -10,9 +10,9 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
 use crate::child_guard::ChildGuard;
-use crate::harness::CancelToken;
 use crate::harness::cancel::CancelTrigger;
 use crate::history;
+use animist::agent::Cancellation;
 
 use super::provider::{AgentEvent, LineKind, ToolCallData, ToolKind, ToolLine};
 
@@ -158,7 +158,7 @@ pub(crate) async fn run_shell(
     command: String,
     visible: bool,
     tx: mpsc::UnboundedSender<AgentEvent>,
-    cancel: CancelToken,
+    cancel: Cancellation,
     shell: Arc<Mutex<ShellState>>,
 ) {
     let _ = tx.send(card(&id, &command, Vec::new()));
@@ -183,7 +183,7 @@ async fn run_command(
     command: &str,
     id: &str,
     tx: &mpsc::UnboundedSender<AgentEvent>,
-    cancel: &CancelToken,
+    cancel: &Cancellation,
 ) -> Result<String, String> {
     let mut cmd = TokioCommand::new("bash");
     cmd.arg("-c")
@@ -224,7 +224,7 @@ async fn run_command(
                 _ = tokio::time::sleep_until(deadline.into()) => {
                     Err(format!("timed out after {}s", SHELL_TIMEOUT.as_secs()))
                 }
-                _ = cancel.wait() => Err("cancelled".to_string()),
+                _ = cancel.cancelled() => Err("cancelled".to_string()),
             }
         };
     }
@@ -393,11 +393,11 @@ mod tests {
     /// queues the `I ran: …` message only for visible runs.
     #[tokio::test]
     async fn run_shell_streams_cards_and_queues_visible_result() {
-        use crate::harness::cancel_channel;
         use crate::tui::provider::AgentEvent;
+        use animist::agent::Cancellation;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_flag, cancel) = cancel_channel();
+        let cancel = Cancellation::default();
         let shell = Arc::new(Mutex::new(ShellState::default()));
 
         run_shell(
@@ -443,10 +443,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_shell_hidden_and_errors_do_not_queue_results() {
-        use crate::harness::cancel_channel;
+        use animist::agent::Cancellation;
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (_flag, cancel) = cancel_channel();
+        let cancel = Cancellation::default();
         let shell = Arc::new(Mutex::new(ShellState::default()));
 
         run_shell(
@@ -468,12 +468,12 @@ mod tests {
     /// with `is_error` set.
     #[tokio::test]
     async fn cancelled_shell_kills_the_command() {
-        use crate::harness::cancel_channel;
         use crate::tui::provider::AgentEvent;
+        use animist::agent::Cancellation;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let (flag, cancel) = cancel_channel();
-        flag.set(true); // cancelled before it starts, as after an Esc press
+        let cancel = Cancellation::default();
+        cancel.cancel(); // cancelled before it starts, as after an Esc press
         let shell = Arc::new(Mutex::new(ShellState::default()));
 
         let started = Instant::now();
@@ -528,28 +528,29 @@ mod tests {
         assert!(state.drain_results().is_empty());
     }
 
-    /// `cancel_all` stops every in-flight run's token; a finished run's
-    /// trigger is already gone and cannot be re-cancelled.
+    /// `cancel_all` stops every in-flight run's cancellation; a finished
+    /// run's trigger is already gone and cannot be re-cancelled.
     #[tokio::test]
     async fn shell_state_cancel_all_cancels_in_flight_runs() {
-        use crate::harness::cancel::cancel_pair;
+        use crate::harness::cancel::CancelTrigger;
+        use animist::agent::Cancellation;
 
         let mut state = ShellState::default();
         let id_a = state.reserve_id();
         let id_b = state.reserve_id();
-        let (trig_a, tok_a) = cancel_pair();
-        let (trig_b, tok_b) = cancel_pair();
-        state.add_trigger(&id_a, trig_a);
-        state.add_trigger(&id_b, trig_b);
+        let cancel_a = Cancellation::default();
+        let cancel_b = Cancellation::default();
+        state.add_trigger(&id_a, CancelTrigger::new(cancel_a.clone()));
+        state.add_trigger(&id_b, CancelTrigger::new(cancel_b.clone()));
 
         state.finish_run(&id_a); // retired: dropping its trigger ends the
-        // link task (the token cancel it performs is post-run cleanup)
-        tok_a.wait().await;
-        assert!(tok_a.cancelled());
+        // link task (the cancellation it performs is post-run cleanup)
+        cancel_a.cancelled().await;
+        assert!(cancel_a.is_cancelled());
 
         state.cancel_all();
-        tok_b.wait().await;
-        assert!(tok_b.cancelled(), "the in-flight run is stopped");
+        cancel_b.cancelled().await;
+        assert!(cancel_b.is_cancelled(), "the in-flight run is stopped");
         assert!(state.active_ids().is_empty());
     }
 

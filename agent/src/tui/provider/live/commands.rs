@@ -425,8 +425,8 @@ fn handle_shell(ctx: &LoopCtx, command: String, visible: bool) {
     let (id, cancel) = {
         let mut shell = ctx.shell.lock().unwrap_or_else(|e| e.into_inner());
         let id = shell.reserve_id();
-        let (trigger, cancel) = harness::cancel::cancel_pair();
-        shell.add_trigger(&id, trigger);
+        let cancel = animist::agent::Cancellation::default();
+        shell.add_trigger(&id, harness::cancel::CancelTrigger::new(cancel.clone()));
         (id, cancel)
     };
     let tx = ctx.kit.evt_tx.clone();

@@ -1,130 +1,37 @@
 //! Cancellation architecture.
 //!
-//! The watch-based [`CancelToken`](super::CancelToken)/[`CancelFlag`](super::CancelFlag)
-//! pair is the substrate — the TUI surface, the stream select, and the
-//! epoch re-arm semantics all hang off it. On top: a cancel-on-drop
-//! [`CancelTrigger`],
-//! [`CancelToken::race`], and the slotted [`CancelMap`] for per-key
-//! grouped cancellation with pre-cancel. Parent↔child propagation is the
-//! caller's awaited select (see `subagent::run_linked`).
+//! animist's watch-based [`Cancellation`] is the substrate: clones share
+//! one monotonic flag, and `cancelled()`/`race` do the waiting. On top: a
+//! cancel-on-drop [`CancelTrigger`] and the slotted [`CancelMap`] for
+//! per-key grouped cancellation with pre-cancel. Parent↔child
+//! propagation is the caller's awaited select (see `subagent::run_linked`).
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::watch;
+use animist::agent::Cancellation;
 
-/// Cancellation shared between a surface and its run: set the flag, and the
-/// run stops at the next stream/dispatch/turn boundary.
-#[derive(Clone)]
-pub struct CancelToken {
-    rx: watch::Receiver<u64>,
-    epoch: u64,
-}
-
-/// The setting half of a [`CancelToken`].
-#[derive(Clone)]
-pub struct CancelFlag {
-    tx: watch::Sender<u64>,
-}
-
-/// Create a cancellation pair, initially not cancelled.
-pub fn cancel_channel() -> (CancelFlag, CancelToken) {
-    let (tx, rx) = watch::channel(0);
-    (CancelFlag { tx }, CancelToken { rx, epoch: 0 })
-}
-
-impl CancelToken {
-    pub fn cancelled(&self) -> bool {
-        *self.rx.borrow() != self.epoch
-    }
-
-    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
-        self.rx.clone()
-    }
-}
-
-impl CancelFlag {
-    /// Cancellation is monotonic and epoch-scoped: `set(true)` bumps the
-    /// generation and can never be overwritten by a concurrent re-arm,
-    /// while `set(false)` is a no-op — a fresh turn starts clean by
-    /// minting a new token at the current generation.
-    pub fn set(&self, cancelled: bool) {
-        if cancelled {
-            self.tx.send_modify(|generation| *generation += 1);
-        }
-    }
-
-    /// A token sharing this flag's state.
-    pub fn token(&self) -> CancelToken {
-        CancelToken {
-            rx: self.tx.subscribe(),
-            epoch: *self.tx.borrow(),
-        }
-    }
-}
-
-const CANCELLED: &str = "cancelled";
-
-/// The setting half of a token that fires on drop, so a scope that exits
-/// early (panic, `?`, early return) stops what it started.
-pub struct CancelTrigger(CancelFlag);
+/// The setting half of a cancellation that fires on drop, so a scope that
+/// exits early (panic, `?`, early return) stops what it started.
+pub struct CancelTrigger(Cancellation);
 
 impl CancelTrigger {
-    pub fn cancel(self) {
-        self.0.set(true);
+    pub fn new(cancellation: Cancellation) -> Self {
+        Self(cancellation)
     }
+
+    /// A clone sharing this trigger's state, for the run to await.
+    pub fn cancellation(&self) -> Cancellation {
+        self.0.clone()
+    }
+
+    pub fn cancel(self) {}
 }
 
 impl Drop for CancelTrigger {
     fn drop(&mut self) {
-        self.0.set(true);
-    }
-}
-
-/// A fresh cancellation pair whose trigger cancels on drop.
-pub fn cancel_pair() -> (CancelTrigger, CancelToken) {
-    let (flag, token) = cancel_channel();
-    (CancelTrigger(flag), token)
-}
-
-impl CancelToken {
-    /// Resolves once this token is cancelled; resolves immediately when it
-    /// already is, and also when the setting half is dropped (it can never
-    /// fire again, so waiting would hang).
-    pub async fn wait(&self) {
-        let mut rx = self.subscribe();
-        loop {
-            if self.cancelled() {
-                return;
-            }
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
-    }
-
-    /// Runs `future` to completion unless cancellation wins the race first.
-    /// A dropped setting half is not a cancellation: the future runs to
-    /// completion (nothing can ever cancel it anymore).
-    pub async fn race<T>(&self, future: impl Future<Output = T>) -> Result<T, String> {
-        if self.cancelled() {
-            return Err(CANCELLED.into());
-        }
-        let mut rx = self.subscribe();
-        tokio::pin!(future);
-        tokio::select! {
-            result = &mut future => Ok(result),
-            changed = rx.changed() => {
-                let _ = changed;
-                if self.cancelled() {
-                    Err(CANCELLED.into())
-                } else {
-                    Ok(future.await)
-                }
-            }
-        }
+        self.0.cancel();
     }
 }
 
@@ -233,112 +140,81 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn trigger_wakes_token() {
-        let (trigger, token) = cancel_pair();
-        assert!(!token.cancelled());
+    async fn trigger_cancels_its_cancellation() {
+        let cancellation = Cancellation::default();
+        let trigger = CancelTrigger::new(cancellation.clone());
+        assert!(!cancellation.is_cancelled());
         trigger.cancel();
-        token.wait().await;
-        assert!(token.cancelled());
+        cancellation.cancelled().await;
+        assert!(cancellation.is_cancelled());
     }
 
     #[tokio::test]
     async fn drop_trigger_also_cancels() {
-        let (trigger, token) = cancel_pair();
+        let cancellation = Cancellation::default();
+        let trigger = CancelTrigger::new(cancellation.clone());
         drop(trigger);
-        token.wait().await;
-        assert!(token.cancelled());
+        cancellation.cancelled().await;
+        assert!(cancellation.is_cancelled());
     }
 
     #[tokio::test]
-    async fn wait_resolves_when_the_flag_half_drops() {
-        // A dropped setting half can never cancel, so waiting must not hang.
-        let (trigger, token) = cancel_pair();
+    async fn cancellation_accessor_shares_state() {
+        let cancellation = Cancellation::default();
+        let trigger = CancelTrigger::new(cancellation);
+        let shared = trigger.cancellation();
+        assert!(!shared.is_cancelled());
         drop(trigger);
-        token.wait().await;
-    }
-
-    #[tokio::test]
-    async fn race_returns_value_when_not_cancelled() {
-        let (_trigger, token) = cancel_pair();
-        let result = token.race(async { 42 }).await;
-        assert_eq!(result.unwrap(), 42);
-    }
-
-    #[tokio::test]
-    async fn race_returns_error_when_already_cancelled() {
-        let (trigger, token) = cancel_pair();
-        trigger.cancel();
-        let result = token.race(std::future::pending::<()>()).await;
-        assert!(result.unwrap_err().contains("cancelled"));
-    }
-
-    #[tokio::test]
-    async fn race_finishes_when_the_flag_half_drops() {
-        let (flag, token) = cancel_channel();
-        drop(flag);
-        let result = token.race(async { 7 }).await;
-        assert_eq!(result.unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn race_interrupted_by_concurrent_cancel() {
-        let (trigger, token) = cancel_pair();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            trigger.cancel();
-        });
-        let result = token.race(std::future::pending::<()>()).await;
-        assert!(result.is_err());
+        assert!(shared.is_cancelled());
     }
 
     #[test]
     fn cancel_map_insert_and_cancel() {
         let map = CancelMap::new();
-        let (trigger, token) = cancel_pair();
-        map.insert("t1".to_owned(), trigger);
-        assert!(!token.cancelled());
+        let cancellation = Cancellation::default();
+        map.insert("t1".to_owned(), CancelTrigger::new(cancellation.clone()));
+        assert!(!cancellation.is_cancelled());
         map.cancel_or_precancel("t1".to_owned());
-        assert!(token.cancelled());
+        assert!(cancellation.is_cancelled());
     }
 
     /// One tool call can open several subagents.
     #[test]
     fn cancel_map_keeps_siblings_under_one_key() {
         let map = CancelMap::new();
-        let (t1, tok1) = cancel_pair();
-        let (t2, tok2) = cancel_pair();
-        map.insert("x".to_owned(), t1);
-        map.insert("x".to_owned(), t2);
-        assert!(!tok1.cancelled(), "a sibling must not evict the first");
-        assert!(!tok2.cancelled());
+        let c1 = Cancellation::default();
+        let c2 = Cancellation::default();
+        map.insert("x".to_owned(), CancelTrigger::new(c1.clone()));
+        map.insert("x".to_owned(), CancelTrigger::new(c2.clone()));
+        assert!(!c1.is_cancelled(), "a sibling must not evict the first");
+        assert!(!c2.is_cancelled());
 
         map.cancel_or_precancel("x".to_owned());
-        assert!(tok1.cancelled(), "cancelling the key stops them all");
-        assert!(tok2.cancelled());
+        assert!(c1.is_cancelled(), "cancelling the key stops them all");
+        assert!(c2.is_cancelled());
     }
 
     #[test]
     fn cancel_map_retire_leaves_siblings_running() {
         let map = CancelMap::new();
-        let (t1, tok1) = cancel_pair();
-        let (t2, tok2) = cancel_pair();
-        let slot1 = map.insert("x".to_owned(), t1);
-        map.insert("x".to_owned(), t2);
+        let c1 = Cancellation::default();
+        let c2 = Cancellation::default();
+        let slot1 = map.insert("x".to_owned(), CancelTrigger::new(c1.clone()));
+        map.insert("x".to_owned(), CancelTrigger::new(c2.clone()));
 
         map.retire(&"x".to_owned(), slot1);
-        assert!(tok1.cancelled(), "retiring drops that trigger");
-        assert!(!tok2.cancelled(), "the sibling keeps running");
+        assert!(c1.is_cancelled(), "retiring drops that trigger");
+        assert!(!c2.is_cancelled(), "the sibling keeps running");
 
         map.cancel_or_precancel("x".to_owned());
-        assert!(tok2.cancelled());
+        assert!(c2.is_cancelled());
     }
 
     /// The last one out clears the key so it can be reused.
     #[test]
     fn cancel_map_retiring_the_last_registration_clears_the_key() {
         let map = CancelMap::new();
-        let (t1, _tok1) = cancel_pair();
-        let slot = map.insert("x".to_owned(), t1);
+        let slot = map.insert("x".to_owned(), CancelTrigger::new(Cancellation::default()));
         assert!(map.has_key(&"x".to_owned()));
 
         map.retire(&"x".to_owned(), slot);
@@ -352,12 +228,12 @@ mod tests {
         let map: CancelMap<String> = CancelMap::new();
         map.cancel_or_precancel("x".to_owned());
 
-        let (t1, tok1) = cancel_pair();
-        let (t2, tok2) = cancel_pair();
-        let slot1 = map.insert("x".to_owned(), t1);
-        let slot2 = map.insert("x".to_owned(), t2);
-        assert!(tok1.cancelled());
-        assert!(tok2.cancelled(), "the mark must outlive the first insert");
+        let c1 = Cancellation::default();
+        let c2 = Cancellation::default();
+        let slot1 = map.insert("x".to_owned(), CancelTrigger::new(c1.clone()));
+        let slot2 = map.insert("x".to_owned(), CancelTrigger::new(c2.clone()));
+        assert!(c1.is_cancelled());
+        assert!(c2.is_cancelled(), "the mark must outlive the first insert");
 
         map.retire(&"x".to_owned(), slot1);
         assert!(map.has_key(&"x".to_owned()));
@@ -370,25 +246,25 @@ mod tests {
     #[test]
     fn cancel_map_cancel_catches_a_sibling_registered_after() {
         let map = CancelMap::new();
-        let (t1, tok1) = cancel_pair();
-        let slot1 = map.insert("x".to_owned(), t1);
+        let c1 = Cancellation::default();
+        let slot1 = map.insert("x".to_owned(), CancelTrigger::new(c1.clone()));
 
         map.cancel_or_precancel("x".to_owned());
-        assert!(tok1.cancelled());
+        assert!(c1.is_cancelled());
 
-        let (t2, tok2) = cancel_pair();
-        let slot2 = map.insert("x".to_owned(), t2);
-        assert!(tok2.cancelled(), "cancel left no mark for the sibling");
+        let c2 = Cancellation::default();
+        let slot2 = map.insert("x".to_owned(), CancelTrigger::new(c2.clone()));
+        assert!(c2.is_cancelled(), "cancel left no mark for the sibling");
 
         map.retire(&"x".to_owned(), slot1);
         assert!(map.has_key(&"x".to_owned()));
         map.retire(&"x".to_owned(), slot2);
         assert!(!map.has_key(&"x".to_owned()));
 
-        let (t3, tok3) = cancel_pair();
-        map.insert("x".to_owned(), t3);
+        let c3 = Cancellation::default();
+        map.insert("x".to_owned(), CancelTrigger::new(c3.clone()));
         assert!(
-            !tok3.cancelled(),
+            !c3.is_cancelled(),
             "the completed call must not poison a reused tool id"
         );
     }
@@ -397,9 +273,9 @@ mod tests {
     fn cancel_map_insert_into_cancelled_returns_retirement_slot() {
         let map = CancelMap::new();
         map.cancel_or_precancel("x".to_owned());
-        let (trigger, token) = cancel_pair();
-        let slot = map.insert("x".to_owned(), trigger);
-        assert!(token.cancelled());
+        let cancellation = Cancellation::default();
+        let slot = map.insert("x".to_owned(), CancelTrigger::new(cancellation.clone()));
+        assert!(cancellation.is_cancelled());
         map.retire(&"x".to_owned(), slot);
         assert!(!map.has_key(&"x".to_owned()));
     }
@@ -409,21 +285,24 @@ mod tests {
         let map: CancelMap<String> = CancelMap::new();
         map.cancel_or_precancel("t1".to_owned());
         map.remove(&"t1".to_owned());
-        let (trigger, token) = cancel_pair();
-        map.insert("t1".to_owned(), trigger);
-        assert!(!token.cancelled(), "remove should clear cancellation");
+        let cancellation = Cancellation::default();
+        map.insert("t1".to_owned(), CancelTrigger::new(cancellation.clone()));
+        assert!(
+            !cancellation.is_cancelled(),
+            "remove should clear cancellation"
+        );
     }
 
     #[test]
     fn cancel_map_cancel_all() {
         let map = CancelMap::new();
-        let (t1, tok1) = cancel_pair();
-        let (t2, tok2) = cancel_pair();
-        map.insert("a".to_owned(), t1);
-        map.insert("b".to_owned(), t2);
+        let c1 = Cancellation::default();
+        let c2 = Cancellation::default();
+        map.insert("a".to_owned(), CancelTrigger::new(c1.clone()));
+        map.insert("b".to_owned(), CancelTrigger::new(c2.clone()));
         map.cancel_all();
-        assert!(tok1.cancelled());
-        assert!(tok2.cancelled());
+        assert!(c1.is_cancelled());
+        assert!(c2.is_cancelled());
     }
 
     #[test]
@@ -431,10 +310,10 @@ mod tests {
         let map: CancelMap<String> = CancelMap::new();
         map.cancel_or_precancel("t1".to_owned());
         map.cancel_all();
-        let (trigger, token) = cancel_pair();
-        map.insert("t1".to_owned(), trigger);
+        let cancellation = Cancellation::default();
+        map.insert("t1".to_owned(), CancelTrigger::new(cancellation.clone()));
         assert!(
-            !token.cancelled(),
+            !cancellation.is_cancelled(),
             "cancel_all should clear cancelled entries"
         );
     }
