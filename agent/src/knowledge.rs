@@ -22,13 +22,14 @@ pub type Store = argosy::mcp::McpState<
     argosy::index::sqlite::SqliteVecStore,
 >;
 
-/// Argosy tool names (their native wire names), in
-/// `tool_definitions()` order. Pinned by a test against the crate so a new
-/// upstream tool cannot register silently.
+/// Argosy tool names as craft registers them (crate wire names remapped by
+/// `native_name`), in `tool_definitions()` order. Pinned by a test against
+/// the crate so a new upstream tool cannot register silently. The crate's
+/// `get_skill` is absent: the builtin `skill` tool already serves argosy
+/// skills (with filesystem shadowing) via [`skill_bodies`].
 pub const TOOL_NAMES: &[&str] = &[
     "search",
     "list_skills",
-    "skill",
     "search_rules",
     "read_memory",
     "read_document",
@@ -58,7 +59,6 @@ pub const TOOL_NAMES: &[&str] = &[
 pub const READ_ONLY_TOOLS: &[&str] = &[
     "search",
     "list_skills",
-    "skill",
     "search_rules",
     "read_memory",
     "read_document",
@@ -394,6 +394,10 @@ pub fn tool_definitions() -> &'static Vec<ToolDef> {
     DEFS.get_or_init(|| {
         argosy::mcp::tool_definitions()
             .into_iter()
+            // The crate's `get_skill` is not registered: the builtin
+            // `skill` tool serves argosy skills via `skill_bodies`, and
+            // registering both would collide on the name.
+            .filter(|tool| tool.name != "get_skill")
             .map(|tool| {
                 let native = native_name(&tool.name);
                 let description = if tool.name == "search" {

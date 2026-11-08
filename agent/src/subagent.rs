@@ -41,7 +41,6 @@ pub const RESEARCH_TOOLS: &[&str] = &[
     "read_document",
     "read_memory",
     "list_skills",
-    "get_skill",
     "outline",
     "zoom",
     "callgraph",

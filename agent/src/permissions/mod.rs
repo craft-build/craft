@@ -68,6 +68,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "list",
     "inspect",
     "retrieve",
+    "skill",
     "list_tools",
     "bash_status",
     "bash_watch",
@@ -94,7 +95,6 @@ pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task", "review", "batch"];
 pub const ARGOSY_ALLOW_TOOLS: &[&str] = &[
     "search",
     "list_skills",
-    "get_skill",
     "search_rules",
     "read_memory",
     "read_document",

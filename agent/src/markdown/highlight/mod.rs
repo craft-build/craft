@@ -114,10 +114,12 @@ static THEME: OnceLock<RwLock<Arc<Theme>>> = OnceLock::new();
 static BLOCK_CACHE: OnceLock<RwLock<BlockCache>> = OnceLock::new();
 static THEME_GEN: AtomicU64 = AtomicU64::new(0);
 
-/// Tests that mutate the global theme (or assert render output that a
-/// concurrent swap would change) share this lock so parallel test threads
-/// can't observe each other's swaps. The lock lives here, next to
-/// `THEME_GEN`, the resource it guards; the TUI theme tests re-export it.
+/// Tests that mutate the process-global theme (or assert render/highlight
+/// output that a concurrent swap would change) share this lock so parallel
+/// test threads can't observe each other's swaps — one mutex for the TUI
+/// theme tests, the render tests, and the highlight-module tests alike. The
+/// lock lives here, next to `THEME_GEN`, the resource it guards; the TUI
+/// theme tests re-export it.
 #[cfg(test)]
 pub(crate) static THEME_SWAP_LOCK: Mutex<()> = Mutex::new(());
 
@@ -509,15 +511,13 @@ impl CodeHighlighter {
     }
 }
 
-/// Test-only lock over the process-global theme and block cache, so tests
-/// that touch them (here or in sibling modules) cannot interleave under the
+/// Test-only lock over the process-global theme and block cache: the same
+/// [`THEME_SWAP_LOCK`] every theme-mutating test takes, so tests that touch
+/// them (here or in sibling modules) cannot interleave under the
 /// shared-process test harness.
 #[cfg(test)]
-static TEST_GLOBALS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
 pub(crate) fn lock_test_globals() -> std::sync::MutexGuard<'static, ()> {
-    TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    THEME_SWAP_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Test-only: takes the global lock and installs the built-in theme, so

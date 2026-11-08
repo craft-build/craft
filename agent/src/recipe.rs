@@ -200,10 +200,11 @@ impl Recipe {
         let template = env
             .template_from_str(&self.instructions)
             .map_err(|e| RecipeError::Template(e.to_string()))?;
-        let context: minijinja::Value = params
-            .iter()
-            .map(|(k, v)| (minijinja::Value::from(k.as_str()), to_mj_value(v)))
-            .collect();
+        let context = minijinja::Value::from_pairs(
+            params
+                .iter()
+                .map(|(k, v)| (k.as_str(), to_mj_value(v))),
+        );
         template
             .render(context)
             .map_err(|e| RecipeError::Template(e.to_string()))
@@ -225,10 +226,10 @@ fn to_mj_value(v: &Value) -> minijinja::Value {
         }
         Value::String(s) => minijinja::Value::from(s.as_str()),
         Value::Array(a) => a.iter().map(to_mj_value).collect::<minijinja::Value>(),
-        Value::Object(o) => o
-            .iter()
-            .map(|(k, val)| (minijinja::Value::from(k.as_str()), to_mj_value(val)))
-            .collect::<minijinja::Value>(),
+        Value::Object(o) => minijinja::Value::from_pairs(
+            o.iter()
+                .map(|(k, val)| (k.as_str(), to_mj_value(val))),
+        ),
     }
 }
 
