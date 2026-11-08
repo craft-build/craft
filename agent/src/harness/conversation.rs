@@ -354,10 +354,6 @@ impl<'a> ConversationBuilder<'a> {
     }
 
     /// Assemble the layers, the settings cell, and the first `Agent`.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the crate error type is deliberately unboxed"
-    )]
     pub fn build(self) -> Result<Conversation> {
         let Self {
             config,
@@ -674,20 +670,12 @@ impl Conversation {
 
     /// Swap the model and rebuild the agent between runs, keeping the
     /// history, the layer state, and the event subscription.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the crate error type is deliberately unboxed"
-    )]
     pub fn set_model(&self, model: ModelHandle) -> Result<()> {
         self.inner.model.store(Arc::new(model));
         self.rebuild().context(BuildConversationSnafu)
     }
 
     /// Swap the tool registry and rebuild the agent between runs.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the crate error type is deliberately unboxed"
-    )]
     pub fn set_tools(&self, tools: ToolRegistry) -> Result<()> {
         self.inner.tools.store(Arc::new(tools));
         self.rebuild().context(BuildConversationSnafu)
@@ -719,10 +707,6 @@ impl Conversation {
 
     /// Release the agent's resources. Explicit, idempotent, and required on
     /// every exit path; async cleanup cannot run in `Drop`.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the crate error type is deliberately unboxed"
-    )]
     pub async fn shutdown(&self) -> Result<()> {
         self.agent()
             .shutdown()

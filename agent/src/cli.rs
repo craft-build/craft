@@ -907,6 +907,450 @@ fn stored_model_spec(session: &crate::storage::sessions::StoredSession) -> Optio
     (!model.is_empty() && model != "unknown" && model.contains('/')).then(|| model.to_string())
 }
 
+/// Resolve the initial prompt for a run: the positional `PROMPT` wins; else
+/// piped stdin (when `stdin_attached` is false) is read to a string; a
+/// terminal stdin yields `None`. The result is trimmed; whitespace-only
+/// input collapses to `None` so the TUI starts normally. Shared by
+/// `--print` (which still errors on `None`) and the interactive TUI.
+pub fn resolve_prompt_input(
+    cli_prompt: Option<String>,
+    stdin: &mut impl std::io::Read,
+    stdin_attached: bool,
+) -> Result<Option<String>> {
+    let raw = match cli_prompt {
+        Some(prompt) => prompt,
+        None if !stdin_attached => {
+            let mut buf = String::new();
+            stdin.read_to_string(&mut buf).map_err(|e| {
+                InvalidSnafu {
+                    reason: format!("reading the prompt from stdin: {e}"),
+                }
+                .build()
+            })?;
+            buf
+        }
+        None => return Ok(None),
+    };
+    let trimmed = raw.trim().to_string();
+    Ok((!trimmed.is_empty()).then_some(trimmed))
+}
+
+/// `craft --print`: run one prompt to completion against the
+/// configured providers and emit text, JSONL (`--output-format
+/// stream-json`), or a verbose transcript (`--verbose`). SDK-mode
+/// stream-json input is not supported. `config.agent.preamble` must
+/// already be the effective preamble — `main` applies the CLI prompt
+/// overrides once, before dispatch.
+pub async fn run_print(cli: &Cli, config: crate::config::Config) -> Result<()> {
+    run_print_with(cli, config, StateDir::resolve().ok()).await
+}
+
+/// [`run_print`] with an injectable state dir: tests pass `None` so runs
+/// never touch the developer's session storage.
+async fn run_print_with(
+    cli: &Cli,
+    mut config: crate::config::Config,
+    state_dir: Option<StateDir>,
+) -> Result<()> {
+    cli.apply_thinking(&mut config)?;
+    // One warning per unimplemented option, in a stable order.
+    for flag in ["--image", "--verbose", "--include-partial-messages"] {
+        let set = match flag {
+            "--image" => !cli.images.is_empty(),
+            "--verbose" => cli.verbose,
+            _ => cli.include_partial_messages,
+        };
+        if set {
+            eprintln!("warning: {flag} is accepted but not implemented yet (task 84)");
+        }
+    }
+
+    let prompt = match resolve_prompt_input(
+        cli.initial_prompt.clone(),
+        &mut std::io::stdin(),
+        std::io::stdin().is_terminal(),
+    )? {
+        Some(prompt) => prompt,
+        None => {
+            return InvalidSnafu {
+                reason: "--print needs a prompt argument or a piped stdin prompt".to_string(),
+            }
+            .fail();
+        }
+    };
+
+    // Session resolution: --continue / --session / --fork-session get
+    // their print-mode semantics here, before any model work.
+    let cwd = std::env::current_dir().map_err(|e| {
+        InvalidSnafu {
+            reason: format!("resolving the current directory: {e}"),
+        }
+        .build()
+    })?;
+    let plan = match state_dir.as_ref() {
+        Some(dir) => cli.resolve_session_plan(dir, &cwd.display().to_string())?,
+        None => {
+            if cli.fork_session || cli.continue_session || cli.session.is_some() {
+                return InvalidSnafu {
+                    reason: "session storage is unavailable, cannot resume or fork".to_string(),
+                }
+                .fail();
+            }
+            ResumePlan::Fresh { id: None }
+        }
+    };
+    let mut query = HeadlessQuery::for_print(cli, prompt, None)?;
+    apply_resume_plan(cli, &mut query, plan);
+    run_headless_query_with(config, query, state_dir).await
+}
+
+/// Wire a resolved [`ResumePlan`] into the query: the session id the run
+/// persists under, and the stored `provider/model` when `--model` is absent
+/// (an explicit flag always wins).
+fn apply_resume_plan(cli: &Cli, query: &mut HeadlessQuery, plan: ResumePlan) {
+    match plan {
+        ResumePlan::Fresh { id } => query.session_id = id,
+        ResumePlan::Resume { id, model } | ResumePlan::Fork { new_id: id, model } => {
+            query.session_id = Some(id);
+            if cli.model.is_none() {
+                query.model = model;
+            }
+        }
+    }
+}
+
+/// Extra environment context (e.g. shell history) injected before the prompt.
+fn inject_context(prompt: &str, context: &[String]) -> String {
+    if context.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = String::from("<context>\n");
+    for block in context {
+        out.push_str(block);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str("</context>\n\n");
+    out.push_str(prompt);
+    out
+}
+
+/// PascalCase → snake_case (`Read`→`read`, `ViewImage`→`view_image`);
+/// already-snake names pass through unchanged.
+fn pascal_to_snake(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// One headless agent query in print mode. Both `--print` and
+/// `craft term run` funnel through here; `config.agent.preamble` must
+/// already be the effective preamble.
+pub struct HeadlessQuery {
+    pub prompt: String,
+    /// Context blocks wrapped in `<context>` before the prompt.
+    pub context: Vec<String>,
+    pub images: Vec<std::path::PathBuf>,
+    pub model: Option<String>,
+    pub output_format: OutputFormat,
+    pub verbose: bool,
+    pub mode: CliMode,
+    pub session_id: Option<SessionRef>,
+    /// Whether `--yolo` / `-A` bypass the permission gate.
+    pub policy: PermissionPolicy,
+    /// CLI tool policy (`--allowed-tools` / `--disallowed-tools`) as
+    /// permission rules, applied to the run's permission engine before
+    /// the first turn. Empty for surfaces that do not expose the flags
+    /// (`term run`, `recipe run`).
+    pub tool_policy: Vec<PermissionRule>,
+}
+
+impl HeadlessQuery {
+    /// The `--print` mapping, straight off the parsed CLI, so the
+    /// flag→policy mapping is unit-testable without loading config or
+    /// touching the network.
+    pub fn for_print(cli: &Cli, prompt: String, session_id: Option<SessionRef>) -> Result<Self> {
+        Ok(Self {
+            prompt,
+            context: Vec::new(),
+            images: cli.images.clone(),
+            model: cli.model.clone(),
+            output_format: cli.output_format.clone(),
+            verbose: cli.verbose,
+            mode: cli.run_mode(),
+            session_id,
+            policy: cli.permission_policy()?,
+            tool_policy: cli.tool_policy()?,
+        })
+    }
+}
+
+/// One headless agent query in print mode. Both `--print` and
+/// `craft term run` funnel through here; `config.agent.preamble` must
+/// already be the effective preamble.
+pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery) -> Result<()> {
+    run_headless_query_with(config, q, crate::storage::StateDir::resolve().ok()).await
+}
+
+/// [`run_headless_query`] with an injectable state dir: tests pass `None`
+/// so runs never touch the developer's session storage.
+pub(crate) async fn run_headless_query_with(
+    config: crate::config::Config,
+    q: HeadlessQuery,
+    state_dir: Option<StateDir>,
+) -> Result<()> {
+    let catalog_data = crate::provider::load_catalog().await;
+    let prompt = inject_context(&q.prompt, &q.context);
+    // Fails fast: silently dropping an image the caller explicitly attached
+    // would be worse than erroring.
+    let images = crate::print::load_images(&q.images)?;
+
+    // Model resolution: `-m provider/model-id`, else the first configured
+    // completion provider's first catalog entry.
+    let (provider_name, provider_config) =
+        match &q.model {
+            Some(spec) => {
+                let (provider, _model) = spec.split_once('/').ok_or_else(|| {
+                    InvalidSnafu {
+                        reason: format!("--model expects provider/model-id, got {spec:?}"),
+                    }
+                    .build()
+                })?;
+                let config =
+                    config.providers.get(provider).ok_or_else(|| {
+                        InvalidSnafu {
+                    reason: format!(
+                        "unknown provider {provider:?} in --model {spec:?} (configured: {})",
+                        config.providers.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                }
+                .build()
+                    })?;
+                (provider.to_string(), config.clone())
+            }
+            None => config
+                .providers
+                .iter()
+                .next()
+                .map(|(name, c)| (name.to_string(), c.clone()))
+                .ok_or_else(|| {
+                    InvalidSnafu {
+                        reason: crate::setup::setup_hint(),
+                    }
+                    .build()
+                })?,
+        };
+    let provider =
+        crate::provider::ProviderHandle::from_config(&provider_config, Some(&catalog_data)).await?;
+    // Discovery feeds selection (implicit path) and metadata lookup; the
+    // explicit `-m` id is never catalog-checked, so a discovery miss only
+    // drops the metadata, never the run.
+    let catalog = provider.models(&provider_config, Some(&catalog_data)).await;
+    let model_id = match &q.model {
+        Some(spec) => spec.split_once('/').expect("validated above").1.to_string(),
+        None => {
+            let models = catalog.as_ref().map_err(|e| {
+                InvalidSnafu {
+                    reason: format!("discovering models for {provider_name:?}: {e}"),
+                }
+                .build()
+            })?;
+            models
+                .first()
+                .and_then(|info| info.ids.first())
+                .cloned()
+                .ok_or_else(|| {
+                    InvalidSnafu {
+                        reason: format!("provider {provider_name:?} has no models"),
+                    }
+                    .build()
+                })?
+        }
+    };
+    let model = provider
+        .model(&provider_config, Some(&catalog_data), &model_id)
+        .await?;
+    // The context window feeds compaction thresholds; the output ceiling
+    // rides the model handle's own info (per-model config, then the
+    // models.dev catalog), where request shaping reads it.
+
+    let cwd = std::env::current_dir().map_err(|e| {
+        crate::error::InvalidSnafu {
+            reason: format!("resolving the current directory: {e}"),
+        }
+        .build()
+    })?;
+    let cwd_str = cwd.display().to_string();
+    // Headless session environment: instructions + permissions + workspace
+    // + connected MCP, through the shared runtime setup contract. The
+    // permission policy lands on the engine before the gate reads it, and
+    // the gate below enforces it on every dispatch (batch children and
+    // subagents included).
+    let env = crate::runtime::workspace_env(
+        &cwd,
+        crate::runtime::McpStartup::Connected,
+        crate::sandbox::SandboxPolicy::resolve(&config, q.policy == PermissionPolicy::Yolo),
+    )
+    .await?;
+    if let Some(note) = &env.sandbox_note {
+        eprintln!("{note}");
+    }
+    match q.policy {
+        PermissionPolicy::Standard => {}
+        PermissionPolicy::Yolo => env.permissions.set_yolo(true),
+        PermissionPolicy::AutoReview => env.permissions.set_auto_review(true),
+    }
+    env.permissions.add_cli_rules(q.tool_policy);
+    // Destructive-hinted MCP tools must force a decision even under an
+    // allow rule, exactly like the TUI/ACP gates: feed the engine the
+    // published annotations before the gate reads it.
+    if let Some(mcp) = env.workspace.mcp() {
+        env.permissions.sync_mcp_annotations(&mcp);
+    }
+    let reviewer = (q.policy == PermissionPolicy::AutoReview)
+        .then(|| crate::auto_review::reviewer_for(model.clone(), config.agent.prompt_format));
+    let mut policy = crate::harness::PolicyLayerInputs::new(
+        Arc::clone(&env.permissions),
+        Arc::new(crate::headless::HeadlessGate),
+    );
+    if let Some(reviewer) = reviewer {
+        policy = policy.reviewer(reviewer);
+    }
+    let workspace = env.workspace;
+
+    let mode = match q.mode {
+        CliMode::Plan => crate::harness::AgentMode::Plan(
+            state_dir
+                .as_ref()
+                .and_then(|dir| crate::storage::plans::new_plan_path(dir).ok())
+                .unwrap_or_else(|| std::path::PathBuf::from("plans/plan.md")),
+        ),
+        _ => crate::harness::AgentMode::Build,
+    };
+
+    // The session: one conversation, restored from the persisted entries,
+    // with the change-feed persister writing its records.
+    let session_ref = q.session_id.clone().unwrap_or_else(SessionRef::generate);
+    let model_spec = format!("{provider_name}/{model_id}");
+    let persister = match &state_dir {
+        Some(dir) => {
+            match crate::harness::Persister::open_in(
+                dir.clone(),
+                session_ref.clone(),
+                &cwd_str,
+                &model_spec,
+            )
+            .await
+            {
+                Ok(persister) => Some(Arc::new(tokio::sync::Mutex::new(persister))),
+                Err(e) => {
+                    eprintln!("session {session_ref} will not be persisted: {e}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let history = match &persister {
+        Some(persister) => persister.lock().await.history(),
+        None => animist::history::History::new(),
+    };
+    // Per-turn cancellation cell: the subagent launcher reads whatever the
+    // current turn stored.
+    let cancel_cell = Arc::new(arc_swap::ArcSwap::from_pointee(
+        animist::agent::Cancellation::default(),
+    ));
+    let (sink, stream) = crate::harness::EventSink::new();
+    let conversation = crate::harness::ConversationBuilder::new(
+        &config,
+        &cwd_str,
+        &env.instructions.text,
+        model.clone(),
+        workspace
+            .clone()
+            .registry(&history)
+            .map_err(crate::error::client_error)?,
+        sink,
+    )
+    .history(history)
+    .mode(mode)
+    .policy(policy.clone())
+    .workspace(workspace.clone())
+    // The change-feed persister writes the run's entry records; without
+    // it the session file keeps only the fresh header the store wrote on
+    // open (found by 12's perf harness: 50-turn --print runs persisted
+    // nothing).
+    .persist(persister.clone())
+    .build()?;
+    // Arm the subagent seam on the conversation (one registry rebuild at
+    // startup; headless carries no provider configs beyond the selection,
+    // so tier selection degrades to the parent model).
+    let launcher = Arc::new(crate::subagent::SubagentLauncher {
+        parent: conversation.clone(),
+        provider: provider_name.clone(),
+        providers: config.providers.clone(),
+        agent: crate::config::AgentConfig {
+            temperature: config.agent.temperature,
+            max_tokens: config.agent.max_tokens,
+            thinking: config.agent.thinking,
+            ..Default::default()
+        },
+        compression: config.compression.clone(),
+        base_prompt: format!("{}{}", config.agent.preamble, env.instructions.text),
+        workspace: workspace.clone(),
+        cancel: cancel_cell.clone(),
+        cancels: Arc::new(crate::harness::cancel::CancelMap::new()),
+        sink: conversation.sink(),
+        policy,
+        cwd: cwd_str.clone(),
+    });
+    let armed = workspace
+        .clone()
+        .with_subagents(launcher)
+        .registry(&conversation.history())
+        .map_err(crate::error::client_error)?;
+    conversation.set_tools(armed)?;
+    let tool_names: Vec<String> = crate::tools::native_tool_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    let turn_cancel = animist::agent::Cancellation::default();
+    cancel_cell.store(Arc::new(turn_cancel.clone()));
+    let task = tokio::spawn({
+        let conversation = conversation.clone();
+        let prompt = prompt.clone();
+        let images = images.clone();
+        async move { crate::harness::run_turn(&conversation, &prompt, &images, turn_cancel).await }
+    });
+    let run = crate::print::PrintRun {
+        stream,
+        task,
+        conversation,
+        session_id: session_ref,
+        cwd: cwd_str,
+        tool_names,
+        model_spec,
+    };
+
+    // Print mode: raw text or stream-json JSONL output. Unlike the
+    // reference (whose print mode exits 0 on agent errors), a failed run is
+    // a failure exit.
+    match crate::print::emit(run, &q.output_format, q.verbose).await? {
+        Some(message) => Err(crate::error::InvalidSnafu { reason: message }.build()),
+        None => Ok(()),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2071,458 +2515,5 @@ mod tests {
                 "{args:?}: {body}"
             );
         }
-    }
-}
-
-/// Resolve the initial prompt for a run: the positional `PROMPT` wins; else
-/// piped stdin (when `stdin_attached` is false) is read to a string; a
-/// terminal stdin yields `None`. The result is trimmed; whitespace-only
-/// input collapses to `None` so the TUI starts normally. Shared by
-/// `--print` (which still errors on `None`) and the interactive TUI.
-pub fn resolve_prompt_input(
-    cli_prompt: Option<String>,
-    stdin: &mut impl std::io::Read,
-    stdin_attached: bool,
-) -> Result<Option<String>> {
-    let raw = match cli_prompt {
-        Some(prompt) => prompt,
-        None if !stdin_attached => {
-            let mut buf = String::new();
-            stdin.read_to_string(&mut buf).map_err(|e| {
-                InvalidSnafu {
-                    reason: format!("reading the prompt from stdin: {e}"),
-                }
-                .build()
-            })?;
-            buf
-        }
-        None => return Ok(None),
-    };
-    let trimmed = raw.trim().to_string();
-    Ok((!trimmed.is_empty()).then_some(trimmed))
-}
-
-/// `craft --print`: run one prompt to completion against the
-/// configured providers and emit text, JSONL (`--output-format
-/// stream-json`), or a verbose transcript (`--verbose`). SDK-mode
-/// stream-json input is not supported. `config.agent.preamble` must
-/// already be the effective preamble — `main` applies the CLI prompt
-/// overrides once, before dispatch.
-pub async fn run_print(cli: &Cli, config: crate::config::Config) -> Result<()> {
-    run_print_with(cli, config, StateDir::resolve().ok()).await
-}
-
-/// [`run_print`] with an injectable state dir: tests pass `None` so runs
-/// never touch the developer's session storage.
-#[expect(
-    clippy::result_large_err,
-    reason = "the crate error type is deliberately unboxed"
-)]
-async fn run_print_with(
-    cli: &Cli,
-    mut config: crate::config::Config,
-    state_dir: Option<StateDir>,
-) -> Result<()> {
-    cli.apply_thinking(&mut config)?;
-    // One warning per unimplemented option, in a stable order.
-    for flag in ["--image", "--verbose", "--include-partial-messages"] {
-        let set = match flag {
-            "--image" => !cli.images.is_empty(),
-            "--verbose" => cli.verbose,
-            _ => cli.include_partial_messages,
-        };
-        if set {
-            eprintln!("warning: {flag} is accepted but not implemented yet (task 84)");
-        }
-    }
-
-    let prompt = match resolve_prompt_input(
-        cli.initial_prompt.clone(),
-        &mut std::io::stdin(),
-        std::io::stdin().is_terminal(),
-    )? {
-        Some(prompt) => prompt,
-        None => {
-            return InvalidSnafu {
-                reason: "--print needs a prompt argument or a piped stdin prompt".to_string(),
-            }
-            .fail();
-        }
-    };
-
-    // Session resolution: --continue / --session / --fork-session get
-    // their print-mode semantics here, before any model work.
-    let cwd = std::env::current_dir().map_err(|e| {
-        InvalidSnafu {
-            reason: format!("resolving the current directory: {e}"),
-        }
-        .build()
-    })?;
-    let plan = match state_dir.as_ref() {
-        Some(dir) => cli.resolve_session_plan(dir, &cwd.display().to_string())?,
-        None => {
-            if cli.fork_session || cli.continue_session || cli.session.is_some() {
-                return InvalidSnafu {
-                    reason: "session storage is unavailable, cannot resume or fork".to_string(),
-                }
-                .fail();
-            }
-            ResumePlan::Fresh { id: None }
-        }
-    };
-    let mut query = HeadlessQuery::for_print(cli, prompt, None)?;
-    apply_resume_plan(cli, &mut query, plan);
-    run_headless_query_with(config, query, state_dir).await
-}
-
-/// Wire a resolved [`ResumePlan`] into the query: the session id the run
-/// persists under, and the stored `provider/model` when `--model` is absent
-/// (an explicit flag always wins).
-fn apply_resume_plan(cli: &Cli, query: &mut HeadlessQuery, plan: ResumePlan) {
-    match plan {
-        ResumePlan::Fresh { id } => query.session_id = id,
-        ResumePlan::Resume { id, model } | ResumePlan::Fork { new_id: id, model } => {
-            query.session_id = Some(id);
-            if cli.model.is_none() {
-                query.model = model;
-            }
-        }
-    }
-}
-
-/// Extra environment context (e.g. shell history) injected before the prompt.
-fn inject_context(prompt: &str, context: &[String]) -> String {
-    if context.is_empty() {
-        return prompt.to_string();
-    }
-    let mut out = String::from("<context>\n");
-    for block in context {
-        out.push_str(block);
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-    out.push_str("</context>\n\n");
-    out.push_str(prompt);
-    out
-}
-
-/// PascalCase → snake_case (`Read`→`read`, `ViewImage`→`view_image`);
-/// already-snake names pass through unchanged.
-fn pascal_to_snake(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 4);
-    for (i, ch) in name.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if i > 0 {
-                out.push('_');
-            }
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-/// One headless agent query in print mode. Both `--print` and
-/// `craft term run` funnel through here; `config.agent.preamble` must
-/// already be the effective preamble.
-pub struct HeadlessQuery {
-    pub prompt: String,
-    /// Context blocks wrapped in `<context>` before the prompt.
-    pub context: Vec<String>,
-    pub images: Vec<std::path::PathBuf>,
-    pub model: Option<String>,
-    pub output_format: OutputFormat,
-    pub verbose: bool,
-    pub mode: CliMode,
-    pub session_id: Option<SessionRef>,
-    /// Whether `--yolo` / `-A` bypass the permission gate.
-    pub policy: PermissionPolicy,
-    /// CLI tool policy (`--allowed-tools` / `--disallowed-tools`) as
-    /// permission rules, applied to the run's permission engine before
-    /// the first turn. Empty for surfaces that do not expose the flags
-    /// (`term run`, `recipe run`).
-    pub tool_policy: Vec<PermissionRule>,
-}
-
-impl HeadlessQuery {
-    /// The `--print` mapping, straight off the parsed CLI, so the
-    /// flag→policy mapping is unit-testable without loading config or
-    /// touching the network.
-    pub fn for_print(cli: &Cli, prompt: String, session_id: Option<SessionRef>) -> Result<Self> {
-        Ok(Self {
-            prompt,
-            context: Vec::new(),
-            images: cli.images.clone(),
-            model: cli.model.clone(),
-            output_format: cli.output_format.clone(),
-            verbose: cli.verbose,
-            mode: cli.run_mode(),
-            session_id,
-            policy: cli.permission_policy()?,
-            tool_policy: cli.tool_policy()?,
-        })
-    }
-}
-
-/// One headless agent query in print mode. Both `--print` and
-/// `craft term run` funnel through here; `config.agent.preamble` must
-/// already be the effective preamble.
-#[expect(
-    clippy::result_large_err,
-    reason = "the crate error type is deliberately unboxed"
-)]
-pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery) -> Result<()> {
-    run_headless_query_with(config, q, crate::storage::StateDir::resolve().ok()).await
-}
-
-/// [`run_headless_query`] with an injectable state dir: tests pass `None`
-/// so runs never touch the developer's session storage.
-pub(crate) async fn run_headless_query_with(
-    config: crate::config::Config,
-    q: HeadlessQuery,
-    state_dir: Option<StateDir>,
-) -> Result<()> {
-    let catalog_data = crate::provider::load_catalog().await;
-    let prompt = inject_context(&q.prompt, &q.context);
-    // Fails fast: silently dropping an image the caller explicitly attached
-    // would be worse than erroring.
-    let images = crate::print::load_images(&q.images)?;
-
-    // Model resolution: `-m provider/model-id`, else the first configured
-    // completion provider's first catalog entry.
-    let (provider_name, provider_config) =
-        match &q.model {
-            Some(spec) => {
-                let (provider, _model) = spec.split_once('/').ok_or_else(|| {
-                    InvalidSnafu {
-                        reason: format!("--model expects provider/model-id, got {spec:?}"),
-                    }
-                    .build()
-                })?;
-                let config =
-                    config.providers.get(provider).ok_or_else(|| {
-                        InvalidSnafu {
-                    reason: format!(
-                        "unknown provider {provider:?} in --model {spec:?} (configured: {})",
-                        config.providers.keys().cloned().collect::<Vec<_>>().join(", ")
-                    ),
-                }
-                .build()
-                    })?;
-                (provider.to_string(), config.clone())
-            }
-            None => config
-                .providers
-                .iter()
-                .next()
-                .map(|(name, c)| (name.to_string(), c.clone()))
-                .ok_or_else(|| {
-                    InvalidSnafu {
-                        reason: crate::setup::setup_hint(),
-                    }
-                    .build()
-                })?,
-        };
-    let provider =
-        crate::provider::ProviderHandle::from_config(&provider_config, Some(&catalog_data)).await?;
-    // Discovery feeds selection (implicit path) and metadata lookup; the
-    // explicit `-m` id is never catalog-checked, so a discovery miss only
-    // drops the metadata, never the run.
-    let catalog = provider.models(&provider_config, Some(&catalog_data)).await;
-    let model_id = match &q.model {
-        Some(spec) => spec.split_once('/').expect("validated above").1.to_string(),
-        None => {
-            let models = catalog.as_ref().map_err(|e| {
-                InvalidSnafu {
-                    reason: format!("discovering models for {provider_name:?}: {e}"),
-                }
-                .build()
-            })?;
-            models
-                .first()
-                .and_then(|info| info.ids.first())
-                .cloned()
-                .ok_or_else(|| {
-                    InvalidSnafu {
-                        reason: format!("provider {provider_name:?} has no models"),
-                    }
-                    .build()
-                })?
-        }
-    };
-    let model = provider
-        .model(&provider_config, Some(&catalog_data), &model_id)
-        .await?;
-    // The context window feeds compaction thresholds; the output ceiling
-    // rides the model handle's own info (per-model config, then the
-    // models.dev catalog), where request shaping reads it.
-
-    let cwd = std::env::current_dir().map_err(|e| {
-        crate::error::InvalidSnafu {
-            reason: format!("resolving the current directory: {e}"),
-        }
-        .build()
-    })?;
-    let cwd_str = cwd.display().to_string();
-    // Headless session environment: instructions + permissions + workspace
-    // + connected MCP, through the shared runtime setup contract. The
-    // permission policy lands on the engine before the gate reads it, and
-    // the gate below enforces it on every dispatch (batch children and
-    // subagents included).
-    let env = crate::runtime::workspace_env(
-        &cwd,
-        crate::runtime::McpStartup::Connected,
-        crate::sandbox::SandboxPolicy::resolve(&config, q.policy == PermissionPolicy::Yolo),
-    )
-    .await?;
-    if let Some(note) = &env.sandbox_note {
-        eprintln!("{note}");
-    }
-    match q.policy {
-        PermissionPolicy::Standard => {}
-        PermissionPolicy::Yolo => env.permissions.set_yolo(true),
-        PermissionPolicy::AutoReview => env.permissions.set_auto_review(true),
-    }
-    env.permissions.add_cli_rules(q.tool_policy);
-    // Destructive-hinted MCP tools must force a decision even under an
-    // allow rule, exactly like the TUI/ACP gates: feed the engine the
-    // published annotations before the gate reads it.
-    if let Some(mcp) = env.workspace.mcp() {
-        env.permissions.sync_mcp_annotations(&mcp);
-    }
-    let reviewer = (q.policy == PermissionPolicy::AutoReview)
-        .then(|| crate::auto_review::reviewer_for(model.clone(), config.agent.prompt_format));
-    let mut policy = crate::harness::PolicyLayerInputs::new(
-        Arc::clone(&env.permissions),
-        Arc::new(crate::headless::HeadlessGate),
-    );
-    if let Some(reviewer) = reviewer {
-        policy = policy.reviewer(reviewer);
-    }
-    let workspace = env.workspace;
-
-    let mode = match q.mode {
-        CliMode::Plan => crate::harness::AgentMode::Plan(
-            state_dir
-                .as_ref()
-                .and_then(|dir| crate::storage::plans::new_plan_path(dir).ok())
-                .unwrap_or_else(|| std::path::PathBuf::from("plans/plan.md")),
-        ),
-        _ => crate::harness::AgentMode::Build,
-    };
-
-    // The session: one conversation, restored from the persisted entries,
-    // with the change-feed persister writing its records.
-    let session_ref = q.session_id.clone().unwrap_or_else(SessionRef::generate);
-    let model_spec = format!("{provider_name}/{model_id}");
-    let persister = match &state_dir {
-        Some(dir) => {
-            match crate::harness::Persister::open_in(
-                dir.clone(),
-                session_ref.clone(),
-                &cwd_str,
-                &model_spec,
-            )
-            .await
-            {
-                Ok(persister) => Some(Arc::new(tokio::sync::Mutex::new(persister))),
-                Err(e) => {
-                    eprintln!("session {session_ref} will not be persisted: {e}");
-                    None
-                }
-            }
-        }
-        None => None,
-    };
-    let history = match &persister {
-        Some(persister) => persister.lock().await.history(),
-        None => animist::history::History::new(),
-    };
-    // Per-turn cancellation cell: the subagent launcher reads whatever the
-    // current turn stored.
-    let cancel_cell = Arc::new(arc_swap::ArcSwap::from_pointee(
-        animist::agent::Cancellation::default(),
-    ));
-    let (sink, stream) = crate::harness::EventSink::new();
-    let conversation = crate::harness::ConversationBuilder::new(
-        &config,
-        &cwd_str,
-        &env.instructions.text,
-        model.clone(),
-        workspace
-            .clone()
-            .registry(&history)
-            .map_err(crate::error::client_error)?,
-        sink,
-    )
-    .history(history)
-    .mode(mode)
-    .policy(policy.clone())
-    .workspace(workspace.clone())
-    // The change-feed persister writes the run's entry records; without
-    // it the session file keeps only the fresh header the store wrote on
-    // open (found by 12's perf harness: 50-turn --print runs persisted
-    // nothing).
-    .persist(persister.clone())
-    .build()?;
-    // Arm the subagent seam on the conversation (one registry rebuild at
-    // startup; headless carries no provider configs beyond the selection,
-    // so tier selection degrades to the parent model).
-    let launcher = Arc::new(crate::subagent::SubagentLauncher {
-        parent: conversation.clone(),
-        provider: provider_name.clone(),
-        providers: config.providers.clone(),
-        agent: crate::config::AgentConfig {
-            temperature: config.agent.temperature,
-            max_tokens: config.agent.max_tokens,
-            thinking: config.agent.thinking,
-            ..Default::default()
-        },
-        compression: config.compression.clone(),
-        base_prompt: format!("{}{}", config.agent.preamble, env.instructions.text),
-        workspace: workspace.clone(),
-        cancel: cancel_cell.clone(),
-        cancels: Arc::new(crate::harness::cancel::CancelMap::new()),
-        sink: conversation.sink(),
-        policy,
-        cwd: cwd_str.clone(),
-    });
-    let armed = workspace
-        .clone()
-        .with_subagents(launcher)
-        .registry(&conversation.history())
-        .map_err(crate::error::client_error)?;
-    conversation.set_tools(armed)?;
-    let tool_names: Vec<String> = crate::tools::native_tool_names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-
-    let turn_cancel = animist::agent::Cancellation::default();
-    cancel_cell.store(Arc::new(turn_cancel.clone()));
-    let task = tokio::spawn({
-        let conversation = conversation.clone();
-        let prompt = prompt.clone();
-        let images = images.clone();
-        async move { crate::harness::run_turn(&conversation, &prompt, &images, turn_cancel).await }
-    });
-    let run = crate::print::PrintRun {
-        stream,
-        task,
-        conversation,
-        session_id: session_ref,
-        cwd: cwd_str,
-        tool_names,
-        model_spec,
-    };
-
-    // Print mode: raw text or stream-json JSONL output. Unlike the
-    // reference (whose print mode exits 0 on agent errors), a failed run is
-    // a failure exit.
-    match crate::print::emit(run, &q.output_format, q.verbose).await? {
-        Some(message) => Err(crate::error::InvalidSnafu { reason: message }.build()),
-        None => Ok(()),
     }
 }

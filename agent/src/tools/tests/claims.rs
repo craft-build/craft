@@ -488,8 +488,7 @@ async fn cancellation_during_a_path_lock_wait_returns_promptly() {
         .expect("the lock wait is cancelled promptly")
         .unwrap();
     let message = outcome
-        .err()
-        .expect("lock cancellation is a structured error")
+        .expect_err("lock cancellation is a structured error")
         .to_string();
     assert!(
         message.contains("cancelled while waiting for a file lock"),

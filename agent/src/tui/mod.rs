@@ -199,10 +199,10 @@ fn color_depth_for(
     if no_color.is_some_and(|v| !v.is_empty()) {
         return slt::ColorDepth::NoColor;
     }
-    if let Some(ct) = colorterm.map(str::to_ascii_lowercase) {
-        if ct == "truecolor" || ct == "24bit" {
-            return slt::ColorDepth::TrueColor;
-        }
+    if let Some(ct) = colorterm.map(str::to_ascii_lowercase)
+        && (ct == "truecolor" || ct == "24bit")
+    {
+        return slt::ColorDepth::TrueColor;
     }
     let term = term.unwrap_or_default().trim().to_ascii_lowercase();
     let env_depth = if TRUECOLOR_TERMS.contains(&term.as_str()) || term.ends_with("-direct") {
@@ -625,8 +625,10 @@ mod tests {
         use slt::event::{KeyCode, KeyModifiers};
 
         let mut app = App::new();
-        let mut view = View::default();
-        view.editor = Some(EditorForm::open(EditorOrigin::ComposerDraft, "d"));
+        let mut view = View {
+            editor: Some(EditorForm::open(EditorOrigin::ComposerDraft, "d")),
+            ..View::default()
+        };
 
         // Typing stays unconsumed (the widget edits during render).
         assert!(!editor_modal_key(

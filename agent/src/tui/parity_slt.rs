@@ -46,9 +46,8 @@ fn golden_fixture_parity_slt() {
                 .lines()
                 .zip(expected.lines().chain(std::iter::repeat("")))
                 .enumerate()
-                .filter_map(|(i, (got, want))| {
-                    (got != want).then(|| format!("  row {i:>2}: got {got:?} want {want:?}"))
-                })
+                .filter(|&(_, (got, want))| got != want)
+                .map(|(i, (got, want))| format!("  row {i:>2}: got {got:?} want {want:?}"))
                 .take(8)
                 .collect::<Vec<_>>()
                 .join("\n");

@@ -1211,15 +1211,16 @@ mod tests {
         // The bounded buffer kept only the newest bytes, and the status
         // report carries the dropped-bytes marker.
         let job = workspace.bash_jobs.get(id).expect("job");
-        let buf = job.output.lock().unwrap();
-        assert!(
-            buf.text.len() <= MAX_BUFFERED_OUTPUT,
-            "buffer {} exceeded cap {}",
-            buf.text.len(),
-            MAX_BUFFERED_OUTPUT
-        );
-        assert!(buf.dropped > 0);
-        drop(buf);
+        {
+            let buf = job.output.lock().unwrap();
+            assert!(
+                buf.text.len() <= MAX_BUFFERED_OUTPUT,
+                "buffer {} exceeded cap {}",
+                buf.text.len(),
+                MAX_BUFFERED_OUTPUT
+            );
+            assert!(buf.dropped > 0);
+        }
         let status = invoke(&BashStatus(workspace.clone()), json!({"task_id": id})).await;
         let text = bash_text(&status);
         assert!(text.contains("truncated"), "{text}");

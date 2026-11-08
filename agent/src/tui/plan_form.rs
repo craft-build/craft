@@ -236,6 +236,40 @@ impl PlanForm {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// The slt panel for this form
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Render this form in the composer box's place, styled like the input
+/// bar: the bold "Plan complete" title, the menu, and the hint row.
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
+    let form = &app.plan_mode.plan_form;
+    if !form.is_visible() {
+        return;
+    }
+    let t = theme::current();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            FORM_LABEL.trim_end().to_string(),
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+    ];
+    for (i, line) in form.content_lines().into_iter().enumerate() {
+        // Menu rows indent under the title like the other forms' bodies;
+        // the hint row carries its own indent.
+        if i < MENU.len() {
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(line);
+        }
+    }
+    crate::tui::ui::composer::render_form_panel(ui, &lines, t.accent);
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,39 +459,4 @@ mod tests {
             PlanFormAction::Passthrough
         );
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// The slt panel for this form
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Render this form in the composer box's place, styled like the input
-/// bar: the bold "Plan complete" title, the menu, and the hint row.
-pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
-    let form = &app.plan_mode.plan_form;
-    if !form.is_visible() {
-        return;
-    }
-    let t = theme::current();
-    let mut lines = vec![
-        Line::from(Span::styled(
-            FORM_LABEL.trim_end().to_string(),
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-    ];
-    for (i, line) in form.content_lines().into_iter().enumerate() {
-        // Menu rows indent under the title like the other forms' bodies;
-        // the hint row carries its own indent.
-        if i < MENU.len() {
-            let mut spans = vec![Span::raw("  ")];
-            spans.extend(line.spans);
-            lines.push(Line::from(spans));
-        } else {
-            lines.push(line);
-        }
-    }
-    crate::tui::ui::composer::render_form_panel(ui, &lines, t.accent);
 }

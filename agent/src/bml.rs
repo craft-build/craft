@@ -19,7 +19,7 @@ use indexmap::IndexMap;
 use serde_json::{Map, Value as Json};
 
 /// Parse a standalone BarkML document.
-pub fn parse(text: &str) -> Result<Statement, barkml::Error> {
+pub fn parse(text: &str) -> Result<Statement, Box<barkml::Error>> {
     let mut doc = barkml::from_str(text)?;
     normalize(&mut doc);
     Ok(doc)

@@ -491,9 +491,8 @@ mod tests {
         );
         let recipe = load(&p).unwrap();
         let params = recipe.resolve_parameters(&HashMap::new()).unwrap();
-        match recipe.render(&params, &p) {
-            Ok(out) => assert!(!out.contains("TOP-SECRET"), "{out}"),
-            Err(_) => {}
+        if let Ok(out) = recipe.render(&params, &p) {
+            assert!(!out.contains("TOP-SECRET"), "{out}")
         }
         // Absolute include names are rejected even when they point back
         // inside the recipe directory.
@@ -508,9 +507,8 @@ mod tests {
         );
         let recipe = load(&p).unwrap();
         let params = recipe.resolve_parameters(&HashMap::new()).unwrap();
-        match recipe.render(&params, &p) {
-            Ok(out) => assert!(!out.contains("Sub-step"), "{out}"),
-            Err(_) => {}
+        if let Ok(out) = recipe.render(&params, &p) {
+            assert!(!out.contains("Sub-step"), "{out}")
         }
         // Includes inside the recipe directory still work.
         let tmp2 = TempDir::new().unwrap();

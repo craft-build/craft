@@ -377,14 +377,19 @@ mod tests {
         supported: bool,
         required: bool,
     ) -> animist::provider::ModelInfo {
-        let mut info = animist::provider::ModelInfo::default();
-        info.ids = vec!["m".to_owned()];
-        info.features.thinking = animist::provider::Thinking::builder()
-            .supported(supported)
-            .required(required)
-            .efforts(efforts.to_vec())
-            .build();
-        info
+        let features = animist::provider::Features {
+            thinking: animist::provider::Thinking::builder()
+                .supported(supported)
+                .required(required)
+                .efforts(efforts.to_vec())
+                .build(),
+            ..Default::default()
+        };
+        animist::provider::ModelInfo {
+            ids: vec!["m".to_owned()],
+            features,
+            ..Default::default()
+        }
     }
 
     #[test]

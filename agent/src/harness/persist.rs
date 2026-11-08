@@ -193,10 +193,6 @@ impl Persister {
 
 /// Open a persister or report why the session cannot be persisted, with
 /// `None` meaning "no state dir" (persistence silently off, as before).
-#[expect(
-    clippy::result_large_err,
-    reason = "the crate error type is deliberately unboxed"
-)]
 pub async fn open_persister(
     session_ref: SessionRef,
     cwd: &str,

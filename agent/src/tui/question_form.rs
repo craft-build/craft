@@ -483,6 +483,20 @@ fn hint_line(hints: &[(&str, &str)]) -> Line<'static> {
     )
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// The slt panel for this form
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Render this form in the composer box's place, styled like the input
+/// bar (accent bar, padding rows, the form's rows as its content).
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
+    let form = &app.overlays.question_form;
+    if !form.is_open() {
+        return;
+    }
+    let lines = form.build_lines();
+    super::ui::composer::render_form_panel(ui, &lines, theme::current().accent);
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,19 +696,4 @@ mod tests {
         form.open("q1".into(), vec![]);
         assert!(!form.is_open());
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// The slt panel for this form
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Render this form in the composer box's place, styled like the input
-/// bar (accent bar, padding rows, the form's rows as its content).
-pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
-    let form = &app.overlays.question_form;
-    if !form.is_open() {
-        return;
-    }
-    let lines = form.build_lines();
-    super::ui::composer::render_form_panel(ui, &lines, theme::current().accent);
 }

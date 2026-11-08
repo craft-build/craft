@@ -33,7 +33,10 @@ pub enum Error {
     },
 
     #[snafu(display("invalid agent BML"))]
-    InvalidBml { source: barkml::Error },
+    InvalidBml {
+        #[snafu(source(from(Box<barkml::Error>, |e| e)))]
+        source: Box<barkml::Error>,
+    },
 
     #[snafu(display("building the conversation harness"))]
     BuildConversation {

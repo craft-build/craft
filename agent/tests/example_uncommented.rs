@@ -14,9 +14,8 @@ fn parses_example_uncommented() {
             .strip_prefix("# ")
             .or_else(|| trimmed.strip_prefix('#'))
             .map(str::trim_start);
-        let is_stmt = uncommented.is_some_and(|s| {
-            s == "}" || s.contains(" = ") || s.ends_with('{')
-        });
+        let is_stmt =
+            uncommented.is_some_and(|s| s == "}" || s.contains(" = ") || s.ends_with('{'));
         if is_stmt {
             let indent = &line[..line.len() - trimmed.len()];
             out.push_str(indent);

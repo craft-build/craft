@@ -721,7 +721,7 @@ async fn annotations_flow_to_descriptors_and_permission_sync() {
     // The initial generation-0 snapshot still populates the table.
     let gen0 = crate::permissions::PermissionManager::new(
         crate::permissions::PermissionsConfig::default(),
-        std::env::temp_dir().into(),
+        std::env::temp_dir(),
     );
     gen0.sync_mcp_annotations(&handle);
     inner.entries[0].populate(StartResult {
@@ -772,7 +772,7 @@ async fn annotations_flow_to_descriptors_and_permission_sync() {
     // First sync happens at the initial generation-0 snapshot.
     let mgr = crate::permissions::PermissionManager::new(
         crate::permissions::PermissionsConfig::default(),
-        std::env::temp_dir().into(),
+        std::env::temp_dir(),
     );
     mgr.sync_mcp_annotations(&handle);
     mgr.sync_mcp_annotations(&handle);

@@ -291,9 +291,11 @@ mod tests {
     fn plan_form_stays_hidden_without_a_plan_write() {
         let dir = tempfile::tempdir().unwrap();
         let plan = dir.path().join("plan.md");
-        let mut cases = 0;
         // Missing, then empty, then unchanged-non-empty plan file.
-        for write_before in [None, Some(""), Some("# Plan\n1. step\n")] {
+        for (cases, write_before) in [None, Some(""), Some("# Plan\n1. step\n")]
+            .into_iter()
+            .enumerate()
+        {
             if let Some(content) = write_before {
                 std::fs::write(&plan, content).unwrap();
             }
@@ -307,7 +309,6 @@ mod tests {
                 Status::Done,
             ));
             assert!(!app.plan_mode.plan_form.is_visible(), "case {cases}");
-            cases += 1;
         }
     }
 

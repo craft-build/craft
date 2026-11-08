@@ -114,71 +114,6 @@ fn truncate_spans<'a>(spans: Vec<Span<'a>>, max: usize) -> (Vec<Span<'a>>, usize
     (out, used)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn base() -> Style {
-        let t = theme::current();
-        Style::default().fg(t.text_primary).bg(t.bg_surface)
-    }
-
-    /// The prefix span carries the sigil in the warning color; the command
-    /// follows as syntect-highlighted spans covering the rest of the line.
-    #[test]
-    fn bang_prefix_gets_sigil_style_and_bash_highlighting() {
-        crate::markdown::highlight::syntax_set(); // arm is_ready()
-        let spans = shell_spans("! cargo test", base()).expect("styled");
-        let t = theme::current();
-        assert_eq!(spans[0].content, "! ");
-        assert_eq!(spans[0].style.fg, Some(t.warning));
-        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(joined, "! cargo test");
-        assert!(spans.len() > 1, "the command is highlighted, not plain");
-    }
-
-    #[test]
-    fn double_bang_prefix_is_styled_too() {
-        crate::markdown::highlight::syntax_set();
-        let spans = shell_spans("!! ls -la", base()).expect("styled");
-        assert_eq!(spans[0].content, "!! ");
-    }
-
-    /// No sigil (or a bang mid-line) keeps the plain single-span path.
-    #[test]
-    fn plain_lines_and_mid_string_bangs_stay_unstyled() {
-        crate::markdown::highlight::syntax_set();
-        assert!(shell_spans("hello ! world", base()).is_none());
-        assert!(shell_spans("just a message", base()).is_none());
-        assert!(shell_spans("! ", base()).is_none(), "empty command");
-    }
-
-    /// The mirror keeps the `wrap_rows` layout: a wide-glyph line
-    /// wraps at the same cells `wrap_rows` picks, and the cursor maps to
-    /// (row, char offset within that row).
-    #[test]
-    fn mirror_maps_text_and_cursor_onto_wrapped_rows() {
-        let text = "好好好cd second";
-        let rows = crate::tui::ui::messages::wrap_rows(text, 5);
-        assert!(rows.len() > 1, "input wraps at width 5: {rows:?}");
-        let mut state = slt::TextareaState::new();
-        sync_mirror(&mut state, text, &rows, 3);
-        assert_eq!(
-            state.lines,
-            rows.iter()
-                .map(|&(s, e)| text.chars().skip(s).take(e - s).collect::<String>())
-                .collect::<Vec<_>>(),
-            "widget rows are exactly the legacy wrapped rows"
-        );
-        assert_eq!((state.cursor_row, state.cursor_col), (1, 1));
-        // Edge cursor at the very end lands on the last row's end.
-        sync_mirror(&mut state, text, &rows, text.chars().count());
-        let last = rows.len() - 1;
-        assert_eq!(state.cursor_row, last);
-        assert_eq!(state.cursor_col, rows[last].1 - rows[last].0);
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────
 // The slt composer panel
 // ─────────────────────────────────────────────────────────────────────────
@@ -477,7 +412,7 @@ pub(crate) fn render_slt(
         // bottom-anchored with fixed insets, so the rect is exact
         // synchronously; when the terminal is too short for the box
         // (clipped flow), skip the pass.
-        let term_h = ui.height().max(1) as u32;
+        let term_h = ui.height().max(1);
         let text_rect: Option<slt::Rect> = if term_h > box_height(view_rows) + rows_below(app) {
             Some(slt::Rect {
                 x: SIDE_MARGIN + PROMPT_W as u32,
@@ -734,5 +669,70 @@ fn restyle_text_area(
             };
             cells_left = cells_left.saturating_sub(w);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base() -> Style {
+        let t = theme::current();
+        Style::default().fg(t.text_primary).bg(t.bg_surface)
+    }
+
+    /// The prefix span carries the sigil in the warning color; the command
+    /// follows as syntect-highlighted spans covering the rest of the line.
+    #[test]
+    fn bang_prefix_gets_sigil_style_and_bash_highlighting() {
+        crate::markdown::highlight::syntax_set(); // arm is_ready()
+        let spans = shell_spans("! cargo test", base()).expect("styled");
+        let t = theme::current();
+        assert_eq!(spans[0].content, "! ");
+        assert_eq!(spans[0].style.fg, Some(t.warning));
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "! cargo test");
+        assert!(spans.len() > 1, "the command is highlighted, not plain");
+    }
+
+    #[test]
+    fn double_bang_prefix_is_styled_too() {
+        crate::markdown::highlight::syntax_set();
+        let spans = shell_spans("!! ls -la", base()).expect("styled");
+        assert_eq!(spans[0].content, "!! ");
+    }
+
+    /// No sigil (or a bang mid-line) keeps the plain single-span path.
+    #[test]
+    fn plain_lines_and_mid_string_bangs_stay_unstyled() {
+        crate::markdown::highlight::syntax_set();
+        assert!(shell_spans("hello ! world", base()).is_none());
+        assert!(shell_spans("just a message", base()).is_none());
+        assert!(shell_spans("! ", base()).is_none(), "empty command");
+    }
+
+    /// The mirror keeps the `wrap_rows` layout: a wide-glyph line
+    /// wraps at the same cells `wrap_rows` picks, and the cursor maps to
+    /// (row, char offset within that row).
+    #[test]
+    fn mirror_maps_text_and_cursor_onto_wrapped_rows() {
+        let text = "好好好cd second";
+        let rows = crate::tui::ui::messages::wrap_rows(text, 5);
+        assert!(rows.len() > 1, "input wraps at width 5: {rows:?}");
+        let mut state = slt::TextareaState::new();
+        sync_mirror(&mut state, text, &rows, 3);
+        assert_eq!(
+            state.lines,
+            rows.iter()
+                .map(|&(s, e)| text.chars().skip(s).take(e - s).collect::<String>())
+                .collect::<Vec<_>>(),
+            "widget rows are exactly the legacy wrapped rows"
+        );
+        assert_eq!((state.cursor_row, state.cursor_col), (1, 1));
+        // Edge cursor at the very end lands on the last row's end.
+        sync_mirror(&mut state, text, &rows, text.chars().count());
+        let last = rows.len() - 1;
+        assert_eq!(state.cursor_row, last);
+        assert_eq!(state.cursor_col, rows[last].1 - rows[last].0);
     }
 }

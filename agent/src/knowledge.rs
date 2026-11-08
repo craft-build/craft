@@ -724,16 +724,13 @@ pub fn render_report_text(tool: &str, report: &serde_json::Value) -> String {
                 .iter()
                 .map(|f| {
                     let mut row = format!(
-                        "[{}] {} ({})",
+                        "[{}] {} ({}:{})",
                         report_str(f, "priority").unwrap_or("?"),
                         report_str(f, "title").unwrap_or(""),
-                        format!(
-                            "{}:{}",
-                            report_str(f, "path").unwrap_or(""),
-                            f.get("line_start")
-                                .and_then(serde_json::Value::as_u64)
-                                .unwrap_or(0),
-                        ),
+                        report_str(f, "path").unwrap_or(""),
+                        f.get("line_start")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
                     );
                     if let Some(body) = report_str(f, "body") {
                         row.push('\n');

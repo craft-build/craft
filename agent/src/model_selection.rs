@@ -111,10 +111,15 @@ mod tests {
     use super::*;
 
     fn model(id: &str, ctx: Option<u32>) -> ModelInfo {
-        let mut info = ModelInfo::default();
-        info.ids = vec![id.to_string()];
-        info.config.context_window = ctx;
-        info
+        let config = animist::provider::Config {
+            context_window: ctx,
+            ..Default::default()
+        };
+        ModelInfo {
+            ids: vec![id.to_string()],
+            config,
+            ..Default::default()
+        }
     }
 
     fn catalogs() -> BTreeMap<String, Vec<ModelInfo>> {

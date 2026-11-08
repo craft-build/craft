@@ -20,8 +20,8 @@ impl Bind {
     }
 
     #[cfg(test)]
-    pub fn to_key_event(self) -> KeyEvent {
-        crate::tui::compat::slt_key(self.code, self.modifiers)
+    pub fn to_key_event(&self) -> KeyEvent {
+        crate::tui::compat::slt_key(self.code.clone(), self.modifiers)
     }
 }
 

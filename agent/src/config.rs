@@ -553,13 +553,13 @@ impl ProviderConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if let Some(name) = self.credential_env() {
-            if name.trim().is_empty() || name.contains(['=', '\0']) {
-                return InvalidSnafu {
-                    reason: "api_key_env must be a nonempty environment variable name",
-                }
-                .fail();
+        if let Some(name) = self.credential_env()
+            && (name.trim().is_empty() || name.contains(['=', '\0']))
+        {
+            return InvalidSnafu {
+                reason: "api_key_env must be a nonempty environment variable name",
             }
+            .fail();
         }
         for (id, model) in self.models() {
             if id.trim().is_empty() {
@@ -581,21 +581,21 @@ impl ProviderConfig {
                 .fail();
             }
         }
-        if let Some(base) = self.base_url() {
-            if !base.is_empty() {
-                let url = url::Url::parse(base).context(InvalidBaseUrlSnafu)?;
-                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-                    return InvalidSnafu {
-                        reason: "base_url must be HTTP(S) with a host",
-                    }
-                    .fail();
+        if let Some(base) = self.base_url()
+            && !base.is_empty()
+        {
+            let url = url::Url::parse(base).context(InvalidBaseUrlSnafu)?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return InvalidSnafu {
+                    reason: "base_url must be HTTP(S) with a host",
                 }
-                if !url.username().is_empty() || url.password().is_some() {
-                    return InvalidSnafu {
-                        reason: "base_url must not embed credentials; use api_key_env",
-                    }
-                    .fail();
+                .fail();
+            }
+            if !url.username().is_empty() || url.password().is_some() {
+                return InvalidSnafu {
+                    reason: "base_url must not embed credentials; use api_key_env",
                 }
+                .fail();
             }
         }
         Ok(())
@@ -822,7 +822,7 @@ impl Config {
     pub async fn load() -> Result<Self> {
         let loaded = crate::bml::load_global();
         if let Some((path, error)) = loaded.errors.first() {
-            return Err(error.clone())
+            return Err(Box::new(error.clone()))
                 .context(InvalidBmlSnafu)
                 .context(LoadConfigSnafu { path: path.clone() });
         }
@@ -1075,10 +1075,9 @@ mod tests {
 
     #[test]
     fn sandbox_block_is_honored() {
-        let config = Config::parse(
-            "sandbox { enabled = false\n mode = \"read_only\"\n network = false }",
-        )
-        .unwrap();
+        let config =
+            Config::parse("sandbox { enabled = false\n mode = \"read_only\"\n network = false }")
+                .unwrap();
         assert!(!config.sandbox.enabled);
         assert_eq!(config.sandbox.mode, crate::sandbox::SandboxMode::ReadOnly);
         assert!(!config.sandbox.network);

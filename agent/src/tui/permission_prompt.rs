@@ -445,6 +445,139 @@ impl Default for PermissionPrompt {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// The slt panel for this form
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Word-wrap one styled line to `max` cells, matching ratatui's
+/// `Paragraph` + `Wrap { trim: false }` byte for byte (the semantics of
+/// `WordWrapper::process_input` from ratatui-widgets `reflow.rs`) over
+/// `(char, style)` cells with `base` patched under each span's style.
+/// Wrapped rows are re-merged into spans so each row paints as one
+/// `ui.line`.
+pub(crate) fn wrap_line_rows(line: &Line<'_>, max: usize, base: Style) -> Vec<Vec<Span<'static>>> {
+    // Flatten to styled cells first: breaks are chosen per grapheme-ish
+    // char with display widths, then runs of equal style become spans.
+    let cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |c| (c, base.patch(span.style)))
+        })
+        .collect();
+    let width = |c: char| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+
+    let mut wrapped: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut pending_line: Vec<(char, Style)> = Vec::new();
+    let mut pending_word: Vec<(char, Style)> = Vec::new();
+    let mut pending_ws: std::collections::VecDeque<(char, Style)> = Default::default();
+    let mut line_width = 0usize;
+    let mut word_width = 0usize;
+    let mut whitespace_width = 0usize;
+    let mut non_whitespace_previous = false;
+
+    for &(ch, style) in &cells {
+        let is_whitespace = ch.is_whitespace();
+        let symbol_width = width(ch);
+
+        // Symbols wider than the line limit are dropped entirely.
+        if symbol_width > max {
+            continue;
+        }
+
+        let word_found = non_whitespace_previous && is_whitespace;
+        // With trim: false only the untrimmed overflow check can fire (the
+        // trimmed variants require `self.trim`).
+        let untrimmed_overflow =
+            pending_line.is_empty() && word_width + whitespace_width + symbol_width > max;
+
+        if word_found || untrimmed_overflow {
+            // trim: false keeps the whitespace even on an empty line.
+            pending_line.extend(pending_ws.drain(..));
+            line_width += whitespace_width;
+            pending_line.append(&mut pending_word);
+            line_width += word_width;
+            whitespace_width = 0;
+            word_width = 0;
+        }
+
+        let line_full = line_width >= max;
+        let pending_word_overflow =
+            symbol_width > 0 && line_width + whitespace_width + word_width >= max;
+
+        if line_full || pending_word_overflow {
+            let mut remaining_width = max.saturating_sub(line_width);
+            wrapped.push(std::mem::take(&mut pending_line));
+            line_width = 0;
+
+            // Whitespace that still fits the finished row stays there.
+            while let Some(&(ws_ch, _)) = pending_ws.front() {
+                let w = width(ws_ch);
+                if w > remaining_width {
+                    break;
+                }
+                whitespace_width -= w;
+                remaining_width -= w;
+                pending_ws.pop_front();
+            }
+
+            // Don't count the first whitespace after a break toward the
+            // next word: it is consumed by the wrap point.
+            if is_whitespace && pending_ws.is_empty() {
+                continue;
+            }
+        }
+
+        if is_whitespace {
+            whitespace_width += symbol_width;
+            pending_ws.push_back((ch, style));
+        } else {
+            word_width += symbol_width;
+            pending_word.push((ch, style));
+        }
+        non_whitespace_previous = !is_whitespace;
+    }
+
+    // Trailing flush (trim: false keeps trailing whitespace).
+    pending_line.extend(pending_ws.drain(..));
+    pending_line.append(&mut pending_word);
+    if !pending_line.is_empty() {
+        wrapped.push(pending_line);
+    }
+    if wrapped.is_empty() {
+        wrapped.push(Vec::new());
+    }
+
+    // Re-merge runs of equal style into spans.
+    wrapped
+        .into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (ch, style) in row {
+                match spans.last_mut() {
+                    Some(last) if last.style == style => {
+                        last.content.to_mut().push(ch);
+                    }
+                    _ => spans.push(Span::styled(ch.to_string(), style)),
+                }
+            }
+            spans
+        })
+        .collect()
+}
+
+/// Render this form in the composer box's place, styled like the input
+/// bar; the warning-colored bar marks it as a decision the run waits on.
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
+    let prompt = &app.overlays.permission_prompt;
+    if !prompt.is_open() {
+        return;
+    }
+    let lines = prompt.build_lines();
+    crate::tui::ui::composer::render_form_panel(ui, &lines, theme::current().warning);
+}
 #[cfg(test)]
 mod tests {
     use super::{PermissionPrompt, PromptState};
@@ -622,138 +755,4 @@ mod tests {
         assert!(!prompt.is_open());
         prompt.close(); // idempotent
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// The slt panel for this form
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Word-wrap one styled line to `max` cells, matching ratatui's
-/// `Paragraph` + `Wrap { trim: false }` byte for byte (the semantics of
-/// `WordWrapper::process_input` from ratatui-widgets `reflow.rs`) over
-/// `(char, style)` cells with `base` patched under each span's style.
-/// Wrapped rows are re-merged into spans so each row paints as one
-/// `ui.line`.
-pub(crate) fn wrap_line_rows(line: &Line<'_>, max: usize, base: Style) -> Vec<Vec<Span<'static>>> {
-    // Flatten to styled cells first: breaks are chosen per grapheme-ish
-    // char with display widths, then runs of equal style become spans.
-    let cells: Vec<(char, Style)> = line
-        .spans
-        .iter()
-        .flat_map(|span| {
-            span.content
-                .chars()
-                .map(move |c| (c, base.patch(span.style)))
-        })
-        .collect();
-    let width = |c: char| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-
-    let mut wrapped: Vec<Vec<(char, Style)>> = Vec::new();
-    let mut pending_line: Vec<(char, Style)> = Vec::new();
-    let mut pending_word: Vec<(char, Style)> = Vec::new();
-    let mut pending_ws: std::collections::VecDeque<(char, Style)> = Default::default();
-    let mut line_width = 0usize;
-    let mut word_width = 0usize;
-    let mut whitespace_width = 0usize;
-    let mut non_whitespace_previous = false;
-
-    for &(ch, style) in &cells {
-        let is_whitespace = ch.is_whitespace();
-        let symbol_width = width(ch);
-
-        // Symbols wider than the line limit are dropped entirely.
-        if symbol_width > max {
-            continue;
-        }
-
-        let word_found = non_whitespace_previous && is_whitespace;
-        // With trim: false only the untrimmed overflow check can fire (the
-        // trimmed variants require `self.trim`).
-        let untrimmed_overflow =
-            pending_line.is_empty() && word_width + whitespace_width + symbol_width > max;
-
-        if word_found || untrimmed_overflow {
-            // trim: false keeps the whitespace even on an empty line.
-            pending_line.extend(pending_ws.drain(..));
-            line_width += whitespace_width;
-            pending_line.append(&mut pending_word);
-            line_width += word_width;
-            whitespace_width = 0;
-            word_width = 0;
-        }
-
-        let line_full = line_width >= max;
-        let pending_word_overflow =
-            symbol_width > 0 && line_width + whitespace_width + word_width >= max;
-
-        if line_full || pending_word_overflow {
-            let mut remaining_width = max.saturating_sub(line_width);
-            wrapped.push(std::mem::take(&mut pending_line));
-            line_width = 0;
-
-            // Whitespace that still fits the finished row stays there.
-            while let Some(&(ws_ch, _)) = pending_ws.front() {
-                let w = width(ws_ch);
-                if w > remaining_width {
-                    break;
-                }
-                whitespace_width -= w;
-                remaining_width -= w;
-                pending_ws.pop_front();
-            }
-
-            // Don't count the first whitespace after a break toward the
-            // next word: it is consumed by the wrap point.
-            if is_whitespace && pending_ws.is_empty() {
-                continue;
-            }
-        }
-
-        if is_whitespace {
-            whitespace_width += symbol_width;
-            pending_ws.push_back((ch, style));
-        } else {
-            word_width += symbol_width;
-            pending_word.push((ch, style));
-        }
-        non_whitespace_previous = !is_whitespace;
-    }
-
-    // Trailing flush (trim: false keeps trailing whitespace).
-    pending_line.extend(pending_ws.drain(..));
-    pending_line.append(&mut pending_word);
-    if !pending_line.is_empty() {
-        wrapped.push(pending_line);
-    }
-    if wrapped.is_empty() {
-        wrapped.push(Vec::new());
-    }
-
-    // Re-merge runs of equal style into spans.
-    wrapped
-        .into_iter()
-        .map(|row| {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (ch, style) in row {
-                match spans.last_mut() {
-                    Some(last) if last.style == style => {
-                        last.content.to_mut().push(ch);
-                    }
-                    _ => spans.push(Span::styled(ch.to_string(), style)),
-                }
-            }
-            spans
-        })
-        .collect()
-}
-
-/// Render this form in the composer box's place, styled like the input
-/// bar; the warning-colored bar marks it as a decision the run waits on.
-pub(crate) fn render_slt(ui: &mut slt::Context, app: &crate::tui::app::App) {
-    let prompt = &app.overlays.permission_prompt;
-    if !prompt.is_open() {
-        return;
-    }
-    let lines = prompt.build_lines();
-    crate::tui::ui::composer::render_form_panel(ui, &lines, theme::current().warning);
 }

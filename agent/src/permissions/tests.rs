@@ -680,7 +680,7 @@ fn in_project_file_writes_are_builtin_allowed() {
     for name in BUILTIN_WRITE_ALLOW_TOOLS {
         let tool = ToolKey::native(name);
         assert_eq!(
-            mgr.check(&tool, &[inside.clone()]),
+            mgr.check(&tool, std::slice::from_ref(&inside)),
             PermissionCheck::Allowed,
             "{name} in-project"
         );

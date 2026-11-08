@@ -218,10 +218,6 @@ fn is_context_overflow(error: &crate::error::Error) -> bool {
 /// pruned copy of it: first the tool-result tail is collapsed and the oldest
 /// round dropped, then tool results are stripped by ratio, and only when the
 /// ladder is exhausted does the caller's static fallback apply.
-#[expect(
-    clippy::result_large_err,
-    reason = "the crate error type is deliberately unboxed"
-)]
 async fn summarize(
     model: &ModelHandle,
     head: &[&StoredMessage],

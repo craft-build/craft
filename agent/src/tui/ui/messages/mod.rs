@@ -169,6 +169,11 @@ struct FrameBuild {
     links: Vec<(u16, u16, u16, String)>,
 }
 
+/// Hit regions handed from the col closure to the always-run overlay
+/// publish: the `FrameBuild` region fields (tool spans, notice rows,
+/// thinking rows).
+type FrameRegions = (Vec<(usize, u16, u16)>, Vec<(usize, u16)>, Vec<(usize, u16)>);
+
 /// Build the frame's visible transcript: refill the segment document, resolve
 /// the viewport through the scrollback engine (follow pins to the bottom,
 /// anything else is clamped back inside its segment), and slice the visible
@@ -497,6 +502,484 @@ fn highlight_visible(
     (hi > lo).then(|| ((lo - top_row) as u16, (hi - top_row) as u16))
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// slt transcript painter
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Paint the transcript: the visible bands from [`build_frame`] become
+/// per-segment children in document order — text runs as fixed-height
+/// `.draw()` regions painting app `Line`s via `Buffer::set_string`, image
+/// segments as slt image widgets — plus a trailing bookkeeping region that
+/// publishes `msg_area` / hit regions / width into [`PaintData`] for the
+/// next frame's event handlers and wrap math (one frame stale).
+pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
+    // slt lays out after the frame closure returns, so the wrap width can
+    // only come from the previous frame's handoff; the bookkeeping draw
+    // below republishes the true rect every frame (the parity harness
+    // renders twice, so frame 2 is exact). 80 columns is the first-frame
+    // fallback.
+    let (area_w, stale_h) = {
+        let p = app.view.paint.lock().expect("paint handoff");
+        (if p.width == 0 { 80 } else { p.width }, p.msg_area.height)
+    };
+    // The viewport HEIGHT, though, must not be stale: the transcript
+    // sits above the todo/files sections and the composer block, and a
+    // ctrl+b / ctrl+t toggle (or a composer row count change) reshuffles
+    // those heights on this very frame. Bands built with the stale
+    // height overflow the shrunk grow(1) area (slt is overflow-by-design)
+    // and paint over the sections, composer and status line for a frame.
+    // Those sibling heights are pure functions of app state, so budget
+    // synchronously; the handoff stays as fallback for the form-open
+    // layouts whose heights aren't cheaply derivable.
+    let term_h = u16::try_from(ui.height()).unwrap_or(u16::MAX);
+    let forms_open = app.overlays.permission_prompt.is_open()
+        || app.overlays.question_form.is_open()
+        || app.plan_mode.plan_form.is_visible();
+    let area_h = if forms_open {
+        stale_h
+    } else {
+        let task_h = u16::from(app.active_task.is_some());
+        let todo_w =
+            (u32::from(area_w).saturating_sub(super::composer::SIDE_MARGIN * 2) as usize).max(1);
+        let todo_h = super::todo::block_height(app, todo_w) as u16;
+        let composer_h = super::composer::block_height(app, u32::from(area_w)) as u16;
+        term_h.saturating_sub(task_h + todo_h + composer_h)
+    };
+    let inner = geom::Rect {
+        x: 0,
+        y: 0,
+        width: area_w.saturating_sub(MARGINS),
+        height: area_h.saturating_sub(1),
+    };
+    let build = if inner.width == 0 {
+        None
+    } else {
+        Some(build_frame(app, inner))
+    };
+
+    let paint = app.view.paint.clone();
+    let area_only = paint.clone();
+    // Region data crosses the col closure boundary through this slot so
+    // the always-run overlay publish (declared after the col) can own it.
+    let regions_out: std::sync::Arc<std::sync::Mutex<FrameRegions>> =
+        std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new(), Vec::new())));
+    let regions_slot = std::sync::Arc::clone(&regions_out);
+    let grow_resp = ui.container().grow(1).col(move |ui| {
+        // Top margin row (`inner.y = area.y + 1`).
+        ui.container().h(1).draw(|_, _| {});
+
+        let mut total_rows: u32 = 0;
+        if let Some(build) = build {
+            let FrameBuild {
+                bands,
+                tool_spans,
+                notice_rows,
+                thinking_rows,
+                links,
+                ..
+            } = build;
+            let bg = Some(theme::current().bg_app);
+            let cols = u32::from(inner.width);
+            let mut links = VecDeque::from(links);
+            let mut row_cursor: u16 = 0;
+            for band in bands {
+                match band {
+                    Band::Text(rows) => {
+                        let count = rows.len() as u16;
+                        if count > 0 {
+                            // Links land inside their band: rows are
+                            // inner-relative and ascend with the walk.
+                            let mut band_links = Vec::new();
+                            while let Some(&(row, ..)) = links.front() {
+                                if row >= row_cursor.wrapping_add(count) {
+                                    break;
+                                }
+                                let (row, cs, ce, uri) = links.pop_front().expect("peeked");
+                                band_links.push((row - row_cursor, cs, ce, uri));
+                            }
+                            ui.container()
+                                .ml(u32::from(MARGIN_L))
+                                .mr(u32::from(MARGIN_R))
+                                .h(u32::from(count))
+                                .draw(move |buf, rect| {
+                                    paint_rows_slt(buf, rect, &rows, &band_links, bg);
+                                });
+                            total_rows += u32::from(count);
+                            row_cursor += count;
+                        }
+                    }
+                    Band::Image { state, rows } => {
+                        if rows > 0 {
+                            if let Some(px) = state.slt_pixels() {
+                                // Margins align the widget with the text
+                                // column; slt owns protocol detection and
+                                // falls back to halfblocks itself.
+                                let _ = ui
+                                    .container()
+                                    .ml(u32::from(MARGIN_L))
+                                    .mr(u32::from(MARGIN_R))
+                                    .h(u32::from(rows))
+                                    .row(|ui| {
+                                        if iterm_terminal() {
+                                            let file = px.file.clone();
+                                            let _ = ui.iterm_image(&file, cols, u32::from(rows));
+                                        } else {
+                                            let rgba = px.rgba.clone();
+                                            let _ = ui.kitty_image(
+                                                &rgba,
+                                                px.pixel_width,
+                                                px.pixel_height,
+                                                cols,
+                                                u32::from(rows),
+                                            );
+                                        }
+                                    });
+                            } else {
+                                // No pixel payload: still reserve the rows so
+                                // the flow below the image stays aligned.
+                                ui.container().h(u32::from(rows)).draw(|_, _| {});
+                            }
+                            total_rows += u32::from(rows);
+                            row_cursor += rows;
+                        }
+                    }
+                }
+            }
+            // Unsatisfied-grow publish (frame 1 and degenerate cases):
+            // a trailing in-col region that only has room when the bands
+            // don't fill the viewport — carrying the TRUE area so the
+            // second frame builds at the right width.
+            ui.container().grow(1).draw(move |_, rect| {
+                publish_area_slt(&area_only, rect, total_rows);
+            });
+            *regions_slot.lock().expect("paint handoff") = (tool_spans, notice_rows, thinking_rows);
+        } else {
+            *regions_slot.lock().expect("paint handoff") = (Vec::new(), Vec::new(), Vec::new());
+        }
+    });
+
+    // Bookkeeping (regions/width/msg_area): an overlay-layer 1x1 region —
+    // it runs EVERY frame (slt skips deferred draws whose rect collapses
+    // to zero, and a satisfied grow does exactly that once the bands fill
+    // the viewport) — carrying the grow container's previous-frame rect,
+    // one frame stale like the rest of the handoff.
+    let (tool_spans, notice_rows, thinking_rows) =
+        std::mem::take(&mut *regions_out.lock().expect("paint handoff"));
+    let paint_for_publish = paint.clone();
+    let _ = ui.overlay(|ui| {
+        ui.container().w(1).h(1).draw(move |_, _rect| {
+            publish_frame_slt(
+                &paint_for_publish,
+                grow_resp.rect,
+                &tool_spans,
+                &notice_rows,
+                &thinking_rows,
+            );
+        });
+    });
+}
+
+/// Paint pre-wrapped app lines into an slt buffer region: one display row
+/// per line, spans left to right, advancing `x` by each span's unicode
+/// width. App styles are slt styles already; unset span backgrounds inherit
+/// the app background, keeping the root fill under the text. The band's
+/// rect is the inner column (the declaring container carries the
+/// margins), so `set_string`'s clip trims unwrappable rows at the margins.
+fn paint_rows_slt(
+    buf: &mut slt::buffer::Buffer,
+    rect: slt::Rect,
+    lines: &[Line<'static>],
+    links: &[(u16, u16, u16, String)],
+    bg: Option<crate::tui::style::Color>,
+) {
+    use unicode_width::UnicodeWidthStr;
+
+    let x_max = rect.x.saturating_add(rect.width);
+    for (dy, line) in lines.iter().enumerate() {
+        let y = rect.y + dy as u32;
+        let mut x = rect.x;
+        for span in &line.spans {
+            let mut style = span.style;
+            if style.bg.is_none() {
+                style.bg = bg;
+            }
+            if x < x_max {
+                buf.set_string(x, y, &span.content, style);
+            }
+            x = x.saturating_add(span.width() as u32);
+        }
+        // ratatui parity: a wide grapheme's continuation cell reads as a
+        // plain space in the frame dump (ratatui resets the skipped cell);
+        // slt leaves it empty-symbol, so normalize it here.
+        let mut cx = rect.x;
+        while cx < x_max {
+            let width = buf
+                .try_get(cx, y)
+                .map(|c| UnicodeWidthStr::width(c.symbol.as_str()) as u32)
+                .unwrap_or(1);
+            if width == 2 {
+                if let Some(cell) = buf.try_get_mut(cx + 1, y) {
+                    cell.set_char(' ');
+                }
+                cx += 2;
+            } else {
+                cx += 1;
+            }
+        }
+    }
+    for (dy, col_start, col_end, uri) in links {
+        let y = rect.y + u32::from(*dy);
+        if y >= rect.bottom() {
+            continue;
+        }
+        for col in *col_start..*col_end {
+            let x = rect.x + u32::from(col);
+            if x >= x_max {
+                continue;
+            }
+            if let Some(cell) = buf.try_get_mut(x, y) {
+                apply_link_slt(cell, uri);
+            }
+        }
+    }
+}
+
+/// Mark a cell as part of an OSC-8 hyperlink via the first-class
+/// [`slt::Cell::hyperlink`] field; the slt backend emits and closes the
+/// escape sequence itself (run-coalesced across contiguous linked cells).
+/// Escape bytes must NOT be embedded in `cell.symbol`: slt normalizes
+/// symbols at the flush boundary and replaces C0/C1 controls (ESC) with
+/// U+FFFD, which renders as `�`/`?` garbage instead of the filename.
+fn apply_link_slt(cell: &mut slt::Cell, uri: &str) {
+    cell.hyperlink = Some(uri.to_string().into());
+}
+
+/// Publish the transcript frame handoff from the leftover region under the
+/// last band: its x/width match the transcript area, its bottom is the
+/// area's bottom, and the content rows above it are ours, so the area's
+/// origin and the inner-relative hit regions resolve exactly.
+/// Publish one frame's handoff. `area` is the FULL transcript area (the
+/// grow container's rect): regions are offset by the inner margins from
+/// its top-left, exactly where the bands painted.
+fn publish_frame_slt(
+    paint: &std::sync::Arc<std::sync::Mutex<crate::tui::app::PaintData>>,
+    area: slt::Rect,
+    tool_spans: &[(usize, u16, u16)],
+    notice_rows: &[(usize, u16)],
+    thinking_rows: &[(usize, u16)],
+) {
+    let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
+    let mut p = paint.lock().expect("paint handoff");
+    // Frame 1: the grow Response rect is still 0x0 — keep whatever the
+    // in-col unsatisfied-grow publish discovered (the true area) and only
+    // refresh the regions.
+    if area.width > 0 && area.height > 0 {
+        p.msg_area = geom::Rect::new(
+            clamp16(area.x),
+            clamp16(area.y),
+            clamp16(area.width),
+            clamp16(area.height),
+        );
+        p.width = clamp16(area.width);
+    }
+    let area = if area.width > 0 && area.height > 0 {
+        area
+    } else {
+        slt::Rect::new(
+            u32::from(p.msg_area.x),
+            u32::from(p.msg_area.y),
+            u32::from(p.msg_area.width),
+            u32::from(p.msg_area.height),
+        )
+    };
+    let inner_x = area.x + u32::from(MARGIN_L);
+    let inner_y = area.y + 1;
+    let inner_w = area.width.saturating_sub(u32::from(MARGINS));
+    p.tool_regions = tool_spans
+        .iter()
+        .map(|&(idx, s, e)| {
+            (
+                idx,
+                geom::Rect::new(
+                    clamp16(inner_x),
+                    clamp16(inner_y + u32::from(s)),
+                    clamp16(inner_w),
+                    e - s,
+                ),
+            )
+        })
+        .collect();
+    p.notice_regions = notice_rows
+        .iter()
+        .map(|&(idx, r)| {
+            (
+                idx,
+                geom::Rect::new(
+                    clamp16(inner_x),
+                    clamp16(inner_y + u32::from(r)),
+                    clamp16(inner_w),
+                    1,
+                ),
+            )
+        })
+        .collect();
+    p.thinking_regions = thinking_rows
+        .iter()
+        .map(|&(idx, r)| {
+            (
+                idx,
+                geom::Rect::new(
+                    clamp16(inner_x),
+                    clamp16(inner_y + u32::from(r)),
+                    clamp16(inner_w),
+                    1,
+                ),
+            )
+        })
+        .collect();
+}
+
+/// Publish the area only, from the leftover region below the bands (the
+/// trailing in-col draw that only has room while the grow is unsatisfied —
+/// frame 1 before the width handoff settles).
+fn publish_area_slt(
+    paint: &std::sync::Arc<std::sync::Mutex<crate::tui::app::PaintData>>,
+    leftover: slt::Rect,
+    total_rows: u32,
+) {
+    let area = slt::Rect::new(
+        leftover.x,
+        leftover.y.saturating_sub(total_rows + 1),
+        leftover.width,
+        leftover.height.saturating_add(total_rows + 1),
+    );
+    let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
+    let mut p = paint.lock().expect("paint handoff");
+    p.msg_area = geom::Rect::new(
+        clamp16(area.x),
+        clamp16(area.y),
+        clamp16(area.width),
+        clamp16(area.height),
+    );
+    p.width = clamp16(area.width);
+}
+
+/// iTerm2 terminals get the OSC 1337 widget (encoded payload); everything
+/// else goes through `kitty_image`, whose own capability probe falls back
+/// to halfblock cells. Env-based so tests deterministically take the
+/// halfblock path.
+fn iterm_terminal() -> bool {
+    std::env::var_os("TERM_PROGRAM").is_some_and(|v| v == "iTerm.app")
+}
+
+/// Trailing per-frame buffer pass, declared last so it sees the finished
+/// cells: the search-highlight fg↔bg swap, the full-screen `frame_text`
+/// snapshot, and the current selection as REVERSED cells.
+pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
+    let sel = app.view.selection;
+    let paint = app.view.paint.clone();
+    // The highlight span is recomputed from the doc engine (the same math
+    // `build_frame` used this frame); the closure translates it to screen
+    // rows through the fresh `msg_area` the transcript just published.
+    let hl_rows = {
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        let top_row = layout.doc_row(app.view.scroll);
+        highlight_visible(
+            app,
+            &layout,
+            top_row,
+            geom::Rect::new(0, 0, app.view.view_width, app.view.view_height),
+        )
+    };
+
+    let _ = ui.overlay(|ui| {
+        ui.container().grow(1).draw(move |buf, _rect| {
+            let (inner_x, inner_y, inner_w) = {
+                let p = paint.lock().expect("paint handoff");
+                let m = p.msg_area;
+                (
+                    u32::from(m.x + MARGIN_L),
+                    u32::from(m.y + 1),
+                    u32::from(m.width.saturating_sub(MARGINS)),
+                )
+            };
+
+            // Search highlight: the segment's visible cells swap fg↔bg.
+            if let Some((start, end)) = hl_rows
+                && inner_w > 0
+            {
+                for row in start..end {
+                    let y = inner_y + u32::from(row);
+                    for col in 0..inner_w {
+                        if let Some(cell) = buf.try_get_mut(inner_x + col, y) {
+                            std::mem::swap(&mut cell.style.fg, &mut cell.style.bg);
+                        }
+                    }
+                }
+            }
+
+            // Snapshot the frame as plain text (selection copy extracts from
+            // this); link cells carry OSC 8 in their symbols, so strip it.
+            let mut frame_text: Vec<String> = Vec::with_capacity(buf.area.height as usize);
+            for r in 0..buf.area.height {
+                let mut line = String::with_capacity(buf.area.width as usize);
+                for c in 0..buf.area.width {
+                    let symbol = buf.get(c, r).symbol.as_str();
+                    if symbol.contains('\u{1b}') {
+                        line.push_str(&strip_osc8(symbol));
+                    } else {
+                        line.push_str(symbol);
+                    }
+                }
+                frame_text.push(line);
+            }
+
+            // The current selection as REVERSED cells: the highlight binds
+            // to real text (per-row extents inside the selection's region)
+            // so padding, margins, and decoration glyphs never highlight.
+            if let Some(sel) = sel
+                && !sel.is_empty()
+            {
+                let ((r1, c1), (r2, c2)) = sel.normalized();
+                let region = sel.region;
+                for r in r1..=r2.min(
+                    u16::try_from(buf.area.height)
+                        .unwrap_or(u16::MAX)
+                        .saturating_sub(1),
+                ) {
+                    if r < region.y || r >= region.y + region.height {
+                        continue;
+                    }
+                    let Some(row) = frame_text.get(r as usize) else {
+                        continue;
+                    };
+                    let Some((first, last)) = crate::tui::selection::text_extent(row, region)
+                    else {
+                        continue;
+                    };
+                    let (first, last) = (first as u16, last as u16);
+                    let row_from = if r == r1 { c1 } else { region.x };
+                    let row_to = if r == r2 {
+                        c2
+                    } else {
+                        region.x + region.width - 1
+                    };
+                    let from = row_from.max(first);
+                    let to = row_to.min(last);
+                    for c in from..=to {
+                        if let Some(cell) = buf.try_get_mut(u32::from(c), u32::from(r)) {
+                            cell.style
+                                .modifiers
+                                .insert(crate::tui::style::Modifiers::REVERSED);
+                        }
+                    }
+                }
+            }
+
+            paint.lock().expect("paint handoff").frame_text = frame_text;
+        });
+    });
+}
 #[cfg(test)]
 mod tests {
     use crate::tui::provider::ToolLine;
@@ -1006,484 +1489,4 @@ mod tests {
             }
         );
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// slt transcript painter
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Paint the transcript: the visible bands from [`build_frame`] become
-/// per-segment children in document order — text runs as fixed-height
-/// `.draw()` regions painting app `Line`s via `Buffer::set_string`, image
-/// segments as slt image widgets — plus a trailing bookkeeping region that
-/// publishes `msg_area` / hit regions / width into [`PaintData`] for the
-/// next frame's event handlers and wrap math (one frame stale).
-pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
-    // slt lays out after the frame closure returns, so the wrap width can
-    // only come from the previous frame's handoff; the bookkeeping draw
-    // below republishes the true rect every frame (the parity harness
-    // renders twice, so frame 2 is exact). 80 columns is the first-frame
-    // fallback.
-    let (area_w, stale_h) = {
-        let p = app.view.paint.lock().expect("paint handoff");
-        (if p.width == 0 { 80 } else { p.width }, p.msg_area.height)
-    };
-    // The viewport HEIGHT, though, must not be stale: the transcript
-    // sits above the todo/files sections and the composer block, and a
-    // ctrl+b / ctrl+t toggle (or a composer row count change) reshuffles
-    // those heights on this very frame. Bands built with the stale
-    // height overflow the shrunk grow(1) area (slt is overflow-by-design)
-    // and paint over the sections, composer and status line for a frame.
-    // Those sibling heights are pure functions of app state, so budget
-    // synchronously; the handoff stays as fallback for the form-open
-    // layouts whose heights aren't cheaply derivable.
-    let term_h = u16::try_from(ui.height()).unwrap_or(u16::MAX);
-    let forms_open = app.overlays.permission_prompt.is_open()
-        || app.overlays.question_form.is_open()
-        || app.plan_mode.plan_form.is_visible();
-    let area_h = if forms_open {
-        stale_h
-    } else {
-        let task_h = u16::from(app.active_task.is_some());
-        let todo_w =
-            (u32::from(area_w).saturating_sub(super::composer::SIDE_MARGIN * 2) as usize).max(1);
-        let todo_h = super::todo::block_height(app, todo_w) as u16;
-        let composer_h = super::composer::block_height(app, u32::from(area_w)) as u16;
-        term_h.saturating_sub(task_h + todo_h + composer_h)
-    };
-    let inner = geom::Rect {
-        x: 0,
-        y: 0,
-        width: area_w.saturating_sub(MARGINS),
-        height: area_h.saturating_sub(1),
-    };
-    let build = if inner.width == 0 {
-        None
-    } else {
-        Some(build_frame(app, inner))
-    };
-
-    let paint = app.view.paint.clone();
-    let area_only = paint.clone();
-    // Region data crosses the col closure boundary through this slot so
-    // the always-run overlay publish (declared after the col) can own it.
-    let regions_out: std::sync::Arc<
-        std::sync::Mutex<(Vec<(usize, u16, u16)>, Vec<(usize, u16)>, Vec<(usize, u16)>)>,
-    > = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new(), Vec::new())));
-    let regions_slot = std::sync::Arc::clone(&regions_out);
-    let grow_resp = ui.container().grow(1).col(move |ui| {
-        // Top margin row (`inner.y = area.y + 1`).
-        ui.container().h(1).draw(|_, _| {});
-
-        let mut total_rows: u32 = 0;
-        if let Some(build) = build {
-            let FrameBuild {
-                bands,
-                tool_spans,
-                notice_rows,
-                thinking_rows,
-                links,
-                ..
-            } = build;
-            let bg = Some(theme::current().bg_app);
-            let cols = u32::from(inner.width);
-            let mut links = VecDeque::from(links);
-            let mut row_cursor: u16 = 0;
-            for band in bands {
-                match band {
-                    Band::Text(rows) => {
-                        let count = rows.len() as u16;
-                        if count > 0 {
-                            // Links land inside their band: rows are
-                            // inner-relative and ascend with the walk.
-                            let mut band_links = Vec::new();
-                            while let Some(&(row, ..)) = links.front() {
-                                if row >= row_cursor.wrapping_add(count) {
-                                    break;
-                                }
-                                let (row, cs, ce, uri) = links.pop_front().expect("peeked");
-                                band_links.push((row - row_cursor, cs, ce, uri));
-                            }
-                            ui.container()
-                                .ml(u32::from(MARGIN_L))
-                                .mr(u32::from(MARGIN_R))
-                                .h(u32::from(count))
-                                .draw(move |buf, rect| {
-                                    paint_rows_slt(buf, rect, &rows, &band_links, bg);
-                                });
-                            total_rows += u32::from(count);
-                            row_cursor += count;
-                        }
-                    }
-                    Band::Image { state, rows } => {
-                        if rows > 0 {
-                            if let Some(px) = state.slt_pixels() {
-                                // Margins align the widget with the text
-                                // column; slt owns protocol detection and
-                                // falls back to halfblocks itself.
-                                let _ = ui
-                                    .container()
-                                    .ml(u32::from(MARGIN_L))
-                                    .mr(u32::from(MARGIN_R))
-                                    .h(u32::from(rows))
-                                    .row(|ui| {
-                                        if iterm_terminal() {
-                                            let file = px.file.clone();
-                                            let _ = ui.iterm_image(&file, cols, u32::from(rows));
-                                        } else {
-                                            let rgba = px.rgba.clone();
-                                            let _ = ui.kitty_image(
-                                                &rgba,
-                                                px.pixel_width,
-                                                px.pixel_height,
-                                                cols,
-                                                u32::from(rows),
-                                            );
-                                        }
-                                    });
-                            } else {
-                                // No pixel payload: still reserve the rows so
-                                // the flow below the image stays aligned.
-                                ui.container().h(u32::from(rows)).draw(|_, _| {});
-                            }
-                            total_rows += u32::from(rows);
-                            row_cursor += rows;
-                        }
-                    }
-                }
-            }
-            // Unsatisfied-grow publish (frame 1 and degenerate cases):
-            // a trailing in-col region that only has room when the bands
-            // don't fill the viewport — carrying the TRUE area so the
-            // second frame builds at the right width.
-            ui.container().grow(1).draw(move |_, rect| {
-                publish_area_slt(&area_only, rect, total_rows);
-            });
-            *regions_slot.lock().expect("paint handoff") = (tool_spans, notice_rows, thinking_rows);
-        } else {
-            *regions_slot.lock().expect("paint handoff") = (Vec::new(), Vec::new(), Vec::new());
-        }
-    });
-
-    // Bookkeeping (regions/width/msg_area): an overlay-layer 1x1 region —
-    // it runs EVERY frame (slt skips deferred draws whose rect collapses
-    // to zero, and a satisfied grow does exactly that once the bands fill
-    // the viewport) — carrying the grow container's previous-frame rect,
-    // one frame stale like the rest of the handoff.
-    let (tool_spans, notice_rows, thinking_rows) =
-        std::mem::take(&mut *regions_out.lock().expect("paint handoff"));
-    let paint_for_publish = paint.clone();
-    let _ = ui.overlay(|ui| {
-        ui.container().w(1).h(1).draw(move |_, _rect| {
-            publish_frame_slt(
-                &paint_for_publish,
-                grow_resp.rect,
-                &tool_spans,
-                &notice_rows,
-                &thinking_rows,
-            );
-        });
-    });
-}
-
-/// Paint pre-wrapped app lines into an slt buffer region: one display row
-/// per line, spans left to right, advancing `x` by each span's unicode
-/// width. App styles are slt styles already; unset span backgrounds inherit
-/// the app background, keeping the root fill under the text. The band's
-/// rect is the inner column (the declaring container carries the
-/// margins), so `set_string`'s clip trims unwrappable rows at the margins.
-fn paint_rows_slt(
-    buf: &mut slt::buffer::Buffer,
-    rect: slt::Rect,
-    lines: &[Line<'static>],
-    links: &[(u16, u16, u16, String)],
-    bg: Option<crate::tui::style::Color>,
-) {
-    use unicode_width::UnicodeWidthStr;
-
-    let x_max = rect.x.saturating_add(rect.width);
-    for (dy, line) in lines.iter().enumerate() {
-        let y = rect.y + dy as u32;
-        let mut x = rect.x;
-        for span in &line.spans {
-            let mut style = span.style;
-            if style.bg.is_none() {
-                style.bg = bg;
-            }
-            if x < x_max {
-                buf.set_string(x, y, &span.content, style);
-            }
-            x = x.saturating_add(span.width() as u32);
-        }
-        // ratatui parity: a wide grapheme's continuation cell reads as a
-        // plain space in the frame dump (ratatui resets the skipped cell);
-        // slt leaves it empty-symbol, so normalize it here.
-        let mut cx = rect.x;
-        while cx < x_max {
-            let width = buf
-                .try_get(cx, y)
-                .map(|c| UnicodeWidthStr::width(c.symbol.as_str()) as u32)
-                .unwrap_or(1);
-            if width == 2 {
-                if let Some(cell) = buf.try_get_mut(cx + 1, y) {
-                    cell.set_char(' ');
-                }
-                cx += 2;
-            } else {
-                cx += 1;
-            }
-        }
-    }
-    for (dy, col_start, col_end, uri) in links {
-        let y = rect.y + u32::from(*dy);
-        if y >= rect.bottom() {
-            continue;
-        }
-        for col in *col_start..*col_end {
-            let x = rect.x + u32::from(col);
-            if x >= x_max {
-                continue;
-            }
-            if let Some(cell) = buf.try_get_mut(x, y) {
-                apply_link_slt(cell, uri);
-            }
-        }
-    }
-}
-
-/// Mark a cell as part of an OSC-8 hyperlink via the first-class
-/// [`slt::Cell::hyperlink`] field; the slt backend emits and closes the
-/// escape sequence itself (run-coalesced across contiguous linked cells).
-/// Escape bytes must NOT be embedded in `cell.symbol`: slt normalizes
-/// symbols at the flush boundary and replaces C0/C1 controls (ESC) with
-/// U+FFFD, which renders as `�`/`?` garbage instead of the filename.
-fn apply_link_slt(cell: &mut slt::Cell, uri: &str) {
-    cell.hyperlink = Some(uri.to_string().into());
-}
-
-/// Publish the transcript frame handoff from the leftover region under the
-/// last band: its x/width match the transcript area, its bottom is the
-/// area's bottom, and the content rows above it are ours, so the area's
-/// origin and the inner-relative hit regions resolve exactly.
-/// Publish one frame's handoff. `area` is the FULL transcript area (the
-/// grow container's rect): regions are offset by the inner margins from
-/// its top-left, exactly where the bands painted.
-fn publish_frame_slt(
-    paint: &std::sync::Arc<std::sync::Mutex<crate::tui::app::PaintData>>,
-    area: slt::Rect,
-    tool_spans: &[(usize, u16, u16)],
-    notice_rows: &[(usize, u16)],
-    thinking_rows: &[(usize, u16)],
-) {
-    let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
-    let mut p = paint.lock().expect("paint handoff");
-    // Frame 1: the grow Response rect is still 0x0 — keep whatever the
-    // in-col unsatisfied-grow publish discovered (the true area) and only
-    // refresh the regions.
-    if area.width > 0 && area.height > 0 {
-        p.msg_area = geom::Rect::new(
-            clamp16(area.x),
-            clamp16(area.y),
-            clamp16(area.width),
-            clamp16(area.height),
-        );
-        p.width = clamp16(area.width);
-    }
-    let area = if area.width > 0 && area.height > 0 {
-        area
-    } else {
-        slt::Rect::new(
-            u32::from(p.msg_area.x),
-            u32::from(p.msg_area.y),
-            u32::from(p.msg_area.width),
-            u32::from(p.msg_area.height),
-        )
-    };
-    let inner_x = area.x + u32::from(MARGIN_L);
-    let inner_y = area.y + 1;
-    let inner_w = area.width.saturating_sub(u32::from(MARGINS));
-    p.tool_regions = tool_spans
-        .iter()
-        .map(|&(idx, s, e)| {
-            (
-                idx,
-                geom::Rect::new(
-                    clamp16(inner_x),
-                    clamp16(inner_y + u32::from(s)),
-                    clamp16(inner_w),
-                    e - s,
-                ),
-            )
-        })
-        .collect();
-    p.notice_regions = notice_rows
-        .iter()
-        .map(|&(idx, r)| {
-            (
-                idx,
-                geom::Rect::new(
-                    clamp16(inner_x),
-                    clamp16(inner_y + u32::from(r)),
-                    clamp16(inner_w),
-                    1,
-                ),
-            )
-        })
-        .collect();
-    p.thinking_regions = thinking_rows
-        .iter()
-        .map(|&(idx, r)| {
-            (
-                idx,
-                geom::Rect::new(
-                    clamp16(inner_x),
-                    clamp16(inner_y + u32::from(r)),
-                    clamp16(inner_w),
-                    1,
-                ),
-            )
-        })
-        .collect();
-}
-
-/// Publish the area only, from the leftover region below the bands (the
-/// trailing in-col draw that only has room while the grow is unsatisfied —
-/// frame 1 before the width handoff settles).
-fn publish_area_slt(
-    paint: &std::sync::Arc<std::sync::Mutex<crate::tui::app::PaintData>>,
-    leftover: slt::Rect,
-    total_rows: u32,
-) {
-    let area = slt::Rect::new(
-        leftover.x,
-        leftover.y.saturating_sub(total_rows + 1),
-        leftover.width,
-        leftover.height.saturating_add(total_rows + 1),
-    );
-    let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
-    let mut p = paint.lock().expect("paint handoff");
-    p.msg_area = geom::Rect::new(
-        clamp16(area.x),
-        clamp16(area.y),
-        clamp16(area.width),
-        clamp16(area.height),
-    );
-    p.width = clamp16(area.width);
-}
-
-/// iTerm2 terminals get the OSC 1337 widget (encoded payload); everything
-/// else goes through `kitty_image`, whose own capability probe falls back
-/// to halfblock cells. Env-based so tests deterministically take the
-/// halfblock path.
-fn iterm_terminal() -> bool {
-    std::env::var_os("TERM_PROGRAM").is_some_and(|v| v == "iTerm.app")
-}
-
-/// Trailing per-frame buffer pass, declared last so it sees the finished
-/// cells: the search-highlight fg↔bg swap, the full-screen `frame_text`
-/// snapshot, and the current selection as REVERSED cells.
-pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
-    let sel = app.view.selection;
-    let paint = app.view.paint.clone();
-    // The highlight span is recomputed from the doc engine (the same math
-    // `build_frame` used this frame); the closure translates it to screen
-    // rows through the fresh `msg_area` the transcript just published.
-    let hl_rows = {
-        let layout = Layout::new(&app.view.segments, app.view.view_width);
-        let top_row = layout.doc_row(app.view.scroll);
-        highlight_visible(
-            app,
-            &layout,
-            top_row,
-            geom::Rect::new(0, 0, app.view.view_width, app.view.view_height),
-        )
-    };
-
-    let _ = ui.overlay(|ui| {
-        ui.container().grow(1).draw(move |buf, _rect| {
-            let (inner_x, inner_y, inner_w) = {
-                let p = paint.lock().expect("paint handoff");
-                let m = p.msg_area;
-                (
-                    u32::from(m.x + MARGIN_L),
-                    u32::from(m.y + 1),
-                    u32::from(m.width.saturating_sub(MARGINS)),
-                )
-            };
-
-            // Search highlight: the segment's visible cells swap fg↔bg.
-            if let Some((start, end)) = hl_rows
-                && inner_w > 0
-            {
-                for row in start..end {
-                    let y = inner_y + u32::from(row);
-                    for col in 0..inner_w {
-                        if let Some(cell) = buf.try_get_mut(inner_x + col, y) {
-                            std::mem::swap(&mut cell.style.fg, &mut cell.style.bg);
-                        }
-                    }
-                }
-            }
-
-            // Snapshot the frame as plain text (selection copy extracts from
-            // this); link cells carry OSC 8 in their symbols, so strip it.
-            let mut frame_text: Vec<String> = Vec::with_capacity(buf.area.height as usize);
-            for r in 0..buf.area.height {
-                let mut line = String::with_capacity(buf.area.width as usize);
-                for c in 0..buf.area.width {
-                    let symbol = buf.get(c, r).symbol.as_str();
-                    if symbol.contains('\u{1b}') {
-                        line.push_str(&strip_osc8(symbol));
-                    } else {
-                        line.push_str(symbol);
-                    }
-                }
-                frame_text.push(line);
-            }
-
-            // The current selection as REVERSED cells: the highlight binds
-            // to real text (per-row extents inside the selection's region)
-            // so padding, margins, and decoration glyphs never highlight.
-            if let Some(sel) = sel
-                && !sel.is_empty()
-            {
-                let ((r1, c1), (r2, c2)) = sel.normalized();
-                let region = sel.region;
-                for r in r1..=r2.min(
-                    u16::try_from(buf.area.height)
-                        .unwrap_or(u16::MAX)
-                        .saturating_sub(1),
-                ) {
-                    if r < region.y || r >= region.y + region.height {
-                        continue;
-                    }
-                    let Some(row) = frame_text.get(r as usize) else {
-                        continue;
-                    };
-                    let Some((first, last)) = crate::tui::selection::text_extent(row, region)
-                    else {
-                        continue;
-                    };
-                    let (first, last) = (first as u16, last as u16);
-                    let row_from = if r == r1 { c1 } else { region.x };
-                    let row_to = if r == r2 {
-                        c2
-                    } else {
-                        region.x + region.width - 1
-                    };
-                    let from = row_from.max(first);
-                    let to = row_to.min(last);
-                    for c in from..=to {
-                        if let Some(cell) = buf.try_get_mut(u32::from(c), u32::from(r)) {
-                            cell.style
-                                .modifiers
-                                .insert(crate::tui::style::Modifiers::REVERSED);
-                        }
-                    }
-                }
-            }
-
-            paint.lock().expect("paint handoff").frame_text = frame_text;
-        });
-    });
 }

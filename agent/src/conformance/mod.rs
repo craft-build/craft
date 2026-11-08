@@ -293,12 +293,7 @@ fn sse_reply(body: Vec<u8>) -> Reply {
     Reply::sse(body)
 }
 
-/// The credential every keyed kind injects. A named fn (not a closure) so
-/// the deliberate unboxed error type can carry its expectation.
-#[expect(
-    clippy::result_large_err,
-    reason = "the crate error type is deliberately unboxed"
-)]
+/// The credential every keyed kind injects.
 fn injected_key(_env: &str) -> Result<String, crate::error::Error> {
     Ok("test-key".to_owned())
 }

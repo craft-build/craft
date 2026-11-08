@@ -140,10 +140,6 @@ async fn cache_is_fresh(path: &std::path::Path) -> bool {
 /// returns the model for the run to retry with. A process's environment
 /// only changes in-process, so this serves flows that update credentials
 /// while craft runs (plugins, config reloads, future auth flows).
-#[expect(
-    clippy::result_large_err,
-    reason = "the crate error type is deliberately unboxed"
-)]
 pub async fn reauth_hook(
     config: &ProviderConfig,
     id: &str,
@@ -375,6 +371,9 @@ mod aws_seed {
 
 use aws_seed::Seed;
 
+/// Test-seam credential lookup: resolves an env-var name to its key.
+type CredentialFn<'a> = &'a (dyn Fn(&str) -> Result<String> + Send + Sync);
+
 impl ProviderHandle {
     /// Construct the provider for `config`, reading credentials from the
     /// environment exactly when the config names an env var (animist
@@ -411,7 +410,7 @@ impl ProviderHandle {
     pub async fn from_config_with(
         config: &ProviderConfig,
         catalog: Option<&Catalog>,
-        credential: &(dyn Fn(&str) -> Result<String> + Send + Sync),
+        credential: CredentialFn<'_>,
     ) -> Result<Self> {
         match config {
             ProviderConfig::AmazonBedrock(entry) => {
@@ -440,7 +439,7 @@ impl ProviderHandle {
     async fn single(
         config: &ProviderConfig,
         catalog: Option<&Catalog>,
-        credential: Option<&(dyn Fn(&str) -> Result<String> + Send + Sync)>,
+        credential: Option<CredentialFn<'_>>,
     ) -> Result<Self> {
         let kind = config_kind_str(config);
         let provider = (|| -> Result<Provider> {
@@ -954,9 +953,10 @@ fn apply_thinking_settings(info: &mut ModelInfo, settings: &crate::config::Model
 /// A minimal info for a model neither the listing nor the catalog knows:
 /// an ID and default metadata, so unlisted deployments still run.
 fn bare_info(id: &str) -> ModelInfo {
-    let mut info = ModelInfo::default();
-    info.ids = vec![id.to_owned()];
-    info
+    ModelInfo {
+        ids: vec![id.to_owned()],
+        ..ModelInfo::default()
+    }
 }
 
 // --- Protocol quirks ----------------------------------------------------------------
@@ -1210,9 +1210,10 @@ mod tests {
     // --- keyless local routing ---
 
     fn openai_config(base_url: &str) -> OpenAiConfig {
-        let mut config = OpenAiConfig::default();
-        config.base_url = base_url.to_owned();
-        config
+        OpenAiConfig {
+            base_url: base_url.to_owned(),
+            ..Default::default()
+        }
     }
 
     #[test]

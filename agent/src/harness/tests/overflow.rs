@@ -255,7 +255,7 @@ async fn stop_reason_overflow_compacts_and_re_runs() {
         entries
             .iter()
             .filter_map(|entry| entry.current())
-            .any(|stored| marker::is(&stored, marker::CONTINUATION)),
+            .any(|stored| marker::is(stored, marker::CONTINUATION)),
         "the re-run continued from a continuation observation"
     );
     let _ = events_until_done(&mut stream).await;

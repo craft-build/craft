@@ -69,7 +69,7 @@ fn segment_delegates(segment: &str) -> bool {
 
 fn is_complex(node: Node) -> bool {
     COMPLEX_TYPES.contains(&node.kind())
-        || (0..node.child_count() as u32).any(|i| node.child(i).is_some_and(is_complex))
+        || (0..node.child_count()).any(|i| node.child(i).is_some_and(is_complex))
 }
 
 fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
@@ -91,7 +91,7 @@ fn collect_commands(node: Node, source: &str, out: &mut Vec<String>) {
 
     let level_start = out.len();
     let mut redirects: Vec<&str> = Vec::new();
-    for i in 0..node.child_count() as u32 {
+    for i in 0..node.child_count() {
         let child = node.child(i).expect("index < child_count");
         if !child.is_named() || child.kind() == "comment" {
             continue;
