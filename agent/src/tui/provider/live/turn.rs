@@ -302,12 +302,14 @@ impl TurnRenderer {
             Event::Craft(CraftEvent::Subagent {
                 tool_use_id,
                 description,
+                model,
                 event,
             }) => {
                 if let Some(inner) = subagent_event(*event) {
                     let _ = self.tx.send(AgentEvent::Subagent {
                         tool_use_id,
                         description,
+                        model,
                         event: Box::new(inner),
                     });
                 }

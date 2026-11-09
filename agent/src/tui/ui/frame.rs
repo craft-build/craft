@@ -150,6 +150,8 @@ fn render_task_header_slt(ui: &mut slt::Context, app: &App) {
     ui.line(|ui| {
         ui.styled(chat.name.clone(), Style::default().fg(t.accent));
         ui.text(" · ");
+        ui.styled(chat.model.clone(), Style::default().fg(t.text_secondary));
+        ui.text(" · ");
         ui.styled(status.label(), Style::default().fg(status_color));
         if status == crate::tui::app::TaskStatus::Working {
             ui.styled("  Esc-Esc cancels", Style::default().fg(t.text_tertiary));

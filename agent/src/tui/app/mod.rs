@@ -580,8 +580,9 @@ impl App {
             AgentEvent::Subagent {
                 tool_use_id,
                 description,
+                model,
                 event,
-            } => self.apply_subagent_event(&tool_use_id, &description, *event),
+            } => self.apply_subagent_event(&tool_use_id, &description, &model, *event),
             AgentEvent::SubagentFinished {
                 tool_use_id,
                 is_error,

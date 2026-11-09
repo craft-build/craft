@@ -387,6 +387,7 @@ pub enum AgentEvent {
     Subagent {
         tool_use_id: String,
         description: String,
+        model: String,
         event: Box<AgentEvent>,
     },
     /// The task tool call backing `tool_use_id` finished; `is_error`

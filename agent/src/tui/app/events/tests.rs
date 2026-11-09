@@ -1061,6 +1061,7 @@ fn sub_event(id: &str, text: &str) -> AgentEvent {
     AgentEvent::Subagent {
         tool_use_id: id.into(),
         description: "refactor tests".into(),
+        model: "mock/weak-model".into(),
         event: Box::new(AgentEvent::AssistantDelta(text.into())),
     }
 }
@@ -1075,6 +1076,7 @@ fn subagent_events_create_and_fill_chat() {
     assert_eq!(app.task_chats.len(), 1);
     assert_eq!(app.task_chats[0].tool_use_id, "t1");
     assert_eq!(app.task_chats[0].name, "refactor tests");
+    assert_eq!(app.task_chats[0].model, "mock/weak-model");
     match &app.task_chats[0].conversation.messages[..] {
         [crate::tui::app::Message::Assistant(text)] => assert_eq!(text, "hello world"),
         _ => panic!("expected one merged assistant message"),
@@ -1216,6 +1218,10 @@ fn ctrl_n_opens_the_task_chat_picker_modal() {
     assert!(
         visible.contains("refactor tests"),
         "task header missing:\n{visible}"
+    );
+    assert!(
+        visible.contains("mock/weak-model"),
+        "task model missing:\n{visible}"
     );
 
     // Without task chats the chord is a no-op (Ctrl-P stays palette).

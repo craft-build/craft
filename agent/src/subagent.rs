@@ -231,14 +231,11 @@ impl SubagentLauncher {
         if requested == ModelTier::Compaction {
             return Err("model tier \"compaction\" is not available for subagents".into());
         }
-        let parent_tier = crate::model_registry::tier_for(&parent_spec, &self.provider, None);
-        let effective = requested.min(parent_tier);
-        if effective == parent_tier {
+        let spec =
+            crate::model_registry::spec_for_subagent(&parent_spec, &self.provider, requested);
+        if spec == parent_spec {
             return Ok(parent);
         }
-        let Some(spec) = crate::model_registry::spec_for_tier(&self.provider, effective) else {
-            return Ok(parent);
-        };
         let Some(provider_config) = self.providers.get(&self.provider) else {
             return Ok(parent);
         };
@@ -391,6 +388,7 @@ impl SubagentLauncher {
             let parent_sink = self.sink.clone();
             let tool_use_id = req.tool_use_id.clone();
             let description = req.description.clone();
+            let child_spec = child_spec.clone();
             let mut stream = stream;
             tokio::spawn(async move {
                 while let Some(event) = stream.next().await {
@@ -410,6 +408,7 @@ impl SubagentLauncher {
                     parent_sink.craft(crate::harness::CraftEvent::Subagent {
                         tool_use_id: tool_use_id.clone(),
                         description: description.clone(),
+                        model: child_spec.to_string(),
                         event: Box::new(event),
                     });
                 }
@@ -1048,15 +1047,16 @@ mod tests {
         );
     }
 
-    /// Task 96: forwarded events are keyed by the spawning call's id, so
-    /// the task-chats view can route them without guessing.
+    /// Forwarded events carry the metadata needed to route and label the
+    /// task chat.
     #[tokio::test]
-    async fn forwarded_events_carry_the_call_id() {
+    async fn forwarded_events_carry_the_call_id_and_model() {
         let captured = Arc::new(Captured(StdMutex::new(Vec::new())));
         let l = launcher(
             mock(vec![crate::testing::text_turn("working on it")]),
             captured.clone(),
         );
+        let expected_model = l.parent.model_spec();
         let mut req = SubagentRequest::research("find", "search");
         req.tool_use_id = "toolu_01".into();
         let result = l.spawn(&req).await;
@@ -1064,8 +1064,8 @@ mod tests {
         let forwarded = settled_events(&captured).await;
         assert!(!forwarded.is_empty());
         assert!(forwarded.iter().all(
-            |e| matches!(e, HarnessEvent::Craft(crate::harness::CraftEvent::Subagent { tool_use_id, .. })
-                if tool_use_id == "toolu_01")
+            |e| matches!(e, HarnessEvent::Craft(crate::harness::CraftEvent::Subagent { tool_use_id, model, .. })
+                if tool_use_id == "toolu_01" && model == &expected_model)
         ));
     }
 

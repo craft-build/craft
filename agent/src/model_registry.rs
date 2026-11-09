@@ -164,6 +164,10 @@ pub fn spec_for_tier(provider: &str, tier: ModelTier) -> Option<String> {
     read().spec_for_tier(provider, tier)
 }
 
+pub fn spec_for_subagent(parent_spec: &str, provider: &str, requested: ModelTier) -> String {
+    read().spec_for_subagent(parent_spec, provider, requested)
+}
+
 pub fn spec_for_tier_any(tier: ModelTier) -> Option<String> {
     read().spec_for_tier_any(tier)
 }
@@ -307,6 +311,12 @@ impl ModelRegistry {
         }?;
 
         (!self.claimed_elsewhere(&candidate, tier)).then_some(candidate)
+    }
+
+    fn spec_for_subagent(&self, parent_spec: &str, provider: &str, requested: ModelTier) -> String {
+        let parent_tier = self.tier_for(parent_spec, provider, None);
+        self.spec_for_tier(provider, requested.min(parent_tier))
+            .unwrap_or_else(|| parent_spec.to_string())
     }
 
     /// Lowest ID wins, so the tier default survives provider list reordering.
@@ -606,6 +616,21 @@ mod tests {
 
         let conflict = make_map(&[(ModelTier::Weak, "ollama/big")], &["big", "mid", "small"]);
         assert_eq!(conflict.spec_for_tier("ollama", ModelTier::Strong), None);
+    }
+
+    #[test]
+    fn subagent_resolves_explicit_model_when_parent_has_same_automatic_tier() {
+        let reg = make_map(
+            &[(ModelTier::Weak, "ollama/chosen")],
+            &["big", "mid", "parent", "chosen"],
+        );
+        let parent = "ollama/parent";
+
+        assert_eq!(reg.tier_for(parent, "ollama", None), ModelTier::Weak);
+        assert_eq!(
+            reg.spec_for_subagent(parent, "ollama", ModelTier::Weak),
+            "ollama/chosen"
+        );
     }
 
     #[test]

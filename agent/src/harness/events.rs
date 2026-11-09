@@ -89,6 +89,8 @@ pub enum CraftEvent {
     Subagent {
         tool_use_id: String,
         description: String,
+        /// Resolved provider/model spec used by the child.
+        model: String,
         event: Box<Event>,
     },
 }

@@ -66,6 +66,8 @@ pub struct TaskChat {
     pub tool_use_id: String,
     /// The description passed to the task call (the chat's name).
     pub name: String,
+    /// Resolved provider/model spec used by this subagent.
+    pub model: String,
     /// The task's own transcript; subagent events apply here.
     pub conversation: Conversation,
     /// Scroll/viewport state, swapped into `App::view` while focused.
@@ -75,10 +77,15 @@ pub struct TaskChat {
 }
 
 impl TaskChat {
-    pub fn new(tool_use_id: impl Into<String>, name: impl Into<String>) -> Self {
+    pub fn new(
+        tool_use_id: impl Into<String>,
+        name: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         TaskChat {
             tool_use_id: tool_use_id.into(),
             name: name.into(),
+            model: model.into(),
             conversation: Conversation::new(),
             view: ViewModel::new(),
             outcome: None,
@@ -215,13 +222,14 @@ impl App {
         &mut self,
         tool_use_id: &str,
         description: &str,
+        model: &str,
         event: crate::tui::provider::AgentEvent,
     ) {
         let idx = match self.task_chat_index(tool_use_id) {
             Some(idx) => idx,
             None => {
                 self.task_chats
-                    .push(TaskChat::new(tool_use_id, description));
+                    .push(TaskChat::new(tool_use_id, description, model));
                 self.task_chats.len() - 1
             }
         };
@@ -276,6 +284,7 @@ mod tests {
             app.apply_subagent_event(
                 "t1",
                 "refactor",
+                "mock/weak",
                 crate::tui::provider::AgentEvent::AssistantDelta("child reply".into()),
             );
             if mounted {
@@ -308,7 +317,7 @@ mod tests {
 
     #[test]
     fn finish_honors_refines_semantics() {
-        let mut chat = TaskChat::new("t1", "refactor");
+        let mut chat = TaskChat::new("t1", "refactor", "mock/weak");
         // Terminalize (turn end) → Unknown; a late error verdict lands.
         chat.terminalize();
         assert_eq!(chat.outcome, Some(TaskOutcome::Unknown));
@@ -324,12 +333,12 @@ mod tests {
 
     #[test]
     fn status_maps_outcome_to_working_done_error() {
-        let mut chat = TaskChat::new("t1", "x");
+        let mut chat = TaskChat::new("t1", "x", "mock/weak");
         assert_eq!(chat.status(), TaskStatus::Working);
         chat.finish(TaskOutcome::Done);
         assert_eq!(chat.status(), TaskStatus::Done);
         // Unknown (terminalized without a verdict) reads as Done.
-        let mut chat2 = TaskChat::new("t2", "y");
+        let mut chat2 = TaskChat::new("t2", "y", "mock/weak");
         chat2.terminalize();
         assert_eq!(chat2.status(), TaskStatus::Done);
         chat2.finish(TaskOutcome::Error);
