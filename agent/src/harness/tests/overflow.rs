@@ -657,6 +657,31 @@ async fn auth_error_without_responder_fails_as_before() {
     assert_eq!(auth_event_count(&events_until_done(&mut stream).await), 0);
 }
 
+/// A model switch swaps the reauth hook with it: a 401 on the new model
+/// waits on the hook supplied with that model, not the original one.
+#[tokio::test]
+async fn auth_error_after_a_model_switch_uses_the_switched_hook() {
+    let original = script(Vec::new());
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, _stream) = reauth_conversation(&dir, &original, TestReauth::Fail).await;
+    let switched = script(vec![auth_error_turn(), done_turn("recovered")]);
+    let model = ModelHandle::scripted(crate::testing::scripted_model(
+        &switched,
+        crate::testing::model_info("other", 128_000, 4_096, false, false),
+    ));
+    conversation
+        .set_model(model, Some(std::sync::Arc::new(TestReauth::Reload)))
+        .unwrap();
+
+    let outcome = run_turn(&conversation, "continue").await;
+    assert!(
+        matches!(&outcome, TurnOutcome::Done { reply } if reply == "recovered"),
+        "got {outcome:?}"
+    );
+    assert_eq!(switched.reload_count(), 1);
+    assert!(original.requests().is_empty());
+}
+
 #[tokio::test]
 async fn auth_error_with_responder_waits_and_recovers() {
     let provider = script(vec![auth_error_turn(), done_turn("recovered")]);

@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
+#[cfg(not(test))]
 use etcetera::base_strategy::BaseStrategy;
 
 const FALLBACK_DIR: &str = ".craft";
@@ -115,6 +116,7 @@ fn strip_windows_extended_prefix(canon: &Path) -> PathBuf {
     canon.to_path_buf()
 }
 
+#[cfg(not(test))]
 fn state_logs(s: &impl BaseStrategy, fallback: &Path) -> (PathBuf, PathBuf) {
     let state_base = s.state_dir();
     let state = state_base
@@ -129,37 +131,69 @@ fn state_logs(s: &impl BaseStrategy, fallback: &Path) -> (PathBuf, PathBuf) {
 }
 
 fn resolve() -> Option<&'static Paths> {
-    STRATEGY
-        .get_or_init(|| {
-            let s = etcetera::choose_base_strategy().ok()?;
-            let fallback_dir = etcetera::home_dir()
-                .ok()
-                .map(|h| h.join(FALLBACK_DIR))
-                .filter(|d| d.is_dir());
-            let xdg_config = s.config_dir().join(APP_NAME);
-            let (data, cache, config) = match &fallback_dir {
-                Some(dir) => (dir.clone(), dir.clone(), dir.clone()),
-                None => (
-                    s.data_dir().join(APP_NAME),
-                    s.cache_dir().join(APP_NAME),
-                    xdg_config.clone(),
-                ),
-            };
-            let (state, logs) = if fallback_dir.is_some() {
-                (data.clone(), data.clone())
-            } else {
-                state_logs(&s, &data)
-            };
-            Some(Paths {
-                config,
-                data,
-                state,
-                logs,
-                cache,
-                xdg_config,
-            })
-        })
-        .as_ref()
+    STRATEGY.get_or_init(build_paths).as_ref()
+}
+
+/// Test builds never touch the real home: every base directory (and
+/// [`home`]) roots in one per-process temp dir, so a `cargo test` run cannot
+/// write sessions, model picks, MCP toggles or logs into the user's
+/// `~/.local/state/craft` or `~/.config/craft`.
+#[cfg(test)]
+fn test_home() -> &'static Path {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        tempfile::Builder::new()
+            .prefix("craft-test-home-")
+            .tempdir()
+            .expect("create test home dir")
+            .keep()
+    })
+}
+
+#[cfg(test)]
+fn build_paths() -> Option<Paths> {
+    let home = test_home();
+    let config = home.join(".config").join(APP_NAME);
+    let state_base = home.join(".local").join("state");
+    Some(Paths {
+        xdg_config: config.clone(),
+        config,
+        data: home.join(".local").join("share").join(APP_NAME),
+        state: state_base.join(APP_NAME),
+        logs: state_base.join("logs").join(APP_NAME),
+        cache: home.join(".cache").join(APP_NAME),
+    })
+}
+
+#[cfg(not(test))]
+fn build_paths() -> Option<Paths> {
+    let s = etcetera::choose_base_strategy().ok()?;
+    let fallback_dir = etcetera::home_dir()
+        .ok()
+        .map(|h| h.join(FALLBACK_DIR))
+        .filter(|d| d.is_dir());
+    let xdg_config = s.config_dir().join(APP_NAME);
+    let (data, cache, config) = match &fallback_dir {
+        Some(dir) => (dir.clone(), dir.clone(), dir.clone()),
+        None => (
+            s.data_dir().join(APP_NAME),
+            s.cache_dir().join(APP_NAME),
+            xdg_config.clone(),
+        ),
+    };
+    let (state, logs) = if fallback_dir.is_some() {
+        (data.clone(), data.clone())
+    } else {
+        state_logs(&s, &data)
+    };
+    Some(Paths {
+        config,
+        data,
+        state,
+        logs,
+        cache,
+        xdg_config,
+    })
 }
 
 fn err() -> std::io::Error {
@@ -216,17 +250,32 @@ pub struct XdgPaths {
 }
 
 pub fn xdg_paths() -> Result<XdgPaths, std::io::Error> {
-    let s = etcetera::choose_base_strategy().map_err(|_| err())?;
-    let data = s.data_dir().join(APP_NAME);
-    let (state, logs) = state_logs(&s, &data);
-    Ok(XdgPaths {
-        config: s.config_dir().join(APP_NAME),
-        state,
-        logs,
-    })
+    #[cfg(test)]
+    {
+        let p = resolve().ok_or_else(err)?;
+        Ok(XdgPaths {
+            config: p.config.clone(),
+            state: p.state.clone(),
+            logs: p.logs.clone(),
+        })
+    }
+    #[cfg(not(test))]
+    {
+        let s = etcetera::choose_base_strategy().map_err(|_| err())?;
+        let data = s.data_dir().join(APP_NAME);
+        let (state, logs) = state_logs(&s, &data);
+        Ok(XdgPaths {
+            config: s.config_dir().join(APP_NAME),
+            state,
+            logs,
+        })
+    }
 }
 
 pub fn home() -> Option<PathBuf> {
+    #[cfg(test)]
+    return Some(test_home().to_path_buf());
+    #[cfg(not(test))]
     etcetera::home_dir().ok()
 }
 
@@ -253,10 +302,7 @@ pub fn canonical_key(path: &Path) -> PathBuf {
 }
 
 pub fn legacy_home_dir() -> Option<PathBuf> {
-    etcetera::home_dir()
-        .ok()
-        .map(|h| h.join(FALLBACK_DIR))
-        .filter(|d| d.is_dir())
+    home().map(|h| h.join(FALLBACK_DIR)).filter(|d| d.is_dir())
 }
 
 /// Where to look for user config, best match first. Writes still go to
@@ -292,6 +338,28 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn test_builds_never_resolve_into_the_real_home() {
+        let sandbox = test_home();
+        let dirs = [
+            config_dir().unwrap(),
+            data_dir().unwrap(),
+            state_dir().unwrap(),
+            logs_dir().unwrap(),
+            cache_dir().unwrap(),
+            xdg_config_dir().unwrap(),
+        ];
+        for dir in dirs.iter().chain(config_search_dirs().iter()) {
+            assert!(
+                dir.starts_with(sandbox),
+                "{} escapes {}",
+                dir.display(),
+                sandbox.display()
+            );
+        }
+        assert_eq!(home().as_deref(), Some(sandbox));
+    }
 
     const KEYED_FILE: &str = "f.rs";
     const SUBDIR: &str = "sub";

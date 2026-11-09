@@ -292,7 +292,7 @@ pub(super) async fn build_session_state(
     restore: Option<RestoredSession>,
     thinking: crate::thinking::ThinkingConfig,
 ) -> Result<(SessionState, crate::harness::EventStream), String> {
-    let model = resolve_model(&kit.config, selection).await?;
+    let model = resolve_model(&kit.config, &kit.listings, selection).await?;
     let (session_ref, persister) = match restore {
         Some(restored) => {
             let id = restored.persister.lock().await.store().session().id.clone();
@@ -354,7 +354,8 @@ pub(super) async fn build_session_state(
             .providers
             .get(&selection.provider)
             .ok_or_else(|| format!("provider {} is not configured", selection.provider))?,
-        &selection.model,
+        &model.model.id,
+        &model.model.info,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -387,10 +388,7 @@ pub(super) async fn build_session_state(
         parent: conversation.clone(),
         provider: selection.provider.clone(),
         providers: kit.config.providers.clone(),
-        agent: crate::config::AgentConfig {
-            thinking: Some(thinking),
-            ..Default::default()
-        },
+        agent: crate::config::AgentConfig::default(),
         compression: kit.config.compression.clone(),
         base_prompt: format!("{}{}", kit.config.agent.preamble, kit.instructions_text),
         workspace: workspace.clone(),
@@ -417,6 +415,7 @@ pub(super) async fn build_session_state(
         SessionState {
             thinking,
             conversation,
+            model_spec: format!("{}/{}", selection.provider, selection.model),
             signals: RunSignals::new(),
             usage,
         },

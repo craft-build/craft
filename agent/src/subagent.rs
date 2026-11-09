@@ -175,7 +175,7 @@ pub struct SubagentLauncher {
     pub provider: String,
     /// Provider configs from which alternate-tier models are built.
     pub providers: std::collections::BTreeMap<String, ProviderConfig>,
-    /// Agent-level run settings for the child.
+    /// Agent-level run settings for the child; thinking follows the parent.
     pub agent: AgentConfig,
     /// Compression settings shared with the parent's run.
     pub compression: crate::compression::CompressionConfig,
@@ -247,8 +247,15 @@ impl SubagentLauncher {
             crate::provider::ProviderHandle::from_config(provider_config, Some(&catalog))
                 .await
                 .map_err(|e| e.to_string())?;
+        // A failed listing degrades to the catalog row, like startup discovery.
+        let listing = provider.models(provider_config, Some(&catalog)).await.ok();
         let model = provider
-            .model(provider_config, Some(&catalog), &spec)
+            .model(
+                provider_config,
+                Some(&catalog),
+                listing.as_deref(),
+                provider_model_id(&spec),
+            )
             .await
             .map_err(|e| e.to_string())?;
         Ok((model, spec.as_str().into()))
@@ -337,7 +344,15 @@ impl SubagentLauncher {
         config.agent.preamble = self.base_prompt.clone();
         config.agent.temperature = self.agent.temperature;
         config.agent.max_tokens = self.agent.max_tokens;
-        config.agent.thinking = self.agent.thinking;
+        // The parent's current level, snapped to what the child's model
+        // accepts (manual `supports_thinking` config folded in).
+        let mut child_info = model.model.info.clone();
+        child_info.features.thinking.supported = model.model.thinking_supported();
+        child_info.features.thinking.required = model.model.thinking_required();
+        config.agent.thinking = Some(crate::thinking::effective_for(
+            self.parent.settings().thinking,
+            Some(&child_info),
+        ));
         config.agent.advisor = self.agent.advisor.clone();
         config.agent.prompt_format = self.agent.prompt_format;
         config.compression = self.compression.clone();
@@ -582,6 +597,10 @@ impl SubagentLauncher {
     }
 }
 
+fn provider_model_id(spec: &str) -> &str {
+    spec.split_once('/').map_or(spec, |(_, model)| model)
+}
+
 fn parse_tier(tier: &str) -> Result<ModelTier, String> {
     match tier {
         "weak" => Ok(ModelTier::Weak),
@@ -770,6 +789,14 @@ mod tests {
     }
 
     #[test]
+    fn provider_model_id_strips_only_the_provider_prefix() {
+        assert_eq!(
+            provider_model_id("synthetic/hf:Qwen/Qwen3.8-27B"),
+            "hf:Qwen/Qwen3.8-27B"
+        );
+    }
+
+    #[test]
     fn partial_text_joins_all_assistant_replies() {
         let convo = vec![
             assistant("one"),
@@ -938,6 +965,36 @@ mod tests {
                 "no subagent events arrived"
             );
         }
+    }
+
+    /// The child runs at the parent's current thinking level, not one
+    /// captured when the launcher was armed, snapped to the efforts the
+    /// child's model lists.
+    #[tokio::test]
+    async fn child_thinking_follows_the_parent_snapped_to_the_model() {
+        use animist::provider::{Effort, ThinkingConfig as Wire};
+        let provider = crate::testing::ScriptedProvider::new(Vec::new());
+        provider.push(crate::testing::text_turn("done"));
+        let mut info = crate::testing::model_info("mock", 200_000, 8_192, true, false);
+        info.features.thinking = animist::provider::Thinking::builder()
+            .supported(true)
+            .required(false)
+            .efforts(vec![Effort::Low, Effort::High, Effort::Max])
+            .build();
+        let model =
+            crate::provider::ModelHandle::scripted(crate::testing::scripted_model(&provider, info));
+        let l = launcher(model, Arc::new(Captured(StdMutex::new(Vec::new()))));
+        l.parent.update_settings(|settings| {
+            settings.thinking =
+                crate::thinking::ThinkingConfig::Effort(crate::thinking::Effort::Medium);
+        });
+
+        let result = l.spawn(&SubagentRequest::research("d", "p")).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            provider.requests()[0].options.thinking,
+            Wire::Effort(Effort::Low)
+        );
     }
 
     #[tokio::test]

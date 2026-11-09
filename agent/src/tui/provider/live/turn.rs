@@ -1,6 +1,7 @@
 //! One agent turn: drives the conversation's run, rendering to the TUI seam
 //! through the session-long forwarder.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -8,7 +9,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::config::Config;
 use animist::agent::AgentEvent as RuntimeEvent;
-use animist::provider::ProviderEvent;
+use animist::provider::{ModelInfo, ProviderEvent};
 
 use crate::harness::AgentMode;
 use crate::harness::{self, CraftEvent, Event, EventStream};
@@ -434,6 +435,7 @@ fn emit_reply(tx: &mpsc::UnboundedSender<AgentEvent>, streamed: bool, reply: &st
 
 pub(super) async fn resolve_model(
     config: &Config,
+    listings: &BTreeMap<String, Vec<ModelInfo>>,
     selection: &Selection,
 ) -> Result<crate::provider::ModelHandle, String> {
     let Some(provider_config) = config.providers.get(&selection.provider) else {
@@ -444,7 +446,12 @@ pub(super) async fn resolve_model(
         .await
         .map_err(report)?;
     provider
-        .model(provider_config, Some(&catalog), &selection.model)
+        .model(
+            provider_config,
+            Some(&catalog),
+            listings.get(&selection.provider).map(Vec::as_slice),
+            &selection.model,
+        )
         .await
         .map_err(report)
 }
@@ -587,19 +594,34 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<history::Co
     let turn_cancel = animist::agent::Cancellation::default();
     kit.cancel_cell.store(Arc::new(turn_cancel.clone()));
     let selection = Arc::unwrap_or_clone(kit.selection.load_full());
-    let model = match resolve_model(&kit.config, &selection).await {
+    let model = match resolve_model(&kit.config, &kit.listings, &selection).await {
         Ok(model) => model,
         Err(message) => fail!(message),
     };
 
-    let conversation = state.lock().await.conversation.clone();
+    let (conversation, current_spec) = {
+        let session = state.lock().await;
+        (session.conversation.clone(), session.model_spec.clone())
+    };
     // A model switch since the conversation was built swaps it between
     // runs, keeping the history, the layer state, and the event stream.
     // The spec, not the id alone: two providers can share a model id.
-    if conversation.model_spec() != format!("{}/{}", selection.provider, model.model.id)
-        && let Err(error) = conversation.set_model(model.clone())
-    {
-        fail!(report(error));
+    let spec = format!("{}/{}", selection.provider, model.model.id);
+    if current_spec != spec {
+        let reauth = match crate::provider::reauth_hook(
+            &kit.config.providers[&selection.provider],
+            &model.model.id,
+            &model.model.info,
+        )
+        .await
+        {
+            Ok(reauth) => reauth,
+            Err(error) => fail!(report(error)),
+        };
+        if let Err(error) = conversation.set_model(model.clone(), Some(reauth)) {
+            fail!(report(error));
+        }
+        state.lock().await.model_spec = spec;
     }
 
     {

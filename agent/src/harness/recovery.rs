@@ -590,8 +590,9 @@ fn lock(state: &RecoveryHandle) -> std::sync::MutexGuard<'_, RecoveryRunState> {
 pub(crate) struct RecoveryLayer {
     /// Retry inputs: the rotation hook and the fallback model chain.
     retry: RetryCtx,
-    /// The surface's reauth hook (TUI and ACP wire one).
-    reauth: Option<Arc<dyn ReauthHook>>,
+    /// The surface's reauth hook for the current model (TUI and ACP wire
+    /// one); the conversation swaps it with the model.
+    reauth: Arc<arc_swap::ArcSwapOption<Arc<dyn ReauthHook>>>,
     state: RecoveryHandle,
     compaction: SharedCompactionState,
     engine: CompactionEngine,
@@ -605,7 +606,7 @@ impl RecoveryLayer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         retry: RetryCtx,
-        reauth: Option<Arc<dyn ReauthHook>>,
+        reauth: Arc<arc_swap::ArcSwapOption<Arc<dyn ReauthHook>>>,
         state: RecoveryHandle,
         compaction: SharedCompactionState,
         engine: CompactionEngine,
@@ -792,7 +793,7 @@ impl RecoveryLayer {
             state.reauth_attempts += 1;
             state.reauth_attempts
         };
-        let Some(hook) = self.reauth.clone() else {
+        let Some(hook) = self.reauth.load_full() else {
             return Ok(Recovery::Propagate);
         };
         // Ahead of animist's own events, so the surface shows the wait

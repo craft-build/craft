@@ -60,6 +60,7 @@ impl CraftProvider {
             evt_tx: evt_tx.clone(),
             files: super::cards::Files::default(),
             selection: Arc::new(ArcSwap::from_pointee(self.selection.clone())),
+            listings: Arc::new(self.catalogs.clone()),
             cwd: cwd.clone(),
             state_dir: state_dir.clone(),
         };

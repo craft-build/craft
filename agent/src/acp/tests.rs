@@ -191,6 +191,7 @@ fn test_session() -> Session {
         provider_name: "openai".into(),
         models: Vec::new(),
         model: "gpt-x".into(),
+        model_spec: "openai/gpt-x".into(),
         context_length: Some(128_000),
         thinking: Default::default(),
         turn: None,
@@ -924,4 +925,66 @@ fn replay_updates_carry_the_shared_transcript() {
         &updates[2],
         SessionUpdate::AgentMessageChunk(chunk) if chunk.content == text_block("all set")
     ));
+}
+
+// ----- model sync -----
+
+/// Two providers serving the same model id: switching between them swaps
+/// the conversation's model and records the new spec, while an unchanged
+/// spec leaves the conversation alone.
+#[tokio::test]
+async fn sync_model_swaps_on_a_provider_change_with_the_same_id() {
+    let config = Config::parse(
+        r#"
+        provider "a" {
+          kind = "openai-compatible"
+          base_url = "http://127.0.0.1:9/v1"
+          model "m" { name = "M" }
+        }
+        provider "b" {
+          kind = "openai-compatible"
+          base_url = "http://127.0.0.1:9/v2"
+          model "m" { name = "M" }
+        }
+    "#,
+    )
+    .unwrap();
+    let state = AppState::new(config);
+    let session = test_session();
+    let conversation = session.conversation.clone();
+    state.sessions.lock().await.insert(
+        "s".into(),
+        Session {
+            model_spec: "a/m".into(),
+            ..session
+        },
+    );
+    let session_id = SessionId::new("s");
+    let scripted_spec = conversation.model_spec();
+    let provider_config = &state.config.providers["b"];
+    let model = crate::provider::ProviderHandle::from_config(provider_config, None)
+        .await
+        .unwrap()
+        .model(provider_config, None, None, "m")
+        .await
+        .unwrap();
+
+    sync_model(&state, &session_id, &conversation, "a", "a/m", &model)
+        .await
+        .unwrap();
+    assert_eq!(
+        conversation.model_spec(),
+        scripted_spec,
+        "same spec: no swap"
+    );
+
+    sync_model(&state, &session_id, &conversation, "b", "a/m", &model)
+        .await
+        .unwrap();
+    assert_ne!(
+        conversation.model_spec(),
+        scripted_spec,
+        "provider change swaps"
+    );
+    assert_eq!(state.sessions.lock().await["s"].model_spec, "b/m");
 }

@@ -101,6 +101,7 @@ async fn persisted_state(
         Arc::new(Mutex::new(SessionState {
             thinking: crate::thinking::ThinkingConfig::default(),
             conversation,
+            model_spec: "mock/model".into(),
             signals: super::turn::RunSignals::new(),
             usage,
         })),
@@ -305,6 +306,7 @@ async fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
             evt_tx: mpsc::unbounded_channel().0,
             files: Files::default(),
             selection: Arc::new(ArcSwap::from_pointee(mock_selection())),
+            listings: Arc::default(),
             cwd: "/cwd".into(),
             state_dir: None,
         },
@@ -338,6 +340,7 @@ fn offline_kit(
         evt_tx,
         files: Files::default(),
         selection: Arc::new(ArcSwap::from_pointee(mock_selection())),
+        listings: Arc::default(),
         cwd: "/cwd".into(),
         state_dir,
     }
@@ -974,4 +977,48 @@ async fn run_turn_sends_the_resolved_preamble_exactly_once() {
     let (_, body) = captured.split_once("\r\n\r\n").unwrap();
     assert_eq!(body.matches("MARKER").count(), 1, "{body}");
     assert_eq!(body.matches("BASELINE-PREAMBLE").count(), 1, "{body}");
+}
+
+/// A turn on the session's current selection keeps the conversation's
+/// model: the spec compares by the config's provider name, which need not
+/// match the provider kind. A swap would route to the unreachable `mock`
+/// endpoint instead of the scripted model.
+#[tokio::test]
+async fn run_turn_keeps_the_model_for_an_unchanged_selection() {
+    let provider = crate::testing::ScriptedProvider::new(Vec::new());
+    provider.push(crate::testing::text_turn("scripted"));
+    let info = crate::testing::model_info_with("model", Some(128_000), None);
+    let workspace = Workspace::new(std::env::temp_dir()).expect("workspace");
+    let (sink, _stream) = crate::harness::EventSink::new();
+    let conversation = crate::harness::ConversationBuilder::new(
+        &Config::parse("").expect("default config"),
+        "/cwd",
+        "",
+        crate::provider::ModelHandle::scripted(crate::testing::scripted_model(&provider, info)),
+        workspace
+            .registry(&animist::history::History::new())
+            .unwrap(),
+        sink,
+    )
+    .build()
+    .expect("conversation builds");
+    let state = Arc::new(Mutex::new(SessionState {
+        conversation,
+        model_spec: "mock/model".into(),
+        ..SessionState::for_tests()
+    }));
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    run_turn(
+        TurnCtx {
+            kit: offline_kit(offline_config(), None, tx),
+            state,
+            mode: crate::harness::AgentMode::Build,
+        },
+        "hi".into(),
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(provider.requests().len(), 1);
 }

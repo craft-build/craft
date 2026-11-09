@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 
 use animist::agent::{Agent, AgentConfig, AgentLayer, Layer};
 use animist::history::History;
@@ -137,6 +137,9 @@ impl LayerSet {
 struct Inner {
     history: History,
     model: Arc<ArcSwap<ModelHandle>>,
+    /// The reauth hook for the current model, shared with the recovery
+    /// layer; [`Conversation::set_model`] swaps it with the model.
+    reauth: Arc<ArcSwapOption<Arc<dyn ReauthHook>>>,
     settings: Arc<ArcSwap<TurnSettings>>,
     tools: Arc<ArcSwap<ToolRegistry>>,
     agent: ArcSwap<Arc<Agent>>,
@@ -438,6 +441,7 @@ impl<'a> ConversationBuilder<'a> {
             .with_buffer(config.compaction_buffer)
             .with_prompt_format(config.agent.prompt_format);
         let model_cell = Arc::new(ArcSwap::from_pointee(model));
+        let reauth_cell = Arc::new(ArcSwapOption::from(reauth.map(Arc::new)));
         let recovery_state = Arc::new(std::sync::Mutex::new(
             super::recovery::RecoveryRunState::default(),
         ));
@@ -474,7 +478,7 @@ impl<'a> ConversationBuilder<'a> {
             })),
             recovery: Layer::new(RecoveryLayer::new(
                 retry,
-                reauth,
+                Arc::clone(&reauth_cell),
                 Arc::clone(&recovery_state),
                 Arc::clone(&compaction),
                 engine.clone(),
@@ -498,6 +502,7 @@ impl<'a> ConversationBuilder<'a> {
         let inner = Inner {
             history,
             model: model_cell,
+            reauth: reauth_cell,
             settings,
             tools: Arc::new(ArcSwap::from_pointee(tools)),
             agent: ArcSwap::from_pointee(Arc::new(agent)),
@@ -668,10 +673,12 @@ impl Conversation {
         &self.inner.config
     }
 
-    /// Swap the model and rebuild the agent between runs, keeping the
-    /// history, the layer state, and the event subscription.
-    pub fn set_model(&self, model: ModelHandle) -> Result<()> {
+    /// Swap the model, and the reauth hook that rebuilds it, then rebuild
+    /// the agent between runs, keeping the history, the layer state, and
+    /// the event subscription.
+    pub fn set_model(&self, model: ModelHandle, reauth: Option<Arc<dyn ReauthHook>>) -> Result<()> {
         self.inner.model.store(Arc::new(model));
+        self.inner.reauth.store(reauth.map(Arc::new));
         self.rebuild().context(BuildConversationSnafu)
     }
 

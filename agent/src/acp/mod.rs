@@ -74,6 +74,9 @@ struct Session {
     provider_name: String,
     models: Vec<animist::provider::ModelInfo>,
     model: String,
+    /// The `provider/model` spec the conversation's model was resolved
+    /// from; differs from the selection until the next turn swaps it.
+    model_spec: String,
     context_length: Option<u32>,
     thinking: crate::thinking::ThinkingConfig,
     /// In-flight turn id; `Some` while a `session/prompt` turn is running.
@@ -447,10 +450,10 @@ impl AppState {
         } else {
             model
         };
-        let (provider, _models) = self.provider_catalog(&provider_name).await?;
+        let (provider, listing) = self.provider_catalog(&provider_name).await?;
         let provider_config = &self.config.providers[&provider_name];
         let handle = provider
-            .model(provider_config, None, &model)
+            .model(provider_config, None, Some(&listing), &model)
             .await
             .map_err(report)?;
 
@@ -494,7 +497,7 @@ impl AppState {
         }
         // Reauth hook over the session provider's credential; a 401
         // parks the run for the refresh instead of failing the turn.
-        let reauth = crate::provider::reauth_hook(provider_config, &model)
+        let reauth = crate::provider::reauth_hook(provider_config, &model, &handle.model.info)
             .await
             .map_err(report)?;
         let conversation = crate::harness::ConversationBuilder::new(
@@ -523,10 +526,7 @@ impl AppState {
             parent: conversation.clone(),
             provider: provider_name.clone(),
             providers: self.config.providers.clone(),
-            agent: crate::config::AgentConfig {
-                thinking: Some(thinking),
-                ..Default::default()
-            },
+            agent: crate::config::AgentConfig::default(),
             compression: self.config.compression.clone(),
             base_prompt: format!("{}{}", self.config.agent.preamble, instructions.text),
             workspace: workspace.clone(),
@@ -549,6 +549,7 @@ impl AppState {
             events,
             cancel_cell,
             persister,
+            model_spec: format!("{provider_name}/{model}"),
             provider_name,
             models,
             model,
@@ -818,7 +819,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Ok(text) => text,
                     Err(message) => return respond_setup_error(responder, message),
                 };
-                let (conversation, mut events, provider_name, model, thinking, turn_cancel, turn_id) = {
+                let (conversation, mut events, provider_name, model, current_spec, thinking, turn_cancel, turn_id) = {
                     let mut sessions = prompt_state.sessions.lock().await;
                     let Some(session) = sessions.get_mut(request.session_id.0.as_ref()) else {
                         drop(sessions);
@@ -842,6 +843,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         std::mem::replace(&mut session.events, crate::harness::EventSink::new().1),
                         session.provider_name.clone(),
                         session.model.clone(),
+                        session.model_spec.clone(),
                         session.thinking,
                         turn_cancel,
                         turn_id,
@@ -861,6 +863,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         &mut events,
                         provider_name,
                         model,
+                        current_spec,
                         thinking,
                         turn_cancel,
                         turn_id,

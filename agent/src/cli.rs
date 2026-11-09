@@ -1178,7 +1178,12 @@ pub(crate) async fn run_headless_query_with(
         }
     };
     let model = provider
-        .model(&provider_config, Some(&catalog_data), &model_id)
+        .model(
+            &provider_config,
+            Some(&catalog_data),
+            catalog.as_deref().ok(),
+            &model_id,
+        )
         .await?;
     // The context window feeds compaction thresholds; the output ceiling
     // rides the model handle's own info (per-model config, then the
@@ -1302,7 +1307,6 @@ pub(crate) async fn run_headless_query_with(
         agent: crate::config::AgentConfig {
             temperature: config.agent.temperature,
             max_tokens: config.agent.max_tokens,
-            thinking: config.agent.thinking,
             ..Default::default()
         },
         compression: config.compression.clone(),

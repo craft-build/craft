@@ -69,6 +69,9 @@ pub(super) type SharedPark = Arc<Mutex<ParkSlots>>;
 struct SessionState {
     thinking: crate::thinking::ThinkingConfig,
     conversation: Conversation,
+    /// The `provider/model` spec the conversation's model was resolved
+    /// from, keyed by the config's provider name.
+    model_spec: String,
     /// Turn-level sync with the session forwarder: the streamed-reply
     /// flags and the terminal-Done generation each run settles on.
     signals: RunSignals,
@@ -103,6 +106,7 @@ impl SessionState {
         Self {
             thinking: crate::thinking::ThinkingConfig::default(),
             conversation,
+            model_spec: "mock/main".into(),
             signals: RunSignals::new(),
             usage: UsageLedger::default(),
         }
@@ -133,6 +137,9 @@ pub(super) struct SessionKit {
     /// The current model selection, shared with the forwarder (context
     /// labels) and every turn (model resolution).
     pub(super) selection: Arc<ArcSwap<Selection>>,
+    /// Each provider's discovered model rows, the metadata a resolved
+    /// model carries.
+    pub(super) listings: Arc<BTreeMap<String, Vec<ModelInfo>>>,
     pub(super) cwd: String,
     pub(super) state_dir: Option<crate::storage::StateDir>,
 }

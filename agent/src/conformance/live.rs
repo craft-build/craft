@@ -49,7 +49,7 @@ async fn live_turn(bml: &str, prompt: &str, with_tools: bool) -> TurnOutcome {
         .expect("one configured model")
         .clone();
     let model = handle
-        .model(&provider_config, Some(&catalog), &model_id)
+        .model(&provider_config, Some(&catalog), None, &model_id)
         .await
         .expect("live model builds");
 

@@ -21,8 +21,42 @@ use crate::thinking::ThinkingConfig;
 
 use super::{AppState, clear_turn, internal_error, report};
 
+/// Swap the conversation onto `model` between runs when the spec its model
+/// was resolved from differs (the spec, not the id alone: two providers can
+/// share a model id), with a reauth hook for the new model, and record the
+/// new spec on the session. History, layer state, and the event stream
+/// carry over.
+pub(super) async fn sync_model(
+    state: &AppState,
+    session_id: &SessionId,
+    conversation: &Conversation,
+    provider_name: &str,
+    current_spec: &str,
+    model: &crate::provider::ModelHandle,
+) -> Result<(), String> {
+    let spec = format!("{provider_name}/{}", model.model.id);
+    if current_spec == spec {
+        return Ok(());
+    }
+    let reauth = crate::provider::reauth_hook(
+        &state.config.providers[provider_name],
+        &model.model.id,
+        &model.model.info,
+    )
+    .await
+    .map_err(report)?;
+    conversation
+        .set_model(model.clone(), Some(reauth))
+        .map_err(report)?;
+    if let Some(session) = state.sessions.lock().await.get_mut(session_id.0.as_ref()) {
+        session.model_spec = spec;
+    }
+    Ok(())
+}
+
 /// One ACP prompt turn on the session's conversation. `stream` is the
 /// conversation's single event stream, lent by the session for the turn;
+/// `current_spec` is the spec the conversation's model was resolved from;
 /// `thinking` is the session's stored preference.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_turn(
@@ -34,6 +68,7 @@ pub(super) async fn run_turn(
     stream: &mut EventStream,
     provider_name: String,
     model: String,
+    current_spec: String,
     thinking: ThinkingConfig,
     turn_cancel: animist::agent::Cancellation,
     turn_id: u64,
@@ -46,7 +81,7 @@ pub(super) async fn run_turn(
             return;
         }};
     }
-    let (provider, _models) = match state.provider_catalog(&provider_name).await {
+    let (provider, listing) = match state.provider_catalog(&provider_name).await {
         Ok(catalog) => catalog,
         Err(message) => fail!(message),
     };
@@ -54,16 +89,24 @@ pub(super) async fn run_turn(
         fail!("no model is selected; set the model session configuration option");
     }
     let provider_config = &state.config.providers[&provider_name];
-    let model = match provider.model(provider_config, None, &model).await {
+    let model = match provider
+        .model(provider_config, None, Some(&listing), &model)
+        .await
+    {
         Ok(model) => model,
         Err(error) => fail!(report(error)),
     };
-    // A model switch since the conversation was built rebuilds it between
-    // runs, keeping the history, the layer state, and the event stream.
-    if conversation.model().model.id != model.model.id
-        && let Err(error) = conversation.set_model(model.clone())
+    if let Err(message) = sync_model(
+        &state,
+        &session_id,
+        &conversation,
+        &provider_name,
+        &current_spec,
+        &model,
+    )
+    .await
     {
-        fail!(report(error));
+        fail!(message);
     }
     let context_length = conversation.model().context_length();
 

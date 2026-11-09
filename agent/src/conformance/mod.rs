@@ -217,7 +217,7 @@ async fn converse_configured(
         .await
         .expect("provider constructs against the mock");
     let model: ModelHandle = handle
-        .model(&provider_config, catalog.as_ref(), "m")
+        .model(&provider_config, catalog.as_ref(), None, "m")
         .await
         .expect("model builds");
 
@@ -1112,7 +1112,7 @@ async fn bedrock_serves_the_auto_review_llm_path() {
             .await
             .expect("provider constructs against the mock");
         let model = handle
-            .model(&provider_config, None, "m")
+            .model(&provider_config, None, None, "m")
             .await
             .expect("model builds");
         let decision = crate::auto_review::review(

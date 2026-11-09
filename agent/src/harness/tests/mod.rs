@@ -508,7 +508,7 @@ async fn model_switch_between_turns_keeps_history_and_subscription() {
         &second,
         testing::model_info("other", 128_000, 4_096, false, false),
     ));
-    conversation.set_model(replacement).unwrap();
+    conversation.set_model(replacement, None).unwrap();
     let outcome =
         crate::harness::run_turn(&conversation, "second", &[], Cancellation::default()).await;
     assert!(matches!(&outcome, TurnOutcome::Done { reply } if reply == "two"));

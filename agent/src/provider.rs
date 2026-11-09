@@ -139,14 +139,17 @@ async fn cache_is_fresh(path: &std::path::Path) -> bool {
 /// provider credential to be refreshed, then rebuilds the provider and
 /// returns the model for the run to retry with. A process's environment
 /// only changes in-process, so this serves flows that update credentials
-/// while craft runs (plugins, config reloads, future auth flows).
+/// while craft runs (plugins, config reloads, future auth flows). `info`
+/// is the resolved model's metadata, which the rebuilt model keeps.
 pub async fn reauth_hook(
     config: &ProviderConfig,
     id: &str,
+    info: &ModelInfo,
 ) -> crate::error::Result<Arc<dyn crate::harness::ReauthHook>> {
     Ok(Arc::new(EnvReauth {
         config: config.clone(),
         id: id.to_owned(),
+        info: info.clone(),
     }))
 }
 
@@ -159,6 +162,7 @@ const REAUTH_MAX_WAIT: Duration = Duration::from_secs(600);
 struct EnvReauth {
     config: ProviderConfig,
     id: String,
+    info: ModelInfo,
 }
 
 #[async_trait::async_trait]
@@ -184,7 +188,12 @@ impl crate::harness::ReauthHook for EnvReauth {
                     .await
                     .map_err(|e| e.to_string())?;
                 return provider
-                    .model(&self.config, None, &self.id)
+                    .model(
+                        &self.config,
+                        None,
+                        Some(std::slice::from_ref(&self.info)),
+                        &self.id,
+                    )
                     .await
                     .map(Some)
                     .map_err(|e| e.to_string());
@@ -539,11 +548,14 @@ impl ProviderHandle {
     /// The model the run loop and side completions call: an animist model
     /// carrying the config's per-model overrides, plus the craft-only
     /// metadata (catalog key, effective window, protocol quirks).
-    /// `catalog` supplies the info for models the provider has not listed.
+    /// `listing` is the provider's discovered rows ([`Self::models`]); a row
+    /// for `id` wins, and `catalog` supplies the info for models the
+    /// provider has not listed.
     pub async fn model(
         &self,
         config: &ProviderConfig,
         catalog: Option<&Catalog>,
+        listing: Option<&[ModelInfo]>,
         id: &str,
     ) -> Result<ModelHandle> {
         let kind = config_kind_str(config);
@@ -561,9 +573,17 @@ impl ProviderHandle {
             }
         };
         let settings = config.models().get(id);
-        let mut info = catalog
-            .and_then(|catalog| catalog.model(key, id))
-            .map(|entry| entry.info.clone())
+        let mut info = listing
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row.ids.first().is_some_and(|row_id| row_id == id))
+            })
+            .or_else(|| {
+                catalog
+                    .and_then(|catalog| catalog.model(key, id))
+                    .map(|entry| &entry.info)
+            })
+            .cloned()
             .unwrap_or_else(|| bare_info(id));
         info.ids = vec![id.to_owned()];
         if let Some(settings) = settings {
@@ -1089,6 +1109,75 @@ mod tests {
         );
     }
 
+    // --- model resolution ---
+
+    fn reasoning_info(id: &str, efforts: Vec<animist::provider::Effort>) -> ModelInfo {
+        let mut info = crate::testing::model_info_with(id, Some(131_072), None);
+        info.features.thinking = animist::provider::Thinking::builder()
+            .supported(true)
+            .required(false)
+            .efforts(efforts)
+            .build();
+        info
+    }
+
+    /// The provider's discovered row wins over the models.dev row, which
+    /// still covers ids the listing lacks; neither leaves bare info.
+    #[tokio::test]
+    async fn resolved_models_carry_the_listing_row() {
+        use animist::provider::Effort;
+        let config = crate::config::Config::parse(
+            "provider \"t\" { kind = \"openai-compatible\"\n base_url = \"http://127.0.0.1:9/v1\" }",
+        )
+        .expect("test provider config parses")
+        .providers
+        .remove("t")
+        .expect("provider row");
+        let mut catalog = Catalog::default();
+        catalog.providers.insert(
+            catalog_key(&config).to_owned(),
+            animist::catalog::ProviderCatalog {
+                info: animist::catalog::ProviderInfo::default(),
+                models: ["listed", "catalogued"]
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            id.to_owned(),
+                            animist::catalog::CatalogModel {
+                                info: reasoning_info(id, vec![Effort::Medium]),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        );
+        let listing = vec![reasoning_info(
+            "listed",
+            vec![Effort::Low, Effort::High, Effort::Max],
+        )];
+        let handle = ProviderHandle::from_config(&config, Some(&catalog))
+            .await
+            .expect("provider builds");
+        let efforts = |model: &ModelHandle| model.model.info.features.thinking.efforts.clone();
+
+        let listed = handle
+            .model(&config, Some(&catalog), Some(&listing), "listed")
+            .await
+            .unwrap();
+        assert_eq!(efforts(&listed), [Effort::Low, Effort::High, Effort::Max]);
+        let catalogued = handle
+            .model(&config, Some(&catalog), Some(&listing), "catalogued")
+            .await
+            .unwrap();
+        assert_eq!(efforts(&catalogued), [Effort::Medium]);
+        let unknown = handle
+            .model(&config, Some(&catalog), Some(&listing), "unknown")
+            .await
+            .unwrap();
+        assert!(!unknown.model.info.features.thinking.supported);
+    }
+
     // --- catalog cache policy ---
 
     fn cache_with_provider(id: &str) -> Catalog {
@@ -1156,7 +1245,8 @@ mod tests {
         let var = "CRAFT_TEST_REAUTH_REFRESH";
         unsafe { std::env::set_var(var, "original") };
         let config = reauth_provider_config(var);
-        let hook = reauth_hook(&config, "m").await.expect("hook builds");
+        let info = reasoning_info("m", vec![animist::provider::Effort::High]);
+        let hook = reauth_hook(&config, "m", &info).await.expect("hook builds");
         let task = tokio::spawn(async move { hook.reauth(1).await });
         // Let the hook take its baseline reading and park in the poll.
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1167,6 +1257,11 @@ mod tests {
             .expect("refresh succeeds")
             .expect("rebuilt model");
         assert_eq!(model.model.id, "m");
+        assert_eq!(
+            model.model.info.features.thinking.efforts,
+            [animist::provider::Effort::High],
+            "the rebuilt model keeps the resolved metadata"
+        );
         unsafe { std::env::remove_var(var) };
     }
 
@@ -1177,7 +1272,9 @@ mod tests {
         let var = "CRAFT_TEST_REAUTH_STALE";
         unsafe { std::env::set_var(var, "stale") };
         let config = reauth_provider_config(var);
-        let hook = reauth_hook(&config, "m").await.expect("hook builds");
+        let hook = reauth_hook(&config, "m", &bare_info("m"))
+            .await
+            .expect("hook builds");
         let outcome = hook.reauth(1).await;
         let Err(message) = &outcome else {
             panic!("an unchanged credential must time out")
@@ -1196,7 +1293,9 @@ mod tests {
         let config = crate::config::Config::parse("provider \"b\" { kind = \"amazon-bedrock\" }")
             .expect("bedrock config parses");
         let entry = config.providers.get("b").expect("provider row");
-        let hook = reauth_hook(entry, "m").await.expect("hook builds");
+        let hook = reauth_hook(entry, "m", &bare_info("m"))
+            .await
+            .expect("hook builds");
         let outcome = hook.reauth(1).await;
         let Err(message) = &outcome else {
             panic!("a credential-less provider must refuse")
