@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Check whether stripped src/beta.rs ends in beta."
+calls = ["read_text"]
+value = true

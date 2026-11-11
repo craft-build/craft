@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Glob the project and filter paths ending in .rs."
+calls = ["glob"]
+value = ["src/alpha.rs", "src/beta.rs"]

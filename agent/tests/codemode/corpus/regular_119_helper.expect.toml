@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Glob all files, read them concurrently, and sum source lengths."
+calls = ["glob", "read_text", "read_text", "read_text"]
+value = 129

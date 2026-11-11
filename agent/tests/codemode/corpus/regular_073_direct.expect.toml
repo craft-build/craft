@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "List the root directory and return its entry count."
+calls = ["list_dir"]
+value = 3

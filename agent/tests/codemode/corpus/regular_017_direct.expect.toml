@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Read data.json as JSON and sum its items."
+calls = ["read_text"]
+value = 6

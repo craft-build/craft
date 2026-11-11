@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Read src/alpha.rs and return its character count."
+calls = ["read_text"]
+value = 58

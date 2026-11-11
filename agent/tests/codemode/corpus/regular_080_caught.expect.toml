@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Check whether list_dir returns Cargo.toml."
+calls = ["list_dir"]
+value = true

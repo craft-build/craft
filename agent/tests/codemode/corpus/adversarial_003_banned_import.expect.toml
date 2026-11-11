@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "banned_import"
+adversarial = true
+calls = []
+failure = "unsupported"

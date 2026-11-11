@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Grep alpha and sum the match line numbers."
+calls = ["grep"]
+value = 6

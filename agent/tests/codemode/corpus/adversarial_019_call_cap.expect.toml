@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "call_cap"
+adversarial = true
+calls = ["read_text", "read_text", "read_text", "read_text"]
+failure = "limit"

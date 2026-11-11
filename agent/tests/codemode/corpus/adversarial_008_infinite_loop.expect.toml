@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "infinite_loop"
+adversarial = true
+calls = []
+failure = "limit"

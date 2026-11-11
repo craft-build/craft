@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Edit src/alpha.rs and return the tool result."
+calls = ["edit"]
+value = "updated src/alpha.rs"

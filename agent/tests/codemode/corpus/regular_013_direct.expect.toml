@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Read docs/guide.md and return it in uppercase."
+calls = ["read_text"]
+value = "# GUIDE\n\nALPHA BETA ALPHA\n"

@@ -1,0 +1,5 @@
+origin = "deterministic-seed"
+task = "Print the alpha count and return the source length."
+calls = ["read_text"]
+value = 58
+stdout = "3\n"

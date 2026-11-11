@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Run a mock bash command and return its exit code."
+calls = ["bash"]
+value = 0

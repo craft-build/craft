@@ -1,0 +1,5 @@
+import re
+async def run():
+    return await read_text('src/alpha.rs')
+value = await run()
+len(re.findall("alpha", value))

@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Read one numbered line from src/alpha.rs with offset 2."
+calls = ["read"]
+value = "2:     println!(\"alpha\");\n"

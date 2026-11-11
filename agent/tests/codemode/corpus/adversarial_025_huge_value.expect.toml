@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "huge_value"
+adversarial = true
+calls = []
+failure = "limit"

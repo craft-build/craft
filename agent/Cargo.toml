@@ -71,4 +71,6 @@ uuid.workspace = true
 [dev-dependencies]
 animist = { workspace = true, features = ["testing"] }
 fastrand = "2"
+monty.workspace = true
+monty-types.workspace = true
 test-case = "3"

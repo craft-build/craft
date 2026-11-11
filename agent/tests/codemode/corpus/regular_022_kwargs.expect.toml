@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Read data.json as JSON and return its name."
+calls = ["read_text"]
+value = "demo"

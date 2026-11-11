@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Grep alpha and return the distinct matching paths."
+calls = ["grep"]
+value = ["src/alpha.rs", "src/beta.rs"]

@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Grep alpha and return the number of matches."
+calls = ["grep"]
+value = 3

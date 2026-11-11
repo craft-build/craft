@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Return the number of lines in src/beta.rs."
+calls = ["read_text"]
+value = 4

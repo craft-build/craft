@@ -285,10 +285,26 @@ There are five phases, each ending in a gate. Phase 0 decides whether the rest h
 
 Gate: the corpus pass rate is at least 90% with the mock dispatcher, or a written list of Monty gaps with workarounds.
 
-- [ ] Add `monty`, `monty-types` and `monty-type-checking` to `[workspace.dependencies]`, pinned to exact versions. Check build time, binary size delta and `cargo deny`.
-- [ ] Probe 1.x behaviour in a scratch test: top-level `await`, `asyncio.gather` with one failing call, positional arguments in `FunctionCall.args`, `TypedDict` returns, and whether `RunProgress` is `Send`.
-- [ ] Build `tests/codemode/corpus/` with the generator script and mock dispatcher (§ Testing and evaluation).
-- [ ] Draft the tool description and stubs, then generate the model scripts against that draft.
+- [x] Add `monty`, `monty-types` and `monty-type-checking` to `[workspace.dependencies]`, pinned to exact versions. Check build time, binary size delta and dependency advisories.
+- [x] Probe 1.x behaviour in a scratch test: top-level `await`, `asyncio.gather` with one failing call, positional arguments in `FunctionCall.args`, `TypedDict` returns, and whether `RunProgress` is `Send`.
+- [x] Build `tests/codemode/corpus/` with the generator script and mock dispatcher (§ Testing and evaluation).
+- [x] Draft the tool description and stubs, and generate model prompts against that draft.
+- [ ] Generate and replay the real model scripts (requires permitted model calls).
+- [ ] Re-run type-checking probes after a compatible Monty release, and measure a clean build.
+
+#### Phase 0 spike results (Nov 11, 2026)
+
+**Gate: not cleared for Phase 1 yet.** The offline runtime spike passes, but the real model corpus and type checker have not run.
+
+- `cargo test -p craft --test codemode`: 7 tests pass. The deterministic seed corpus passes 120/120 regular and 30/30 adversarial scripts. These are 30 tasks written in four styles, not a substitute for output from the five target models. `generate.py` also emits 150 model prompts in `prompts.jsonl`.
+- The runtime spike is dev-only. `cargo tree -p craft -e normal` contains no Monty packages, so the production binary delta is zero. A warm spike rebuild took 0.60 s on the spike machine; a clean-build delta is not measured.
+- `cargo audit` reports no vulnerability errors (19 pre-existing allowed warnings). `monty` and `monty-types` are linked into the spike; `monty-type-checking` and Salsa remain pinned in workspace dependencies but are not linked into the final graph.
+- **Type-checking blocker:** Monty 1.5.0's Ruff 0.0.14 dependency does not compile with security-fixed Salsa 0.28.5 because `HashEqLike::hash` was removed. Pinning Salsa 0.28.4 would compile around the error but reintroduce GHSA-xc3w-55vh-cw3w, so it was rejected. The workaround is to keep this spike runtime-only and wait for a compatible Monty/Ruff release, not to accept the vulnerable pin.
+- **Missing `await`:** without type checking, Monty raises a line-correct `AttributeError` or `TypeError` before dispatching the tool call. The corpus records this actual runtime outcome; the desired preflight `type` class remains untested.
+- **Tool exceptions:** the mock uses `RuntimeError` for catchable failures. A `NameLookup` returning `MontyType::Exception(RuntimeError)` is not catchable as an exception class in 1.5.0. Phase 1 needs a host-provided exception module/class and a catchability probe before exposing `ToolError` as documented.
+- **`asyncio.gather`:** one failed external future raises in the script and the sibling call is still dispatched. This probe does not establish the planned list-with-partial-results contract; the host `gather` helper and `fail_fast` switch still need implementation.
+
+Regenerate the deterministic corpus and model prompts with `python3 agent/tests/codemode/generate.py`. Use `--prompts-only` to regenerate prompts without replacing the corpus.
 
 ### Phase 1 — Working tool behind a flag (about 1 week)
 

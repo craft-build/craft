@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "unknown_tool"
+adversarial = true
+calls = []
+failure = "unknown_tool"

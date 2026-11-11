@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "sleep"
+adversarial = true
+calls = []
+failure = "unsupported"

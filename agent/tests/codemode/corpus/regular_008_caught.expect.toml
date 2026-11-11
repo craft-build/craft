@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Count occurrences of needle in src/alpha.rs."
+calls = ["read_text"]
+value = 1

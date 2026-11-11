@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Parse data.json and return the number of items."
+calls = ["read_text"]
+value = 3

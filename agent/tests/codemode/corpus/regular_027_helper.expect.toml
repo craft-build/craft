@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Count alpha regex matches in src/alpha.rs."
+calls = ["read_text"]
+value = 3

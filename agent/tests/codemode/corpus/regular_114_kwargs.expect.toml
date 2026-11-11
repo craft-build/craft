@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Read alpha and beta concurrently and return both lengths."
+calls = ["read_text", "read_text"]
+value = [58, 45]

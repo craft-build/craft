@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "syntax"
+adversarial = true
+calls = []
+failure = "syntax"

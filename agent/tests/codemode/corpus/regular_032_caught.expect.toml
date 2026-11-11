@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Return the number of distinct words in docs/guide.md."
+calls = ["read_text"]
+value = 4

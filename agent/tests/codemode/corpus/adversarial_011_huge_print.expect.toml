@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "huge_print"
+adversarial = true
+calls = []
+failure = "limit"

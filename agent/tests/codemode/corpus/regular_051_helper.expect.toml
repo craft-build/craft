@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Glob the project and return the number of paths."
+calls = ["glob"]
+value = 3

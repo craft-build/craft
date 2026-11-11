@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Run a mock bash command and count stdout lines."
+calls = ["bash"]
+value = 2

@@ -1,0 +1,5 @@
+origin = "adversarial"
+task = "wrong_type"
+adversarial = true
+calls = ["read_text"]
+failure = "runtime"

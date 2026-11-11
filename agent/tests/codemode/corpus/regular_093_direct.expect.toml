@@ -1,0 +1,4 @@
+origin = "deterministic-seed"
+task = "Run a mock bash command and uppercase stdout."
+calls = ["bash"]
+value = "ALPHA\nBETA\n"
