@@ -126,6 +126,7 @@ impl CraftProvider {
         .await?;
         let (instructions, permissions, workspace) =
             (env.instructions, env.permissions, env.workspace);
+        let workspace = workspace.with_codemode(config.codemode);
         if let Some(note) = env.sandbox_note {
             notes.push(note);
         }

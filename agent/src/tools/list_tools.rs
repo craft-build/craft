@@ -29,12 +29,16 @@ impl super::error::IntoToolResult for ListToolsOutput {
 /// Introspection over the session's registered tools. Holds a snapshot of
 /// the registry's definitions taken at registration time.
 #[derive(Clone)]
-pub struct ListTools(pub Arc<Vec<ToolDefinition>>);
+pub struct ListTools(pub Arc<Vec<ToolDefinition>>, pub Arc<Vec<ToolDefinition>>);
 
 impl ListTools {
-    fn execute(&self, args: ListToolsArgs) -> Result<ListToolsOutput> {
+    fn execute(&self, args: ListToolsArgs, scripted: bool) -> Result<ListToolsOutput> {
+        let definitions = if scripted { &self.1 } else { &self.0 };
         if let Some(name) = args.detail.as_deref() {
-            if let Some(definition) = self.0.iter().find(|definition| definition.name == name) {
+            if let Some(definition) = definitions
+                .iter()
+                .find(|definition| definition.name == name)
+            {
                 let schema = serde_json::to_string_pretty(&definition.input_schema)
                     .unwrap_or_else(|_| definition.input_schema.to_string());
                 return Ok(ListToolsOutput {
@@ -45,8 +49,7 @@ impl ListTools {
                 "unknown tool: {name}. Call list_tools() to see available tools."
             )));
         }
-        let mut entries: Vec<(&str, &str)> = self
-            .0
+        let mut entries: Vec<(&str, &str)> = definitions
             .iter()
             .map(|definition| {
                 (
@@ -78,6 +81,10 @@ impl ToolImpl for ListTools {
         )
     }
 
+    fn metadata(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
+        crate::codemode::catalog::model_only_metadata()
+    }
+
     // In-memory snapshot: independent of every other call.
 
     fn scheduling(&self, _input: &serde_json::Value) -> ToolScheduling {
@@ -88,6 +95,37 @@ impl ToolImpl for ListTools {
     }
 
     async fn call(&self, _context: &ToolContext<'_>, args: ListToolsArgs) -> Result<ToolOutput> {
-        finish(Self::execute(self, args))
+        finish(Self::execute(self, args, false))
+    }
+}
+
+/// The script-facing twin of `list_tools`. It is code-only and reports the
+/// complete registry, so hidden tools never leak through the model-facing tool.
+#[derive(Clone)]
+pub struct ListToolsCode(pub ListTools);
+
+#[async_trait]
+impl ToolImpl for ListToolsCode {
+    type Args = ListToolsArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<ListToolsArgs>(
+            "list_tools_code",
+            "Codemode alias for list_tools that reports every code-callable tool.",
+        )
+    }
+
+    fn metadata(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
+        crate::codemode::catalog::code_only_metadata()
+    }
+
+    fn scheduling(&self, input: &serde_json::Value) -> ToolScheduling {
+        self.0.scheduling(input)
+    }
+
+    async fn call(&self, _context: &ToolContext<'_>, args: ListToolsArgs) -> Result<ToolOutput> {
+        finish(ListTools::execute(&self.0, args, true))
     }
 }

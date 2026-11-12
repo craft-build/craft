@@ -310,15 +310,24 @@ Regenerate the deterministic corpus and model prompts with `python3 agent/tests/
 
 Gate: harness tests green, and codemode usable in the TUI with `--codemode alongside`.
 
-- [ ] Bump craft from animist 0.7 to 0.8.0.
-- [ ] animist change: make a tool callable by child dispatch without advertising it to the model. Today `execute_tool_inner` (`src/agent/mod.rs`) runs a child only if its name is in the request's `visible` tool list. A hidden `read_text`, or any tool in `exclusive` mode, would come back as `Unknown tool: …`. Proposed fix: a `callers` field on `ToolDefinition` (`model`, `code`, or both, like Anthropic's `allowed_callers`). The request lists only `model` tools, and child dispatch checks the registry for `code` tools.
-- [ ] `agent/src/codemode/{mod,catalog,stubs,worker,bridge,convert,adapters}.rs`.
-- [ ] Internal `read_text` tool in `src/tools/read.rs`, callable only from scripts (`callers = code`), sharing `read`'s guards and read lifecycle.
-- [ ] Register `Code` last in `Workspace::registry` and `subagent_registry` (`src/tools/mod.rs`), after MCP and `list_tools`, so its catalog snapshot from `ToolRegistry::definitions()` sees every tool.
-- [ ] `CodemodeConfig` in `src/config.rs`, the `--codemode` flag in `src/cli.rs`, and the description text in `src/prompt.rs`.
-- [ ] Claims: `Code` declares an exclusive claim, as `batch` does. animist's `dispatch` and `dispatch_all` refuse a non-exclusive parent with `ChildDispatchRequiresExclusive`.
-- [ ] Cancellation: running inline, dropping the call future stops the script; with a thread, drop the bridge receiver so the worker unwinds.
-- [ ] Guardrails (`src/harness/guardrail.rs`): record the ids of `code` calls in `pre_tool_exec`. For a child whose `parent_call_id` is one of them, skip doom-loop recording and denial, `check_before_call` and `record_result`, and doom success or error accounting, but still read and fill the dedup cache.
+- [x] Bump craft from animist 0.7 to 0.8.1.
+- [x] animist change: make a tool callable by child dispatch without advertising it to the model. Shipped upstream as application-owned `ToolImpl::metadata` (Craft uses `craft.callers`) plus `ToolRegistry::entries`, `ToolRegistry::selection`, and `ToolContext::dispatch_all_in`; the request lists only model-visible tools, and a frozen code selection authorizes hidden/exclusive children.
+- [x] `agent/src/codemode/{mod,catalog,stubs,worker,bridge,convert,adapters}.rs`.
+- [x] Internal `read_text` tool in `src/tools/read.rs`, callable only from scripts (`craft.callers = ["code"]`), sharing `read`'s guards and read lifecycle.
+- [x] Register `Code` last in `Workspace::registry`, both `subagent_registry` variants, and `reviewer_registry` (`src/tools/mod.rs`), after MCP and `list_tools`, so its catalog snapshot sees every pre-`code` tool.
+- [x] `CodemodeConfig` in `src/config.rs`, the `--codemode` flag in `src/cli.rs`, and the description text in `src/prompt.rs`.
+- [x] Claims: `Code` uses the default exclusive claim, as `batch` does.
+- [x] Cancellation: each script runs on a dedicated 64 MiB-stack thread; dropping/cancelling the async bridge closes both channels so a waiting worker exits, while completed workers are joined off the async executor.
+- [x] Guardrails (`src/harness/guardrail.rs`): record the ids of `code` calls in `pre_tool_exec`. For a child whose `parent_call_id` is one of them, skip doom-loop recording and denial, `check_before_call` and `record_result`, and doom success or error accounting, while retaining read dedup/invalidation and cached-response bookkeeping.
+
+#### Phase 1 implementation results (Nov 12, 2026)
+
+- The production surface is metadata-driven: absent `craft.callers` means model and code; `read_text` is code-only; `batch`, `task`, `question`, and `code` are model-only. `Catalog` freezes entries and a `ToolSelection` before `code` is registered, so `code` cannot call itself and model-only fan-out/subagent tools stay outside scripts.
+- Animist 0.8.1's `ToolContext::dispatch_all_in(calls, selection)` is the sole child-dispatch path. `ConversationBuilder` derives a model `ToolSelection` from mode metadata, and `prepare_request` retains only matching declarations; `list_tools` uses the same predicate for its model snapshot while code children can request full schemas.
+- Pure-Python execution runs on the dedicated 64 MiB worker thread (the design's crash-mitigation option), not inline on a Tokio worker. The async bridge owns dispatch, wall-clock/interpreter limits, progress forwarding, and cancellation.
+- Partial-result `gather` is deferred by decision: Monty 1.5.0 has no `return_exceptions`, and host functions cannot cleanly consume awaitables. Phase 1 supports fail-fast `asyncio.gather`; no host `gather` or `fail_fast` parameter is advertised.
+- Monty 1.5.0 still rejects a host `MontyObject::type_object(...)` in an `except` clause. `ToolError` therefore behaves as the documented RuntimeError alias through a line-preserving identifier rewrite to the builtin class; the catchability probe covers `except ToolError`.
+- Verified with `cargo test -p craft`, `cargo test -p craft --test codemode`, focused harness codemode tests, clippy/fmt checks, and a no-paid-call `--codemode alongside` startup smoke test. The Phase 0 real-model corpus gate remains untaken and Phase 2 diagnostics/telemetry remain undone.
 
 ### Phase 2 — Diagnostics and preflight (about 4 days)
 

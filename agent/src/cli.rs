@@ -131,6 +131,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub model: Option<String>,
 
+    /// Python tool orchestration: off, alongside, or exclusive.
+    #[arg(long, value_enum)]
+    pub codemode: Option<crate::config::CodemodeMode>,
+
     /// Include full turn-by-turn messages in --print output.
     #[arg(long)]
     pub verbose: bool,
@@ -688,10 +692,18 @@ impl Cli {
 
     /// Apply CLI policy before dispatching to any interactive or headless surface.
     pub fn apply_thinking(&self, config: &mut crate::config::Config) -> Result<()> {
+        self.apply_codemode(config);
         if let Some(thinking) = self.thinking_override()? {
             config.always_thinking = Some(thinking);
         }
         Ok(())
+    }
+
+    /// Apply an explicit codemode override without disturbing file defaults.
+    pub fn apply_codemode(&self, config: &mut crate::config::Config) {
+        if let Some(mode) = self.codemode {
+            config.codemode.mode = mode;
+        }
     }
 
     /// The system-prompt text that replaces the config preamble:
@@ -953,6 +965,7 @@ async fn run_print_with(
     state_dir: Option<StateDir>,
 ) -> Result<()> {
     cli.apply_thinking(&mut config)?;
+    cli.apply_codemode(&mut config);
     // One warning per unimplemented option, in a stable order.
     for flag in ["--image", "--verbose", "--include-partial-messages"] {
         let set = match flag {
@@ -1231,7 +1244,7 @@ pub(crate) async fn run_headless_query_with(
     if let Some(reviewer) = reviewer {
         policy = policy.reviewer(reviewer);
     }
-    let workspace = env.workspace;
+    let workspace = env.workspace.with_codemode(config.codemode);
 
     let mode = match q.mode {
         CliMode::Plan => crate::harness::AgentMode::Plan(
@@ -1453,6 +1466,42 @@ mod tests {
         assert!(parse(&["--thinking", "adaptive", "--max-thinking-tokens", "4096"]).is_err());
         assert!(parse(&["--effort", "high", "--max-thinking-tokens", "4096"]).is_err());
         assert_eq!(parse(&[]).unwrap().thinking_override().unwrap(), None);
+    }
+
+    #[test]
+    fn codemode_flag_parses_and_overrides_config_idempotently() {
+        use crate::config::CodemodeMode;
+
+        for (value, expected) in [
+            ("off", CodemodeMode::Off),
+            ("alongside", CodemodeMode::Alongside),
+            ("exclusive", CodemodeMode::Exclusive),
+        ] {
+            let cli = parse(&["--codemode", value]).unwrap();
+            assert_eq!(cli.codemode, Some(expected));
+            let mut config = crate::config::Config::parse(
+                "codemode { mode = \"exclusive\"\n max_tool_calls = 12 }",
+            )
+            .unwrap();
+            cli.apply_codemode(&mut config);
+            cli.apply_codemode(&mut config);
+            assert_eq!(config.codemode.mode, expected);
+            assert_eq!(config.codemode.max_tool_calls, 12);
+        }
+
+        assert!(parse(&["--codemode", "unknown"]).is_err());
+        let cli = parse(&[]).unwrap();
+        let mut config = crate::config::Config::parse("codemode { mode = \"alongside\" }").unwrap();
+        cli.apply_thinking(&mut config).unwrap();
+        assert_eq!(config.codemode.mode, CodemodeMode::Alongside);
+    }
+
+    #[test]
+    fn apply_thinking_also_applies_codemode_for_runtime_entrypoints() {
+        let cli = parse(&["--codemode", "off"]).unwrap();
+        let mut config = crate::config::Config::parse("codemode { mode = \"exclusive\" }").unwrap();
+        cli.apply_thinking(&mut config).unwrap();
+        assert_eq!(config.codemode.mode, crate::config::CodemodeMode::Off);
     }
 
     #[test]

@@ -61,7 +61,7 @@ async fn list_tools_lists_and_details_registered_tools() {
         .into_iter()
         .filter(|definition| definition.name != "list_tools")
         .collect();
-    let tool = ListTools(Arc::new(definitions));
+    let tool = ListTools(Arc::new(definitions.clone()), Arc::new(definitions));
     let output = invoke(&tool, json!({})).await;
     let text = output_text(&output);
     assert!(text.starts_with("Available tools:"), "got: {text}");

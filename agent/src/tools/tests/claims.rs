@@ -201,7 +201,13 @@ fn claim_table_matches_the_documented_scheme() {
             json!({"name": "n"}),
         ),
         claim(&Sessions::new(".".to_owned(), None), json!({})),
-        claim(&ListTools(std::sync::Arc::new(Vec::new())), json!({})),
+        claim(
+            &ListTools(
+                std::sync::Arc::new(Vec::new()),
+                std::sync::Arc::new(Vec::new()),
+            ),
+            json!({}),
+        ),
     ] {
         assert!(
             matches!(&tool, ToolScheduling::Resources { reads, writes } if reads.is_empty() && writes.is_empty()),

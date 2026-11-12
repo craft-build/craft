@@ -63,6 +63,7 @@ pub const FILE_WRITE_TOOLS: &[&str] = &[
 /// rule says otherwise. Mirrors the gate allowlist this engine replaces.
 pub const READ_ONLY_TOOLS: &[&str] = &[
     "read",
+    "read_text",
     "grep",
     "glob",
     "list",
@@ -84,7 +85,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
 /// [`READ_ONLY_TOOLS`]; every child call still passes through this same
 /// gate, and the wrapper's own scope is an opaque wildcard the reviewer
 /// cannot judge.
-pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task", "review", "batch"];
+pub const BUILTIN_ALLOW_TOOLS: &[&str] = &["task", "review", "batch", "code"];
 
 /// Every argosy tool native name, auto-allowed as the integration plan
 /// requests — except the project-writing code tools (`astgrep` with

@@ -1,10 +1,16 @@
-use animist::agent::tool::{ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling};
+use std::collections::BTreeMap;
+
+use animist::agent::tool::{
+    ToolContent, ToolContext, ToolDefinition, ToolImpl, ToolOutput, ToolScheduling,
+};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::error::{Error, Result, definition, failure, finish, invalid, not_found};
+use super::error::{
+    Error, Result, contents_output, definition, failure, finish, invalid, not_found,
+};
 use super::{MAX_LINE_BYTES, MAX_OUTPUT_BYTES, Workspace, claims, clip, read_bytes, text};
 use crate::skills::Discovery;
 
@@ -21,6 +27,13 @@ pub struct ReadArgs {
     /// Lines to return (default 200, maximum 2000; 0 means 2000).
     #[serde(default = "default_limit")]
     pub limit: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadTextArgs {
+    /// Workspace-relative path or an absolute path inside the workspace.
+    pub path: String,
 }
 
 fn default_offset() -> usize {
@@ -46,6 +59,31 @@ pub struct ReadOutput {
     /// Subdirectory instruction files discovered for the read file's parent
     /// directory, as `(canonical_path, content)` pairs.
     pub instructions: Vec<(String, String)>,
+}
+
+struct FullDocument {
+    path: String,
+    body: String,
+    instructions: Vec<(String, String)>,
+}
+
+pub struct ReadTextOutput {
+    pub body: String,
+    pub instructions: Vec<(String, String)>,
+}
+
+impl super::error::IntoToolResult for ReadTextOutput {
+    fn into_tool_result(self) -> ToolOutput {
+        let mut contents = vec![ToolContent::Text { text: self.body }];
+        contents.extend(
+            self.instructions
+                .into_iter()
+                .map(|(path, content)| ToolContent::Text {
+                    text: format!("Instructions from: {path}\n{content}"),
+                }),
+        );
+        contents_output(contents)
+    }
 }
 
 impl super::error::IntoToolResult for ReadOutput {
@@ -88,41 +126,57 @@ impl Read {
         if let Some(result) = read_skill(&args.path, &skill_discovery(workspace), workspace).await {
             return result;
         }
-        let path = workspace.file(&args.path)?;
-        let _guard = workspace
-            .read_guard(std::slice::from_ref(&args.path), cancel)
-            .await?;
-        let contents = text(read_bytes(&path).await?)?;
-        let total_lines = contents.lines().count();
-        if args.offset > total_lines.saturating_add(1) {
-            return Err(invalid(format!(
-                "offset exceeds end of file ({total_lines} lines)"
-            )));
-        }
+        let document = read_full_document(workspace, &args.path, Some(args.offset), cancel).await?;
+        let total_lines = document.body.lines().count();
         let limit = if args.limit == 0 { 2000 } else { args.limit };
-        let (lines, _, next) = page_lines(&contents, args.offset, limit);
-        let instructions = if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(crate::instructions::is_instruction_file)
-        {
-            Vec::new()
-        } else {
-            let parent = path.parent().unwrap_or(&path);
-            crate::instructions::find_subdirectory_instructions(
-                parent,
-                workspace.root(),
-                &workspace.loaded_instructions,
-            )
-        };
+        let (lines, _, next) = page_lines(&document.body, args.offset, limit);
         Ok(ReadOutput {
-            path: workspace.display(&path),
+            path: document.path,
             lines,
             total_lines,
             next_offset: next,
-            instructions,
+            instructions: document.instructions,
         })
     }
+}
+
+async fn read_full_document(
+    workspace: &Workspace,
+    requested_path: &str,
+    offset: Option<usize>,
+    cancel: &animist::agent::Cancellation,
+) -> Result<FullDocument> {
+    let path = workspace.file(requested_path)?;
+    let lock_path = requested_path.to_owned();
+    let _guard = workspace
+        .read_guard(std::slice::from_ref(&lock_path), cancel)
+        .await?;
+    let body = text(read_bytes(&path).await?)?;
+    let total_lines = body.lines().count();
+    if offset.is_some_and(|offset| offset > total_lines.saturating_add(1)) {
+        return Err(invalid(format!(
+            "offset exceeds end of file ({total_lines} lines)"
+        )));
+    }
+    let instructions = if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(crate::instructions::is_instruction_file)
+    {
+        Vec::new()
+    } else {
+        let parent = path.parent().unwrap_or(&path);
+        crate::instructions::find_subdirectory_instructions(
+            parent,
+            workspace.root(),
+            &workspace.loaded_instructions,
+        )
+    };
+    Ok(FullDocument {
+        path: workspace.display(&path),
+        body,
+        instructions,
+    })
 }
 
 /// The shared paging loop for file and resource bodies: one-based line
@@ -434,6 +488,22 @@ const READ_DESCRIPTION: &str = "Read UTF-8 text with one-based line numbers. Use
      argosy://_argosys lists the active argosys), 'mcp://<server>/<uri>' (an MCP server \
      resource), or any resource URI published by a connected MCP server.";
 
+const READ_TEXT_DESCRIPTION: &str = "Read a complete UTF-8 workspace file without line numbers or paging. \
+     The first content block is the exact file body; discovered subdirectory instructions follow in separate \
+     blocks. Files are capped at 8 MiB. No binary files, symlinks, or paths outside the workspace.";
+
+#[derive(Clone)]
+pub struct ReadText(pub Workspace);
+
+fn read_scheduling(workspace: &Workspace, input: &Value) -> ToolScheduling {
+    match input.get("path").and_then(Value::as_str) {
+        Some(path) if !path.is_empty() => {
+            claims::reads(workspace.root_key().as_deref(), &[path.to_owned()])
+        }
+        _ => ToolScheduling::Exclusive,
+    }
+}
+
 #[async_trait]
 impl ToolImpl for Read {
     type Args = ReadArgs;
@@ -445,14 +515,7 @@ impl ToolImpl for Read {
     }
 
     fn scheduling(&self, input: &Value) -> ToolScheduling {
-        match input.get("path").and_then(Value::as_str) {
-            // Resource URLs and file paths claim their target: two reads of
-            // one path overlap, a read conflicts with a write to it.
-            Some(path) if !path.is_empty() => {
-                claims::reads(self.0.root_key().as_deref(), &[path.to_owned()])
-            }
-            _ => ToolScheduling::Exclusive,
-        }
+        read_scheduling(&self.0, input)
     }
 
     async fn call(&self, context: &ToolContext<'_>, args: ReadArgs) -> Result<ToolOutput> {
@@ -470,6 +533,35 @@ impl ToolImpl for Read {
             Self::execute(&self.0, args, &context.run.cancellation).await
         }
         .await;
+        finish(outcome)
+    }
+}
+
+#[async_trait]
+impl ToolImpl for ReadText {
+    type Args = ReadTextArgs;
+    type Output = ToolOutput;
+    type Error = Error;
+
+    fn definition(&self) -> ToolDefinition {
+        definition::<ReadTextArgs>("read_text", READ_TEXT_DESCRIPTION)
+    }
+
+    fn metadata(&self) -> BTreeMap<String, Value> {
+        BTreeMap::from([("craft.callers".to_owned(), serde_json::json!(["code"]))])
+    }
+
+    fn scheduling(&self, input: &Value) -> ToolScheduling {
+        read_scheduling(&self.0, input)
+    }
+
+    async fn call(&self, context: &ToolContext<'_>, args: ReadTextArgs) -> Result<ToolOutput> {
+        let outcome = read_full_document(&self.0, &args.path, None, &context.run.cancellation)
+            .await
+            .map(|document| ReadTextOutput {
+                body: document.body,
+                instructions: document.instructions,
+            });
         finish(outcome)
     }
 }
@@ -644,6 +736,60 @@ mod tests {
         let (_tmp, ws) = workspace();
         let error = invoke_read(&ws, "file:///notes.txt").await;
         assert!(error.contains("no MCP servers are connected"), "{error}");
+    }
+
+    #[test]
+    fn read_text_is_code_only() {
+        let (_tmp, ws) = workspace();
+        assert_eq!(
+            ReadText(ws).metadata().get("craft.callers"),
+            Some(&serde_json::json!(["code"]))
+        );
+    }
+
+    #[tokio::test]
+    async fn read_text_returns_exact_full_body_then_instruction_blocks() {
+        let (tmp, ws) = workspace();
+        std::fs::write(tmp.path().join("sub/AGENTS.md"), "subdirectory rules").unwrap();
+        let body = (1..=2100)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        std::fs::write(tmp.path().join("sub/large.txt"), &body).unwrap();
+
+        let output = invoke_read_text(&ws, "sub/large.txt").await;
+        assert!(!output.is_error);
+        let text = output
+            .content
+            .0
+            .iter()
+            .map(|block| match block {
+                ToolContent::Text { text } => text.as_str(),
+                ToolContent::Image { .. } => panic!("unexpected image block"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text.len(), 2);
+        assert_eq!(text[0], body);
+        assert!(text[1].starts_with("Instructions from: "), "{}", text[1]);
+        assert!(text[1].ends_with("/sub/AGENTS.md\nsubdirectory rules"));
+    }
+
+    #[tokio::test]
+    async fn read_text_preserves_read_file_safety() {
+        let (tmp, ws) = workspace();
+        std::fs::write(tmp.path().join("binary"), [0, 255]).unwrap();
+        let output = invoke_read_text(&ws, "binary").await;
+        assert!(output.is_error);
+        assert!(crate::history::ext::tool_content_text(&output.content).contains("binary files"));
+    }
+
+    async fn invoke_read_text(ws: &Workspace, path: &str) -> ToolOutput {
+        let mut harness = animist::agent::testing::ToolHarness::builder()
+            .build()
+            .expect("harness");
+        harness
+            .call(ReadText(ws.clone()), serde_json::json!({ "path": path }))
+            .await
+            .expect("read_text outcome")
     }
 
     /// Invoke the read tool and return its model-visible text, whatever the

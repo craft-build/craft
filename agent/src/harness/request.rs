@@ -82,6 +82,7 @@ pub(crate) struct RequestLayerInputs {
     pub sections: Vec<animist::agent::Section>,
     /// The rendering surface every system prompt in this conversation uses.
     pub prompt_format: crate::prompt::PromptFormat,
+    pub model_tools: animist::agent::tool::ToolSelection,
 }
 
 /// Per-run state, snapshotted at `turn_start`.
@@ -191,6 +192,9 @@ impl LayerImpl for RequestLayer {
             (run.system.clone(), run.run_start)
         };
         request.system = system;
+        request
+            .tools
+            .retain(|tool| self.inputs.model_tools.contains(&tool.name));
         read_lifecycle::apply_to_request_from(
             &mut request.messages,
             self.inputs.write_root.as_deref(),

@@ -129,6 +129,10 @@ impl ToolImpl for Task {
         definition::<TaskArgs>("task", TASK_DESCRIPTION)
     }
 
+    fn metadata(&self) -> std::collections::BTreeMap<String, Value> {
+        crate::codemode::catalog::model_only_metadata()
+    }
+
     // Sibling subagents must share a wave: the child claims its own
     // resources inside its own conversation, and cross-agent file
     // ordering is enforced by PathLocks, not the parent's wave.

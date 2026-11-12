@@ -152,17 +152,19 @@ fn collect_file_operations(
                 continue;
             };
             let (op_kind, file_path) = match name.as_str() {
-                "read" | "edit" | "multiedit" | "write" => match extract_path(input) {
-                    Some(p) => (
-                        match name.as_str() {
-                            "read" => OpKind::Read,
-                            "write" => OpKind::Write,
-                            _ => OpKind::Edit,
-                        },
-                        p,
-                    ),
-                    None => continue,
-                },
+                "read" | "read_text" | "edit" | "multiedit" | "write" => {
+                    match extract_path(input) {
+                        Some(p) => (
+                            match name.as_str() {
+                                "read" | "read_text" => OpKind::Read,
+                                "write" => OpKind::Write,
+                                _ => OpKind::Edit,
+                            },
+                            p,
+                        ),
+                        None => continue,
+                    }
+                }
                 // Every file a patch touches counts as an edit of that file.
                 "apply_patch" => {
                     let Some(patch) = input.get("patch_text").and_then(|v| v.as_str()) else {
@@ -212,10 +214,10 @@ fn collect_file_operations(
                 }
                 _ => continue,
             };
-            let line_range = if matches!(op_kind, OpKind::Read) {
-                extract_line_range(input)
-            } else {
-                None
+            let line_range = match name.as_str() {
+                "read_text" => None,
+                _ if matches!(op_kind, OpKind::Read) => extract_line_range(input),
+                _ => None,
             };
             operations.push(FileOperation {
                 msg_index,
@@ -842,6 +844,56 @@ mod tests {
             "covered by full file read"
         );
         assert_eq!(classifications[1].state, ReadState::Fresh);
+    }
+
+    #[test]
+    fn read_text_is_a_whole_file_read_shared_with_paged_reads() {
+        let messages = vec![
+            user_msg("read partial"),
+            tool_use_msg(
+                "t1",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 1, "limit": 50}),
+            ),
+            tool_result_msg("t1", "lines 1-50"),
+            user_msg("read exact text"),
+            tool_use_msg(
+                "t2",
+                "read_text",
+                json!({"path": "/src/main.rs", "offset": 50, "limit": 1}),
+            ),
+            tool_result_of_msg("t2", "read_text", "all content"),
+            tool_use_msg("t3", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg("t3", "all content"),
+        ];
+        let classifications = classify_reads(&messages, None);
+        assert_eq!(
+            find_by_id(&classifications, "t1").state,
+            ReadState::Superseded
+        );
+        assert_eq!(
+            find_by_id(&classifications, "t2").state,
+            ReadState::Superseded
+        );
+        assert_eq!(find_by_id(&classifications, "t3").state, ReadState::Fresh);
+    }
+
+    #[test]
+    fn writes_stale_date_read_text_with_normalized_paths() {
+        let mut messages = vec![
+            user_msg("read exact text"),
+            tool_use_msg("t1", "read_text", json!({"path": "./src/main.rs"})),
+            tool_result_of_msg("t1", "read_text", "content"),
+            tool_use_msg(
+                "t2",
+                "write",
+                json!({"path": "src/main.rs", "content": "new"}),
+            ),
+            tool_result_of_msg("t2", "write", "ok"),
+        ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let classifications = classify_reads(&messages, None);
+        assert_eq!(find_by_id(&classifications, "t1").state, ReadState::Stale);
     }
 
     #[test]

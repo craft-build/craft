@@ -422,7 +422,8 @@ impl AppState {
         )
         .await
         .map_err(report)?;
-        Ok((env.instructions, env.workspace, env.permissions))
+        let workspace = env.workspace.with_codemode(self.config.codemode);
+        Ok((env.instructions, workspace, env.permissions))
     }
 
     async fn build_session(&self, inputs: BuildInputs) -> std::result::Result<Session, String> {

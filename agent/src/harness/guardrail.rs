@@ -43,6 +43,8 @@ pub(crate) struct GuardrailLayer {
     /// the run's error count, so the block contributes exactly
     /// `SCORE_DOOM_LOOP` — no extra error point from the denied result.
     doom_blocked: Mutex<HashSet<String>>,
+    /// Code-call IDs seen this turn; their children bypass loop guardrails.
+    code_calls: Mutex<HashSet<String>>,
 }
 
 impl GuardrailLayer {
@@ -53,6 +55,7 @@ impl GuardrailLayer {
             responded: Mutex::new(HashSet::new()),
             pre_warned: Mutex::new(HashSet::new()),
             doom_blocked: Mutex::new(HashSet::new()),
+            code_calls: Mutex::new(HashSet::new()),
         }
     }
 
@@ -143,7 +146,12 @@ impl LayerImpl for GuardrailLayer {
         if !self.state.take_follow_up() {
             self.state.reset_for_turn();
         }
-        for set in [&self.responded, &self.pre_warned, &self.doom_blocked] {
+        for set in [
+            &self.responded,
+            &self.pre_warned,
+            &self.doom_blocked,
+            &self.code_calls,
+        ] {
             set.lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .clear();
@@ -160,7 +168,28 @@ impl LayerImpl for GuardrailLayer {
         let name = call.name.as_str();
         let input = &call.input;
         let read_only = ToolDedupCache::is_read_only(name);
+        let mut code_calls = self
+            .code_calls
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if name == "code" {
+            code_calls.insert(call.id.clone());
+        }
+        let code_child = context
+            .parent_call_id
+            .is_some_and(|parent| code_calls.contains(parent));
+        drop(code_calls);
         let verdict = self.state.with(|inner| {
+            if code_child {
+                let cached = read_only.then(|| {
+                    let key = ToolDedupCache::key(name, input);
+                    inner.dedup.get(key, name, input).cloned()
+                });
+                return Verdict::Proceed {
+                    cached: cached.flatten(),
+                    warned: false,
+                };
+            }
             if inner.doom.should_hard_stop() {
                 return Verdict::HardStop;
             }
@@ -270,13 +299,19 @@ impl LayerImpl for GuardrailLayer {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(&call.id);
+        let code_child = context.parent_call_id.is_some_and(|parent| {
+            self.code_calls
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .contains(parent)
+        });
         let read_only = ToolDedupCache::is_read_only(name);
         let text = ext::tool_content_text(&output.content);
         // One pass: doom accounting runs for every closed result, the
         // guardrail counters and the cache only for calls that really
         // executed or replayed.
         let reason = self.state.with(|inner| {
-            if !doom_blocked {
+            if !doom_blocked && !code_child {
                 if output.is_error {
                     inner.doom.note_tool_error();
                 } else {
@@ -288,6 +323,9 @@ impl LayerImpl for GuardrailLayer {
             }
             if !responded {
                 Self::record(inner, context, &output);
+            }
+            if code_child {
+                return None;
             }
             inner
                 .guardrails

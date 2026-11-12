@@ -38,6 +38,69 @@ pub struct Config {
     /// enabled, `workspace_write`, network allowed.
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    #[serde(default)]
+    pub codemode: CodemodeConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CodemodeMode {
+    #[default]
+    Off,
+    Alongside,
+    Exclusive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CodemodeConfig {
+    pub mode: CodemodeMode,
+    pub timeout_secs: u64,
+    pub wall_clock_secs: u64,
+    pub max_tool_calls: usize,
+    pub max_output_kib: usize,
+}
+
+impl Default for CodemodeConfig {
+    fn default() -> Self {
+        Self {
+            mode: CodemodeMode::Off,
+            timeout_secs: 30,
+            wall_clock_secs: 600,
+            max_tool_calls: 200,
+            max_output_kib: 32,
+        }
+    }
+}
+
+impl CodemodeConfig {
+    fn validate(&self) -> Result<()> {
+        if self.timeout_secs == 0 || self.timeout_secs > 120 {
+            return InvalidSnafu {
+                reason: "codemode.timeout_secs must be between 1 and 120",
+            }
+            .fail();
+        }
+        if self.wall_clock_secs == 0 {
+            return InvalidSnafu {
+                reason: "codemode.wall_clock_secs must be positive",
+            }
+            .fail();
+        }
+        if self.max_tool_calls == 0 {
+            return InvalidSnafu {
+                reason: "codemode.max_tool_calls must be positive",
+            }
+            .fail();
+        }
+        if self.max_output_kib == 0 || self.max_output_kib.checked_mul(1024).is_none() {
+            return InvalidSnafu {
+                reason: "codemode.max_output_kib must be positive and fit in memory",
+            }
+            .fail();
+        }
+        Ok(())
+    }
 }
 
 /// `[sandbox]` section, resolved into a [`crate::sandbox::SandboxPolicy`]
@@ -870,7 +933,7 @@ impl Config {
 
     /// Extract a [`Config`] from a merged BarkML document, taking only the
     /// sections that belong to the main config (`agent`, `provider`,
-    /// `compaction`, `compression`, `sandbox`, `keybind`/`keybindings`);
+    /// `compaction`, `compression`, `sandbox`, `codemode`, `keybind`/`keybindings`);
     /// unrelated
     /// blocks (`mcp`, `permissions`) are left for their own loaders.
     pub fn from_statement(doc: &barkml::Statement) -> Result<Self> {
@@ -881,7 +944,7 @@ impl Config {
         if let Some(value) = root.get("always_thinking") {
             map.insert("always_thinking".into(), value.clone());
         }
-        for section in ["agent", "compression", "sandbox"] {
+        for section in ["agent", "compression", "sandbox", "codemode"] {
             if let Some(child) = doc.get_child(section, &[]) {
                 map.insert(section.to_string(), crate::bml::container_json(child));
             }
@@ -976,6 +1039,7 @@ impl Config {
 
     fn validate(config: Self) -> Result<Self> {
         config.agent.validate()?;
+        config.codemode.validate()?;
         if let Err(reason) = config.compression.validate() {
             return InvalidSnafu { reason }.fail();
         }
@@ -1084,6 +1148,49 @@ mod tests {
 
         let default = Config::parse("").unwrap();
         assert_eq!(default.sandbox, SandboxConfig::default());
+    }
+
+    #[test]
+    fn codemode_defaults_and_overrides_parse() {
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.codemode, CodemodeConfig::default());
+
+        let config = Config::parse(
+            r#"codemode {
+                mode = "alongside"
+                timeout_secs = 120
+                wall_clock_secs = 30
+                max_tool_calls = 12
+                max_output_kib = 64
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(config.codemode.mode, CodemodeMode::Alongside);
+        assert_eq!(config.codemode.timeout_secs, 120);
+        assert_eq!(config.codemode.wall_clock_secs, 30);
+        assert_eq!(config.codemode.max_tool_calls, 12);
+        assert_eq!(config.codemode.max_output_kib, 64);
+    }
+
+    #[test]
+    fn rejects_invalid_codemode_settings() {
+        for field in [
+            "mode = \"unknown\"",
+            "timeout_secs = 0",
+            "timeout_secs = 121",
+            "wall_clock_secs = 0",
+            "max_tool_calls = 0",
+            "max_output_kib = 0",
+            "max_output_kib = 18446744073709551615",
+            "type_check = true",
+            "telemetry = true",
+        ] {
+            assert!(
+                Config::parse(&format!("codemode {{ {field} }}")).is_err(),
+                "{field}"
+            );
+        }
+        assert!(Config::parse("codemode { timeout_secs = 18446744073709551616 }").is_err());
     }
 
     #[test]

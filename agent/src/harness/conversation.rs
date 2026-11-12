@@ -452,6 +452,7 @@ impl<'a> ConversationBuilder<'a> {
         // per run: `config.agent.preamble` followed by the discovered
         // instructions is the `Instructions` section, verbatim.
         let instructions = format!("{}{instructions_text}", config.agent.preamble);
+        let model_tools = crate::codemode::catalog::model_selection(&tools, config.codemode.mode);
         let layers = LayerSet {
             test: test_layer,
             policy: Layer::new(PolicyLayer::new(
@@ -475,6 +476,7 @@ impl<'a> ConversationBuilder<'a> {
                 cwd: cwd.to_owned(),
                 sections,
                 prompt_format: config.agent.prompt_format,
+                model_tools,
             })),
             recovery: Layer::new(RecoveryLayer::new(
                 retry,

@@ -353,6 +353,7 @@ impl SubagentLauncher {
         config.agent.advisor = self.agent.advisor.clone();
         config.agent.prompt_format = self.agent.prompt_format;
         config.compression = self.compression.clone();
+        config.codemode = self.workspace.codemode();
 
         // The child's own history: retrieve reads the child's entry
         // sources, seeded from the parent snapshot below.

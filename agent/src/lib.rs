@@ -3,6 +3,7 @@ pub mod auto_review;
 pub mod bml;
 pub mod child_guard;
 pub mod cli;
+pub mod codemode;
 pub mod command;
 pub mod compaction;
 pub mod compression;

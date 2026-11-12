@@ -203,6 +203,10 @@ impl ToolImpl for Question {
         definition::<QuestionArgs>("question", QUESTION_DESCRIPTION)
     }
 
+    fn metadata(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
+        crate::codemode::catalog::model_only_metadata()
+    }
+
     // Exclusive: the ask parks on the host seam for up to the ask timeout,
     // and the model must not race a user prompt against other calls.
 

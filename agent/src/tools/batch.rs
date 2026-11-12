@@ -190,6 +190,10 @@ impl ToolImpl for Batch {
         )
     }
 
+    fn metadata(&self) -> std::collections::BTreeMap<String, Value> {
+        crate::codemode::catalog::model_only_metadata()
+    }
+
     // Exclusive, as dispatch_all requires: the fan-out owns its wave.
 
     async fn call(&self, context: &ToolContext<'_>, args: Self::Args) -> Result<ToolOutput> {

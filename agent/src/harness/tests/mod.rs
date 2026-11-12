@@ -4,6 +4,7 @@
 
 mod advisor;
 mod cli_policy;
+mod codemode;
 mod compression;
 mod dispatch;
 mod overflow;

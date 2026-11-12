@@ -40,6 +40,28 @@ const TOOL_USAGE_RULES: &[&str] = &[
 
 const BUILTIN_TOOL_PREFERENCE_RULE: &str = "Prioritize built-in tools over shelling out to `bash` or running Python via `bash` whenever a built-in tool can perform the task.";
 
+pub(crate) const CODEMODE_TOOL_GUIDANCE: &str = r#"Use `code` for chained or dependent tool calls, fan-out, and filtering large results; use a direct tool for one simple call. The script returns only printed output and its final expression.
+- Await every tool call, including at top level. Positional and keyword arguments follow the stubs below.
+- `asyncio.gather` is fail-fast; it does not return partial results. Catch failed child calls with `except ToolError`.
+- Allowed imports: asyncio, collections, dataclasses, datetime, itertools, json, math, re, typing. No inheritance, match statements, open(), direct filesystem, network, or subprocess access.
+- Files and searches return the structured types in the stubs. Output is capped; print a concise result or finish with an expression.
+
+Examples:
+```python
+texts = await asyncio.gather(read_text("src/a.rs"), read_text("src/b.rs"))
+print([text for text in texts if "needle" in text])
+```
+```python
+matches = await grep("TODO", path="src")
+print(len(matches), matches[:5])
+```
+```python
+try:
+    print(await edit("src/a.rs", old_string="old", new_string="new"))
+except ToolError as error:
+    print(f"edit failed: {error}")
+```"#;
+
 const SUBAGENT_BRIEFING_INTRO: &str = r#"A subagent starts with none of this conversation's context. Write its prompt like a briefing for a smart colleague who just walked into the room:"#;
 
 const SUBAGENT_BRIEFING_RULES: &[&str] = &[

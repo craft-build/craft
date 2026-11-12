@@ -39,6 +39,8 @@ jiff.workspace = true
 jsonrepair.workspace = true
 libc.workspace = true
 minijinja.workspace = true
+monty.workspace = true
+monty-types.workspace = true
 nucleo-matcher.workspace = true
 regex.workspace = true
 reqwest.workspace = true
@@ -71,6 +73,4 @@ uuid.workspace = true
 [dev-dependencies]
 animist = { workspace = true, features = ["testing"] }
 fastrand = "2"
-monty.workspace = true
-monty-types.workspace = true
 test-case = "3"

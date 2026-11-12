@@ -57,14 +57,14 @@ pub use edit::{
 pub use glob::{Glob, GlobArgs, GlobOutput};
 pub use grep::{Grep, GrepArgs, GrepMatch, GrepOutput};
 pub use list::{List, ListArgs, ListOutput};
-pub use list_tools::{ListTools, ListToolsArgs, ListToolsOutput};
+pub use list_tools::{ListTools, ListToolsArgs, ListToolsCode, ListToolsOutput};
 pub use move_file::{MoveFile, MoveFileArgs, MoveFileOutput};
 pub use multiedit::{EditEntry, MultiEdit, MultiEditArgs, MultiEditOutput};
 pub use question::{
     ASK_TIMEOUT, AskQuestions, DismissAsk, Question, QuestionAnswer, QuestionArgs, QuestionOption,
     QuestionOutput, QuestionSpec, decode_answer, encode_answer, is_question_answer,
 };
-pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
+pub use read::{Read, ReadArgs, ReadLine, ReadOutput, ReadText, ReadTextArgs};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
 pub use review::{REVIEWER_PROMPT, Review, ReviewArgs, ReviewOutput};
 pub use sessions::{Sessions, SessionsArgs, SessionsOutput};
@@ -101,6 +101,8 @@ pub(crate) const MAX_LINE_BYTES: usize = 2048;
 /// rejected when they collide with one of these (they would shadow a builtin).
 const BUILTIN_TOOL_NAMES: &[&str] = &[
     "read",
+    "read_text",
+    "code",
     "grep",
     "glob",
     "list",
@@ -184,6 +186,7 @@ pub struct Workspace {
     /// Session sandbox policy (resolved from config/env at construction or
     /// installed by the surface). `bash` reads it at execution time.
     sandbox: crate::sandbox::SandboxPolicyCell,
+    codemode: crate::config::CodemodeConfig,
 }
 
 impl Workspace {
@@ -208,7 +211,17 @@ impl Workspace {
             mcp: Arc::new(RwLock::new(None)),
             subagents: Arc::new(task::NoSubagents),
             sandbox: Default::default(),
+            codemode: Default::default(),
         })
+    }
+
+    pub fn with_codemode(mut self, codemode: crate::config::CodemodeConfig) -> Self {
+        self.codemode = codemode;
+        self
+    }
+
+    pub fn codemode(&self) -> crate::config::CodemodeConfig {
+        self.codemode
     }
 
     /// Test seam: point the plans-dir read exemption at an isolated state
@@ -241,6 +254,7 @@ impl Workspace {
         child.mcp = self.mcp.clone();
         child.sandbox = self.sandbox.clone();
         child.locks = self.locks.clone();
+        child.codemode = self.codemode;
         Ok(child)
     }
 
@@ -431,6 +445,7 @@ impl Workspace {
         self.register_argosy(&mut registry, None)?;
         self.register_mcp(&mut registry)?;
         self.register_list_tools(&mut registry)?;
+        self.register_codemode(&mut registry)?;
         Ok(registry)
     }
 
@@ -468,6 +483,7 @@ impl Workspace {
         self.register_argosy(&mut registry, Some(allowed))?;
         self.register_mcp(&mut registry)?;
         self.register_list_tools(&mut registry)?;
+        self.register_codemode(&mut registry)?;
         Ok(registry)
     }
 
@@ -491,6 +507,7 @@ impl Workspace {
         )?;
         self.register_argosy(&mut registry, Some(allowed))?;
         self.register_list_tools(&mut registry)?;
+        self.register_codemode(&mut registry)?;
         Ok(registry)
     }
 
@@ -525,6 +542,9 @@ impl Workspace {
     ) -> std::result::Result<(), animist::agent::AgentError> {
         if allowed.contains(&"read") {
             registry.register(Read(self.clone()))?;
+            if self.codemode.mode != crate::config::CodemodeMode::Off {
+                registry.register(ReadText(self.clone()))?;
+            }
         }
         if allowed.contains(&"grep") {
             registry.register(Grep(self.clone()))?;
@@ -667,7 +687,8 @@ impl Workspace {
         Ok(())
     }
 
-    /// `list_tools` describes the finished table, so it registers last.
+    /// `list_tools` snapshots the finished pre-`code` table; `code` registers
+    /// immediately afterward and is deliberately absent from that snapshot.
     #[expect(
         clippy::result_large_err,
         reason = "AgentError is animist's public error type and cannot be boxed here"
@@ -676,8 +697,36 @@ impl Workspace {
         &self,
         registry: &mut ToolRegistry,
     ) -> std::result::Result<(), animist::agent::AgentError> {
-        let definitions = registry.definitions();
-        registry.register(ListTools(Arc::new(definitions)))?;
+        let entries = registry.entries();
+        let definitions = entries
+            .iter()
+            .filter(|entry| crate::codemode::catalog::model_visible(entry, self.codemode.mode))
+            .map(|entry| entry.definition.clone())
+            .collect();
+        let complete: Vec<ToolDefinition> =
+            entries.into_iter().map(|entry| entry.definition).collect();
+        registry.register(ListTools(Arc::new(definitions), Arc::new(complete.clone())))?;
+        if self.codemode.mode != crate::config::CodemodeMode::Off {
+            registry.register(ListToolsCode(ListTools(
+                Arc::new(complete.clone()),
+                Arc::new(complete),
+            )))?;
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    fn register_codemode(
+        &self,
+        registry: &mut ToolRegistry,
+    ) -> std::result::Result<(), animist::agent::AgentError> {
+        if self.codemode.mode != crate::config::CodemodeMode::Off {
+            let catalog = crate::codemode::catalog::Catalog::from_registry(registry);
+            registry.register(crate::codemode::Code::new(catalog, self.codemode))?;
+        }
         Ok(())
     }
 

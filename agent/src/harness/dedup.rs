@@ -21,7 +21,14 @@ use std::hash::{Hash, Hasher};
 
 use animist::history::ContentBlock;
 
-const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob", "view_image", "sessions"];
+const READ_ONLY_TOOLS: &[&str] = &[
+    "read",
+    "read_text",
+    "grep",
+    "glob",
+    "view_image",
+    "sessions",
+];
 const WRITE_TOOLS: &[&str] = &[
     "write",
     "edit",
@@ -613,7 +620,7 @@ mod tests {
 
     #[test]
     fn read_only_and_write_classification() {
-        for name in ["read", "grep", "glob"] {
+        for name in ["read", "read_text", "grep", "glob"] {
             assert!(ToolDedupCache::is_read_only(name));
         }
         for name in [
