@@ -59,6 +59,10 @@ pub struct CodemodeConfig {
     pub wall_clock_secs: u64,
     pub max_tool_calls: usize,
     pub max_output_kib: usize,
+    /// Reserved: the `ty` preflight is not wired while
+    /// `monty-type-checking` does not compile against security-fixed salsa.
+    pub type_check: bool,
+    pub telemetry: bool,
 }
 
 impl Default for CodemodeConfig {
@@ -69,6 +73,8 @@ impl Default for CodemodeConfig {
             wall_clock_secs: 600,
             max_tool_calls: 200,
             max_output_kib: 32,
+            type_check: false,
+            telemetry: true,
         }
     }
 }
@@ -96,6 +102,12 @@ impl CodemodeConfig {
         if self.max_output_kib == 0 || self.max_output_kib.checked_mul(1024).is_none() {
             return InvalidSnafu {
                 reason: "codemode.max_output_kib must be positive and fit in memory",
+            }
+            .fail();
+        }
+        if self.type_check {
+            return InvalidSnafu {
+                reason: "codemode.type_check is reserved: the ty preflight is not yet available",
             }
             .fail();
         }
@@ -1162,6 +1174,7 @@ mod tests {
                 wall_clock_secs = 30
                 max_tool_calls = 12
                 max_output_kib = 64
+                telemetry = false
             }"#,
         )
         .unwrap();
@@ -1170,6 +1183,9 @@ mod tests {
         assert_eq!(config.codemode.wall_clock_secs, 30);
         assert_eq!(config.codemode.max_tool_calls, 12);
         assert_eq!(config.codemode.max_output_kib, 64);
+        assert!(!config.codemode.telemetry);
+        assert!(!config.codemode.type_check, "type_check stays reserved");
+        assert!(default.codemode.telemetry, "telemetry is on by default");
     }
 
     #[test]
@@ -1183,7 +1199,6 @@ mod tests {
             "max_output_kib = 0",
             "max_output_kib = 18446744073709551615",
             "type_check = true",
-            "telemetry = true",
         ] {
             assert!(
                 Config::parse(&format!("codemode {{ {field} }}")).is_err(),

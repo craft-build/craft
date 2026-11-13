@@ -38,7 +38,13 @@ async fn main() -> Result<(), Error> {
             let config = Config::load().await?;
             craft::subcmd::models(config).await
         }
-        Some(Commands::Stats { sessions }) => craft::subcmd::stats(*sessions),
+        Some(Commands::Stats { sessions, codemode }) => {
+            if *codemode {
+                craft::subcmd::stats_codemode()
+            } else {
+                craft::subcmd::stats(*sessions)
+            }
+        }
         Some(Commands::Doctor { export }) => {
             let config = Config::load().await?;
             craft::subcmd::doctor(config, *export).await

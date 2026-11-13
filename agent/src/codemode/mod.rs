@@ -2,7 +2,9 @@ mod adapters;
 mod bridge;
 pub mod catalog;
 mod convert;
+pub mod diagnose;
 mod stubs;
+pub(crate) mod telemetry;
 mod worker;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -19,6 +21,8 @@ use crate::{config::CodemodeConfig, tools::error};
 pub struct Code {
     catalog: Arc<catalog::Catalog>,
     config: CodemodeConfig,
+    model: Option<String>,
+    session_id: Option<String>,
 }
 
 impl Code {
@@ -26,7 +30,17 @@ impl Code {
         Self {
             catalog: Arc::new(catalog),
             config,
+            model: None,
+            session_id: None,
         }
+    }
+
+    /// Telemetry context for the JSONL record; both fall back to
+    /// `"unknown"` when the surface could not supply them.
+    pub fn with_context(mut self, model: Option<String>, session_id: Option<String>) -> Self {
+        self.model = model;
+        self.session_id = session_id;
+        self
     }
 }
 
@@ -72,10 +86,22 @@ impl ToolImpl for Code {
                 "timeout_secs must be between 1 and 120",
             ));
         }
-        let result = bridge::run(context, &self.catalog, self.config, args.code, timeout_secs)
-            .await
-            .map_err(error::failure);
-        error::finish(result.map(error::text_output))
+        let script_lines = args.code.lines().count();
+        let outcome =
+            bridge::run(context, &self.catalog, self.config, args.code, timeout_secs).await;
+        if self.config.telemetry {
+            telemetry::record(
+                &outcome,
+                self.model.as_deref(),
+                self.session_id.as_deref(),
+                script_lines,
+            );
+        }
+        if outcome.failure.is_some() {
+            error::finish(Err::<ToolOutput, _>(error::failure(outcome.text)))
+        } else {
+            error::finish(Ok(error::text_output(outcome.text)))
+        }
     }
 }
 
@@ -87,14 +113,19 @@ mod tests {
     use super::*;
     use crate::{config::CodemodeMode, tools::Workspace};
 
+    fn codemode_test_config() -> CodemodeConfig {
+        CodemodeConfig {
+            mode: CodemodeMode::Alongside,
+            wall_clock_secs: 5,
+            telemetry: false,
+            ..Default::default()
+        }
+    }
+
     async fn execute(dir: &tempfile::TempDir, source: &str) -> ToolOutput {
         let workspace = Workspace::new(dir.path())
             .unwrap()
-            .with_codemode(CodemodeConfig {
-                mode: CodemodeMode::Alongside,
-                wall_clock_secs: 5,
-                ..Default::default()
-            });
+            .with_codemode(codemode_test_config());
         let registry = workspace.registry(&History::new()).unwrap();
         let catalog = catalog::Catalog::from_registry(&registry);
         let mut harness = ToolHarness::builder().tools(registry).build().unwrap();
@@ -145,10 +176,30 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
         let output = execute(&dir, "read_text('a.txt').strip()").await;
         assert!(output.is_error, "{:?}", output.content);
+        let text = crate::history::ext::tool_content_text(&output.content);
         assert!(
-            crate::history::ext::tool_content_text(&output.content).contains("Runtime"),
-            "{:?}",
-            output.content
+            text.contains("Runtime line 1: AttributeError: 'coroutine' object"),
+            "class and line: got {text}"
+        );
+        assert!(
+            text.contains("hint: add `await` before the call"),
+            "the runtime pattern carries the await hint: got {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn syntax_failures_carry_line_and_excerpt() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = execute(&dir, "first = 1\nvalue =\nresult = value").await;
+        assert!(output.is_error, "{:?}", output.content);
+        let text = crate::history::ext::tool_content_text(&output.content);
+        assert!(
+            text.contains("Syntax line 2: SyntaxError: Expected an expression"),
+            "class and line: got {text}"
+        );
+        assert!(
+            text.contains("   1 | first = 1\n   2 | value =\n   3 | result = value"),
+            "three-line excerpt: got {text}"
         );
     }
 
@@ -161,6 +212,7 @@ mod tests {
                 mode: CodemodeMode::Alongside,
                 wall_clock_secs: 5,
                 max_output_kib: 1,
+                telemetry: false,
                 ..Default::default()
             });
         let registry = workspace.registry(&History::new()).unwrap();
@@ -218,6 +270,7 @@ mod tests {
                 mode: CodemodeMode::Alongside,
                 wall_clock_secs: 5,
                 max_tool_calls: 2,
+                telemetry: false,
                 ..Default::default()
             });
         let registry = workspace.registry(&History::new()).unwrap();
@@ -249,6 +302,7 @@ mod tests {
             .with_codemode(CodemodeConfig {
                 mode: CodemodeMode::Alongside,
                 wall_clock_secs: 5,
+                telemetry: false,
                 ..Default::default()
             });
         let registry = workspace.registry(&History::new()).unwrap();

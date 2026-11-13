@@ -15,20 +15,11 @@ use serde_json::Value;
 
 use crate::config::CodemodeConfig;
 
-const STACK_BYTES: usize = 64 * 1024 * 1024;
-const ALLOWED_MODULES: &[&str] = &[
-    "asyncio",
-    "collections",
-    "dataclasses",
-    "datetime",
-    "itertools",
-    "json",
-    "math",
-    "re",
-    "typing",
-];
+use super::diagnose::{self, Class, Failure};
 
-#[derive(Debug)]
+const STACK_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
 pub struct PendingCall {
     pub id: u32,
     pub name: String,
@@ -39,7 +30,7 @@ pub struct PendingCall {
 #[derive(Debug)]
 pub struct Finished {
     pub stdout: String,
-    pub result: Result<Option<String>, String>,
+    pub result: Result<Option<String>, Failure>,
 }
 
 #[derive(Debug)]
@@ -98,201 +89,6 @@ impl PrintWriterCallback for Output {
     }
 }
 
-pub fn preflight(code: &str) -> Result<(), String> {
-    if code.lines().count() > 2_000 {
-        return Err("Limit: source exceeds 2,000 lines".to_owned());
-    }
-    let masked = mask_strings_and_comments(code);
-    for line in masked.lines().map(str::trim) {
-        let module = line
-            .strip_prefix("import ")
-            .and_then(|imports| imports.split([',', ' ']).next())
-            .or_else(|| {
-                line.strip_prefix("from ")
-                    .and_then(|import| import.split(' ').next())
-            });
-        if let Some(module) = module {
-            let module = module.split('.').next().unwrap_or_default();
-            if !module.is_empty() && !ALLOWED_MODULES.contains(&module) {
-                return Err(format!(
-                    "Unsupported: import {module}; allowed modules: {}",
-                    ALLOWED_MODULES.join(", ")
-                ));
-            }
-        }
-    }
-    if masked
-        .lines()
-        .any(|line| line.trim_start().starts_with("match "))
-    {
-        return Err("Unsupported: match statements".to_owned());
-    }
-    if contains_call(&masked, "open") {
-        return Err("Unsupported: open(); use glob() or read_text()".to_owned());
-    }
-    if masked.lines().any(|line| {
-        line.trim_start().starts_with("class ")
-            && line
-                .split_once('(')
-                .is_some_and(|(_, bases)| !bases.starts_with(')'))
-    }) {
-        return Err("Unsupported: class inheritance".to_owned());
-    }
-    Ok(())
-}
-
-/// Replaces string-literal and comment bytes with spaces while preserving byte
-/// offsets, so lexical checks never interpret payload text as source.
-fn mask_strings_and_comments(code: &str) -> String {
-    #[derive(Clone, Copy)]
-    enum State {
-        Normal,
-        String {
-            quote: char,
-            triple: bool,
-            escaped: bool,
-        },
-        Comment,
-    }
-
-    let mut masked = code.as_bytes().to_vec();
-    let mut state = State::Normal;
-    let mut index = 0;
-    let chars: Vec<(usize, char)> = code.char_indices().collect();
-    while index < chars.len() {
-        let (offset, character) = chars[index];
-        state = match state {
-            State::Normal if character == '#' => {
-                masked[offset] = b' ';
-                State::Comment
-            }
-            State::Normal if is_string_start(&chars, index) => {
-                let quote = character;
-                let triple = chars.get(index + 1).is_some_and(|(_, next)| *next == quote)
-                    && chars.get(index + 2).is_some_and(|(_, next)| *next == quote);
-                for (relative, _) in code[offset..]
-                    .char_indices()
-                    .take(if triple { 3 } else { 1 })
-                {
-                    masked[offset + relative] = b' ';
-                }
-                index += if triple { 2 } else { 0 };
-                State::String {
-                    quote,
-                    triple,
-                    escaped: false,
-                }
-            }
-            State::Comment if character == '\n' => State::Normal,
-            State::Comment => {
-                masked[offset] = b' ';
-                State::Comment
-            }
-            State::String {
-                quote,
-                triple,
-                escaped,
-            } => {
-                masked[offset] = b' ';
-                if escaped {
-                    State::String {
-                        quote,
-                        triple,
-                        escaped: false,
-                    }
-                } else if character == '\\' {
-                    State::String {
-                        quote,
-                        triple,
-                        escaped: true,
-                    }
-                } else if !triple && character == quote {
-                    State::Normal
-                } else if triple
-                    && character == quote
-                    && chars.get(index + 1).is_some_and(|(_, next)| *next == quote)
-                    && chars.get(index + 2).is_some_and(|(_, next)| *next == quote)
-                {
-                    if let Some((close, _)) = chars.get(index + 1) {
-                        masked[*close] = b' ';
-                    }
-                    if let Some((close, _)) = chars.get(index + 2) {
-                        masked[*close] = b' ';
-                    }
-                    index += 2;
-                    State::Normal
-                } else {
-                    State::String {
-                        quote,
-                        triple,
-                        escaped: false,
-                    }
-                }
-            }
-            State::Normal => State::Normal,
-        };
-        index += 1;
-    }
-    String::from_utf8(masked).unwrap_or_default()
-}
-
-fn is_string_start(chars: &[(usize, char)], index: usize) -> bool {
-    let (_, quote) = chars[index];
-    if quote != '"' && quote != '\'' {
-        return false;
-    }
-    let mut prefix = String::new();
-    let mut cursor = index;
-    while cursor > 0 {
-        cursor -= 1;
-        let character = chars[cursor].1;
-        if character.is_ascii_alphabetic() {
-            prefix.insert(0, character.to_ascii_lowercase());
-        } else {
-            let boundary = !(character.is_alphanumeric() || character == '_');
-            let valid = matches!(
-                prefix.as_str(),
-                "" | "r" | "u" | "b" | "f" | "rb" | "br" | "rf" | "fr"
-            );
-            return boundary && valid;
-        }
-    }
-    matches!(
-        prefix.as_str(),
-        "r" | "u" | "b" | "f" | "rb" | "br" | "rf" | "fr"
-    )
-}
-
-fn contains_call(masked: &str, identifier: &str) -> bool {
-    let chars: Vec<(usize, char)> = masked.char_indices().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        let (_, character) = chars[index];
-        if !(character.is_ascii_alphanumeric() || character == '_') {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        while index < chars.len()
-            && (chars[index].1.is_ascii_alphanumeric() || chars[index].1 == '_')
-        {
-            index += 1;
-        }
-        let end = chars
-            .get(index.saturating_sub(1))
-            .map_or(start, |(offset, _)| offset + chars[index - 1].1.len_utf8());
-        if &masked[start..end] == identifier {
-            while index < chars.len() && chars[index].1.is_whitespace() {
-                index += 1;
-            }
-            if chars.get(index).is_some_and(|(_, next)| *next == '(') {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 pub type WorkerChannels = (
     flume::Receiver<Message>,
     flume::Sender<Vec<Reply>>,
@@ -304,8 +100,8 @@ pub fn spawn(
     timeout_secs: u64,
     config: CodemodeConfig,
     names: Vec<String>,
-) -> Result<WorkerChannels, String> {
-    preflight(&code)?;
+) -> Result<WorkerChannels, Failure> {
+    diagnose::preflight(&code)?;
     let (message_tx, message_rx) = flume::unbounded();
     let (reply_tx, reply_rx) = flume::unbounded();
     let handle = thread::Builder::new()
@@ -322,12 +118,12 @@ pub fn spawn(
                 Err(_) => {
                     let _ = message_tx.send(Message::Done(Finished {
                         stdout: String::new(),
-                        result: Err("Crash: codemode worker panicked".to_owned()),
+                        result: Err(Failure::crash("codemode worker panicked")),
                     }));
                 }
             }
         })
-        .map_err(|error| format!("Crash: could not start codemode worker: {error}"))?;
+        .map_err(|error| Failure::crash(format!("could not start codemode worker: {error}")))?;
     Ok((message_rx, reply_tx, handle))
 }
 
@@ -369,10 +165,10 @@ fn run_inner(
     _sender: &flume::Sender<Message>,
     replies: &flume::Receiver<Vec<Reply>>,
     output: &mut Output,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, Failure> {
     let code = alias_tool_error(&code);
     let runner = MontyRun::new(code, "main.py", names.clone(), CompileOptions::default())
-        .map_err(format_exception)?;
+        .map_err(|error| Failure::from_exception(&error))?;
     let timeout = Duration::from_secs(timeout_secs);
     let limits = ResourceLimits::default()
         .max_feed_duration(timeout)
@@ -389,7 +185,7 @@ fn run_inner(
             ResourceTracker::new(limits),
             PrintWriter::Callback(output),
         )
-        .map_err(format_exception)?;
+        .map_err(|error| Failure::from_exception(&error))?;
     let mut pending = BTreeMap::new();
 
     loop {
@@ -421,36 +217,47 @@ fn run_inner(
                     },
                 );
                 call.resume_pending(PrintWriter::Callback(output))
-                    .map_err(format_exception)?
+                    .map_err(|error| Failure::from_exception(&error))?
             }
             RunProgress::ResolveFutures(waiting) => {
-                let calls = std::mem::take(&mut pending)
-                    .into_values()
-                    .collect::<Vec<_>>();
-                _sender
-                    .send(Message::Calls(calls))
-                    .map_err(|_| "Cancelled: codemode bridge closed".to_owned())?;
-                let replies = replies
-                    .recv()
-                    .map_err(|_| "Cancelled: codemode bridge closed".to_owned())?;
+                let calls = pending.values().cloned().collect::<Vec<_>>();
+                _sender.send(Message::Calls(calls)).map_err(|_| {
+                    Failure::plain(Class::Cancelled, "Cancelled: codemode bridge closed")
+                })?;
+                let replies = replies.recv().map_err(|_| {
+                    Failure::plain(Class::Cancelled, "Cancelled: codemode bridge closed")
+                })?;
                 let results = replies
                     .into_iter()
                     .map(|(id, result)| {
-                        let result = match result {
-                            Ok(value) => {
+                        let name = pending.get(&id).map(|call| call.name.as_str());
+                        let result = match (name, result) {
+                            // A name outside the catalog resumes as the
+                            // interpreter's own NameError, so the failure
+                            // classifies as unknown_tool with suggestions.
+                            (Some(name), _) if !names.iter().any(|known| known == name) => {
+                                ExtFunctionResult::NotFound(name.to_owned())
+                            }
+                            (Some(_), Ok(value)) => {
                                 ExtFunctionResult::Return(super::convert::from_json(&value))
                             }
-                            Err(message) => ExtFunctionResult::Error(MontyException::new(
+                            (name, Err(message)) => ExtFunctionResult::Error(MontyException::new(
                                 ExcType::RuntimeError,
-                                Some(message),
+                                Some(format!(
+                                    "ToolError from {}: {message}",
+                                    name.unwrap_or("tool")
+                                )),
                             )),
+                            // The bridge replies only to ids it received.
+                            (None, Ok(_)) => unreachable!("reply for unknown call id"),
                         };
                         (id, result)
                     })
                     .collect();
+                pending.clear();
                 waiting
                     .resume(results, PrintWriter::Callback(output))
-                    .map_err(format_exception)?
+                    .map_err(|error| Failure::from_exception(&error))?
             }
             RunProgress::NameLookup(lookup) => {
                 let result = if names.contains(&lookup.name) {
@@ -460,11 +267,11 @@ fn run_inner(
                 };
                 lookup
                     .resume(result, PrintWriter::Callback(output))
-                    .map_err(format_exception)?
+                    .map_err(|error| Failure::from_exception(&error))?
             }
             RunProgress::OsCall(call) => call
                 .resume_with(PrintWriter::Callback(output), os_result)
-                .map_err(format_exception)?,
+                .map_err(|error| Failure::from_exception(&error))?,
             RunProgress::Complete(value) => {
                 let repr =
                     (value.as_ref().type_name() != "NoneType").then(|| value.as_ref().py_repr());
@@ -478,7 +285,7 @@ fn alias_tool_error(code: &str) -> String {
     // Monty 1.5 rejects a host `MontyObject::type_object` in an `except`
     // clause, so the documented alias is rewritten as source identifiers while
     // strings and comments stay exactly as the model wrote them.
-    let masked = mask_strings_and_comments(code);
+    let masked = diagnose::mask_strings_and_comments(code);
     let mut rewritten = String::with_capacity(code.len() + 16);
     let mut chars = code.char_indices().peekable();
     while let Some((start, character)) = chars.next() {
@@ -586,18 +393,6 @@ fn civil_from_days(days: i64) -> Option<(i32, u8, u8)> {
     Some((year as i32, month as u8, day as u8))
 }
 
-fn format_exception(error: MontyException) -> String {
-    let class = match error.exc_type() {
-        ExcType::SyntaxError => "Syntax",
-        ExcType::NameError => "Unknown tool/name",
-        ExcType::NotImplementedError => "Unsupported",
-        ExcType::MemoryError | ExcType::RecursionError | ExcType::TimeoutError => "Limit",
-        ExcType::RuntimeError => "ToolError",
-        _ => "Runtime",
-    };
-    format!("{class}: {error}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,14 +401,6 @@ mod tests {
     fn civil_date_matches_epoch() {
         assert_eq!(civil_from_days(0), Some((1970, 1, 1)));
         assert_eq!(civil_from_days(20_468), Some((2026, 1, 15)));
-    }
-
-    #[test]
-    fn open_preflight_ignores_payload_text_and_prefixed_identifiers() {
-        assert!(preflight("print('open(')").is_ok());
-        assert!(preflight("# open('file')\nhandle_open(path)").is_ok());
-        assert!(preflight("reopen('file')").is_ok());
-        assert!(preflight("open  ('file')").is_err());
     }
 
     #[test]

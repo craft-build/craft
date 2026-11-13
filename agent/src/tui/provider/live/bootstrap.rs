@@ -343,7 +343,11 @@ pub(super) async fn build_session_state(
         kit.cancel_cell.clone(),
     ));
     let (sink, stream) = crate::harness::EventSink::new();
-    let workspace = kit.workspace.clone();
+    let workspace = kit
+        .workspace
+        .clone()
+        .with_model(LoopCtx::model_spec(selection))
+        .with_session_id(session_ref.id().to_string());
     // Register MCP tool annotations once the tool set is settled
     // so the gate consults the same hints as the turn path.
     if let Some(mcp) = workspace.mcp() {

@@ -13,22 +13,13 @@ use monty_types::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use craft::codemode::diagnose::{self, Class, Failure};
+
 use crate::{
     convert::{from_json, object, to_json},
     stubs::TOOL_NAMES,
 };
 
-const ALLOWED_MODULES: &[&str] = &[
-    "asyncio",
-    "collections",
-    "dataclasses",
-    "datetime",
-    "itertools",
-    "json",
-    "math",
-    "re",
-    "typing",
-];
 const MAX_TOOL_CALLS: usize = 4;
 const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 const CORPUS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/codemode/corpus");
@@ -98,58 +89,10 @@ impl Report {
     }
 }
 
-pub fn preflight(code: &str) -> Option<(String, String)> {
-    if code.lines().count() > 2_000 {
-        return Some(("limit".to_owned(), "source exceeds 2,000 lines".to_owned()));
-    }
-    for line in code.lines().map(str::trim) {
-        let module = line
-            .strip_prefix("import ")
-            .and_then(|imports| imports.split([',', ' ']).next())
-            .or_else(|| {
-                line.strip_prefix("from ")
-                    .and_then(|import| import.split(' ').next())
-            });
-        if let Some(module) = module {
-            let module = module.split('.').next().unwrap_or_default();
-            if !module.is_empty() && !ALLOWED_MODULES.contains(&module) {
-                return Some((
-                    "unsupported".to_owned(),
-                    format!("import {module}; use only {}", ALLOWED_MODULES.join(", ")),
-                ));
-            }
-        }
-    }
-    if code
-        .lines()
-        .any(|line| line.trim_start().starts_with("match "))
-    {
-        return Some(("unsupported".to_owned(), "match statements".to_owned()));
-    }
-    if code.contains("open(") {
-        return Some((
-            "unsupported".to_owned(),
-            "open(); use glob() or read_text()".to_owned(),
-        ));
-    }
-    if code.lines().any(|line| {
-        line.trim_start().starts_with("class ")
-            && line
-                .split_once('(')
-                .is_some_and(|(_, bases)| !bases.starts_with(')'))
-    }) {
-        return Some(("unsupported".to_owned(), "class inheritance".to_owned()));
-    }
-
-    None
-}
-
 pub fn execute(code: &str) -> Outcome {
     let mut outcome = Outcome::default();
-    if let Some((class, detail)) = preflight(code) {
-        outcome.failure = Some(class);
-        outcome.detail = detail;
-        return outcome;
+    if let Err(failure) = diagnose::preflight(code) {
+        return failed(&mut outcome, failure);
     }
 
     let runner = match MontyRun::new(
@@ -184,9 +127,11 @@ pub fn execute(code: &str) -> Outcome {
         progress = match progress {
             RunProgress::FunctionCall(call) => {
                 if pending.len() + outcome.calls.len() >= MAX_TOOL_CALLS {
-                    outcome.failure = Some("limit".to_owned());
-                    outcome.detail = format!("nested tool-call cap {MAX_TOOL_CALLS} exceeded");
-                    return outcome;
+                    let failure = Failure::plain(
+                        Class::Limit,
+                        format!("nested tool-call cap {MAX_TOOL_CALLS} exceeded"),
+                    );
+                    return failed(&mut outcome, failure);
                 }
                 let args = call
                     .args
@@ -254,52 +199,41 @@ pub fn execute(code: &str) -> Outcome {
                 }
             }
             RunProgress::OsCall(call) => {
-                outcome.failure = Some("unsupported".to_owned());
-                outcome.detail = format!(
-                    "OS call denied: {:?}; use glob() or read_text()",
-                    call.function_call
+                let failure = Failure::plain(
+                    Class::Unsupported,
+                    format!(
+                        "OS call denied: {:?}; use glob() or read_text()",
+                        call.function_call
+                    ),
                 );
-                return outcome;
+                return failed(&mut outcome, failure);
             }
             RunProgress::Complete(value) => {
                 let json = to_json(value.as_ref());
                 if json.to_string().len() + outcome.stdout.len() > MAX_OUTPUT_BYTES {
-                    outcome.failure = Some("limit".to_owned());
-                    outcome.detail = format!("output cap {MAX_OUTPUT_BYTES} bytes exceeded");
-                } else {
-                    outcome.value = Some(json);
+                    let failure = Failure::plain(
+                        Class::Limit,
+                        format!("output cap {MAX_OUTPUT_BYTES} bytes exceeded"),
+                    );
+                    return failed(&mut outcome, failure);
                 }
+                outcome.value = Some(json);
                 return outcome;
             }
         };
     }
 }
 
+fn failed(outcome: &mut Outcome, failure: Failure) -> Outcome {
+    outcome.failure = Some(failure.class.as_str().to_owned());
+    outcome.detail = failure.detail;
+    std::mem::take(outcome)
+}
+
 fn exception_outcome(error: MontyException, mut outcome: Outcome) -> Outcome {
-    let class = if error
-        .message()
-        .is_some_and(|message| message.starts_with("ToolError"))
-    {
-        "tool_error"
-    } else if matches!(error.exc_type(), ExcType::NameError) {
-        "unknown_tool"
-    } else if matches!(error.exc_type(), ExcType::SyntaxError) {
-        "syntax"
-    } else if matches!(error.exc_type(), ExcType::NotImplementedError) {
-        "unsupported"
-    } else if matches!(
-        error.exc_type(),
-        ExcType::MemoryError | ExcType::RecursionError | ExcType::TimeoutError
-    ) || error
-        .message()
-        .is_some_and(|message| message.contains("limit") || message.contains("exceeded"))
-    {
-        "limit"
-    } else {
-        "runtime"
-    };
-    outcome.failure = Some(class.to_owned());
-    outcome.detail = error.to_string();
+    let failure = Failure::from_exception(&error);
+    outcome.failure = Some(failure.class.as_str().to_owned());
+    outcome.detail = failure.detail;
     outcome
 }
 

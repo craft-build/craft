@@ -316,6 +316,9 @@ impl SubagentLauncher {
             }
             other => return Err(format!("unknown isolation mode: {other}")),
         };
+        // Telemetry records the child's model, not the parent's; the
+        // session stays the parent's.
+        let workspace = workspace.with_model(child_spec.as_ref());
 
         let schema = match req.output_schema.as_ref() {
             Some(v) => {

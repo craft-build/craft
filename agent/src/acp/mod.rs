@@ -457,6 +457,9 @@ impl AppState {
             .model(provider_config, None, Some(&listing), &model)
             .await
             .map_err(report)?;
+        let workspace = workspace
+            .with_model(format!("{provider_name}/{model}"))
+            .with_session_id(session_id.0.to_string());
 
         let preference = self
             .config

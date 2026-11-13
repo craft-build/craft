@@ -331,11 +331,18 @@ Gate: harness tests green, and codemode usable in the TUI with `--codemode along
 
 ### Phase 2 — Diagnostics and preflight (about 4 days)
 
-Gate: every adversarial corpus script fails with the right class, and the repair-hint retry passes for at least 80% of first-try failures.
+Gate (adjusted): every adversarial corpus script fails with the right class through the production classifier, plus deterministic tests for the hint, partial-progress, and stats formats. The repair-hint retry gate moved to Phase 5 (it needs model-written scripts).
 
-- [ ] `ty` preflight with stubs, `scan_imports`, unsupported-syntax scan.
-- [ ] `diagnose.rs` with the eight failure classes, edit-distance suggestions and the partial-progress summary.
-- [ ] `telemetry.rs` writing JSONL to `paths::state_dir()/codemode.jsonl`, plus a `craft stats --codemode` summary.
+- [x] `diagnose.rs` with the eight failure classes plus an internal `Crash` variant, edit-distance suggestions, and the partial-progress summary. Classification happens at origin (worker and bridge build a typed `Failure`), not by string matching at a seam.
+- [x] Preflight hardened and moved to `diagnose::preflight` (single implementation shared with the corpus runner): script-size cap, import allowlist, `match`, `open()`, class bases.
+- [x] `telemetry.rs` writing one JSONL record per run to `paths::state_dir()/codemode.jsonl`, plus `craft stats --codemode`. The `ty` preflight stays contingency-only (see results); `codemode.type_check` exists but rejects `true` while unavailable.
+
+#### Phase 2 implementation results (Nov 13, 2026)
+
+- **`ty` kickoff probe (monty-type-checking 1.6.0): still broken.** A scratch `cargo check` fails in `ruff_python_ast 0.0.14` — `HashEqLike::hash` was removed by the security-fixed salsa 0.28.5 — exactly the Phase 0 break. Pinning salsa 0.28.4 would reintroduce GHSA-xc3w-55vh-cw3w and stays rejected. Runtime classification substitutes: the missing-`await` coroutine misuse fails line-correct before dispatch and now carries the "add `await` before the call" hint. `CodemodeConfig.type_check` is reserved (default `false`, `true` rejected by validation) until a compatible release compiles.
+- Failures render as `Class line N: message` + (syntax) a three-line excerpt + one repair hint; child tool failures report `ToolError from <tool>` with the try/except hint, and unknown tools get up to three edit-distance suggestions plus the not-callable list. The bridge prepends `Completed N of M tool calls before failing: edit xN ok, ...` from per-tool ok/err tallies; completed child calls already persist in history.
+- Telemetry is written from the async side after `bridge::run`, best-effort, one line per call: `ts`, `model`, `session_id`, `outcome` (`ok` or the class), capped `detail`, `calls`, per-tool ok/err, `duration_ms`, `script_lines`. Model/session reach the `code` tool through `Workspace::with_model`/`with_session_id` at the CLI, ACP, TUI, and subagent registry-build sites (`"unknown"` when absent). Retry-within-2 correlation stays approximate (timestamp + session) until Phase 5.
+- The corpus runner now uses the production `diagnose` classification and preflight; its private copies are deleted, so the 30 adversarial cases gate the same code the model hits.
 
 ### Phase 3 — TUI, ACP and print polish (about 4 days)
 
@@ -358,6 +365,7 @@ Gate: the metrics in § Testing and evaluation.
 
 - [ ] Paired conformance runs, off vs `alongside` vs `exclusive`, across 4 models.
 - [ ] Turn `alongside` on by default for models that meet the targets, using per-model config defaults.
+- [ ] Repair-hint retry gate (moved from Phase 2): ≥80% of first-try failures succeed on the hinted retry, measured from `codemode.jsonl` against a real-model corpus.
 
 ## Risks and open questions
 

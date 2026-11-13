@@ -81,6 +81,99 @@ pub fn stats(sessions: bool) -> Result<()> {
     Ok(())
 }
 
+/// `craft stats --codemode`: run outcomes, first-try success, and the
+/// failure-class histogram from `codemode.jsonl`. The leading class is the
+/// diagnostics backlog's top item.
+pub fn stats_codemode() -> Result<()> {
+    let dir = storage()?;
+    let path = dir.path().join("codemode.jsonl");
+    let records = read_codemode_records(&path);
+    print!("{}", render_codemode_stats(&records, &path));
+    Ok(())
+}
+
+#[derive(Debug, serde::Deserialize, PartialEq)]
+pub(crate) struct CodemodeToolTally {
+    pub ok: usize,
+    pub err: usize,
+}
+
+#[derive(Debug, serde::Deserialize, PartialEq)]
+pub(crate) struct CodemodeRecord {
+    pub ts: String,
+    pub model: String,
+    pub session_id: String,
+    pub outcome: String,
+    pub detail: String,
+    pub calls: usize,
+    pub duration_ms: u64,
+    pub script_lines: usize,
+    #[serde(default)]
+    pub tools: std::collections::BTreeMap<String, CodemodeToolTally>,
+}
+
+/// Malformed lines are skipped (counted), never fatal: telemetry is
+/// best-effort on write and stays best-effort on read.
+pub(crate) fn read_codemode_records(path: &Path) -> Vec<CodemodeRecord> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+pub(crate) fn render_codemode_stats(records: &[CodemodeRecord], path: &Path) -> String {
+    if records.is_empty() {
+        return format!("no codemode runs recorded yet ({})\n", path.display());
+    }
+    let ok = records
+        .iter()
+        .filter(|record| record.outcome == "ok")
+        .count();
+    let sessions = records
+        .iter()
+        .map(|record| record.session_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let mut out = format!(
+        "Codemode runs: {} across {} sessions\nFirst-try success: {:.1}% ({}/{})\n\n",
+        records.len(),
+        sessions,
+        100.0 * ok as f64 / records.len() as f64,
+        ok,
+        records.len(),
+    );
+    out.push_str("Per model:\n");
+    let mut models: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
+    for record in records {
+        let entry = models.entry(record.model.as_str()).or_default();
+        entry.0 += 1;
+        entry.1 += usize::from(record.outcome == "ok");
+    }
+    for (model, (runs, oks)) in &models {
+        out.push_str(&format!(
+            "  {model}  {runs} runs  {:.1}% ok\n",
+            100.0 * *oks as f64 / *runs as f64
+        ));
+    }
+    out.push_str("\nFailures by class:\n");
+    let mut classes: std::collections::BTreeMap<&str, usize> = Default::default();
+    for record in records {
+        if record.outcome != "ok" {
+            *classes.entry(record.outcome.as_str()).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<_> = classes.into_iter().collect();
+    ranked.sort_by(|(left_class, left), (right_class, right)| {
+        right.cmp(left).then_with(|| left_class.cmp(right_class))
+    });
+    for (class, count) in ranked {
+        out.push_str(&format!("  {class} x{count}\n"));
+    }
+    out
+}
+
 fn render_stats(summary: &CostSummary, ledger_path: &Path, sessions: bool) -> String {
     if summary.records == 0 {
         return format!(
@@ -709,6 +802,52 @@ mod tests {
         let out = render_stats(&summary, ledger.path(), false);
         assert!(out.contains("Records:      1 across 1 sessions"));
         assert!(out.contains("  p/anthropic/m  $0.25"));
+    }
+
+    #[test]
+    fn codemode_stats_render_from_a_fixture_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("codemode.jsonl");
+        let lines = [
+            r#"{"ts":"2026-11-12T10:00:00Z","model":"mock/main","session_id":"s1","outcome":"ok","detail":"","calls":4,"tools":{"read_text":{"ok":4,"err":0}},"duration_ms":120,"script_lines":8}"#,
+            r#"{"ts":"2026-11-12T10:01:00Z","model":"mock/main","session_id":"s1","outcome":"runtime","detail":"ValueError: boom","calls":1,"tools":{},"duration_ms":30,"script_lines":3}"#,
+            r#"{"ts":"2026-11-12T10:02:00Z","model":"anthropic/claude","session_id":"s2","outcome":"unknown_tool","detail":"NameError: name 'globb' is not defined","calls":0,"tools":{},"duration_ms":12,"script_lines":1}"#,
+            // A malformed line is skipped, not fatal.
+            "{not json",
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let records = read_codemode_records(&path);
+        assert_eq!(records.len(), 3);
+        let out = render_codemode_stats(&records, &path);
+        assert!(out.contains("Codemode runs: 3 across 2 sessions"));
+        assert!(out.contains("First-try success: 33.3% (1/3)"));
+        assert!(out.contains("Per model:"));
+        assert!(out.contains("  anthropic/claude  1 runs  0.0% ok"));
+        assert!(out.contains("  mock/main  2 runs  50.0% ok"));
+        assert!(out.contains("Failures by class:"));
+        // The histogram ranks by count, so the backlog top is first.
+        assert!(
+            out.find("runtime x1").unwrap() < out.find("unknown_tool x1").unwrap(),
+            "histogram orders by count: {out}"
+        );
+    }
+
+    #[test]
+    fn codemode_stats_names_the_ledger_when_empty_or_missing() {
+        let missing = render_codemode_stats(&[], Path::new("/x/state/codemode.jsonl"));
+        assert_eq!(
+            missing,
+            "no codemode runs recorded yet (/x/state/codemode.jsonl)\n"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("codemode.jsonl");
+        std::fs::write(&path, "\n").unwrap();
+        assert_eq!(
+            render_codemode_stats(&read_codemode_records(&path), &path),
+            format!("no codemode runs recorded yet ({})\n", path.display())
+        );
     }
 
     #[test]

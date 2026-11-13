@@ -5,8 +5,12 @@ use super::*;
 use crate::config::CodemodeMode;
 
 fn codemode_config(mode: CodemodeMode) -> Config {
+    codemode_config_with(mode, false)
+}
+
+fn codemode_config_with(mode: CodemodeMode, telemetry: bool) -> Config {
     Config::parse(&format!(
-        "codemode {{ mode = \"{}\" }}",
+        "codemode {{ mode = \"{}\"\n telemetry = {telemetry} }}",
         match mode {
             CodemodeMode::Off => "off",
             CodemodeMode::Alongside => "alongside",
@@ -174,6 +178,118 @@ async fn twenty_reads_finish_and_share_dedup_without_guardrail_noise() {
         "code children do not trip per-tool guardrails"
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    let _ = events_until_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn mid_script_failure_reports_partial_progress_class_and_hint() {
+    let source = "import asyncio\nfirst = await read_text('a.txt')\nsecond = await read_text('b.txt')\nawait edit('a.txt', old_string='missing', new_string='new')\nprint(first, second)";
+    let provider = script(vec![
+        code_call("t1", source),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
+    let (conversation, mut stream) = conversation(&dir, &provider, CodemodeMode::Alongside).await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let results = tool_results(&conversation).await;
+    assert_eq!(results.len(), 1);
+    let text = result_text(&results[0]);
+    assert!(
+        text.contains("Completed 2 of 3 tool calls before failing: read_text x2 ok\n"),
+        "got {text}"
+    );
+    assert!(
+        text.contains("ToolError line 4: ToolError from edit: "),
+        "class, line, and child tool name: got {text}"
+    );
+    assert!(
+        text.contains("hint: wrap the call in `try/except ToolError`"),
+        "got {text}"
+    );
+    let _ = events_until_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn unknown_tool_suggests_closest_names_and_lists_uncallables() {
+    let provider = script(vec![
+        code_call("t1", "print(await globb('*.txt'))"),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let (conversation, mut stream) = conversation(&dir, &provider, CodemodeMode::Alongside).await;
+
+    let outcome = run_turn(&conversation, "go").await;
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let results = tool_results(&conversation).await;
+    let text = result_text(&results[0]);
+    assert!(
+        text.contains("UnknownTool line 1: NameError: name 'globb' is not defined"),
+        "got {text}"
+    );
+    assert!(
+        text.contains("hint: did you mean: glob?; not callable from code:"),
+        "suggestions plus the uncallable list: got {text}"
+    );
+    assert!(
+        text.contains("batch"),
+        "the uncallable list names model-only tools: got {text}"
+    );
+    let _ = events_until_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn telemetry_records_one_jsonl_line_per_code_call() {
+    let state = tempfile::tempdir().unwrap();
+    crate::codemode::telemetry::set_test_state_dir(Some(state.path().to_path_buf()));
+    let source = "print(await read_text('a.txt'))";
+    let provider = script(vec![
+        code_call("t1", source),
+        crate::testing::text_turn("done"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let workspace = Workspace::new(dir.path())
+        .expect("workspace")
+        .with_codemode(codemode_config_with(CodemodeMode::Alongside, true).codemode)
+        .with_model("mock/main")
+        .with_session_id("s1");
+    let history = History::default();
+    let (conversation, mut stream) = conversation_over(
+        &provider,
+        &codemode_config_with(CodemodeMode::Alongside, true),
+        &dir.path().display().to_string(),
+        workspace.registry(&history).expect("registry"),
+        Some(history),
+    )
+    .await;
+
+    let outcome = run_turn(&conversation, "go").await;
+    crate::codemode::telemetry::set_test_state_dir(None);
+
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let path = state.path().join("codemode.jsonl");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let mut lines = text.lines();
+    let record: serde_json::Value =
+        serde_json::from_str(lines.next().expect("one record")).unwrap();
+    assert_eq!(lines.next(), None, "exactly one line per code call: {text}");
+    assert_eq!(record["model"], "mock/main");
+    assert_eq!(record["session_id"], "s1");
+    assert_eq!(record["outcome"], "ok");
+    assert_eq!(record["calls"], 1);
+    assert_eq!(record["script_lines"], 1);
+    assert_eq!(
+        record["tools"]["read_text"],
+        serde_json::json!({"ok": 1, "err": 0})
+    );
     let _ = events_until_done(&mut stream).await;
 }
 

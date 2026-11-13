@@ -187,6 +187,11 @@ pub struct Workspace {
     /// installed by the surface). `bash` reads it at execution time.
     sandbox: crate::sandbox::SandboxPolicyCell,
     codemode: crate::config::CodemodeConfig,
+    /// Telemetry context for the `code` tool: the model spec and session
+    /// id of the conversation that owns this registry. `None` records
+    /// `"unknown"` in codemode telemetry.
+    model: Option<String>,
+    session_id: Option<String>,
 }
 
 impl Workspace {
@@ -212,6 +217,8 @@ impl Workspace {
             subagents: Arc::new(task::NoSubagents),
             sandbox: Default::default(),
             codemode: Default::default(),
+            model: None,
+            session_id: None,
         })
     }
 
@@ -222,6 +229,18 @@ impl Workspace {
 
     pub fn codemode(&self) -> crate::config::CodemodeConfig {
         self.codemode
+    }
+
+    /// Codemode telemetry context; taken after the session's model and id
+    /// are known, before the first `registry` build.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     /// Test seam: point the plans-dir read exemption at an isolated state
@@ -255,6 +274,8 @@ impl Workspace {
         child.sandbox = self.sandbox.clone();
         child.locks = self.locks.clone();
         child.codemode = self.codemode;
+        child.model = self.model.clone();
+        child.session_id = self.session_id.clone();
         Ok(child)
     }
 
@@ -725,7 +746,10 @@ impl Workspace {
     ) -> std::result::Result<(), animist::agent::AgentError> {
         if self.codemode.mode != crate::config::CodemodeMode::Off {
             let catalog = crate::codemode::catalog::Catalog::from_registry(registry);
-            registry.register(crate::codemode::Code::new(catalog, self.codemode))?;
+            registry.register(
+                crate::codemode::Code::new(catalog, self.codemode)
+                    .with_context(self.model.clone(), self.session_id.clone()),
+            )?;
         }
         Ok(())
     }

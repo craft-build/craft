@@ -284,6 +284,10 @@ pub enum Commands {
         /// Show per-session breakdown instead of the default per-model view.
         #[arg(long)]
         sessions: bool,
+        /// Summarize codemode runs from `codemode.jsonl` instead of the cost
+        /// ledger.
+        #[arg(long)]
+        codemode: bool,
     },
     /// Diagnose provider configuration and self-heal to a working provider.
     Doctor {
@@ -1260,6 +1264,9 @@ pub(crate) async fn run_headless_query_with(
     // with the change-feed persister writing its records.
     let session_ref = q.session_id.clone().unwrap_or_else(SessionRef::generate);
     let model_spec = format!("{provider_name}/{model_id}");
+    let workspace = workspace
+        .with_model(model_spec.clone())
+        .with_session_id(session_ref.id().to_string());
     let persister = match &state_dir {
         Some(dir) => {
             match crate::harness::Persister::open_in(
@@ -2177,12 +2184,26 @@ mod tests {
         let cli = parse(&["stats", "--sessions"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Commands::Stats { sessions: true })
+            Some(Commands::Stats {
+                sessions: true,
+                codemode: false
+            })
         ));
         let cli = parse(&["stats"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Commands::Stats { sessions: false })
+            Some(Commands::Stats {
+                sessions: false,
+                codemode: false
+            })
+        ));
+        let cli = parse(&["stats", "--codemode"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Stats {
+                sessions: false,
+                codemode: true
+            })
         ));
         let cli = parse(&["doctor", "--export"]).unwrap();
         assert!(matches!(

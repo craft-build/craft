@@ -35,6 +35,7 @@ impl CatalogEntry {
 #[derive(Clone)]
 pub struct Catalog {
     entries: Vec<CatalogEntry>,
+    wire_names: BTreeMap<String, String>,
     selection: ToolSelection,
     uncallable_names: Vec<String>,
 }
@@ -68,8 +69,13 @@ impl Catalog {
             });
         }
 
+        let mut wire_names = BTreeMap::new();
+        for entry in &entries {
+            wire_names.insert(entry.python_name.clone(), entry.wire_name().to_owned());
+        }
         Self {
             entries,
+            wire_names,
             selection: registry.selection(code_callable),
             uncallable_names,
         }
@@ -89,6 +95,15 @@ impl Catalog {
             .any(|entry| entry.python_name == python_name)
     }
 
+    /// The wire name behind a Python name, for keys that must match
+    /// dispatch-side tallies; falls back to the given name when the call
+    /// never bound (the unknown-tool case).
+    pub fn wire_name<'a>(&'a self, python_name: &'a str) -> &'a str {
+        self.wire_names
+            .get(python_name)
+            .map_or(python_name, String::as_str)
+    }
+
     /// Converts a Python call into its registered wire name and JSON object.
     pub fn bind(
         &self,
@@ -104,8 +119,8 @@ impl Catalog {
 
         if args.len() > entry.parameters.len() {
             return Err(format!(
-                "{python_name}: too many positional arguments (maximum {})",
-                entry.parameters.len()
+                "too many positional arguments (maximum {})",
+                entry.parameters.len(),
             ));
         }
         if let Some(unknown) = kwargs.keys().find(|name| {
@@ -114,16 +129,13 @@ impl Catalog {
                 .iter()
                 .any(|parameter| &parameter.python_name == *name)
         }) {
-            return Err(format!("{python_name}: unknown argument '{unknown}'"));
+            return Err(format!("unknown argument '{unknown}'"));
         }
 
         let mut input = Map::new();
         for (parameter, value) in entry.parameters.iter().zip(args) {
             if kwargs.contains_key(&parameter.python_name) {
-                return Err(format!(
-                    "{python_name}: duplicate argument '{}'",
-                    parameter.python_name
-                ));
+                return Err(format!("duplicate argument '{}'", parameter.python_name,));
             }
             input.insert(parameter.wire_name.clone(), value);
         }
@@ -139,8 +151,8 @@ impl Catalog {
         {
             if !input.contains_key(&parameter.wire_name) {
                 return Err(format!(
-                    "{python_name}: missing required argument '{}'",
-                    parameter.python_name
+                    "missing required argument '{}'",
+                    parameter.python_name,
                 ));
             }
         }
