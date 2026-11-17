@@ -68,6 +68,7 @@ pub(super) type SharedPark = Arc<Mutex<ParkSlots>>;
 /// everything else the surfaces need is reached through it.
 struct SessionState {
     thinking: crate::thinking::ThinkingConfig,
+    codemode: crate::config::CodemodeMode,
     conversation: Conversation,
     /// The `provider/model` spec the conversation's model was resolved
     /// from, keyed by the config's provider name.
@@ -105,6 +106,7 @@ impl SessionState {
         .expect("conversation builds");
         Self {
             thinking: crate::thinking::ThinkingConfig::default(),
+            codemode: crate::config::CodemodeMode::Off,
             conversation,
             model_spec: "mock/main".into(),
             signals: RunSignals::new(),

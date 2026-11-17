@@ -506,6 +506,7 @@ impl App {
             AgentEvent::FilesSet(files) => self.files = files,
             AgentEvent::TokenUsage(label) => self.session.token_label = label,
             AgentEvent::ThinkingChanged(thinking) => self.session.thinking = thinking,
+            AgentEvent::CodemodeChanged(codemode) => self.session.codemode = codemode,
             AgentEvent::CatalogSet { models, current } => {
                 if !models.is_empty() {
                     self.session.models = models;
@@ -536,11 +537,13 @@ impl App {
                         LoadedMessage::Assistant(text) => Message::Assistant(text),
                         LoadedMessage::Tool {
                             id,
+                            parent_call_id,
                             kind,
                             text,
                             full,
                         } => Message::Tool {
                             id,
+                            parent_call_id,
                             kind,
                             lines: replay_body(&text),
                             // "Show full output" reads the verbatim
@@ -1092,6 +1095,7 @@ pub(crate) mod testutil {
 
         let mut app = App::new();
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             awaiting_approval: false,
             id: "r1".into(),
             kind: ToolKind::Read {
@@ -1221,6 +1225,7 @@ mod tests {
                 LoadedMessage::User("do it".into()),
                 LoadedMessage::Tool {
                     id: "t1".into(),
+                    parent_call_id: None,
                     kind: crate::tui::provider::ToolKind::Bash { cmd: "bash".into() },
                     text: "[4 lines compressed from 4096]".into(),
                     full: Some("the whole original".into()),

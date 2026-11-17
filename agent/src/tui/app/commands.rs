@@ -78,6 +78,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "Set reasoning mode, effort, or token budget",
     },
     CommandSpec {
+        id: "codemode",
+        slash: Some("/codemode"),
+        alias: None,
+        label: "Toggle codemode",
+        hint: "/codemode",
+        desc: "Set code mode (off, alongside, exclusive)",
+    },
+    CommandSpec {
         id: "clear",
         slash: Some("/clear"),
         alias: None,
@@ -296,6 +304,9 @@ impl App {
                 let _ = tx.send(Command::Undo);
             }
             "mcp" => self.open_mcp(),
+            "codemode" => {
+                let _ = tx.send(Command::SetCodemode(None));
+            }
             "recipe" => self.open_recipes(),
             "compact" => {
                 let _ = tx.send(Command::Compact);
@@ -621,6 +632,23 @@ impl App {
     }
 
     pub(crate) fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
+        if cmd.split_whitespace().next() == Some("/codemode") {
+            let spec = cmd.trim_start().strip_prefix("/codemode").unwrap().trim();
+            if spec.is_empty() {
+                let _ = tx.send(Command::SetCodemode(None));
+            } else {
+                match crate::config::CodemodeMode::parse_str(spec) {
+                    Some(mode) => {
+                        let _ = tx.send(Command::SetCodemode(Some(mode)));
+                    }
+                    None => self.push_notice(
+                        Tone::Warning,
+                        "codemode expects off, alongside, or exclusive",
+                    ),
+                }
+            }
+            return;
+        }
         if cmd.split_whitespace().next() == Some("/thinking") {
             let spec = cmd.trim_start().strip_prefix("/thinking").unwrap().trim();
             if spec.is_empty() {
@@ -774,6 +802,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc::error::TryRecvError;
     // Key events are built through the interim `compat::slt_key` shim
     // (slt KeyEvent is non-exhaustive; no struct literals outside slt).
     #[test]
@@ -893,6 +922,30 @@ mod tests {
     use crate::tui::app::{App, Message, Modal};
     use crate::tui::compat::slt_key;
     use crate::tui::provider::UsageFetchState;
+
+    #[test]
+    fn codemode_slash_accepts_strict_modes_and_warns_on_unknown() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for mode in [
+            crate::config::CodemodeMode::Off,
+            crate::config::CodemodeMode::Alongside,
+            crate::config::CodemodeMode::Exclusive,
+        ] {
+            app.run_slash(&format!("/codemode {}", mode.as_str()), &tx);
+            assert!(
+                matches!(rx.try_recv(), Ok(super::Command::SetCodemode(Some(value))) if value == mode)
+            );
+        }
+        app.run_slash("/codemode", &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(super::Command::SetCodemode(None))
+        ));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        app.run_slash("/codemode turbo", &tx);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
 
     /// W8: every command advertised in the slash popup or the palette
     /// resolves to a real dispatch arm (command sent, modal opened, or an

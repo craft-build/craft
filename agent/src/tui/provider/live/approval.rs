@@ -49,6 +49,7 @@ impl ApprovalResponder for ApprovalGate {
     fn ask(&self, ask: ApprovalAsk<'_>) -> crate::harness::BoxFuture<Approval> {
         // Owned copies: the boxed future outlives the borrowed ask.
         let id = ask.id.to_owned();
+        let parent_call_id = ask.parent_call_id.map(str::to_owned);
         let name = ask.name.to_owned();
         let arguments = ask.input.clone();
         let scopes = ask.scopes.to_vec();
@@ -77,6 +78,7 @@ impl ApprovalResponder for ApprovalGate {
             }
             let _ = tx.send(AgentEvent::AssistantEnd);
             let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+                parent_call_id: parent_call_id.clone(),
                 id: id.clone(),
                 kind: cards::tool_head(&name, &arguments),
                 lines: Vec::new(),
@@ -219,6 +221,7 @@ mod tests {
         ApprovalAsk {
             id,
             name: "bash",
+            parent_call_id: None,
             input,
             scopes,
             low_risk: false,

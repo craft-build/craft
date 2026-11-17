@@ -8,10 +8,10 @@
         ▎  > mo▎
         ▎  ──────────────────────────────────────────────────────────
         ▎   Change model                                      ctrl+l
+        ▎   Toggle codemode                                /codemode
         ▎   Dream (consolidate memory)                        /dream
         ▎   Search memory                                    /memory
         ▎
-
 
 
 

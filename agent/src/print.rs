@@ -8,6 +8,7 @@
 //!
 //! [`emit`] reports agent failures so the caller can exit nonzero.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -232,6 +233,7 @@ struct PrintState {
     result_text: String,
     turn_text: String,
     turn_tools: Vec<Value>,
+    started_tools: HashMap<String, VecDeque<Option<String>>>,
     num_turns: u32,
     usage: TokenUsage,
     cost: Option<f64>,
@@ -253,6 +255,7 @@ impl PrintState {
             result_text: String::new(),
             turn_text: String::new(),
             turn_tools: Vec::new(),
+            started_tools: HashMap::new(),
             num_turns: 0,
             usage: TokenUsage::default(),
             cost: None,
@@ -295,10 +298,48 @@ impl PrintState {
                 self.turn_text.push_str(&text);
                 self.result_text.push_str(&text);
             }
-            Event::Agent(AgentEvent::ToolStarted { call, .. }) => {
-                self.turn_tools.push(json!({
-                    "type": "tool_use", "id": call.id, "name": call.name, "input": call.input
-                }));
+            Event::Agent(AgentEvent::ToolStarted {
+                call,
+                parent_call_id,
+            }) => {
+                let external_id = parent_call_id.as_deref().map_or_else(
+                    || call.id.clone(),
+                    |parent| crate::harness::nested_call_id(parent, &call.id),
+                );
+                self.started_tools
+                    .entry(call.id.clone())
+                    .or_default()
+                    .push_back(parent_call_id.clone());
+                let mut tool_use = json!({
+                    "type": "tool_use", "id": external_id, "name": call.name, "input": call.input
+                });
+                if let Some(parent) = parent_call_id {
+                    tool_use["parent_tool_use_id"] = json!(parent);
+                }
+                self.turn_tools.push(tool_use);
+            }
+            Event::Agent(AgentEvent::ToolFailed { call, error }) => {
+                let parent = self
+                    .started_tools
+                    .get_mut(&call.id)
+                    .and_then(VecDeque::pop_front)
+                    .flatten();
+                let external_id = parent.as_deref().map_or_else(
+                    || call.id.clone(),
+                    |parent| crate::harness::nested_call_id(parent, &call.id),
+                );
+                let output = animist::agent::tool::ToolOutput::builder()
+                    .content(error.to_string())
+                    .is_error(true)
+                    .build();
+                self.out.emit(&UserEvent {
+                    event_type: "user",
+                    message: UserMessage {
+                        role: "user",
+                        content: json!([tool_result_json(external_id, &output)]),
+                    },
+                    session_id: &self.session_id,
+                })?;
             }
             Event::Craft(CraftEvent::Retry {
                 attempt,
@@ -333,11 +374,21 @@ impl PrintState {
                 })?;
             }
             Event::Agent(AgentEvent::ToolFinished { call, output }) => {
+                let parent = self
+                    .started_tools
+                    .get_mut(&call.id)
+                    .and_then(VecDeque::pop_front)
+                    .flatten();
+                let external_id = parent.as_deref().map_or_else(
+                    || call.id.clone(),
+                    |parent| crate::harness::nested_call_id(parent, &call.id),
+                );
+                let result = tool_result_json(external_id, &output);
                 self.out.emit(&UserEvent {
                     event_type: "user",
                     message: UserMessage {
                         role: "user",
-                        content: json!([tool_result_json(&call, &output)]),
+                        content: json!([result]),
                     },
                     session_id: &self.session_id,
                 })?;
@@ -438,13 +489,10 @@ fn message_content_blocks(content: &[ContentBlock]) -> Vec<Value> {
 /// The wire form of one finished tool call, matching the blocks the old
 /// per-wave user events carried (tool results serialize in animist's block
 /// shape: `tool_use_id`, `content`, `is_error`).
-fn tool_result_json(
-    call: &animist::agent::tool::ToolCall,
-    output: &animist::agent::tool::ToolOutput,
-) -> Value {
+fn tool_result_json(id: String, output: &animist::agent::tool::ToolOutput) -> Value {
     let mut value = json!({
         "type": "tool_result",
-        "tool_use_id": call.id,
+        "tool_use_id": id,
         "content": serde_json::to_value(&output.content).unwrap_or_else(|_| json!([])),
     });
     if output.is_error {
@@ -698,6 +746,40 @@ mod tests {
         assert_eq!(state.result_text, "fixingdone");
         assert_eq!(state.num_turns, 2);
         assert_eq!(state.stop_reason, Some("end_turn"));
+    }
+
+    #[test]
+    fn nested_tool_uses_and_results_share_parent_qualified_ids() {
+        let mut state =
+            PrintState::new(sid(), "mock/model".into(), &OutputFormat::StreamJson, false);
+        state.observe(tool_started("t1", "code")).unwrap();
+        state
+            .observe(Event::Agent(AgentEvent::ToolStarted {
+                call: animist::agent::tool::ToolCall {
+                    id: "code-0".into(),
+                    name: "read_text".into(),
+                    input: json!({"path": "a.rs"}),
+                },
+                parent_call_id: Some("t1".into()),
+            }))
+            .unwrap();
+        // Collect what stream-json would print as lines so the matching
+        // `tool_result` id can be asserted without capturing stdout.
+        state.out = WireOut::Json(Vec::new());
+        state
+            .observe(tool_finished("code-0", "read_text", "alpha"))
+            .unwrap();
+        assert_eq!(state.turn_tools.len(), 2);
+        assert_eq!(state.turn_tools[1]["id"], "t1:code-0");
+        assert_eq!(state.turn_tools[1]["parent_tool_use_id"], "t1");
+        let events = match std::mem::replace(&mut state.out, WireOut::None) {
+            WireOut::Json(events) => events,
+            _ => panic!("collected stream events"),
+        };
+        assert_eq!(
+            events[0]["message"]["content"][0]["tool_use_id"],
+            "t1:code-0"
+        );
     }
 
     #[test]

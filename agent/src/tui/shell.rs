@@ -130,6 +130,7 @@ impl ShellState {
 
 fn card(id: &str, command: &str, lines: Vec<ToolLine>) -> AgentEvent {
     AgentEvent::ToolCall(ToolCallData {
+        parent_call_id: None,
         id: id.to_owned(),
         kind: ToolKind::Bash {
             cmd: command.to_owned(),

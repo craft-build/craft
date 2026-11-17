@@ -42,7 +42,7 @@ pub(crate) use store::SOFT_SAVE_DELAY;
 pub use store::SessionStore;
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -165,6 +165,31 @@ pub struct SessionMeta {
     /// it; `None` for legacy sessions predating mode persistence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Effective codemode preference, persisted beside `thinking`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codemode: Option<String>,
+    /// Codemode presentation projections: child calls and run summaries the
+    /// model history deliberately does not contain.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub codemode_runs: BTreeMap<String, StoredCodemodeRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredCodemodeRun {
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+    #[serde(default)]
+    pub children: Vec<StoredCodemodeChild>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredCodemodeChild {
+    pub id: String,
+    pub tool: String,
+    pub input: serde_json::Value,
+    pub output: String,
+    pub is_error: bool,
 }
 
 /// Messages plus the token of the run they belong to. Comparing tokens tells
@@ -572,6 +597,25 @@ where
             return;
         }
         self.meta.mode = mode;
+        self.touch_soft();
+    }
+
+    pub fn set_codemode(&mut self, mode: crate::config::CodemodeMode) {
+        let mode = mode.as_str().to_owned();
+        if self.meta.codemode.as_deref() == Some(mode.as_str()) {
+            return;
+        }
+        self.meta.codemode = Some(mode);
+        self.touch_soft();
+    }
+
+    /// Presentation-only projection; the code script stays in the parent's
+    /// model-history `ToolUse` block.
+    pub fn record_codemode_run(&mut self, id: String, run: StoredCodemodeRun) {
+        if self.meta.codemode_runs.get(&id) == Some(&run) {
+            return;
+        }
+        self.meta.codemode_runs.insert(id, run);
         self.touch_soft();
     }
 

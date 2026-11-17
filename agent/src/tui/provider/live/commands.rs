@@ -114,6 +114,7 @@ impl CraftProvider {
         let (models, current) = ctx.catalog_choices(&selection);
         let _ = evt_tx.send(AgentEvent::CatalogSet { models, current });
         let _ = evt_tx.send(AgentEvent::ThinkingChanged(ctx.state.lock().await.thinking));
+        let _ = evt_tx.send(AgentEvent::CodemodeChanged(ctx.state.lock().await.codemode));
         let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
 
         if let Some(id) = &self.resume_session {
@@ -169,6 +170,7 @@ impl CraftProvider {
             maybe_send_next(&ctx, &mut current_turn, &mut pending_messages).await;
             match cmd {
                 Command::SetThinking(thinking) => handle_set_thinking(&ctx, thinking).await,
+                Command::SetCodemode(mode) => handle_set_codemode(&ctx, &current_turn, mode).await,
                 Command::SendMessage(text, mode, images) => {
                     handle_send_message(
                         &ctx,
@@ -692,7 +694,8 @@ async fn reset_session(ctx: &LoopCtx, current_turn: &mut Option<AbortHandle>, cl
     };
     // A failed rebuild keeps the current session (and says so): a fresh
     // unusable one would strand the loop.
-    if let Err(error) = install_session(&ctx.kit, &ctx.state, thinking, None).await {
+    let codemode = ctx.state.lock().await.codemode;
+    if let Err(error) = install_session(&ctx.kit, &ctx.state, thinking, None, codemode).await {
         notice(
             ctx,
             Tone::Danger,
@@ -754,6 +757,53 @@ pub(super) async fn handle_set_thinking(ctx: &LoopCtx, thinking: crate::thinking
         persister.lock().await.store_mut().set_thinking(effective);
     }
     let _ = ctx.kit.evt_tx.send(AgentEvent::ThinkingChanged(effective));
+}
+
+/// `/codemode`: rebuild the conversation between turns so the workspace
+/// registry and the request's frozen tool selection move together. A failed
+/// rebuild keeps the old conversation active.
+pub(super) async fn handle_set_codemode(
+    ctx: &LoopCtx,
+    current_turn: &Option<AbortHandle>,
+    mode: Option<crate::config::CodemodeMode>,
+) {
+    if current_turn.is_some() {
+        let _ = ctx.kit.evt_tx.send(AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: "A turn is still running; wait for it to finish before changing codemode.".into(),
+        });
+        return;
+    }
+    let (thinking, current, conversation) = {
+        let guard = ctx.state.lock().await;
+        (guard.thinking, guard.codemode, guard.conversation.clone())
+    };
+    let persister = conversation.persister();
+    let restore = if let Some(persister) = persister {
+        super::bootstrap::RestoredSession::Persister(persister)
+    } else {
+        let entries = conversation.history().snapshot().await.entries().to_vec();
+        super::bootstrap::RestoredSession::History(animist::history::History::from_entries(entries))
+    };
+    let target = mode.unwrap_or_else(|| current.cycle());
+    if let Err(error) = install_session(&ctx.kit, &ctx.state, thinking, Some(restore), target).await
+    {
+        notice(
+            ctx,
+            Tone::Danger,
+            format!("could not change codemode: {error}"),
+        )
+        .await;
+        return;
+    }
+    if let Some(persister) = ctx.state.lock().await.conversation.persister() {
+        persister.lock().await.store_mut().set_codemode(target);
+    }
+    let _ = ctx.kit.evt_tx.send(AgentEvent::CodemodeChanged(target));
+    let _ = ctx.kit.evt_tx.send(AgentEvent::Notice {
+        tone: Tone::Success,
+        text: format!("codemode: {target} (effective on the next turn)"),
+    });
 }
 
 /// `Command::Undo`: refuse while a turn is running, then roll the

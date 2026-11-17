@@ -2023,6 +2023,9 @@ fn entry_format_round_trips_with_compaction_alterations_and_revisions() {
                 text: "summary of the compacted turns".into(),
             },
             ReplayItem::ToolResult {
+                input: None,
+                parent_call_id: None,
+                code: None,
                 id: "t1".into(),
                 name: "bash".into(),
                 text: "[9 lines compressed from 9001 | retrieve: hash=ab12]".into(),

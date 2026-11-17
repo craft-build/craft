@@ -52,7 +52,7 @@ pub(super) async fn load_session(ctx: &LoopCtx, id: &str) {
             return;
         }
     };
-    let (title, draft, mode, stored_thinking, messages) = {
+    let (title, draft, mode, stored_thinking, stored_codemode, codemode_runs, messages) = {
         let guard = persister.lock().await;
         let session = guard.store().session();
         (
@@ -60,24 +60,34 @@ pub(super) async fn load_session(ctx: &LoopCtx, id: &str) {
             session.meta.input_draft.clone().unwrap_or_default(),
             session.meta.mode.clone(),
             session.meta.thinking,
+            session.meta.codemode.clone(),
+            session.meta.codemode_runs.clone(),
             session.messages().to_vec(),
         )
     };
     // The shared replay list (the same one ACP `session/load` and the
     // headless resume build): current view, inactive entries hidden,
     // compaction cards, markers, altered results with their originals.
-    let rendered = loaded_messages(&crate::harness::replay::transcript(&messages));
+    let rendered = loaded_messages(&crate::harness::replay::transcript_with_codemode(
+        &messages,
+        &codemode_runs,
+    ));
     // Stored thinking wins on resume; anything the file does not spell out
     // (legacy sessions) keeps the session's current level.
-    let thinking = match stored_thinking {
-        Some(thinking) => thinking,
-        None => ctx.state.lock().await.thinking,
-    };
+    let guard = ctx.state.lock().await;
+    let thinking = stored_thinking.unwrap_or(guard.thinking);
+    let fallback_codemode = guard.codemode;
+    let codemode = stored_codemode
+        .as_deref()
+        .and_then(crate::config::CodemodeMode::parse_str)
+        .unwrap_or(fallback_codemode);
+    drop(guard);
     if let Err(error) = install_session(
         &ctx.kit,
         &ctx.state,
         thinking,
-        Some(RestoredSession { persister }),
+        Some(RestoredSession::Persister(persister)),
+        codemode,
     )
     .await
     {
@@ -169,19 +179,19 @@ pub(super) fn loaded_messages(items: &[crate::harness::ReplayItem]) -> Vec<super
             crate::harness::ReplayItem::ToolResult {
                 id,
                 name,
+                input,
+                parent_call_id,
+                code,
                 text,
                 full,
                 ..
-            } => {
-                super::LoadedMessage::Tool {
-                    id: id.clone(),
-                    // The same header derivation live cards get, minus the
-                    // argument detail the replay does not hold.
-                    kind: super::cards::tool_head(name, &serde_json::Value::Null),
-                    text: text.clone(),
-                    full: full.clone(),
-                }
-            }
+            } => super::LoadedMessage::Tool {
+                id: id.clone(),
+                parent_call_id: parent_call_id.clone(),
+                kind: super::cards::replayed_kind(name, input.as_ref(), code.as_ref()),
+                text: text.clone(),
+                full: full.clone(),
+            },
             crate::harness::ReplayItem::Compaction { kind, text } => {
                 super::LoadedMessage::Compaction {
                     kind: kind.clone(),

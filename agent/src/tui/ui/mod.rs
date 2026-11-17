@@ -84,6 +84,7 @@ mod tests {
             "Looking at the refresh path first.".into(),
         ));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t1".into(),
             awaiting_approval: false,
             image: None,
@@ -98,6 +99,7 @@ mod tests {
             }],
         }));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t2".into(),
             awaiting_approval: true,
             image: None,
@@ -120,6 +122,7 @@ mod tests {
             ],
         }));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t3".into(),
             awaiting_approval: false,
             image: None,

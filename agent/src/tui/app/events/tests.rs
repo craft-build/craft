@@ -524,6 +524,7 @@ fn click_notice_row_expands_and_retruncates_body() {
         })
         .collect();
     app.handle_event(AgentEvent::ToolCall(ToolCallData {
+        parent_call_id: None,
         id: "b1".into(),
         kind: ToolKind::Bash { cmd: "make".into() },
         lines,

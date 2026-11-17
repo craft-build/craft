@@ -145,6 +145,7 @@ pub(super) fn tool_head(name: &str, arguments: &serde_json::Value) -> ToolKind {
         // bodies are typically large rendered text (repo maps, skill
         // bodies, outlines) that would otherwise flood the scrollback.
         name if crate::knowledge::is_argosy_tool(name) => card_kind(name, &detail),
+        "code" => code_kind(arguments),
         other => ToolKind::Bash {
             cmd: format!("{other} {detail}").trim().to_string(),
         },
@@ -155,6 +156,46 @@ fn card_kind(name: &str, detail: &str) -> ToolKind {
     ToolKind::Card {
         cmd: format!("{name} {detail}").trim().to_string(),
         summary: String::new(),
+    }
+}
+
+pub(super) fn code_kind(arguments: &serde_json::Value) -> ToolKind {
+    ToolKind::Code {
+        script: arguments
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        summary: String::new(),
+        failure: None,
+    }
+}
+
+/// A replayed call's card: input survives where the matching `ToolUse` does,
+/// and a code parent carries its stored run summary.
+pub(super) fn replayed_kind(
+    name: &str,
+    input: Option<&serde_json::Value>,
+    run: Option<&crate::harness::ReplayCodeRun>,
+) -> ToolKind {
+    let arguments = input.unwrap_or(&serde_json::Value::Null);
+    match (name, run) {
+        ("code", Some(run)) => {
+            let ToolKind::Code { script, .. } = code_kind(arguments) else {
+                unreachable!("code_kind returns Code");
+            };
+            let outcome = run.failure.clone().unwrap_or_else(|| "ok".to_owned());
+            ToolKind::Code {
+                script,
+                summary: format!(
+                    "{} calls · {:.1}s · {outcome}",
+                    run.children,
+                    run.duration_ms as f64 / 1000.0
+                ),
+                failure: run.failure.clone(),
+            }
+        }
+        _ => tool_head(name, arguments),
     }
 }
 
@@ -239,6 +280,7 @@ pub(super) fn tool_done(
         return ToolDone {
             card: ToolCallData {
                 id,
+                parent_call_id: None,
                 kind: crate::tui::provider::cards::tool_head(name, arguments),
                 lines: Vec::new(),
                 awaiting_approval: false,
@@ -339,6 +381,28 @@ pub(super) fn tool_done(
                 Vec::new(),
             )
         }
+        "code" => {
+            let failure = if *is_error {
+                crate::codemode::diagnose::Class::from_rendered(&text)
+                    .map_or_else(|| "error".to_owned(), |class| class.as_str().to_owned())
+                    .into()
+            } else {
+                None
+            };
+            (
+                ToolKind::Code {
+                    script: arguments
+                        .get("code")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    summary: String::new(),
+                    failure,
+                },
+                context_lines(&text),
+                Vec::new(),
+            )
+        }
         other => (
             ToolKind::Bash {
                 cmd: format!("{other} {detail}").trim().to_string(),
@@ -350,6 +414,7 @@ pub(super) fn tool_done(
     ToolDone {
         card: ToolCallData {
             id,
+            parent_call_id: None,
             kind,
             lines,
             awaiting_approval: false,
@@ -609,6 +674,34 @@ mod tests {
         assert_eq!(grep_annotation(two), "2 matches in 2 files");
         let truncated = "src/a.rs:\n  12: x\n\n[Search truncated: more matches may exist.]";
         assert_eq!(grep_annotation(truncated), "1 match in 1 file (truncated)");
+    }
+
+    #[test]
+    fn code_cards_keep_source_and_extract_the_failure_class() {
+        let arguments = serde_json::json!({"code": "print('hi')\n"});
+        assert!(matches!(
+            tool_head("code", &arguments),
+            ToolKind::Code { script, .. } if script == "print('hi')\n"
+        ));
+        let result = history::ext::tool_result("t1", Some("code"), "Runtime: boom", true);
+        let done = tool_done("t1".into(), "code", &arguments, &result);
+        assert!(
+            matches!(&done.card.kind, ToolKind::Code { script, failure: Some(class), .. }
+                if script == "print('hi')\n" && class == "runtime")
+        );
+    }
+
+    #[test]
+    fn replayed_code_kind_keeps_script_and_summary() {
+        let run = crate::harness::ReplayCodeRun {
+            duration_ms: 2_100,
+            failure: None,
+            children: 9,
+        };
+        assert!(matches!(
+            replayed_kind("code", Some(&serde_json::json!({"code": "x = 1"})), Some(&run)),
+            ToolKind::Code { script, summary, failure: None } if script == "x = 1" && summary.contains("9 calls") && summary.contains("ok")
+        ));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! tags (`craft.compaction`, `craft.marker`), never by their text.
 
 use animist::history::{ContentBlock, HistoryEntry, Role};
+use std::collections::BTreeMap;
 
 use crate::compaction::llm::COMPACTION_TAG;
 use crate::history::ext;
@@ -29,6 +30,12 @@ pub enum ReplayItem {
     ToolResult {
         id: String,
         name: String,
+        /// The call's original input, when the matching `ToolUse` survives.
+        input: Option<serde_json::Value>,
+        /// Parent call for a nested codemode child; `None` for model calls.
+        parent_call_id: Option<String>,
+        /// Codemode run summary, on the code parent only.
+        code: Option<ReplayCodeRun>,
         text: String,
         full: Option<String>,
         is_error: bool,
@@ -46,13 +53,34 @@ pub enum ReplayItem {
     },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplayCodeRun {
+    pub duration_ms: u64,
+    pub failure: Option<String>,
+    pub children: usize,
+}
+
+/// The session-unique external id for a nested call: its raw id qualified by
+/// the code parent's raw id. Top-level call ids stay unchanged.
+pub fn nested_call_id(parent: &str, child: &str) -> String {
+    format!("{parent}:{child}")
+}
+
 /// Build the replay list for a persisted entry list: active entries only,
 /// each as its current view, in order.
 pub fn transcript(entries: &[HistoryEntry]) -> Vec<ReplayItem> {
+    transcript_with_codemode(entries, &BTreeMap::new())
+}
+
+pub fn transcript_with_codemode(
+    entries: &[HistoryEntry],
+    runs: &BTreeMap<String, crate::storage::sessions::StoredCodemodeRun>,
+) -> Vec<ReplayItem> {
     let mut items = Vec::new();
     // Calls seen so far, for results whose block carries no name (the
     // pre-name legacy convention `ext::tool_name` also falls back to).
-    let mut calls: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut calls: std::collections::HashMap<String, (String, serde_json::Value)> =
+        std::collections::HashMap::new();
     for entry in entries.iter().filter(|entry| entry.is_active()) {
         let current = entry.latest();
         let message = current.message();
@@ -87,8 +115,10 @@ pub fn transcript(entries: &[HistoryEntry]) -> Vec<ReplayItem> {
                         Role::System => {}
                     }
                 }
-                ContentBlock::ToolUse { id, name, .. } => {
-                    calls.insert(id, name);
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
+                    calls.insert(id.clone(), (name.clone(), input.clone()));
                 }
                 ContentBlock::ToolResult {
                     tool_use_id,
@@ -101,14 +131,17 @@ pub fn transcript(entries: &[HistoryEntry]) -> Vec<ReplayItem> {
                     // The verbatim original, when an alteration or compaction
                     // revised what the entry shows.
                     let full = verbatim_result_text(entry, tool_use_id, &text);
-                    let name = name
-                        .as_deref()
-                        .or_else(|| calls.get(tool_use_id.as_str()).copied())
-                        .unwrap_or("unknown")
-                        .to_owned();
+                    let (fallback_name, input) = calls
+                        .get(tool_use_id.as_str())
+                        .cloned()
+                        .unwrap_or(("unknown".to_owned(), serde_json::Value::Null));
+                    let name = name.as_deref().unwrap_or(&fallback_name).to_owned();
                     items.push(ReplayItem::ToolResult {
                         id: tool_use_id.clone(),
                         name,
+                        input: (input != serde_json::Value::Null).then_some(input),
+                        parent_call_id: None,
+                        code: None,
                         text,
                         full,
                         is_error: *is_error,
@@ -118,7 +151,58 @@ pub fn transcript(entries: &[HistoryEntry]) -> Vec<ReplayItem> {
             }
         }
     }
-    items
+    expand_codemode(items, runs)
+}
+
+/// Insert each stored child projection directly after its code parent and
+/// attach the parent's run summary. Model history is left untouched.
+fn expand_codemode(
+    items: Vec<ReplayItem>,
+    runs: &BTreeMap<String, crate::storage::sessions::StoredCodemodeRun>,
+) -> Vec<ReplayItem> {
+    let mut out = Vec::with_capacity(items.len());
+    for mut item in items {
+        let (id, name) = match &item {
+            ReplayItem::ToolResult { id, name, .. } => (id.clone(), name.clone()),
+            _ => {
+                out.push(item);
+                continue;
+            }
+        };
+        let Some(run) = runs.get(&id) else {
+            out.push(item);
+            continue;
+        };
+        let is_code = name == "code";
+        let children = run.children.clone();
+        let summary = is_code.then_some(ReplayCodeRun {
+            duration_ms: run.duration_ms,
+            failure: run.failure.clone(),
+            children: children.len(),
+        });
+        let ReplayItem::ToolResult { code, .. } = &mut item else {
+            unreachable!("matched above");
+        };
+        *code = summary;
+        out.push(item);
+        if !is_code {
+            continue;
+        }
+        let parent = id;
+        for child in children {
+            out.push(ReplayItem::ToolResult {
+                id: nested_call_id(&parent, &child.id),
+                name: child.tool.clone(),
+                input: Some(child.input),
+                parent_call_id: Some(parent.clone()),
+                code: None,
+                text: child.output,
+                full: None,
+                is_error: child.is_error,
+            });
+        }
+    }
+    out
 }
 
 /// Animist's agent commits every tool-result entry with a placeholder
@@ -244,6 +328,9 @@ mod tests {
         assert_eq!(
             items,
             vec![ReplayItem::ToolResult {
+                input: None,
+                parent_call_id: None,
+                code: None,
                 id: "t1".into(),
                 name: "bash".into(),
                 text: "[4 lines compressed from 4096 | retrieve: hash=abc]".into(),
@@ -279,6 +366,9 @@ mod tests {
         assert_eq!(
             transcript(&[done]),
             vec![ReplayItem::ToolResult {
+                input: None,
+                parent_call_id: None,
+                code: None,
                 id: "t9".into(),
                 name: "bash".into(),
                 text: "the finished output".into(),
@@ -315,6 +405,9 @@ mod tests {
         assert_eq!(
             transcript(&[altered]),
             vec![ReplayItem::ToolResult {
+                input: None,
+                parent_call_id: None,
+                code: None,
                 id: "t9".into(),
                 name: "bash".into(),
                 text: "[9 lines compressed from 9001 | retrieve: hash=ab12]".into(),
@@ -336,6 +429,9 @@ mod tests {
         assert_eq!(
             items,
             vec![ReplayItem::ToolResult {
+                input: None,
+                parent_call_id: None,
+                code: None,
                 id: "t2".into(),
                 name: "read".into(),
                 text: "plain output".into(),
@@ -380,6 +476,9 @@ mod tests {
                     text: "running it".into()
                 },
                 ReplayItem::ToolResult {
+                    input: Some(serde_json::json!({})),
+                    parent_call_id: None,
+                    code: None,
                     // The result block carries no name; the call does.
                     id: "t3".into(),
                     name: "grep".into(),

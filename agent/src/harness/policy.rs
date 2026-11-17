@@ -198,6 +198,10 @@ impl PolicyLayer {
             .as_deref()
             .unwrap_or_else(|| inputs.permissions.cwd());
         let (scopes, force_prompt) = scope_for_call(root, name, &call.input);
+        let display_id = context
+            .parent_call_id
+            .map(|parent| crate::harness::nested_call_id(parent, &call.id))
+            .unwrap_or_else(|| call.id.clone());
         match inputs.permissions.check_multi(&tool, &scopes, force_prompt) {
             PermissionCheck::Allowed => Ok(None),
             PermissionCheck::Denied => {
@@ -210,12 +214,13 @@ impl PolicyLayer {
                 let decision = if inputs.permissions.is_auto_review()
                     && let Some(reviewer) = &inputs.reviewer
                 {
-                    self.auto_review(reviewer, &inputs.permissions, &tool, &call.id, &scopes)
+                    self.auto_review(reviewer, &inputs.permissions, &tool, &display_id, &scopes)
                         .await
                 } else {
                     let ask = ApprovalAsk {
-                        id: &call.id,
+                        id: &display_id,
                         name,
+                        parent_call_id: context.parent_call_id,
                         input: &call.input,
                         scopes: &scopes,
                         low_risk,

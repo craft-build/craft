@@ -2,7 +2,7 @@
 //! `~/.config/craft/*.bml` (legacy `~/.craft/` is searched first when it
 //! exists). Format is BarkML.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, fmt, path::Path};
 
 use serde::Deserialize;
 use snafu::ResultExt;
@@ -12,7 +12,7 @@ use crate::error::{
     ReadConfigSnafu, Result,
 };
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
@@ -49,6 +49,40 @@ pub enum CodemodeMode {
     Off,
     Alongside,
     Exclusive,
+}
+
+impl CodemodeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Alongside => "alongside",
+            Self::Exclusive => "exclusive",
+        }
+    }
+
+    /// Strict spelling shared by `/codemode`, session metadata, and BML.
+    pub fn parse_str(text: &str) -> Option<Self> {
+        match text {
+            "off" => Some(Self::Off),
+            "alongside" => Some(Self::Alongside),
+            "exclusive" => Some(Self::Exclusive),
+            _ => None,
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Alongside,
+            Self::Alongside => Self::Exclusive,
+            Self::Exclusive => Self::Off,
+        }
+    }
+}
+
+impl fmt::Display for CodemodeMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

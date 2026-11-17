@@ -62,6 +62,7 @@ fn seed_files() -> Vec<TouchedFile> {
 
 fn read_call(id: &str) -> ToolCallData {
     ToolCallData {
+        parent_call_id: None,
         id: id.into(),
         awaiting_approval: false,
         kind: ToolKind::Read {
@@ -88,6 +89,7 @@ fn read_call(id: &str) -> ToolCallData {
 
 fn grep_call(id: &str) -> ToolCallData {
     ToolCallData {
+        parent_call_id: None,
         id: id.into(),
         awaiting_approval: false,
         kind: ToolKind::Grep {
@@ -116,6 +118,7 @@ fn grep_call(id: &str) -> ToolCallData {
 fn edit_call(id: &str) -> ToolCallData {
     use LineKind::*;
     ToolCallData {
+        parent_call_id: None,
         id: id.into(),
         awaiting_approval: true,
         kind: ToolKind::Edit {
@@ -156,6 +159,7 @@ fn edit_call(id: &str) -> ToolCallData {
 
 fn bash_call(id: &str) -> ToolCallData {
     ToolCallData {
+        parent_call_id: None,
         id: id.into(),
         awaiting_approval: false,
         kind: ToolKind::Bash {
@@ -288,6 +292,10 @@ impl Provider for MockProvider {
                     Command::SetThinking(thinking) => {
                         let _ = evt_tx.send(AgentEvent::ThinkingChanged(thinking));
                     }
+                    Command::SetCodemode(mode) => {
+                        let mode = mode.unwrap_or(crate::config::CodemodeMode::Off);
+                        let _ = evt_tx.send(AgentEvent::CodemodeChanged(mode));
+                    }
                     Command::SendMessage(_, _mode, _) => {
                         if let Some(h) = current.take() {
                             h.abort();
@@ -305,6 +313,7 @@ impl Provider for MockProvider {
                         // The scripted mock cannot run shells; echo the
                         // command back as a finished bash card.
                         let _ = evt_tx.send(AgentEvent::ToolCall(ToolCallData {
+                            parent_call_id: None,
                             id: format!("shell-{turns}"),
                             kind: ToolKind::Bash { cmd: command },
                             lines: Vec::new(),
@@ -496,7 +505,7 @@ mod tests {
                     ToolKind::Grep { .. } => saw_grep = true,
                     ToolKind::Edit { .. } => saw_edit = true,
                     ToolKind::Bash { .. } => saw_bash = true,
-                    ToolKind::Card { .. } => {}
+                    ToolKind::Card { .. } | ToolKind::Code { .. } => {}
                 },
                 AgentEvent::StatusChanged(Status::WaitingApproval) => break,
                 _ => {}

@@ -19,6 +19,8 @@ pub struct ApprovalAsk<'a> {
     pub id: &'a str,
     /// The call's wire name (`server__tool` for MCP tools).
     pub name: &'a str,
+    /// Parent call id for nested codemode children; `None` for model calls.
+    pub parent_call_id: Option<&'a str>,
     /// The call's decoded input, for display.
     pub input: &'a serde_json::Value,
     /// The scopes the rules could not decide, already resolved against the

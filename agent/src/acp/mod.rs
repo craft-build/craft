@@ -295,6 +295,7 @@ impl AppState {
         };
         self.build_session(BuildInputs {
             workspace,
+            codemode: self.config.codemode.mode,
             instructions,
             permissions,
             persister: None,
@@ -337,6 +338,8 @@ impl AppState {
         .map_err(|e| format!("session {stored_id:?} could not be loaded: {e}"))?;
         let stored_model = persister.store().session().model.clone();
         let stored_thinking = persister.store().session().meta.thinking;
+        let stored_codemode = persister.store().session().meta.codemode.as_deref();
+        let stored_runs = persister.store().session().meta.codemode_runs.clone();
         let stored_entries = persister.store().session().messages().to_vec();
         let (instructions, workspace, permissions) = self.open_workspace(cwd).await?;
         // The stored model spec is `{provider}/{model}` (see `run_turn`).
@@ -360,7 +363,15 @@ impl AppState {
         let (replay_connection, replay_session_id) = (connection.clone(), session_id.clone());
         let mut session = self
             .build_session(BuildInputs {
-                workspace,
+                workspace: workspace.with_codemode(crate::config::CodemodeConfig {
+                    mode: stored_codemode
+                        .and_then(crate::config::CodemodeMode::parse_str)
+                        .unwrap_or(self.config.codemode.mode),
+                    ..self.config.codemode
+                }),
+                codemode: stored_codemode
+                    .and_then(crate::config::CodemodeMode::parse_str)
+                    .unwrap_or(self.config.codemode.mode),
                 instructions,
                 permissions,
                 persister: Some(Arc::new(tokio::sync::Mutex::new(persister))),
@@ -385,7 +396,10 @@ impl AppState {
         // The resume contract: the replayed transcript reaches the client as
         // session updates before the `session/load` response, built by the
         // same shared replay the TUI resume uses.
-        for update in turn::replay_updates(&crate::harness::replay::transcript(&stored_entries)) {
+        for update in turn::replay_updates(&crate::harness::replay::transcript_with_codemode(
+            &stored_entries,
+            &stored_runs,
+        )) {
             let _ = replay_connection
                 .send_notification(SessionNotification::new(replay_session_id.clone(), update));
         }
@@ -429,6 +443,7 @@ impl AppState {
     async fn build_session(&self, inputs: BuildInputs) -> std::result::Result<Session, String> {
         let BuildInputs {
             workspace,
+            codemode,
             instructions,
             permissions,
             persister,
@@ -458,6 +473,10 @@ impl AppState {
             .await
             .map_err(report)?;
         let workspace = workspace
+            .with_codemode(crate::config::CodemodeConfig {
+                mode: codemode,
+                ..self.config.codemode
+            })
             .with_model(format!("{provider_name}/{model}"))
             .with_session_id(session_id.0.to_string());
 
@@ -567,6 +586,7 @@ impl AppState {
 /// The inputs [`AppState::build_session`] assembles.
 struct BuildInputs {
     workspace: Workspace,
+    codemode: crate::config::CodemodeMode,
     instructions: crate::instructions::Instructions,
     permissions: Arc<PermissionManager>,
     persister: Option<Arc<tokio::sync::Mutex<crate::harness::Persister>>>,

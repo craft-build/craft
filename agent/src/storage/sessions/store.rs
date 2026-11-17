@@ -178,6 +178,28 @@ impl SessionStore {
         self.save();
     }
 
+    pub fn set_codemode(&mut self, mode: crate::config::CodemodeMode) {
+        self.session.set_codemode(mode);
+        self.save();
+    }
+
+    pub fn codemode(&self) -> Option<crate::config::CodemodeMode> {
+        self.session
+            .meta
+            .codemode
+            .as_deref()
+            .and_then(crate::config::CodemodeMode::parse_str)
+    }
+
+    pub fn codemode_runs(&self) -> &std::collections::BTreeMap<String, super::StoredCodemodeRun> {
+        &self.session.meta.codemode_runs
+    }
+
+    pub fn record_codemode_run(&mut self, id: String, run: super::StoredCodemodeRun) {
+        self.session.record_codemode_run(id, run);
+        self.save();
+    }
+
     /// Persist the session mode so a resume restores it (`build`/`plan`).
     /// Mode changes are user-initiated and rare, so they write immediately.
     pub fn set_mode(&mut self, plan: bool) {

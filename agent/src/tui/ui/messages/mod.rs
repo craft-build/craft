@@ -252,6 +252,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                 .push(Segment::with_lines(compaction_block(kind, text, width))),
             Message::Tool {
                 id,
+                parent_call_id,
                 kind,
                 lines: body,
                 full,
@@ -280,7 +281,8 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                     collapsed,
                     hovered,
                     body_expanded,
-                    width,
+                    width.saturating_sub(if parent_call_id.is_some() { 2 } else { 0 }),
+                    parent_call_id.is_some(),
                 );
                 let seg = app.view.segments.len();
                 if let Some(row) = notice_row {
@@ -1093,6 +1095,7 @@ mod tests {
 
         let mut app = App::new();
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t1".into(),
             kind: ToolKind::Bash {
                 cmd: "view_image shot.png".into(),
@@ -1137,6 +1140,7 @@ mod tests {
 
         let mut app = App::new();
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t1".into(),
             kind: ToolKind::Bash {
                 cmd: "view_image shot.png".into(),
@@ -1172,6 +1176,7 @@ mod tests {
 
         let mut app = App::new();
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t1".into(),
             kind: ToolKind::Bash {
                 cmd: "cargo test".into(),
@@ -1215,6 +1220,7 @@ mod tests {
         ));
         let path = std::env::temp_dir().join("probe.rs");
         app.conversation.messages.push(Message::Tool {
+            parent_call_id: None,
             id: "t1".into(),
             full: None,
             kind: crate::tui::provider::ToolKind::Read {
@@ -1368,6 +1374,7 @@ mod tests {
         let mut app = App::new();
         let path = std::env::temp_dir().join("osc8_probe.rs");
         app.conversation.messages.push(Message::Tool {
+            parent_call_id: None,
             id: "t1".into(),
             full: None,
             kind: crate::tui::provider::ToolKind::Read {
@@ -1414,6 +1421,7 @@ mod tests {
         let mut narrow_app = App::new();
         let long = std::env::temp_dir().join("osc8_probe.rs");
         narrow_app.conversation.messages.push(Message::Tool {
+            parent_call_id: None,
             id: "t1".into(),
             full: None,
             kind: crate::tui::provider::ToolKind::Read {

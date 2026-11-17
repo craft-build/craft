@@ -100,6 +100,7 @@ async fn persisted_state(
     (
         Arc::new(Mutex::new(SessionState {
             thinking: crate::thinking::ThinkingConfig::default(),
+            codemode: crate::config::CodemodeMode::Off,
             conversation,
             model_spec: "mock/model".into(),
             signals: super::turn::RunSignals::new(),
@@ -401,6 +402,96 @@ async fn thinking_changes_persist_across_clear_and_new_session() {
         stored(&state).await,
         Some(Some(ThinkingConfig::Budget(4096)))
     );
+}
+
+#[tokio::test]
+async fn codemode_switches_rebuild_the_same_persisted_session() {
+    use crate::config::CodemodeMode;
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let kit = offline_kit(offline_config(), Some(state_dir.clone()), tx);
+    let state = open_session(&kit, crate::thinking::ThinkingConfig::default(), None)
+        .await
+        .expect("session builds offline");
+    let ctx = LoopCtx {
+        state: state.clone(),
+        kit,
+        shell: Arc::default(),
+        catalogs: BTreeMap::new(),
+        catalog: Arc::new(animist::catalog::Catalog::default()),
+        wake: Arc::new(Notify::new()),
+    };
+    let conversation = state.lock().await.conversation.clone();
+    conversation
+        .history()
+        .add_stored(ext::stored_user_text("history survives"))
+        .await;
+    let session_ref = state
+        .lock()
+        .await
+        .conversation
+        .persister()
+        .expect("offline state dir persists")
+        .lock()
+        .await
+        .store()
+        .session()
+        .id
+        .clone();
+
+    let current_turn = None;
+    for mode in [
+        CodemodeMode::Alongside,
+        CodemodeMode::Exclusive,
+        CodemodeMode::Off,
+    ] {
+        super::commands::handle_set_codemode(&ctx, &current_turn, Some(mode)).await;
+        assert_eq!(state.lock().await.codemode, mode);
+        let guard = state.lock().await;
+        let persister = guard.conversation.persister().unwrap();
+        assert_eq!(persister.lock().await.store().codemode(), Some(mode));
+    }
+    super::commands::handle_set_codemode(&ctx, &current_turn, None).await;
+    assert_eq!(state.lock().await.codemode, CodemodeMode::Alongside);
+    let guard = state.lock().await;
+    assert_eq!(
+        guard
+            .conversation
+            .persister()
+            .unwrap()
+            .lock()
+            .await
+            .store()
+            .session()
+            .id,
+        session_ref
+    );
+    drop(guard);
+    let history = conversation.history().snapshot().await;
+    let rendered = harness::replay::transcript(history.entries());
+    assert!(matches!(
+        rendered.first(),
+        Some(harness::ReplayItem::User { text }) if text == "history survives"
+    ));
+    assert!(matches!(rx.try_recv(), Ok(AgentEvent::CodemodeChanged(_))));
+
+    let task = tokio::spawn(std::future::pending::<()>());
+    let busy = Some(task.abort_handle());
+    task.abort();
+    super::commands::handle_set_codemode(&ctx, &busy, Some(CodemodeMode::Off)).await;
+    assert_eq!(state.lock().await.codemode, CodemodeMode::Alongside);
+    let warned = loop {
+        match rx.try_recv() {
+            Ok(AgentEvent::Notice {
+                tone: Tone::Warning,
+                ..
+            }) => break true,
+            Ok(_) => continue,
+            Err(_) => break false,
+        }
+    };
+    assert!(warned, "a busy turn refuses the switch");
 }
 
 #[tokio::test]

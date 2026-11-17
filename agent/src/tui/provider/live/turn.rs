@@ -1,7 +1,7 @@
 //! One agent turn: drives the conversation's run, rendering to the TUI seam
 //! through the session-long forwarder.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,7 +17,7 @@ use crate::history;
 
 use super::super::cards::{self, Files};
 use super::usage_recorder::record_run_usage;
-use crate::tui::provider::{AgentEvent, PlanItem, Status, Tone, ToolCallData};
+use crate::tui::provider::{AgentEvent, PlanItem, Status, Tone, ToolCallData, ToolKind};
 
 use super::{Selection, SessionKit, SessionState, report};
 
@@ -113,6 +113,8 @@ struct TurnRenderer {
     files: Files,
     selection: Arc<arc_swap::ArcSwap<Selection>>,
     signals: RunSignals,
+    call_parents: std::sync::Mutex<HashMap<String, std::collections::VecDeque<Option<String>>>>,
+    code_runs: std::sync::Mutex<BTreeMap<String, (std::time::Instant, usize)>>,
 }
 
 impl TurnRenderer {
@@ -126,7 +128,38 @@ impl TurnRenderer {
             files,
             selection,
             signals: RunSignals::new(),
+            call_parents: std::sync::Mutex::new(HashMap::new()),
+            code_runs: std::sync::Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn remember_parent(&self, raw: String, parent: Option<String>) {
+        self.call_parents
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(raw)
+            .or_default()
+            .push_back(parent);
+    }
+
+    fn take_parent(&self, raw: &str) -> Option<String> {
+        let mut calls = self
+            .call_parents
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let queue = calls.get_mut(raw)?;
+        let parent = queue.pop_front().flatten();
+        if queue.is_empty() {
+            calls.remove(raw);
+        }
+        parent
+    }
+
+    fn external_id(raw: &str, parent: Option<&str>) -> String {
+        parent.map_or_else(
+            || raw.to_owned(),
+            |parent| crate::harness::nested_call_id(parent, raw),
+        )
     }
 
     fn map(&self, event: Event) {
@@ -154,12 +187,31 @@ impl TurnRenderer {
                 // outcome renderer must not re-emit it.
                 let _ = self.tx.send(AgentEvent::AssistantEnd);
             }
-            Event::Agent(RuntimeEvent::ToolStarted { call, .. }) => {
+            Event::Agent(RuntimeEvent::ToolStarted {
+                call,
+                parent_call_id,
+            }) => {
                 if !self.signals.tools_started.swap(true, Ordering::Relaxed) {
                     let _ = self.tx.send(AgentEvent::StatusChanged(Status::Running));
                 }
+                if call.name == "code" {
+                    self.code_runs
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .insert(call.id.clone(), (std::time::Instant::now(), 0));
+                } else if let Some(parent) = &parent_call_id {
+                    let mut runs = self
+                        .code_runs
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    if let Some((_, calls)) = runs.get_mut(parent) {
+                        *calls += 1;
+                    }
+                }
+                self.remember_parent(call.id.clone(), parent_call_id.clone());
                 let _ = self.tx.send(AgentEvent::ToolCall(ToolCallData {
-                    id: call.id,
+                    id: Self::external_id(&call.id, parent_call_id.as_deref()),
+                    parent_call_id,
                     kind: cards::tool_head(&call.name, &call.input),
                     lines: Vec::new(),
                     awaiting_approval: false,
@@ -167,6 +219,8 @@ impl TurnRenderer {
                 }));
             }
             Event::Agent(RuntimeEvent::ToolFinished { call, output }) => {
+                let parent = self.take_parent(&call.id);
+                let external_id = Self::external_id(&call.id, parent.as_deref());
                 // A finished seam tool call settles its subagent's chat:
                 // is_error is the most specific ending it sees.
                 if SUBAGENT_TOOLS.contains(&call.name.as_str()) {
@@ -176,7 +230,33 @@ impl TurnRenderer {
                     });
                 }
                 let result = tool_result_block(&call, &output);
-                let done = cards::tool_done(call.id.clone(), &call.name, &call.input, &result);
+                let code_run = if call.name == "code" {
+                    self.code_runs
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .remove(&call.id)
+                } else {
+                    None
+                };
+                let mut done = cards::tool_done(call.id.clone(), &call.name, &call.input, &result);
+                if let (Some((started, calls)), ToolKind::Code { summary, .. }) =
+                    (code_run, &mut done.card.kind)
+                {
+                    let outcome = if output.is_error {
+                        let text = crate::history::ext::tool_content_text(&output.content);
+                        crate::codemode::diagnose::Class::from_rendered(&text)
+                            .map_or_else(|| "error".to_owned(), |class| class.as_str().to_owned())
+                    } else {
+                        "ok".to_owned()
+                    };
+                    *summary = format!(
+                        "{calls} call{} · {:.1}s · {outcome}",
+                        if calls == 1 { "" } else { "s" },
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+                done.card.id = external_id;
+                done.card.parent_call_id = parent;
                 if !done.touched.is_empty() {
                     // Poison-tolerant: a poisoned mutex must not leave
                     // the UI stuck "Running".
@@ -288,6 +368,48 @@ impl TurnRenderer {
                 };
                 let _ = self.tx.send(AgentEvent::AutoReview { id, tone, text });
             }
+            Event::Agent(RuntimeEvent::ToolProgress { id, content }) => {
+                let known = self
+                    .code_runs
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .contains_key(&id);
+                if known {
+                    let _ = self.tx.send(AgentEvent::ToolProgress { id, content });
+                }
+            }
+            Event::Agent(RuntimeEvent::ToolFailed { call, error }) => {
+                let parent = self.take_parent(&call.id);
+                self.code_runs
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(&call.id);
+                let kind = if call.name == "code" {
+                    ToolKind::Code {
+                        script: call
+                            .input
+                            .get("code")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        summary: String::new(),
+                        failure: Some("crash".to_owned()),
+                    }
+                } else {
+                    cards::tool_head(&call.name, &call.input)
+                };
+                let _ = self.tx.send(AgentEvent::ToolCall(ToolCallData {
+                    id: Self::external_id(&call.id, parent.as_deref()),
+                    parent_call_id: parent,
+                    kind,
+                    lines: vec![crate::tui::provider::ToolLine::new(
+                        crate::tui::provider::LineKind::Del,
+                        error.to_string(),
+                    )],
+                    awaiting_approval: false,
+                    image: None,
+                }));
+            }
             // Nothing to render: Done is consumed by the forwarder; Error
             // rides TurnOutcome::Failed; the nudge precedes a continuation
             // the reply rendering covers; the remaining agent events are
@@ -364,6 +486,7 @@ fn subagent_event(event: Event) -> Option<AgentEvent> {
         Event::Agent(RuntimeEvent::ToolStarted { call, .. }) => {
             Some(AgentEvent::ToolCall(ToolCallData {
                 id: call.id,
+                parent_call_id: None,
                 kind: cards::tool_head(&call.name, &call.input),
                 lines: Vec::new(),
                 awaiting_approval: false,
@@ -802,6 +925,69 @@ mod tests {
             },
             output,
         })
+    }
+
+    /// Codemode child ids restart at `code-0`; the renderer qualifies them by
+    /// parent for card identity, forwards parent print progress, and summarizes
+    /// the code parent when it finishes.
+    #[test]
+    fn nested_codemode_calls_render_parent_qualified_and_stream_progress() {
+        let (renderer, mut rx) = renderer();
+        let call = animist::agent::tool::ToolCall {
+            id: "t1".into(),
+            name: "code".into(),
+            input: serde_json::json!({"code": "print(1)"}),
+        };
+        renderer.map(Event::Agent(RuntimeEvent::ToolStarted {
+            call,
+            parent_call_id: None,
+        }));
+        let child = animist::agent::tool::ToolCall {
+            id: "code-0".into(),
+            name: "read_text".into(),
+            input: serde_json::json!({"path": "a"}),
+        };
+        renderer.map(Event::Agent(RuntimeEvent::ToolStarted {
+            call: child,
+            parent_call_id: Some("t1".into()),
+        }));
+        renderer.map(Event::Agent(RuntimeEvent::ToolProgress {
+            id: "t1".into(),
+            content: "partial".into(),
+        }));
+        renderer.map(tool_finished_event("code-0", "read_text", false));
+        renderer.map(tool_finished_event("t1", "code", false));
+
+        assert!(
+            matches!(rx.try_recv().unwrap(), AgentEvent::StatusChanged(_)),
+            "the first tool start reports running"
+        );
+        let AgentEvent::ToolCall(parent) = rx.try_recv().unwrap() else {
+            panic!("code parent start");
+        };
+        assert_eq!(parent.id, "t1");
+        let AgentEvent::ToolCall(child) = rx.try_recv().unwrap() else {
+            panic!("child start");
+        };
+        assert_eq!(child.id, "t1:code-0");
+        assert_eq!(child.parent_call_id.as_deref(), Some("t1"));
+        let AgentEvent::ToolProgress { id, content } = rx.try_recv().unwrap() else {
+            panic!("progress forwarded");
+        };
+        assert_eq!((id.as_str(), content.as_str()), ("t1", "partial"));
+        let AgentEvent::ToolCall(child_done) = rx.try_recv().unwrap() else {
+            panic!("child finish");
+        };
+        assert_eq!(child_done.id, "t1:code-0");
+        let AgentEvent::ToolCall(parent_done) = rx.try_recv().unwrap() else {
+            panic!("parent finish");
+        };
+        assert_eq!(parent_done.id, "t1");
+        let ToolKind::Code { summary, .. } = &parent_done.kind else {
+            panic!("code card retains its kind");
+        };
+        assert!(summary.contains("1 call"), "{summary}");
+        assert!(summary.ends_with("ok"), "{summary}");
     }
 
     /// Both `SpawnSubagent` seam tools settle their subagent's chat when

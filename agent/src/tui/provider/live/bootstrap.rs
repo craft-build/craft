@@ -279,8 +279,9 @@ impl CraftProvider {
 
 /// A persisted session being restored into a fresh conversation: the
 /// persister owns the loaded history and the session's on-disk identity.
-pub(super) struct RestoredSession {
-    pub(super) persister: Arc<tokio::sync::Mutex<crate::harness::Persister>>,
+pub(super) enum RestoredSession {
+    Persister(Arc<tokio::sync::Mutex<crate::harness::Persister>>),
+    History(animist::history::History),
 }
 
 /// Assemble one session's [`SessionState`]: resolve the model, open (or
@@ -292,12 +293,18 @@ pub(super) async fn build_session_state(
     selection: &Selection,
     restore: Option<RestoredSession>,
     thinking: crate::thinking::ThinkingConfig,
+    codemode: crate::config::CodemodeMode,
 ) -> Result<(SessionState, crate::harness::EventStream), String> {
-    let model = resolve_model(&kit.config, &kit.listings, selection).await?;
-    let (session_ref, persister) = match restore {
-        Some(restored) => {
-            let id = restored.persister.lock().await.store().session().id.clone();
-            (id, Some(restored.persister))
+    let mut config = (*kit.config).clone();
+    config.codemode.mode = codemode;
+    let model = resolve_model(&config, &kit.listings, selection).await?;
+    let (session_ref, persister, restored_history) = match restore {
+        Some(RestoredSession::Persister(persister)) => {
+            let id = persister.lock().await.store().session().id.clone();
+            (id, Some(persister), None)
+        }
+        Some(RestoredSession::History(history)) => {
+            (crate::id::SessionRef::generate(), None, Some(history))
         }
         None => {
             let session_ref = crate::id::SessionRef::generate();
@@ -314,14 +321,14 @@ pub(super) async fn build_session_state(
                 ))),
                 None => None,
             };
-            (session_ref, persister)
+            (session_ref, persister, None)
         }
     };
     // The persister's history is the conversation's history (the same
     // change feed); a non-persisting session starts a fresh one.
     let history = match &persister {
         Some(persister) => persister.lock().await.history(),
-        None => animist::history::History::new(),
+        None => restored_history.unwrap_or_else(animist::history::History::new),
     };
 
     // The approval seam is shared by the conversation and every subagent,
@@ -346,6 +353,7 @@ pub(super) async fn build_session_state(
     let workspace = kit
         .workspace
         .clone()
+        .with_codemode(config.codemode)
         .with_model(LoopCtx::model_spec(selection))
         .with_session_id(session_ref.id().to_string());
     // Register MCP tool annotations once the tool set is settled
@@ -365,7 +373,7 @@ pub(super) async fn build_session_state(
     .await
     .map_err(|error| error.to_string())?;
     let conversation = crate::harness::ConversationBuilder::new(
-        &kit.config,
+        &config,
         &kit.cwd,
         &kit.instructions_text,
         model,
@@ -419,6 +427,7 @@ pub(super) async fn build_session_state(
     Ok((
         SessionState {
             thinking,
+            codemode,
             conversation,
             model_spec: format!("{}/{}", selection.provider, selection.model),
             signals: RunSignals::new(),
@@ -437,7 +446,9 @@ pub(super) async fn open_session(
     restore: Option<RestoredSession>,
 ) -> Result<Arc<tokio::sync::Mutex<SessionState>>, String> {
     let selection = Arc::unwrap_or_clone(kit.selection.load_full());
-    let (session, stream) = build_session_state(kit, &selection, restore, thinking).await?;
+    let codemode = kit.workspace.codemode().mode;
+    let (session, stream) =
+        build_session_state(kit, &selection, restore, thinking, codemode).await?;
     let state = Arc::new(tokio::sync::Mutex::new(session));
     let signals = start_forwarder(
         stream,
@@ -459,9 +470,11 @@ pub(super) async fn install_session(
     state: &Arc<tokio::sync::Mutex<SessionState>>,
     thinking: crate::thinking::ThinkingConfig,
     restore: Option<RestoredSession>,
+    codemode: crate::config::CodemodeMode,
 ) -> Result<(), String> {
     let selection = Arc::unwrap_or_clone(kit.selection.load_full());
-    let (session, stream) = build_session_state(kit, &selection, restore, thinking).await?;
+    let (session, stream) =
+        build_session_state(kit, &selection, restore, thinking, codemode).await?;
     let signals = start_forwarder(
         stream,
         state.clone(),

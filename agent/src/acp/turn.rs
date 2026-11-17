@@ -3,14 +3,14 @@ use agent_client_protocol::{
     v1::{
         ConnectionTo, Responder,
         schema::{
-            ConfigOptionUpdate, Content, ContentBlock, ContentChunk,
+            ConfigOptionUpdate, Content, ContentBlock, ContentChunk, Meta,
             PromptResponse as AcpPromptResponse, SessionId, SessionNotification, SessionUpdate,
             StopReason, TextContent, ToolCall as AcpToolCall, ToolCallContent, ToolCallId,
             ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
         },
     },
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, atomic::Ordering};
 
 use animist::agent::AgentEvent;
@@ -156,6 +156,7 @@ pub(super) async fn run_turn(
     // progresses, then drain through the terminal Done.
     let connection_for_events = connection.clone();
     let session_id_for_events = session_id.clone();
+    let call_parents = std::sync::Mutex::new(HashMap::<String, VecDeque<Option<String>>>::new());
     let forward_event =
         |event: Event,
          emitted_text: &std::sync::atomic::AtomicBool,
@@ -177,16 +178,77 @@ pub(super) async fn run_turn(
                 }) => SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(
                     TextContent::new(text),
                 ))),
-                Event::Agent(AgentEvent::ToolStarted { call, .. }) => {
-                    SessionUpdate::ToolCall(tool_call_start(&call.id, &call.name, &call.input))
+                Event::Agent(AgentEvent::ToolStarted {
+                    call,
+                    parent_call_id,
+                }) => {
+                    let external_id = parent_call_id.as_deref().map_or_else(
+                        || call.id.clone(),
+                        |parent| crate::harness::nested_call_id(parent, &call.id),
+                    );
+                    call_parents
+                        .lock()
+                        .expect("call parent map unpoisoned")
+                        .entry(call.id.clone())
+                        .or_default()
+                        .push_back(parent_call_id.clone());
+                    SessionUpdate::ToolCall(tool_call_start(
+                        &external_id,
+                        &call.name,
+                        &call.input,
+                        parent_call_id.as_deref(),
+                    ))
                 }
                 Event::Agent(AgentEvent::ToolFinished { call, output }) => {
-                    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                        ToolCallId::new(call.id.clone()),
+                    let mut parents = call_parents.lock().expect("call parent map unpoisoned");
+                    let parent = parents
+                        .get_mut(&call.id)
+                        .and_then(VecDeque::pop_front)
+                        .flatten();
+                    let external_id = parent.as_deref().map_or_else(
+                        || call.id.clone(),
+                        |parent| crate::harness::nested_call_id(parent, &call.id),
+                    );
+                    let status = if output.is_error {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    };
+                    let mut update = ToolCallUpdate::new(
+                        ToolCallId::new(external_id),
                         ToolCallUpdateFields::new()
-                            .status(ToolCallStatus::Completed)
+                            .status(status)
                             .content(vec![tool_result_content(&call, &output)]),
-                    ))
+                    );
+                    if parent.is_some() {
+                        update = update.meta(parent_meta(parent.as_deref()));
+                    }
+                    SessionUpdate::ToolCallUpdate(update)
+                }
+                Event::Agent(AgentEvent::ToolFailed { call, error }) => {
+                    let mut parents = call_parents.lock().expect("call parent map unpoisoned");
+                    let parent = parents
+                        .get_mut(&call.id)
+                        .and_then(VecDeque::pop_front)
+                        .flatten();
+                    let external_id = parent.as_deref().map_or_else(
+                        || call.id.clone(),
+                        |parent| crate::harness::nested_call_id(parent, &call.id),
+                    );
+                    let output = animist::agent::tool::ToolOutput::builder()
+                        .content(error.to_string())
+                        .is_error(true)
+                        .build();
+                    let mut update = ToolCallUpdate::new(
+                        ToolCallId::new(external_id),
+                        ToolCallUpdateFields::new()
+                            .status(ToolCallStatus::Failed)
+                            .content(vec![tool_result_content(&call, &output)]),
+                    );
+                    if parent.is_some() {
+                        update = update.meta(parent_meta(parent.as_deref()));
+                    }
+                    SessionUpdate::ToolCallUpdate(update)
                 }
                 Event::Agent(AgentEvent::StepFinished { usage, .. }) => {
                     let Some(size) = context_length else {
@@ -282,11 +344,31 @@ pub(super) async fn run_turn(
     }
 }
 
-fn tool_call_start(id: &str, name: &str, arguments: &serde_json::Value) -> AcpToolCall {
+fn parent_meta(parent: Option<&str>) -> Meta {
+    let mut meta = Meta::new();
+    if let Some(parent) = parent {
+        meta.insert(
+            "craft".to_owned(),
+            serde_json::json!({ "parentCallId": parent }),
+        );
+    }
+    meta
+}
+
+pub(super) fn tool_call_start(
+    id: &str,
+    name: &str,
+    arguments: &serde_json::Value,
+    parent: Option<&str>,
+) -> AcpToolCall {
     let mut call = AcpToolCall::new(ToolCallId::new(id), tool_title(name, arguments));
     call.kind = tool_kind(name);
     call.status = ToolCallStatus::InProgress;
     call.raw_input = Some(arguments.clone());
+    call.name = Some(name.to_owned());
+    if parent.is_some() {
+        call.meta = Some(parent_meta(parent));
+    }
     call
 }
 
@@ -306,13 +388,30 @@ pub(super) fn replay_updates(items: &[ReplayItem]) -> Vec<SessionUpdate> {
             ReplayItem::Assistant { text } => Some(SessionUpdate::AgentMessageChunk(
                 ContentChunk::new(ContentBlock::Text(TextContent::new(text.clone()))),
             )),
-            ReplayItem::ToolResult { id, name, text, .. } => {
+            ReplayItem::ToolResult {
+                id,
+                name,
+                input,
+                parent_call_id,
+                is_error,
+                text,
+                ..
+            } => {
                 let mut call = AcpToolCall::new(
                     ToolCallId::new(id.clone()),
-                    tool_title(name, &serde_json::Value::Null),
+                    tool_title(name, input.as_ref().unwrap_or(&serde_json::Value::Null)),
                 );
                 call.kind = tool_kind(name);
-                call.status = ToolCallStatus::Completed;
+                call.status = if *is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                };
+                call.raw_input = input.clone();
+                call.name = Some(name.clone());
+                if parent_call_id.is_some() {
+                    call.meta = Some(parent_meta(parent_call_id.as_deref()));
+                }
                 call.content = vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
                     TextContent::new(text.clone()),
                 )))];
@@ -324,6 +423,9 @@ pub(super) fn replay_updates(items: &[ReplayItem]) -> Vec<SessionUpdate> {
 }
 
 pub(super) fn tool_title(name: &str, arguments: &serde_json::Value) -> String {
+    if name == "code" {
+        return name.to_owned();
+    }
     if let Some(detail) = crate::tui::provider::cards::first_string_argument(arguments) {
         format!("{name} {detail}")
     } else {

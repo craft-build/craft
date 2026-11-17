@@ -348,8 +348,15 @@ Gate (adjusted): every adversarial corpus script fails with the right class thro
 
 Gate: the code card and nested rows render in the TUI, ACP and stream-json, and a resumed session replays them correctly.
 
-- [ ] Card renderer in `src/tui/provider/cards.rs`, progress streaming, failure-class badge.
-- [ ] `/codemode` slash command, plus a session-persisted mode beside the thinking preference.
+- [x] Card renderer in `src/tui/provider/cards.rs`, progress streaming, failure-class badge.
+- [x] `/codemode` slash command, plus a session-persisted mode beside the thinking preference.
+
+#### Phase 3 implementation results (Nov 17, 2026)
+
+- The `code` card is its own TUI kind: Python-highlighted source (collapsed to the first eight lines), streamed `print` output, and a final `N calls · T · ok/class` summary. Child cards carry parent-qualified session ids and indent directly under their code parent; two scripts that both emit `code-0` never merge.
+- ACP and stream-json qualify nested ids the same way, carry the parent relationship (`_meta.craft.parentCallId` / `parent_tool_use_id`), and keep the full script in the code call's input. Replay reconstructs parents, children, source, output, ordering, summaries, and failure badges.
+- Nested calls persist as optional presentation metadata in session meta, not model history: the model still sees exactly the code parent's result, while a resumed TUI or ACP session rebuilds the child rows from the projection. Legacy sessions without that metadata load unchanged.
+- `/codemode off|alongside|exclusive` (bare invocation cycles) rebuilds the workspace registry, tool catalog, hidden `read_text`, and frozen model tool selection together between turns. A successful switch preserves history, session id, snapshots, permissions, and settings and persists the preference; a failed rebuild or an in-flight turn keeps the old session active.
 
 ### Phase 4 — Crash isolation (about 1 week)
 

@@ -68,6 +68,7 @@ fn scene_transcript() -> App {
             .into(),
     ));
     app.handle_event(AgentEvent::ToolCall(ToolCallData {
+        parent_call_id: None,
         awaiting_approval: false,
         id: "r1".into(),
         kind: ToolKind::Read {
@@ -188,6 +189,7 @@ fn scene_todo() -> App {
         "Found it — raylib isn't declared yet. Adding the dependency.".into(),
     ));
     app.handle_event(AgentEvent::ToolCall(ToolCallData {
+        parent_call_id: None,
         awaiting_approval: false,
         id: "b1".into(),
         kind: ToolKind::Bash {
@@ -200,6 +202,7 @@ fn scene_todo() -> App {
         image: None,
     }));
     app.handle_event(AgentEvent::ToolCall(ToolCallData {
+        parent_call_id: None,
         awaiting_approval: false,
         id: "e1".into(),
         kind: ToolKind::Edit {

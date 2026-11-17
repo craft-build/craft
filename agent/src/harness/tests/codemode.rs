@@ -119,6 +119,88 @@ async fn scripts_dispatch_hidden_children_and_commit_shaped_output() {
 }
 
 #[tokio::test]
+async fn code_children_persist_as_presentation_metadata_only() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
+    let source =
+        "import asyncio\nprint(await asyncio.gather(read_text('a.txt'), read_text(path='b.txt')))";
+    let provider = script(vec![
+        code_call("t1", source),
+        crate::testing::text_turn("done"),
+    ]);
+    let state = tempfile::tempdir().unwrap();
+    let state_dir = crate::storage::StateDir::from_path(state.path().to_path_buf());
+    let session_ref = crate::id::SessionRef::generate();
+    let persister = crate::harness::Persister::open_in(
+        state_dir,
+        session_ref,
+        &dir.path().display().to_string(),
+        "scripted/scripted",
+    )
+    .await
+    .unwrap();
+    let history = persister.history();
+    let workspace = Workspace::new(dir.path())
+        .unwrap()
+        .with_codemode(codemode_config(CodemodeMode::Alongside).codemode);
+    let registry = workspace.registry(&history).unwrap();
+    let persister = std::sync::Arc::new(tokio::sync::Mutex::new(persister));
+    let (conversation, mut stream) = conversation_tuned(
+        &provider,
+        &codemode_config(CodemodeMode::Alongside),
+        &dir.path().display().to_string(),
+        registry,
+        Some(history),
+        |builder| builder.persist(Some(persister.clone())),
+    )
+    .await;
+
+    let outcome = run_turn(&conversation, "go").await;
+    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
+    let _ = events_until_done(&mut stream).await;
+    let entries_count = tool_results(&conversation).await.len();
+    assert_eq!(entries_count, 1);
+
+    let guard = persister.lock().await;
+    let runs = guard.store().codemode_runs();
+    let run = runs.get("t1").expect("code run projection");
+    assert_eq!(run.children.len(), 2);
+    assert_eq!(run.children[0].id, "code-0");
+    assert_eq!(run.children[0].tool, "read_text");
+    assert_eq!(run.children[0].output, "alpha\n");
+    assert_eq!(run.children[1].id, "code-1");
+    assert_eq!(run.failure, None);
+
+    let replay = crate::harness::replay::transcript_with_codemode(guard.entries(), runs);
+    let ids: Vec<&str> = replay
+        .iter()
+        .filter_map(|item| match item {
+            crate::harness::ReplayItem::ToolResult { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, vec!["t1", "t1:code-0", "t1:code-1"]);
+    let parent = replay
+        .iter()
+        .find_map(|item| match item {
+            crate::harness::ReplayItem::ToolResult {
+                id, input, code, ..
+            } if id == "t1" => Some((input, code)),
+            _ => None,
+        })
+        .expect("code parent replays with source and run summary");
+    let (Some(input), Some(run)) = parent else {
+        panic!("code parent replays with source and run summary");
+    };
+    assert_eq!(
+        input.get("code").and_then(serde_json::Value::as_str),
+        Some(source)
+    );
+    assert_eq!(run.children, 2);
+}
+
+#[tokio::test]
 async fn direct_model_read_text_is_unknown_but_code_selection_admits_it() {
     let provider = script(vec![
         crate::testing::tool_turn(vec![tool_event(

@@ -888,6 +888,9 @@ fn replay_updates_carry_the_shared_transcript() {
             text: "do it".into(),
         },
         crate::harness::ReplayItem::ToolResult {
+            input: None,
+            parent_call_id: None,
+            code: None,
             id: "t1".into(),
             name: "bash".into(),
             text: "done".into(),
@@ -925,6 +928,63 @@ fn replay_updates_carry_the_shared_transcript() {
         &updates[2],
         SessionUpdate::AgentMessageChunk(chunk) if chunk.content == text_block("all set")
     ));
+}
+
+/// A nested codemode call gets a session-unique id, its parent in `craft`
+/// metadata, and a concise `code` title while `rawInput` still carries the
+/// whole script.
+#[test]
+fn replay_updates_reconstruct_nested_codemode_relationships() {
+    use agent_client_protocol::v1::schema::{SessionUpdate, ToolCallStatus};
+    let updates = replay_updates(&[crate::harness::ReplayItem::ToolResult {
+        id: "t1:code-0".into(),
+        name: "read_text".into(),
+        input: Some(serde_json::json!({"path": "a.rs"})),
+        parent_call_id: Some("t1".into()),
+        code: None,
+        text: "alpha".into(),
+        full: None,
+        is_error: true,
+    }]);
+    let [SessionUpdate::ToolCall(call)] = updates.as_slice() else {
+        panic!("one replayed child call, got {updates:?}");
+    };
+    assert_eq!(call.tool_call_id.0.as_ref(), "t1:code-0");
+    assert_eq!(call.status, ToolCallStatus::Failed);
+    assert_eq!(call.raw_input.as_ref().unwrap()["path"], "a.rs");
+    assert_eq!(
+        call.meta.as_ref().and_then(|meta| meta.get("craft")),
+        Some(&serde_json::json!({"parentCallId": "t1"}))
+    );
+}
+
+#[test]
+fn codemode_tool_calls_are_parent_qualified_and_carry_input() {
+    let call = tool_call_start(
+        "t1:code-0",
+        "read_text",
+        &serde_json::json!({"path": "a.rs"}),
+        Some("t1"),
+    );
+    assert_eq!(call.tool_call_id.0.as_ref(), "t1:code-0");
+    assert_eq!(call.title, "read_text a.rs");
+    assert_eq!(
+        call.meta.as_ref().and_then(|meta| meta.get("craft")),
+        Some(&serde_json::json!({"parentCallId": "t1"}))
+    );
+    let code = tool_call_start(
+        "t1",
+        "code",
+        &serde_json::json!({"code": "print('x')\nprint('y')"}),
+        None,
+    );
+    assert_eq!(code.title, "code");
+    let code_input = code.raw_input.clone().unwrap_or_default();
+    assert_eq!(
+        code_input["code"],
+        serde_json::json!("print('x')\nprint('y')")
+    );
+    assert!(code.meta.is_none());
 }
 
 // ----- model sync -----

@@ -19,6 +19,8 @@ use crate::harness::AgentMode;
 pub enum Command {
     /// Change reasoning for subsequent turns.
     SetThinking(crate::thinking::ThinkingConfig),
+    /// Change codemode for subsequent turns; `None` cycles the three modes.
+    SetCodemode(Option<crate::config::CodemodeMode>),
     /// User submitted a message in the composer, in the given mode.
     /// Submit the composer text, with any image attachments.
     SendMessage(String, AgentMode, Vec<crate::history::ContentBlock>),
@@ -185,6 +187,14 @@ pub enum ToolKind {
         cmd: String,
         summary: String,
     },
+    /// A `code` call: the Python script is kept independently from streamed
+    /// output, which arrives as `ToolProgress` and is replaced by the final
+    /// authoritative body.
+    Code {
+        script: String,
+        summary: String,
+        failure: Option<String>,
+    },
 }
 
 impl ToolKind {
@@ -224,6 +234,8 @@ pub enum Keep {
 #[derive(Clone, Debug)]
 pub struct ToolCallData {
     pub id: String,
+    /// Parent code call; `None` for model-visible top-level calls.
+    pub parent_call_id: Option<String>,
     pub kind: ToolKind,
     pub lines: Vec<ToolLine>,
     /// The card awaits an approve/reject decision. Only backends that stage
@@ -296,6 +308,8 @@ pub enum AgentEvent {
     StatusChanged(Status),
     /// Effective session reasoning setting, including startup and resume.
     ThinkingChanged(crate::thinking::ThinkingConfig),
+    /// Effective codemode preference after startup, resume, or `/codemode`.
+    CodemodeChanged(crate::config::CodemodeMode),
     /// A complete assistant message (notes, errors, one-shot replies).
     AssistantText(String),
     /// Streamed chunk of the assistant reply currently being written.
@@ -307,6 +321,11 @@ pub enum AgentEvent {
     /// Tool cards are merged by id: emit once with empty lines when the call
     /// starts and again with the finished body when its result arrives.
     ToolCall(ToolCallData),
+    /// Streamed progress for the tool call with `id`.
+    ToolProgress {
+        id: String,
+        content: String,
+    },
     PlanSet(Vec<PlanItem>),
     FilesSet(Vec<TouchedFile>),
     /// Human label for token usage, e.g. "44.8K/1M (4%)".
@@ -405,14 +424,14 @@ pub enum AgentEvent {
 pub enum LoadedMessage {
     User(String),
     Assistant(String),
-    /// A tool result: the card kind derived from the tool's name (the
-    /// replay holds no call arguments, so the header carries no detail),
-    /// the text the current view shows (the altered text when an
+    /// A tool result: the card kind (including a resumed code script and
+    /// summary), the text the current view shows (the altered text when an
     /// alteration revised the entry), and the verbatim original behind the
     /// card's "show full output" affordance. An error keeps its whole text
     /// in the body, the live no-detail convention.
     Tool {
         id: String,
+        parent_call_id: Option<String>,
         kind: ToolKind,
         text: String,
         full: Option<String>,

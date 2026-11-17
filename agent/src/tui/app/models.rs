@@ -2,7 +2,9 @@
 
 use crate::tui::geom::Rect;
 
-use crate::tui::provider::{AgentEvent, ModelChoice, Tone, ToolCallData, ToolKind, ToolLine};
+use crate::tui::provider::{
+    AgentEvent, LineKind, ModelChoice, Tone, ToolCallData, ToolKind, ToolLine,
+};
 use crate::tui::selection::Selection;
 use crate::tui::ui::scrollback::{ScrollPos, SegmentCache};
 
@@ -52,6 +54,7 @@ pub enum Message {
     },
     Tool {
         id: String,
+        parent_call_id: Option<String>,
         kind: ToolKind,
         lines: Vec<ToolLine>,
         /// The verbatim original behind this card's "show full output"
@@ -273,6 +276,7 @@ impl Conversation {
             }
             AgentEvent::ToolCall(ToolCallData {
                 id,
+                parent_call_id,
                 kind,
                 lines,
                 awaiting_approval,
@@ -319,6 +323,7 @@ impl Conversation {
                         let collapsible = kind.collapsible();
                         self.messages.push(Message::Tool {
                             id: id.clone(),
+                            parent_call_id: parent_call_id.clone(),
                             kind,
                             lines,
                             full: None,
@@ -326,9 +331,48 @@ impl Conversation {
                             review: None,
                             image,
                         });
+                        if parent_call_id.is_some() {
+                            // Exclude the newly pushed child itself from the
+                            // subtree scan.
+                            let prior = self.messages.len() - 1;
+                            let subtree_end = self.messages[..prior]
+                                .iter()
+                                .enumerate()
+                                .rev()
+                                .find(|(_, message)| {
+                                    matches!(message, Message::Tool {
+                                        id: owner,
+                                        parent_call_id: owner_parent,
+                                        ..
+                                    } if parent_call_id.as_deref() == Some(owner.as_str())
+                                        || owner_parent.as_deref()
+                                            == parent_call_id.as_deref())
+                                })
+                                .map(|(index, _)| index + 1)
+                                .unwrap_or(self.messages.len() - 1);
+                            let card = self.messages.pop().expect("card was just pushed");
+                            self.messages.insert(subtree_end, card);
+                        }
                         if collapsible {
                             self.collapsed.push(id);
                         }
+                    }
+                }
+            }
+            AgentEvent::ToolProgress { id, content } => {
+                let card = self
+                    .messages
+                    .iter_mut()
+                    .find(|m| matches!(m, Message::Tool { id: mid, .. } if *mid == id));
+                if let Some(Message::Tool { lines, .. }) = card {
+                    lines.extend(
+                        content
+                            .lines()
+                            .map(|line| ToolLine::new(LineKind::Muted, line)),
+                    );
+                    if lines.len() > 200 {
+                        let tail = lines.split_off(lines.len() - 200);
+                        *lines = tail;
                     }
                 }
             }
@@ -544,6 +588,7 @@ pub struct Session {
     pub models: Vec<ModelChoice>,
     pub model_idx: usize,
     pub thinking: crate::thinking::ThinkingConfig,
+    pub codemode: crate::config::CodemodeMode,
     pub cwd: String,
     pub branch: String,
     pub token_label: String,
@@ -561,6 +606,7 @@ impl Session {
             models: seed_models(),
             model_idx: 0,
             thinking: crate::thinking::ThinkingConfig::default(),
+            codemode: crate::config::CodemodeMode::Off,
             cwd: String::new(),
             branch: String::new(),
             token_label: "…".into(),
@@ -622,6 +668,7 @@ mod tests {
     fn tool_call_events_merge_by_id() {
         let mut conv = Conversation::new();
         conv.apply(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t1".into(),
             kind: ToolKind::Read {
                 path: "src/a.rs".into(),
@@ -632,6 +679,7 @@ mod tests {
             image: None,
         }));
         conv.apply(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t1".into(),
             kind: ToolKind::Read {
                 path: "src/a.rs".into(),
@@ -655,12 +703,92 @@ mod tests {
         }
     }
 
+    /// Two code runs can both emit raw child id `code-0`: parent-qualified
+    /// ids keep the children separate and directly under their parents.
+    #[test]
+    fn nested_cards_stay_under_their_parent_and_progress_replaces() {
+        let mut conv = Conversation::new();
+        for parent in ["t1", "t2"] {
+            conv.apply(AgentEvent::ToolCall(ToolCallData {
+                parent_call_id: None,
+                id: parent.into(),
+                kind: ToolKind::Code {
+                    script: "print(1)".into(),
+                    summary: String::new(),
+                    failure: None,
+                },
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+            }));
+            conv.apply(AgentEvent::ToolCall(ToolCallData {
+                parent_call_id: Some(parent.into()),
+                id: format!("{parent}:code-0"),
+                kind: ToolKind::Read {
+                    path: "a.rs".into(),
+                    summary: String::new(),
+                },
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+            }));
+        }
+        conv.apply(AgentEvent::ToolProgress {
+            id: "t1".into(),
+            content: "partial".into(),
+        });
+        conv.apply(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
+            id: "t1".into(),
+            kind: ToolKind::Code {
+                script: "print(1)".into(),
+                summary: "0 calls · 0.0s · ok".into(),
+                failure: None,
+            },
+            lines: vec![ToolLine::new(LineKind::Success, "final")],
+            awaiting_approval: false,
+            image: None,
+        }));
+        let ids: Vec<(&str, Option<&str>)> = conv
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Tool {
+                    id, parent_call_id, ..
+                } => Some((id.as_str(), parent_call_id.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("t1", None),
+                ("t1:code-0", Some("t1")),
+                ("t2", None),
+                ("t2:code-0", Some("t2"))
+            ]
+        );
+        match &conv.messages[0] {
+            Message::Tool {
+                kind: ToolKind::Code { summary, .. },
+                lines,
+                ..
+            } => {
+                assert!(summary.contains("ok"));
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0].text, "final");
+            }
+            _ => panic!("expected a code card"),
+        }
+    }
+
     /// Auto-review attaches under the card by id, leaving the card's own kind
     /// and body intact, and survives the tool result merge.
     #[test]
     fn auto_review_rides_under_the_card() {
         let mut conv = Conversation::new();
         conv.apply(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t1".into(),
             kind: ToolKind::Bash {
                 cmd: "cargo test".into(),
@@ -676,6 +804,7 @@ mod tests {
         });
         // The result merge updates the card body without dropping the review.
         conv.apply(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
             id: "t1".into(),
             kind: ToolKind::Bash {
                 cmd: "cargo test".into(),

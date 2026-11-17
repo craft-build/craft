@@ -69,6 +69,31 @@ impl Class {
             Class::Crash => "Crash",
         }
     }
+
+    /// Recovers the class from a rendered diagnostic line. Display-side use
+    /// only: producers classify at origin through [`Failure`].
+    pub fn from_rendered(text: &str) -> Option<Self> {
+        let classes = [
+            Self::Syntax,
+            Self::Type,
+            Self::Unsupported,
+            Self::UnknownTool,
+            Self::ToolError,
+            Self::Runtime,
+            Self::Limit,
+            Self::Cancelled,
+            Self::Crash,
+        ];
+        text.lines().find_map(|line| {
+            classes.into_iter().find(|class| {
+                let label = class.label();
+                line.starts_with(label)
+                    && (line[label.len()..].starts_with(':')
+                        || line[label.len()..].starts_with(" line")
+                        || *class == Self::Cancelled && line.starts_with("Cancelled after"))
+            })
+        })
+    }
 }
 
 /// One classified script failure: `message` is the concise summary the model
@@ -666,6 +691,22 @@ mod tests {
             limit.hint.as_deref(),
             Some("narrow the loop or raise `timeout_secs` (maximum 120)")
         );
+    }
+
+    #[test]
+    fn rendered_diagnostics_recover_their_class() {
+        assert_eq!(Class::from_rendered("Runtime: boom"), Some(Class::Runtime));
+        assert_eq!(
+            Class::from_rendered("Syntax line 3: expected expression"),
+            Some(Class::Syntax)
+        );
+        assert_eq!(
+            Class::from_rendered(
+                "Completed 2 of 3 tool calls before failing\nCancelled after 3 tool calls"
+            ),
+            Some(Class::Cancelled)
+        );
+        assert_eq!(Class::from_rendered("plain output"), None);
     }
 
     #[test]

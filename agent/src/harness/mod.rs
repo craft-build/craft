@@ -41,7 +41,7 @@ pub use mode::{AgentMode, PLAN_WRITE_RESTRICTED};
 pub use persist::Persister;
 pub use policy::PolicyLayerInputs;
 pub use recovery::ReauthHook;
-pub use replay::{ReplayItem, transcript};
+pub use replay::{ReplayCodeRun, ReplayItem, nested_call_id, transcript, transcript_with_codemode};
 
 use std::future::Future;
 use std::pin::Pin;

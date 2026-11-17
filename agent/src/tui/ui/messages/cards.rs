@@ -35,6 +35,7 @@ pub(super) fn tool_block(
     hovered: bool,
     body_expanded: bool,
     width: usize,
+    nested: bool,
 ) -> (Vec<Line<'static>>, Option<usize>, Option<Hyperlink>) {
     let t = theme::current();
 
@@ -73,6 +74,12 @@ pub(super) fn tool_block(
             prefix.push(Span::styled(
                 if collapsed { "▸ " } else { "▾ " }.to_string(),
                 Style::default().fg(t.text_tertiary).bg(card_bg),
+            ));
+        }
+        ToolKind::Code { .. } => {
+            prefix.push(Span::styled(
+                "py ",
+                Style::default().fg(t.accent).bg(card_bg),
             ));
         }
     }
@@ -126,6 +133,7 @@ pub(super) fn tool_block(
             })
         }
         ToolKind::Grep { .. } | ToolKind::Bash { .. } | ToolKind::Card { .. } => None,
+        ToolKind::Code { .. } => None,
     };
     // Prepend the bar to every laid-out row.
     let with_bar = |lines: Vec<Line<'static>>| -> Vec<Line<'static>> {
@@ -133,6 +141,9 @@ pub(super) fn tool_block(
             .into_iter()
             .map(|line| {
                 let mut spans = vec![Span::styled(bar, bar_style)];
+                if nested {
+                    spans.insert(0, Span::styled("  ", surf));
+                }
                 spans.extend(line.spans);
                 pad_row(spans, outer_width, surf)
             })
@@ -143,6 +154,13 @@ pub(super) fn tool_block(
     let badge = diff_badge(diff);
     let right = match (badge, kind) {
         (Some((text, color)), _) => Some((text.to_string(), color)),
+        (
+            None,
+            ToolKind::Code {
+                failure: Some(class),
+                ..
+            },
+        ) => Some((class.clone(), t.danger)),
         (None, k) if k.collapsible() => Some((tool_summary(k), t.text_tertiary)),
         _ => None,
     };
@@ -247,6 +265,45 @@ pub(super) fn tool_block(
 
     // --- body truncation ---
     let indent = " ".repeat(BODY_INDENT);
+    if let ToolKind::Code { script, .. } = kind {
+        const SOURCE_CAP: usize = 8;
+        let all: Vec<&str> = script.lines().collect();
+        let (shown, hidden) = if body_expanded || all.len() <= SOURCE_CAP {
+            (all.as_slice(), 0)
+        } else {
+            (&all[..SOURCE_CAP], all.len() - SOURCE_CAP)
+        };
+        let mut python = Highlighter::for_token("python");
+        for (nr, source) in shown.iter().enumerate() {
+            let segs = python.highlight_line(source);
+            let base = Style::default().fg(t.text_secondary).bg(card_bg);
+            let lead = vec![
+                Span::styled(indent.clone(), surf),
+                gutter_span(nr + 1, 2, card_bg),
+            ];
+            let content = styled_diff_spans(source, Some(segs.as_slice()), &[], base, base);
+            let avail = width.saturating_sub(spans_width(&lead)).max(1);
+            lines.extend(
+                wrap_spans(content, avail)
+                    .into_iter()
+                    .map(|content| pad_row([lead.clone(), content].concat(), width, surf)),
+            );
+        }
+        if hidden > 0 {
+            lines.push(pad_row(
+                vec![
+                    Span::styled(indent.clone(), surf),
+                    Span::styled(
+                        format!("… ({hidden} source lines) click to expand"),
+                        Style::default().fg(t.text_tertiary).bg(card_bg),
+                    ),
+                ],
+                width,
+                surf,
+            ));
+        }
+    }
+
     let (cap, keep) = kind.body_hints();
     let hidden = body.len().saturating_sub(cap);
     let truncating = !body_expanded && hidden >= MIN_HIDDEN_LINES;
@@ -427,7 +484,59 @@ pub(super) fn tool_block(
 #[cfg(test)]
 mod tests {
     use super::{Line, tool_block};
-    use crate::tui::provider::ToolLine;
+    use crate::tui::provider::{ToolKind, ToolLine};
+    /// The code card collapses to the first eight Python source lines and an
+    /// expansion notice; body expansion unlocks every line.
+    #[test]
+    fn code_card_collapses_to_eight_source_lines() {
+        let script: String = (1..=10)
+            .map(|line| format!("value{line} = {line}\n"))
+            .collect();
+        let kind = ToolKind::Code {
+            script,
+            summary: String::new(),
+            failure: None,
+        };
+        let collapsed = tool_block(
+            &kind,
+            "t1",
+            &[],
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            80,
+            false,
+        )
+        .0;
+        let collapsed_text: Vec<String> = collapsed.iter().map(line_text).collect();
+        assert!(collapsed_text.iter().any(|row| row.contains("value8")));
+        assert!(!collapsed_text.iter().any(|row| row.contains("value9")));
+        assert!(
+            collapsed_text
+                .iter()
+                .any(|row| row.contains("2 source lines"))
+        );
+        let expanded = tool_block(
+            &kind,
+            "t1",
+            &[],
+            false,
+            None,
+            false,
+            false,
+            false,
+            true,
+            80,
+            false,
+        )
+        .0;
+        let expanded_text: Vec<String> = expanded.iter().map(line_text).collect();
+        assert!(expanded_text.iter().any(|row| row.contains("value10")));
+    }
+
     use crate::tui::style::Modifier;
 
     fn line_text(line: &Line<'_>) -> String {
@@ -462,7 +571,7 @@ mod tests {
             },
         ];
         let lines = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, false, 80,
+            &kind, "t1", &body, false, None, false, false, false, false, 80, false,
         )
         .0;
         let joined: Vec<String> = lines.iter().map(line_text).collect();
@@ -508,7 +617,7 @@ mod tests {
             },
         ];
         let lines = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, false, 80,
+            &kind, "t1", &body, false, None, false, false, false, false, 80, false,
         )
         .0;
         let ctx = lines
@@ -535,11 +644,11 @@ mod tests {
         };
         let body = vec![ToolLine::new(crate::tui::provider::LineKind::Add, "x")];
         let expanded = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, false, 80,
+            &kind, "t1", &body, false, None, false, false, false, false, 80, false,
         )
         .0;
         let collapsed = tool_block(
-            &kind, "t1", &body, false, None, false, true, false, false, 80,
+            &kind, "t1", &body, false, None, false, true, false, false, 80, false,
         )
         .0;
         assert!(expanded.len() > collapsed.len());
@@ -564,7 +673,7 @@ mod tests {
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("line {i}")))
             .collect();
         let (lines, notice, _link) = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, false, 80,
+            &kind, "t1", &body, false, None, false, false, false, false, 80, false,
         );
         // 40 head lines kept; the notice names the hidden count and sits
         // just above the bottom padding row.
@@ -582,7 +691,7 @@ mod tests {
         );
         // Expanded body renders everything, with a fold-back notice.
         let (lines, notice, _link) = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, true, 80,
+            &kind, "t1", &body, false, None, false, false, false, true, 80, false,
         );
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(
@@ -601,7 +710,7 @@ mod tests {
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("out {i}")))
             .collect();
         let (lines, notice, _link) = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, false, 80,
+            &kind, "t1", &body, false, None, false, false, false, false, 80, false,
         );
         assert!(notice.is_some(), "tail-kept bodies still carry a notice");
         let text: Vec<String> = lines.iter().map(line_text).collect();
@@ -623,7 +732,7 @@ mod tests {
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("l {i}")))
             .collect();
         let (lines, notice, _link) = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, false, 80,
+            &kind, "t1", &body, false, None, false, false, false, false, 80, false,
         );
         assert_eq!(notice, None, "3 hidden lines buy no notice");
         let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
@@ -638,7 +747,7 @@ mod tests {
         };
         let body = vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")];
         let (_, _, link) = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, false, 80,
+            &kind, "t1", &body, false, None, false, false, false, false, 80, false,
         );
         let hl = link.expect("read card carries a link");
         assert!(hl.uri.starts_with("file://"), "{}", hl.uri);
@@ -651,7 +760,7 @@ mod tests {
             summary: String::new(),
         };
         let (_, _, link) = tool_block(
-            &kind, "t1", &body, false, None, false, true, false, false, 80,
+            &kind, "t1", &body, false, None, false, true, false, false, 80, false,
         );
         assert!(link.is_some(), "collapsed edit card still links");
     }
@@ -667,7 +776,7 @@ mod tests {
         ] {
             let body = vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")];
             let (_, _, link) = tool_block(
-                &kind, "t1", &body, false, None, false, false, false, false, 80,
+                &kind, "t1", &body, false, None, false, false, false, false, 80, false,
             );
             assert!(link.is_none());
         }
@@ -684,7 +793,7 @@ mod tests {
                     this looks destructive and was blocked by the guardrail";
         let body = vec![ToolLine::new(crate::tui::provider::LineKind::Muted, long)];
         let (lines, _, _) = tool_block(
-            &kind, "t1", &body, false, None, false, false, false, false, 40,
+            &kind, "t1", &body, false, None, false, false, false, false, 40, false,
         );
         let text: Vec<String> = lines.iter().map(line_text).collect();
         // No row exceeds the card width (minus trailing pad is included).
@@ -718,6 +827,7 @@ mod tests {
             false,
             false,
             width,
+            false,
         );
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(

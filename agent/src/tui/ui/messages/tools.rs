@@ -16,6 +16,7 @@ pub(super) fn tool_label(kind: &ToolKind) -> String {
         ToolKind::Bash { cmd } => cmd.clone(),
         ToolKind::Card { cmd, .. } => cmd.clone(),
         ToolKind::Edit { path, .. } => format!("Edit {path}"),
+        ToolKind::Code { .. } => "Code".to_owned(),
     }
 }
 
@@ -25,6 +26,15 @@ pub(super) fn tool_summary(kind: &ToolKind) -> String {
         | ToolKind::Grep { summary, .. }
         | ToolKind::Edit { summary, .. }
         | ToolKind::Card { summary, .. } => summary.clone(),
+        ToolKind::Code {
+            summary, failure, ..
+        } => {
+            if summary.is_empty() {
+                failure.clone().unwrap_or_else(|| "running".to_owned())
+            } else {
+                summary.clone()
+            }
+        }
         _ => String::new(),
     }
 }
