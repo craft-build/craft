@@ -158,11 +158,21 @@ impl LayerImpl for PersistLayer {
                         crate::codemode::diagnose::Class::from_rendered(&text)
                             .map_or_else(|| "error".to_owned(), |class| class.as_str().to_owned())
                     });
+                    let mut children = run.children;
+                    // Children complete concurrently within one wave; the
+                    // bridge assigns `code-<dispatch index>` ids, so sort by
+                    // dispatch order for a deterministic projection.
+                    children.sort_by_key(|child| {
+                        child
+                            .id
+                            .strip_prefix("code-")
+                            .and_then(|index| index.parse::<u32>().ok())
+                    });
                     StoredCodemodeRun {
                         duration_ms: run.started.elapsed().as_millis().min(u128::from(u64::MAX))
                             as u64,
                         failure,
-                        children: run.children,
+                        children,
                     }
                 })
             }

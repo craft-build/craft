@@ -336,6 +336,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: RecipeAction,
     },
+    /// Internal: the codemode worker protocol loop over stdin/stdout.
+    #[command(name = "__codemode-worker", hide = true)]
+    __CodemodeWorker,
 }
 
 #[derive(Clone, Debug, Subcommand)]

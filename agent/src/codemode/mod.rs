@@ -3,9 +3,16 @@ mod bridge;
 pub mod catalog;
 mod convert;
 pub mod diagnose;
+#[cfg(test)]
+mod duplex;
+mod pool;
+mod proto;
 mod stubs;
 pub(crate) mod telemetry;
 mod worker;
+
+pub use pool::{debug_idle_pids, debug_kill_all, debug_runs_sent};
+pub use worker::{RECYCLE_AFTER_RUNS, worker_main};
 
 use std::{collections::BTreeMap, sync::Arc};
 

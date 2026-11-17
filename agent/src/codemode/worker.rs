@@ -1,46 +1,31 @@
 use std::{
     borrow::Cow,
     collections::BTreeMap,
+    io,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::config::CodemodeConfig;
 use monty::{MontyRun, RunProgress};
 use monty_types::{
     CompileOptions, ExcType, ExtFunctionResult, MontyDate, MontyDateTime, MontyException,
     MontyObject, NameLookupResult, OsFunctionCall, PrintWriter, PrintWriterCallback,
     ResourceLimits, ResourceTracker,
 };
-use serde_json::Value;
-
-use crate::config::CodemodeConfig;
 
 use super::diagnose::{self, Class, Failure};
+use super::proto;
+
+pub use super::proto::{Finished, Message, PendingCall, Reply, WorkerParams};
 
 const STACK_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
-pub struct PendingCall {
-    pub id: u32,
-    pub name: String,
-    pub args: Vec<Value>,
-    pub kwargs: BTreeMap<String, Value>,
-}
-
-#[derive(Debug)]
-pub struct Finished {
-    pub stdout: String,
-    pub result: Result<Option<String>, Failure>,
-}
-
-#[derive(Debug)]
-pub enum Message {
-    Calls(Vec<PendingCall>),
-    Print(String),
-    Done(Finished),
-}
-
-pub type Reply = (u32, Result<Value, String>);
+/// After this many completed runs a worker self-exits so the pool respawns
+/// it fresh — cheap insurance against anything stateful accumulating inside
+/// one long-lived process.
+pub const RECYCLE_AFTER_RUNS: usize = 64;
 
 struct Output {
     sender: flume::Sender<Message>,
@@ -89,27 +74,36 @@ impl PrintWriterCallback for Output {
     }
 }
 
-pub type WorkerChannels = (
+type RunChannels = (
     flume::Receiver<Message>,
     flume::Sender<Vec<Reply>>,
     thread::JoinHandle<()>,
 );
 
-pub fn spawn(
-    code: String,
-    timeout_secs: u64,
-    config: CodemodeConfig,
-    names: Vec<String>,
-) -> Result<WorkerChannels, Failure> {
-    diagnose::preflight(&code)?;
+/// Spawns one interpreter run on a dedicated big-stack thread, wired to a
+/// fresh pair of in-process channels. The thread always reports through
+/// [`Message::Done`], including on panic.
+fn spawn_run(params: WorkerParams) -> Result<RunChannels, Failure> {
     let (message_tx, message_rx) = flume::unbounded();
     let (reply_tx, reply_rx) = flume::unbounded();
     let handle = thread::Builder::new()
         .name("craft-codemode".to_owned())
         .stack_size(STACK_BYTES)
         .spawn(move || {
+            let config = CodemodeConfig {
+                max_output_kib: params.max_output_kib,
+                max_tool_calls: params.max_tool_calls,
+                ..CodemodeConfig::default()
+            };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(code, timeout_secs, config, names, &message_tx, &reply_rx)
+                run(
+                    params.code,
+                    params.timeout_secs,
+                    config,
+                    params.names,
+                    &message_tx,
+                    &reply_rx,
+                )
             }));
             match result {
                 Ok(finished) => {
@@ -125,6 +119,125 @@ pub fn spawn(
         })
         .map_err(|error| Failure::crash(format!("could not start codemode worker: {error}")))?;
     Ok((message_rx, reply_tx, handle))
+}
+
+/// The reply channel of the run currently in flight; `None` between runs.
+type ReplySlot = Arc<Mutex<Option<flume::Sender<Vec<Reply>>>>>;
+
+/// What the reader thread hands the serve loop.
+enum Incoming {
+    Run(WorkerParams),
+    Stop,
+}
+
+/// The child-side serve loop, generic over the transport so the stdio
+/// subprocess and the in-memory test duplex share one implementation:
+/// handshake `ready`, then read a `run` frame, stream one run's events,
+/// write `done`, and repeat until EOF or the recycle cap.
+pub fn serve<R, W>(read: R, mut write: W)
+where
+    R: io::Read + Send + 'static,
+    W: io::Write,
+{
+    let (incoming_tx, incoming_rx) = flume::unbounded::<Incoming>();
+    let slot: ReplySlot = Arc::new(Mutex::new(None));
+    let reader_slot = slot.clone();
+    let reader = thread::Builder::new()
+        .name("craft-codemode-io".to_owned())
+        .spawn(move || {
+            let mut read = read;
+            while let Some(frame) = proto::read_frame(&mut read).ok().flatten() {
+                match proto::parse_frame::<proto::ToWorker>(&frame) {
+                    Ok(proto::ToWorker::Run(params)) => {
+                        if incoming_tx.send(Incoming::Run(params)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(proto::ToWorker::Replies { replies }) => {
+                        let replies = replies
+                            .into_iter()
+                            .map(|(id, outcome)| (id, outcome.into_result()))
+                            .collect::<Vec<_>>();
+                        if let Some(sender) = reader_slot.lock().unwrap().as_ref() {
+                            let _ = sender.send(replies);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            reader_slot.lock().unwrap().take();
+            let _ = incoming_tx.send(Incoming::Stop);
+        });
+    if reader.is_err() {
+        return;
+    }
+    if write_frame(&mut write, &proto::FromWorker::Ready).is_err() {
+        return;
+    }
+    let mut runs = 0usize;
+    while let Ok(incoming) = incoming_rx.recv() {
+        match incoming {
+            Incoming::Stop => break,
+            Incoming::Run(params) => {
+                if run_once(params, &mut write, &slot).is_err() {
+                    break;
+                }
+                runs += 1;
+                if runs >= RECYCLE_AFTER_RUNS {
+                    break;
+                }
+            }
+        }
+    }
+    // The reader thread is left detached: it blocks on the pipe and exits
+    // when the parent closes it (or when its send target is gone).
+}
+
+/// Executes one run frame end to end: interpreter thread up, events out,
+/// `done` written, thread reaped. Fails only when the transport is dead.
+fn run_once<W: io::Write>(params: WorkerParams, write: &mut W, slot: &ReplySlot) -> io::Result<()> {
+    let (events, replies, join) = match spawn_run(params) {
+        Ok(wired) => wired,
+        Err(failure) => {
+            return write_frame(
+                write,
+                &proto::FromWorker::Done {
+                    stdout: String::new(),
+                    result: Err(failure),
+                },
+            );
+        }
+    };
+    *slot.lock().unwrap() = Some(replies);
+    let mut result = Ok(());
+    for message in events.iter() {
+        let done = matches!(message, Message::Done(_));
+        if let Err(error) = write_frame(write, &proto::FromWorker::from(message)) {
+            result = Err(error);
+            break;
+        }
+        if done {
+            break;
+        }
+    }
+    slot.lock().unwrap().take();
+    let _ = join.join();
+    result
+}
+
+fn write_frame<W: io::Write>(write: &mut W, frame: &impl serde::Serialize) -> io::Result<()> {
+    let mut buffer = Vec::new();
+    proto::encode_into(&mut buffer, frame)?;
+    write.write_all(&buffer)?;
+    write.flush()
+}
+
+/// `crafty __codemode-worker` entry: a fast, side-effect-free protocol
+/// loop. Nothing but frames may reach its stdout; stderr stays free for
+/// panic output the parent logs at debug level.
+pub fn worker_main() -> ! {
+    serve(std::io::stdin(), std::io::stdout());
+    std::process::exit(0);
 }
 
 fn run(

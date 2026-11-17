@@ -6,6 +6,7 @@
 //! its class, line, message, detail, and one concrete repair hint.
 
 use monty_types::{ExcType, MontyException};
+use serde::{Deserialize, Serialize};
 
 pub const ALLOWED_MODULES: &[&str] = &[
     "asyncio",
@@ -26,7 +27,7 @@ const MAX_SUGGESTION_DISTANCE: usize = 3;
 /// The eight doc classes plus the internal `Crash` variant kept distinct so
 /// Phase 4's worker isolation has its signal (a crash is never silently a
 /// runtime failure).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Class {
     Syntax,
     Type,
@@ -99,7 +100,7 @@ impl Class {
 /// One classified script failure: `message` is the concise summary the model
 /// sees, `detail` the full underlying error text (Monty display) telemetry
 /// records.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
     pub class: Class,
     pub line: Option<u32>,

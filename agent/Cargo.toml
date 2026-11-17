@@ -57,7 +57,7 @@ superlighttui.workspace = true
 tempfile.workspace = true
 tokio = {
   workspace = true,
-  features = ["fs", "macros", "net", "process", "rt"]
+  features = ["fs", "io-util", "macros", "net", "process", "rt"]
 }
 toml.workspace = true
 tracing.workspace = true

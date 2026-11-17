@@ -14,12 +14,21 @@ use std::io::IsTerminal;
 #[snafu::report]
 async fn main() -> Result<(), Error> {
     let cli = Cli::parse();
+    // The codemode worker must run before any subsystem starts: it is a
+    // fast, side-effect-free loop where nothing but protocol frames may
+    // reach stdout (no logging init, no config load).
+    if matches!(cli.command, Some(Commands::__CodemodeWorker)) {
+        craft::codemode::worker_main();
+    }
     // Diagnostics before any subsystem starts: tracing events (model stalls,
     // MCP failures) land in the rotating log file from the first turn on.
     craft::logging::init();
     cli.warn_ignored_flags();
     cli.validate()?;
     match &cli.command {
+        // Dispatched before logging above; this arm only satisfies the
+        // exhaustive match (worker_main never returns).
+        Some(Commands::__CodemodeWorker) => unreachable!("dispatched above"),
         Some(Commands::Completions { shell }) => {
             let mut cmd = Cli::command();
             let bin = cmd.get_name().to_owned();
