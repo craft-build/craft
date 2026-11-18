@@ -17,7 +17,7 @@ use crate::history;
 
 use super::super::cards::{self, Files};
 use super::usage_recorder::record_run_usage;
-use crate::tui::provider::{AgentEvent, PlanItem, Status, Tone, ToolCallData, ToolKind};
+use crate::tui::provider::{AgentEvent, CallState, PlanItem, Status, Tone, ToolCallData, ToolKind};
 
 use super::{Selection, SessionKit, SessionState, report};
 
@@ -216,6 +216,7 @@ impl TurnRenderer {
                     lines: Vec::new(),
                     awaiting_approval: false,
                     image: None,
+                    state: CallState::Running,
                 }));
             }
             Event::Agent(RuntimeEvent::ToolFinished { call, output }) => {
@@ -408,6 +409,7 @@ impl TurnRenderer {
                     )],
                     awaiting_approval: false,
                     image: None,
+                    state: CallState::Failed,
                 }));
             }
             // Nothing to render: Done is consumed by the forwarder; Error
@@ -491,6 +493,7 @@ fn subagent_event(event: Event) -> Option<AgentEvent> {
                 lines: Vec::new(),
                 awaiting_approval: false,
                 image: None,
+                state: CallState::Running,
             }))
         }
         Event::Agent(RuntimeEvent::ToolFinished { call, output }) => Some(AgentEvent::ToolCall(
@@ -966,11 +969,13 @@ mod tests {
             panic!("code parent start");
         };
         assert_eq!(parent.id, "t1");
+        assert_eq!(parent.state, CallState::Running);
         let AgentEvent::ToolCall(child) = rx.try_recv().unwrap() else {
             panic!("child start");
         };
         assert_eq!(child.id, "t1:code-0");
         assert_eq!(child.parent_call_id.as_deref(), Some("t1"));
+        assert_eq!(child.state, CallState::Running);
         let AgentEvent::ToolProgress { id, content } = rx.try_recv().unwrap() else {
             panic!("progress forwarded");
         };
@@ -979,15 +984,29 @@ mod tests {
             panic!("child finish");
         };
         assert_eq!(child_done.id, "t1:code-0");
+        assert_eq!(child_done.state, CallState::Complete);
         let AgentEvent::ToolCall(parent_done) = rx.try_recv().unwrap() else {
             panic!("parent finish");
         };
         assert_eq!(parent_done.id, "t1");
+        assert_eq!(parent_done.state, CallState::Complete);
         let ToolKind::Code { summary, .. } = &parent_done.kind else {
             panic!("code card retains its kind");
         };
         assert!(summary.contains("1 call"), "{summary}");
         assert!(summary.ends_with("ok"), "{summary}");
+    }
+
+    /// An errored result marks the merged card Failed; the same flows for
+    /// `ToolFailed` (a fresh card with a Del body).
+    #[test]
+    fn finished_tool_state_tracks_the_error_flag() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(tool_finished_event("t1", "bash", true));
+        let AgentEvent::ToolCall(done) = rx.try_recv().unwrap() else {
+            panic!("done card");
+        };
+        assert_eq!(done.state, CallState::Failed);
     }
 
     /// Both `SpawnSubagent` seam tools settle their subagent's chat when

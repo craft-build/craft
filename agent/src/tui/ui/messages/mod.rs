@@ -1,9 +1,10 @@
 //! Message list rendering: user / assistant / tool blocks, plus scrolling.
 
 use super::theme;
+use crate::config::ToolDisplay;
 use crate::tui::app::{App, Message};
 use crate::tui::geom;
-use crate::tui::provider::ToolLine;
+use crate::tui::provider::{CallState, ToolKind, ToolLine};
 use crate::tui::style::Style;
 use crate::tui::text::{Line, Span};
 use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
@@ -19,7 +20,10 @@ pub(crate) use self::text::AssistantCache;
 pub(crate) use self::wrap::wrap_rows;
 
 use self::cards::tool_block;
-use self::text::{compaction_block, notice_block, thinking_block, thinking_header, user_block};
+use self::text::{
+    compaction_block, notice_block, thinking_block, thinking_header, tool_group_header,
+    tool_oneliner, user_block,
+};
 
 /// Transcript side margins. The left one is two cells deeper than the
 /// composer's (which sits at 2), so message blocks read as indented under
@@ -164,6 +168,9 @@ struct FrameBuild {
     notice_rows: Vec<(usize, u16)>,
     /// (message index, row) of collapsed thinking headers.
     thinking_rows: Vec<(usize, u16)>,
+    /// (message index of the group's first member, row) of tool-group
+    /// header rows.
+    group_rows: Vec<(usize, u16)>,
     /// (row, col_start, col_end, uri) of card link headers; empty under a
     /// muxed terminal or when every header is off-screen.
     links: Vec<(u16, u16, u16, String)>,
@@ -171,8 +178,171 @@ struct FrameBuild {
 
 /// Hit regions handed from the col closure to the always-run overlay
 /// publish: the `FrameBuild` region fields (tool spans, notice rows,
-/// thinking rows).
-type FrameRegions = (Vec<(usize, u16, u16)>, Vec<(usize, u16)>, Vec<(usize, u16)>);
+/// thinking rows, group header rows).
+type FrameRegions = (
+    Vec<(usize, u16, u16)>,
+    Vec<(usize, u16)>,
+    Vec<(usize, u16)>,
+    Vec<(usize, u16)>,
+);
+
+/// Per-frame render-walk state shared by the message, card and group
+/// renderers: inner width plus the hit-region and deferred-work lists
+/// the walk fills.
+struct RenderWalk {
+    width: usize,
+    /// (msg idx, seg start, seg end) of collapsible cards.
+    tool_seg_ranges: Vec<(usize, usize, usize)>,
+    /// (msg idx, seg, row) of "click to expand" notice rows.
+    notice_seg_rows: Vec<(usize, usize, usize)>,
+    /// (msg idx, seg, row) of group header rows.
+    group_seg_rows: Vec<(usize, usize, usize)>,
+    /// (seg, link) of card headers carrying an OSC-8 target.
+    card_links: Vec<(usize, Hyperlink)>,
+    /// (segment, tool id, base64 payload) deferred until after the walk.
+    pending_images: Vec<(usize, String, String)>,
+}
+
+/// (running, complete, failed) over the members a group header counts.
+fn count_states(messages: &[Message], roots_only: bool) -> (usize, usize, usize) {
+    let mut counts = (0, 0, 0);
+    for msg in messages {
+        if let Message::Tool {
+            parent_call_id,
+            state,
+            ..
+        } = msg
+            && (!roots_only || parent_call_id.is_none())
+        {
+            match state {
+                CallState::Running => counts.0 += 1,
+                CallState::Complete => counts.1 += 1,
+                CallState::Failed => counts.2 += 1,
+            }
+        }
+    }
+    counts
+}
+
+/// Render one tool card (message `idx`) exactly as an ungrouped card
+/// renders: chrome, notice row, link, hit region, deferred image and
+/// auto-review line.
+fn push_tool_card(app: &mut App, walk: &mut RenderWalk, idx: usize, nested: bool) {
+    let Message::Tool {
+        id,
+        kind,
+        lines: body,
+        full,
+        diff,
+        review,
+        image,
+        ..
+    } = &app.conversation.messages[idx]
+    else {
+        return;
+    };
+    let collapsed = app.conversation.collapsed.iter().any(|c| c == id);
+    let body_expanded = app.conversation.expanded_bodies.iter().any(|c| c == id);
+    let focused = app.conversation.focused == Some(idx);
+    let hovered = app.view.hover_tool == Some(idx);
+    // An expanded replay card with a verbatim original shows the
+    // original; everything else shows the current body.
+    let body: &[ToolLine] = if body_expanded {
+        full.as_deref().unwrap_or(body)
+    } else {
+        body
+    };
+    let (lines, notice_row, link) = tool_block(
+        kind,
+        id,
+        body,
+        full.is_some(),
+        *diff,
+        focused,
+        collapsed,
+        hovered,
+        body_expanded,
+        walk.width.saturating_sub(if nested { 2 } else { 0 }),
+        nested,
+    );
+    let seg = app.view.segments.len();
+    if let Some(row) = notice_row {
+        walk.notice_seg_rows.push((idx, seg, row));
+    }
+    if let Some(hl) = link {
+        walk.card_links.push((seg, hl));
+    }
+    if kind.collapsible() {
+        walk.tool_seg_ranges.push((idx, seg, seg + 1));
+    }
+    app.view.segments.push(Segment::with_lines(lines));
+    // `view_image` results render below the card body, in the same
+    // segment so scroll/height math covers them. Decoding is deferred
+    // past the walk (the picker cache needs `&mut app`).
+    if let Some(data) = image {
+        walk.pending_images
+            .push((app.view.segments.len(), id.clone(), data.clone()));
+    }
+    // Auto-review rides just below the card, outside its chrome.
+    if let Some(review) = review {
+        app.view.segments.push(Segment::with_lines(notice_block(
+            review.tone,
+            &review.text,
+            walk.width,
+        )));
+    }
+}
+
+/// Render the nested (codemode children) group whose first child is
+/// message `idx`: one header plus, while expanded, the member cards.
+/// Records a `msg_seg_start` entry for every member past the first:
+/// each rendered member's own segment when expanded, the position past
+/// the group when collapsed. Returns the message index one past the
+/// group's last member.
+fn push_nested_group(
+    app: &mut App,
+    walk: &mut RenderWalk,
+    idx: usize,
+    msg_seg_start: &mut Vec<usize>,
+) -> usize {
+    let parent = match &app.conversation.messages[idx] {
+        Message::Tool {
+            parent_call_id: Some(parent),
+            ..
+        } => parent.clone(),
+        _ => return idx,
+    };
+    let end = app.conversation.child_run_end(idx, &parent);
+    let (running, complete, failed) = count_states(&app.conversation.messages[idx..end], false);
+    let key = format!("child:{parent}");
+    let expanded = app.conversation.group_expanded(&key, running > 0);
+    let lines = tool_group_header(
+        running,
+        complete,
+        failed,
+        expanded,
+        running > 0,
+        app.status_tick,
+        true,
+    );
+    walk.group_seg_rows.push((idx, app.view.segments.len(), 0));
+    app.view.segments.push(Segment::with_lines(lines));
+    if expanded {
+        // The caller recorded the first member's start entry; its card
+        // renders here with the rest.
+        for member in idx..end {
+            if member > idx {
+                msg_seg_start.push(app.view.segments.len());
+            }
+            push_tool_card(app, walk, member, true);
+        }
+    } else {
+        for _ in idx + 1..end {
+            msg_seg_start.push(app.view.segments.len());
+        }
+    }
+    end
+}
 
 /// Build the frame's visible transcript: refill the segment document, resolve
 /// the viewport through the scrollback engine (follow pins to the bottom,
@@ -209,18 +379,133 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
     }
 
     let mut msg_seg_start = Vec::with_capacity(app.conversation.messages.len());
-    let mut tool_seg_ranges: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, start, end)
-    let mut notice_seg_rows: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, seg, row)
     let mut thinking_seg_rows: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, seg, row)
-    // (segment index, link) for card headers carrying an OSC-8 target;
-    // resolved into viewport rows once the layout is known.
-    let mut card_links: Vec<(usize, Hyperlink)> = Vec::new();
-    // (segment, tool id, base64 payload) collected during the message walk;
-    // resolved into render states right after it.
-    let mut pending_images: Vec<(usize, String, String)> = Vec::new();
-    for (idx, msg) in app.conversation.messages.iter().enumerate() {
+    let mut walk = RenderWalk {
+        width,
+        tool_seg_ranges: Vec::new(),
+        notice_seg_rows: Vec::new(),
+        group_seg_rows: Vec::new(),
+        card_links: Vec::new(),
+        pending_images: Vec::new(),
+    };
+    // Index-based walk: group runs are consumed in one step, so every
+    // consumed member still gets a start entry (one per message,
+    // always) — its own segment when it renders, the position past its
+    // group when hidden.
+    let mut idx = 0;
+    while idx < app.conversation.messages.len() {
         msg_seg_start.push(app.view.segments.len());
-        match msg {
+        // Group rendering consumes whole runs and hands `&mut app` to the
+        // shared card renderer, so it dispatches before the per-message
+        // match borrows a message. Each branch owns its trailing blank
+        // separator and index advance.
+        let group_end = if matches!(
+            app.conversation.messages.get(idx),
+            Some(Message::Tool {
+                parent_call_id: Some(_),
+                ..
+            })
+        ) {
+            // Nested codemode children always render inside a compact
+            // group behind one header, regardless of `tool_display`.
+            Some(push_nested_group(app, &mut walk, idx, &mut msg_seg_start))
+        } else if app.tool_display == ToolDisplay::Compact
+            && matches!(
+                app.conversation.messages.get(idx),
+                Some(Message::Tool { .. })
+            )
+        {
+            // Contiguous root tool runs share a group header; within an
+            // expanded group Edit and Code keep full cards, and so do
+            // image-bearing and failed members (their whole output must
+            // stay reachable); every other tool collapses to a one-line
+            // entry.
+            let end = app.conversation.tool_run_end(idx);
+            let (running, complete, failed) =
+                count_states(&app.conversation.messages[idx..end], true);
+            let key = app.conversation.group_key(idx).unwrap_or_default();
+            let expanded = app.conversation.group_expanded(&key, running > 0);
+            let lines = tool_group_header(
+                running,
+                complete,
+                failed,
+                expanded,
+                running > 0,
+                app.status_tick,
+                false,
+            );
+            walk.group_seg_rows.push((idx, app.view.segments.len(), 0));
+            app.view.segments.push(Segment::with_lines(lines));
+            if expanded {
+                let mut member = idx;
+                while member < end {
+                    let m = &app.conversation.messages[member];
+                    if member > idx {
+                        msg_seg_start.push(app.view.segments.len());
+                    }
+                    if matches!(
+                        m,
+                        Message::Tool {
+                            parent_call_id: Some(_),
+                            ..
+                        }
+                    ) {
+                        // Nested groups keep their own header (and cards)
+                        // directly under their code parent.
+                        member = push_nested_group(app, &mut walk, member, &mut msg_seg_start);
+                    } else if matches!(
+                        m,
+                        Message::Tool {
+                            kind: ToolKind::Edit { .. } | ToolKind::Code { .. },
+                            ..
+                        } | Message::Tool { image: Some(_), .. }
+                            | Message::Tool {
+                                state: CallState::Failed,
+                                ..
+                            }
+                    ) {
+                        push_tool_card(app, &mut walk, member, false);
+                        member += 1;
+                    } else if let Message::Tool { kind, state, .. } = m {
+                        app.view
+                            .segments
+                            .push(Segment::with_lines(vec![tool_oneliner(
+                                kind, *state, width, false,
+                            )]));
+                        member += 1;
+                    } else {
+                        member += 1;
+                    }
+                }
+            } else {
+                for _ in idx + 1..end {
+                    msg_seg_start.push(app.view.segments.len());
+                }
+            }
+            Some(end)
+        } else {
+            None
+        };
+        if let Some(end) = group_end {
+            idx = end;
+            app.view
+                .segments
+                .push(Segment::with_lines(vec![Line::default()]));
+            continue;
+        }
+        if matches!(
+            app.conversation.messages.get(idx),
+            Some(Message::Tool { .. })
+        ) {
+            // Default: every root tool renders its own full card.
+            push_tool_card(app, &mut walk, idx, false);
+            idx += 1;
+            app.view
+                .segments
+                .push(Segment::with_lines(vec![Line::default()]));
+            continue;
+        }
+        match &app.conversation.messages[idx] {
             Message::User(text) => app
                 .view
                 .segments
@@ -250,81 +535,18 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                 .view
                 .segments
                 .push(Segment::with_lines(compaction_block(kind, text, width))),
-            Message::Tool {
-                id,
-                parent_call_id,
-                kind,
-                lines: body,
-                full,
-                diff,
-                review,
-                image,
-            } => {
-                let collapsed = app.conversation.collapsed.iter().any(|c| c == id);
-                let body_expanded = app.conversation.expanded_bodies.iter().any(|c| c == id);
-                let focused = app.conversation.focused == Some(idx);
-                let hovered = app.view.hover_tool == Some(idx);
-                // An expanded replay card with a verbatim original shows the
-                // original; everything else shows the current body.
-                let body: &[ToolLine] = if body_expanded {
-                    full.as_deref().unwrap_or(body)
-                } else {
-                    body
-                };
-                let (lines, notice_row, link) = tool_block(
-                    kind,
-                    id,
-                    body,
-                    full.is_some(),
-                    *diff,
-                    focused,
-                    collapsed,
-                    hovered,
-                    body_expanded,
-                    width.saturating_sub(if parent_call_id.is_some() { 2 } else { 0 }),
-                    parent_call_id.is_some(),
-                );
-                let seg = app.view.segments.len();
-                if let Some(row) = notice_row {
-                    notice_seg_rows.push((idx, seg, row));
-                }
-                if let Some(hl) = link {
-                    card_links.push((seg, hl));
-                }
-                if kind.collapsible() {
-                    tool_seg_ranges.push((
-                        idx,
-                        app.view.segments.len(),
-                        app.view.segments.len() + 1,
-                    ));
-                }
-                app.view.segments.push(Segment::with_lines(lines));
-                // `view_image` results render below the
-                // card body, in the same segment so scroll/height math
-                // covers them. The message loop holds `&app.conversation`;
-                // decoding is deferred to after it (the picker cache needs
-                // `&mut app`).
-                if let Some(data) = image {
-                    pending_images.push((app.view.segments.len(), id.clone(), data.clone()));
-                }
-                // Auto-review rides just below the card, outside its chrome,
-                // so the card itself stays focused on the tool's output.
-                if let Some(review) = review {
-                    app.view.segments.push(Segment::with_lines(notice_block(
-                        review.tone,
-                        &review.text,
-                        width,
-                    )));
-                }
-            }
+            // Tool arms are handled above; keep the match exhaustive
+            // without duplicating the card renderer here.
+            Message::Tool { .. } => {}
         }
+        idx += 1;
         app.view
             .segments
             .push(Segment::with_lines(vec![Line::default()]));
     }
     app.view.assistant_cache.end_frame();
 
-    for (seg, id, data) in pending_images {
+    for (seg, id, data) in walk.pending_images {
         if let Some(state) = app.image_state(&id, &data, inner.width)
             && let Some(s) = app.view.segments.get_mut(seg)
         {
@@ -399,7 +621,8 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
 
     // Visible screen rows of collapsible tool cards (for hover/click),
     // addressed in doc rows so they track the scroll position.
-    let tool_spans = tool_seg_ranges
+    let tool_spans = walk
+        .tool_seg_ranges
         .iter()
         .filter_map(|&(idx, s_start, s_end)| {
             let vis_start = clamp_row_u16(
@@ -422,7 +645,8 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
 
     // Visible rows of "click to expand" notice rows, addressed the same
     // way as card regions so they track the scroll position.
-    let notice_rows = notice_seg_rows
+    let notice_rows = walk
+        .notice_seg_rows
         .iter()
         .filter_map(|&(idx, seg, row)| {
             let vis = clamp_row_u16(
@@ -453,6 +677,23 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
         })
         .collect();
 
+    // Visible tool-group header rows, addressed like notice rows.
+    let group_rows = walk
+        .group_seg_rows
+        .iter()
+        .filter_map(|&(idx, seg, row)| {
+            let vis = clamp_row_u16(
+                layout
+                    .doc_row(ScrollPos {
+                        seg,
+                        row: row as u16,
+                    })
+                    .saturating_sub(top_row),
+            );
+            (vis < inner.height).then_some((idx, vis))
+        })
+        .collect();
+
     // Resolve card links to visible rows: the header sits one row under the
     // card's top-padding blank. Skipped under tmux, whose passthrough
     // mangles OSC-8. The single-row guard: a header is one pre-wrapped
@@ -460,7 +701,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
     // writing outside the viewport.
     let mut links = Vec::new();
     if !is_muxed() {
-        for (seg, hl) in card_links {
+        for (seg, hl) in walk.card_links {
             let doc = layout.doc_row(ScrollPos { seg, row: 1 });
             // Skip rows scrolled out above (plain subtraction, not
             // saturating) or pushed out below the viewport.
@@ -483,6 +724,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
         tool_spans,
         notice_rows,
         thinking_rows,
+        group_rows,
         links,
     }
 }
@@ -563,8 +805,9 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
     let area_only = paint.clone();
     // Region data crosses the col closure boundary through this slot so
     // the always-run overlay publish (declared after the col) can own it.
-    let regions_out: std::sync::Arc<std::sync::Mutex<FrameRegions>> =
-        std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new(), Vec::new())));
+    let regions_out: std::sync::Arc<std::sync::Mutex<FrameRegions>> = std::sync::Arc::new(
+        std::sync::Mutex::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())),
+    );
     let regions_slot = std::sync::Arc::clone(&regions_out);
     let grow_resp = ui.container().grow(1).col(move |ui| {
         // Top margin row (`inner.y = area.y + 1`).
@@ -577,6 +820,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                 tool_spans,
                 notice_rows,
                 thinking_rows,
+                group_rows,
                 links,
                 ..
             } = build;
@@ -654,9 +898,11 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
             ui.container().grow(1).draw(move |_, rect| {
                 publish_area_slt(&area_only, rect, total_rows);
             });
-            *regions_slot.lock().expect("paint handoff") = (tool_spans, notice_rows, thinking_rows);
+            *regions_slot.lock().expect("paint handoff") =
+                (tool_spans, notice_rows, thinking_rows, group_rows);
         } else {
-            *regions_slot.lock().expect("paint handoff") = (Vec::new(), Vec::new(), Vec::new());
+            *regions_slot.lock().expect("paint handoff") =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
     });
 
@@ -665,7 +911,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
     // to zero, and a satisfied grow does exactly that once the bands fill
     // the viewport) — carrying the grow container's previous-frame rect,
     // one frame stale like the rest of the handoff.
-    let (tool_spans, notice_rows, thinking_rows) =
+    let (tool_spans, notice_rows, thinking_rows, group_rows) =
         std::mem::take(&mut *regions_out.lock().expect("paint handoff"));
     let paint_for_publish = paint.clone();
     let _ = ui.overlay(|ui| {
@@ -676,6 +922,7 @@ pub(crate) fn render_slt(ui: &mut slt::Context, app: &mut App) {
                 &tool_spans,
                 &notice_rows,
                 &thinking_rows,
+                &group_rows,
             );
         });
     });
@@ -769,6 +1016,7 @@ fn publish_frame_slt(
     tool_spans: &[(usize, u16, u16)],
     notice_rows: &[(usize, u16)],
     thinking_rows: &[(usize, u16)],
+    group_rows: &[(usize, u16)],
 ) {
     let clamp16 = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
     let mut p = paint.lock().expect("paint handoff");
@@ -826,6 +1074,20 @@ fn publish_frame_slt(
         })
         .collect();
     p.thinking_regions = thinking_rows
+        .iter()
+        .map(|&(idx, r)| {
+            (
+                idx,
+                geom::Rect::new(
+                    clamp16(inner_x),
+                    clamp16(inner_y + u32::from(r)),
+                    clamp16(inner_w),
+                    1,
+                ),
+            )
+        })
+        .collect();
+    p.group_regions = group_rows
         .iter()
         .map(|&(idx, r)| {
             (
@@ -984,7 +1246,8 @@ pub(crate) fn overlay_pass_slt(ui: &mut slt::Context, app: &App) {
 }
 #[cfg(test)]
 mod tests {
-    use crate::tui::provider::ToolLine;
+    use crate::tui::app::App;
+    use crate::tui::provider::{AgentEvent, CallState, ToolLine};
 
     /// Renders the app through the slt frame (two passes so the layout
     /// handoff settles) and returns the buffer rows, trailing blanks
@@ -1103,6 +1366,7 @@ mod tests {
             lines: Vec::new(),
             awaiting_approval: false,
             image: Some(b64),
+            state: crate::tui::provider::CallState::Complete,
         }));
         let rows = frame_rows(&mut app, 60, 30);
 
@@ -1148,6 +1412,7 @@ mod tests {
             lines: Vec::new(),
             awaiting_approval: false,
             image: Some(b64),
+            state: crate::tui::provider::CallState::Complete,
         }));
         let _ = frame_rows(&mut app, 60, 10);
         let seg_idx = (0..app.view.segments.len())
@@ -1184,6 +1449,7 @@ mod tests {
             lines: Vec::new(),
             awaiting_approval: false,
             image: None,
+            state: crate::tui::provider::CallState::Complete,
         }));
         app.handle_event(AgentEvent::AutoReview {
             id: "t1".into(),
@@ -1234,6 +1500,7 @@ mod tests {
             diff: None,
             review: None,
             image: None,
+            state: crate::tui::provider::CallState::Complete,
         });
         let mut tb = slt::TestBackend::new(80, 20);
         tb.render(|ui| super::render_slt(ui, &mut app));
@@ -1388,6 +1655,7 @@ mod tests {
             diff: None,
             review: None,
             image: None,
+            state: crate::tui::provider::CallState::Complete,
         });
         // Fill the document past the viewport so a scroll below the card
         // survives the layout clamp instead of snapping back to the top.
@@ -1432,6 +1700,7 @@ mod tests {
             diff: None,
             review: None,
             image: None,
+            state: crate::tui::provider::CallState::Complete,
         });
         narrow_app.view.follow = false;
         let tb = transcript_backend(&mut narrow_app, 24, 12);
@@ -1495,6 +1764,363 @@ mod tests {
                 col_end: 8,
                 uri: "file:///a".into()
             }
+        );
+    }
+
+    fn code_parent(id: &str) -> AgentEvent {
+        AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: id.into(),
+            kind: crate::tui::provider::ToolKind::Code {
+                script: "print(1)".into(),
+                summary: String::new(),
+                failure: None,
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Running,
+        })
+    }
+
+    fn read_call(id: &str, parent: Option<&str>, summary: &str, state: CallState) -> AgentEvent {
+        AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: parent.map(str::to_owned),
+            id: id.into(),
+            kind: crate::tui::provider::ToolKind::Read {
+                path: "src/main.rs".into(),
+                summary: summary.into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state,
+        })
+    }
+
+    /// Nested codemode children render behind one collapsible group header
+    /// with live counters: expanded (cards visible) while children run,
+    /// auto-collapsed once they settle, and shown again by a pinned pin.
+    #[test]
+    fn nested_children_render_behind_a_group_header() {
+        let mut app = App::new();
+        app.handle_event(code_parent("t1"));
+        app.handle_event(read_call("t1:c0", Some("t1"), "", CallState::Running));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("1 tool running")),
+            "live header while a child streams: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("src/main.rs")),
+            "running group shows member cards: {rows:?}"
+        );
+
+        // The finish merge settles the group: it auto-collapses to the
+        // header.
+        app.handle_event(read_call(
+            "t1:c0",
+            Some("t1"),
+            "10 lines",
+            CallState::Complete,
+        ));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("1 complete")),
+            "settled header counts: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "settled group hides member cards: {rows:?}"
+        );
+
+        // A pinned expansion survives the settled state.
+        app.conversation.toggle_group("child:t1", false);
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("src/main.rs")),
+            "pinned expansion shows member cards: {rows:?}"
+        );
+    }
+
+    /// The header counters transition running → complete → failed as the
+    /// member events merge in.
+    #[test]
+    fn nested_group_counts_track_member_states() {
+        let mut app = App::new();
+        app.handle_event(code_parent("t1"));
+        app.handle_event(read_call("t1:c0", Some("t1"), "", CallState::Running));
+        app.handle_event(read_call("t1:c1", Some("t1"), "", CallState::Running));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("2 tools running")),
+            "{rows:?}"
+        );
+        app.handle_event(read_call("t1:c0", Some("t1"), "ok", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("1 tool running · 1 complete")),
+            "{rows:?}"
+        );
+        app.handle_event(read_call("t1:c1", Some("t1"), "boom", CallState::Failed));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("1 complete · 1 failed")),
+            "{rows:?}"
+        );
+    }
+
+    /// Compact mode: contiguous root tool runs render behind a group
+    /// header; within the expanded group Edit and Code keep full cards
+    /// while read-only tools collapse to one-line entries; the settled
+    /// run collapses to the header.
+    #[test]
+    fn compact_mode_groups_root_tools_and_simplifies_cards() {
+        use crate::config::ToolDisplay;
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Running));
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "r2".into(),
+            kind: crate::tui::provider::ToolKind::Bash {
+                cmd: "cargo build".into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Complete,
+        }));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("1 tool running · 1 complete")),
+            "root header counts root-level tools only: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("src/main.rs · 10 lines")),
+            "read-only tools render one-line entries: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("cargo build")),
+            "bash one-liner keeps its command: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("$ cargo build")),
+            "bash renders without card chrome in compact mode: {rows:?}"
+        );
+
+        // The run settles: everything collapses to the header.
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("2 complete")),
+            "settled root header: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "settled root group hides members: {rows:?}"
+        );
+    }
+
+    /// Compact groups keep full cards for image-bearing and failed
+    /// members: the one-line entry has no room for an image or the
+    /// failure body, and neither is reachable any other way.
+    #[test]
+    fn compact_groups_keep_full_cards_for_images_and_failures() {
+        use crate::config::ToolDisplay;
+
+        let img = image::RgbaImage::from_pixel(16, 8, image::Rgba([255, 255, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
+
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        // A running member keeps the root group auto-expanded.
+        app.handle_event(read_call("r0", None, "", CallState::Running));
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "r-img".into(),
+            kind: crate::tui::provider::ToolKind::Bash {
+                cmd: "view_image shot.png".into(),
+            },
+            lines: Vec::new(),
+            awaiting_approval: false,
+            image: Some(b64),
+            state: CallState::Complete,
+        }));
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "r-fail".into(),
+            kind: crate::tui::provider::ToolKind::Bash {
+                cmd: "cargo build".into(),
+            },
+            lines: vec![ToolLine::new(
+                crate::tui::provider::LineKind::Del,
+                "error: could not compile",
+            )],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Failed,
+        }));
+        let rows = frame_rows(&mut app, 80, 30);
+
+        assert!(
+            (0..app.view.segments.len()).any(|i| app
+                .view
+                .segments
+                .get(i)
+                .is_some_and(|s| s.image.is_some())),
+            "the image member renders through the full-card path"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("error: could not compile")),
+            "the failure body renders: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("$ cargo build")),
+            "the failed member keeps card chrome: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("1 failed")),
+            "the header still counts the failure: {rows:?}"
+        );
+    }
+
+    /// Expanded-group members each record their own render position (so
+    /// focus scrolls to the right row), and collapsed groups hide their
+    /// members from keyboard focus entirely.
+    #[test]
+    fn compact_groups_record_member_starts_and_exclude_hidden_focus() {
+        use crate::config::ToolDisplay;
+
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(code_parent("t1"));
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("1 tool running")),
+            "the running code parent keeps the group expanded: {rows:?}"
+        );
+        let starts = app.view.msg_starts.clone();
+        assert_eq!(starts.len(), 3, "one start entry per message");
+        assert!(
+            starts[0] < starts[1] && starts[1] < starts[2],
+            "rendered members record their own rows: {starts:?}"
+        );
+        assert_eq!(app.focus_targets(), vec![1, 2], "reads are focusable");
+
+        // Settle the run: the group auto-collapses and hides its members.
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "t1".into(),
+            kind: crate::tui::provider::ToolKind::Code {
+                script: "print(1)".into(),
+                summary: "1 call · ok".into(),
+                failure: None,
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Complete,
+        }));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "collapsed group hides members: {rows:?}"
+        );
+        assert!(
+            app.focus_targets().is_empty(),
+            "hidden members are not focusable"
+        );
+        assert_eq!(
+            app.view.msg_starts[1], app.view.msg_starts[2],
+            "unrendered members share the position past the group"
+        );
+
+        // A pinned expansion restores the members as focus targets.
+        app.conversation.toggle_group("root:t1", false);
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("src/main.rs")),
+            "pinned expansion shows members: {rows:?}"
+        );
+        assert_eq!(app.focus_targets(), vec![1, 2]);
+    }
+
+    /// Nested groups keep their own header and cards inside an expanded
+    /// root group in compact mode.
+    #[test]
+    fn nested_group_renders_inside_an_expanded_root_group() {
+        use crate::config::ToolDisplay;
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(code_parent("t1"));
+        app.handle_event(read_call("t1:c0", Some("t1"), "", CallState::Running));
+        app.handle_event(read_call("r1", None, "", CallState::Running));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("2 tools running")),
+            "root header counts the code parent and the read: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("1 tool running")),
+            "nested header counts its children: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("src/main.rs")),
+            "nested member card visible while the nested group runs: {rows:?}"
+        );
+
+        // Everything settles: both groups collapse.
+        app.handle_event(read_call(
+            "t1:c0",
+            Some("t1"),
+            "5 lines",
+            CallState::Complete,
+        ));
+        app.handle_event(read_call("r1", None, "3 lines", CallState::Complete));
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "t1".into(),
+            kind: crate::tui::provider::ToolKind::Code {
+                script: "print(1)".into(),
+                summary: "1 call · ok".into(),
+                failure: None,
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Complete,
+        }));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "settled groups hide everything but headers: {rows:?}"
+        );
+    }
+
+    /// Default mode keeps root tools ungrouped: one card per call, no
+    /// group header between them.
+    #[test]
+    fn default_mode_leaves_root_tools_ungrouped() {
+        let mut app = App::new();
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("src/main.rs")),
+            "cards render directly: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("complete")),
+            "no group header in cards mode: {rows:?}"
         );
     }
 }

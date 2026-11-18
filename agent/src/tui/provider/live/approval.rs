@@ -84,6 +84,7 @@ impl ApprovalResponder for ApprovalGate {
                 lines: Vec::new(),
                 awaiting_approval: true,
                 image: None,
+                state: crate::tui::provider::CallState::Running,
             }));
             let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
             let (files, commands) = display_context(&name, &arguments, &scopes);

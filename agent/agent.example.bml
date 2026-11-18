@@ -28,6 +28,9 @@ agent {
   # max_concurrent_tools = 8
   # Write durable facts to the project argosy after each run. Default true.
   # memory_extraction = false
+  # TUI tool-call rendering: "cards" (default, one card per call) or
+  # "compact" (collapsible groups; read-only tools as one-line entries).
+  # tool_display = "compact"
 
   # Post-turn advisor: a lightweight reviewer that reads each reply and emits
   # at most one note. Off by default.

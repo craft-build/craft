@@ -41,6 +41,29 @@ impl App {
             .map(|(i, _)| *i)
     }
 
+    /// Tool-group header row (message index of the group's first member)
+    /// at a screen position.
+    fn group_at(&self, row: u16, col: u16) -> Option<usize> {
+        self.view
+            .paint
+            .lock()
+            .expect("paint handoff")
+            .group_regions
+            .iter()
+            .find(|(_, r)| rect_contains(*r, row, col))
+            .map(|(i, _)| *i)
+    }
+
+    /// Toggle a tool group between collapsed header and expanded members.
+    /// The pin survives streaming and clears on the group's next
+    /// settled → running transition.
+    fn toggle_group(&mut self, idx: usize) {
+        if let Some(key) = self.conversation.group_key(idx) {
+            let running = self.conversation.group_running(idx);
+            self.conversation.toggle_group(&key, running);
+        }
+    }
+
     /// Toggle one thinking block between its collapsed header and body.
     fn toggle_thinking(&mut self, idx: usize) {
         if let Some(Message::Thinking(_)) = self.conversation.messages.get(idx) {
@@ -118,6 +141,7 @@ impl App {
                     .notice_at(row, col)
                     .map(PendingClick::Notice)
                     .or_else(|| self.thinking_at(row, col).map(PendingClick::Thinking))
+                    .or_else(|| self.group_at(row, col).map(PendingClick::Group))
                     .or_else(|| self.tool_at(row, col).map(PendingClick::Card))
                     .or_else(|| rect_contains(todo_header, row, col).then_some(PendingClick::Todo))
                     .or_else(|| {
@@ -147,6 +171,10 @@ impl App {
                     (Some(PendingClick::Thinking(idx)), true) => {
                         self.view.selection = None;
                         self.toggle_thinking(idx);
+                    }
+                    (Some(PendingClick::Group(idx)), true) => {
+                        self.view.selection = None;
+                        self.toggle_group(idx);
                     }
                     // A press on a todo-widget header folds that section.
                     (Some(PendingClick::Todo), true) => {

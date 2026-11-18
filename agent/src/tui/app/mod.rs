@@ -185,6 +185,11 @@ pub struct App {
     /// in tests unless set directly.
     pub custom_commands: Vec<crate::command::CustomCommand>,
 
+    /// TUI tool-call rendering (config `agent.tool_display`): full cards
+    /// per call, or compact groups with one-line entries for read-only
+    /// tools. Nested codemode children group under either setting.
+    pub tool_display: crate::config::ToolDisplay,
+
     /// MCP client handle: snapshot reader + command sender for the
     /// `/mcp` screen. Cloned from the provider at startup; `None` when no
     /// MCP servers are configured.
@@ -251,6 +256,7 @@ impl App {
                 loads: Vec::new(),
             },
             custom_commands: Vec::new(),
+            tool_display: crate::config::ToolDisplay::default(),
             mcp: None,
             should_quit: false,
         }
@@ -541,6 +547,7 @@ impl App {
                             kind,
                             text,
                             full,
+                            state,
                         } => Message::Tool {
                             id,
                             parent_call_id,
@@ -552,6 +559,7 @@ impl App {
                             diff: None,
                             review: None,
                             image: None,
+                            state,
                         },
                         LoadedMessage::Compaction { kind, text } => {
                             Message::Compaction { kind, text }
@@ -652,13 +660,18 @@ impl App {
     // ------------------------------------------------------------------
 
     /// Indices of tool blocks that can be focused: collapsible blocks and
-    /// pending diffs, in display order.
+    /// pending diffs that currently render — members hidden behind a
+    /// collapsed group header are skipped — in display order.
     pub(crate) fn focus_targets(&self) -> Vec<usize> {
+        let grouped_roots = self.tool_display == crate::config::ToolDisplay::Compact;
         self.conversation
             .messages
             .iter()
             .enumerate()
-            .filter(|(_, m)| m.is_collapsible_tool() || m.is_pending_diff())
+            .filter(|(i, m)| {
+                (m.is_collapsible_tool() || m.is_pending_diff())
+                    && self.conversation.tool_group_expanded(*i, grouped_roots)
+            })
             .map(|(i, _)| i)
             .collect()
     }
@@ -1019,6 +1032,7 @@ impl App {
         self.conversation.collapsed.clear();
         self.conversation.expanded_bodies.clear();
         self.conversation.expanded_thinking.clear();
+        self.conversation.group_pins.clear();
         self.conversation.focused = None;
         self.view.hover_tool = None;
         self.view.pending_click = None;
@@ -1028,6 +1042,7 @@ impl App {
             p.tool_regions.clear();
             p.notice_regions.clear();
             p.thinking_regions.clear();
+            p.group_regions.clear();
         }
         self.overlays.modal = Modal::None;
         self.view.scroll = ScrollPos::default();
@@ -1104,6 +1119,7 @@ pub(crate) mod testutil {
             },
             lines: vec![],
             image: None,
+            state: crate::tui::provider::CallState::Complete,
         }));
         // Card spans rows 2..6, columns 2..40 (as the renderer would report).
         app.view.paint.lock().unwrap().tool_regions = vec![(
@@ -1229,6 +1245,7 @@ mod tests {
                     kind: crate::tui::provider::ToolKind::Bash { cmd: "bash".into() },
                     text: "[4 lines compressed from 4096]".into(),
                     full: Some("the whole original".into()),
+                    state: crate::tui::provider::CallState::Complete,
                 },
                 LoadedMessage::Compaction {
                     kind: "llm".into(),

@@ -231,6 +231,16 @@ pub enum Keep {
     Tail,
 }
 
+/// Lifecycle of a tool call as the transcript tracks it. Completion is
+/// the id-merge of the finish event; failure rides the same merge with
+/// the result's error flag (or a `ToolFailed` event).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallState {
+    Running,
+    Complete,
+    Failed,
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolCallData {
     pub id: String,
@@ -244,6 +254,7 @@ pub struct ToolCallData {
     /// Base64 image payload rendered inline under the card body, from
     /// a `view_image` tool result. `None` for every other tool.
     pub image: Option<String>,
+    pub state: CallState,
 }
 
 /// One selectable model on a configured provider, as shown in the model menu.
@@ -435,6 +446,7 @@ pub enum LoadedMessage {
         kind: ToolKind,
         text: String,
         full: Option<String>,
+        state: CallState,
     },
     /// A compaction summary, rendered as a compaction card.
     Compaction {

@@ -286,6 +286,7 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
     }
     apply_initial_mode(&mut app, starts_in_plan_mode);
     if let Ok(config) = crate::config::Config::load().await {
+        app.tool_display = config.agent.tool_display;
         let entries: Vec<(String, Vec<String>)> = config.keybindings.into_iter().collect();
         let mut warnings = Vec::new();
         app.overlays.keybinds =

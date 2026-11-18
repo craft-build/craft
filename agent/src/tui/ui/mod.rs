@@ -16,8 +16,8 @@ mod todo;
 mod tests {
     use crate::tui::app::App;
     use crate::tui::provider::{
-        AgentEvent, LineKind, ModelChoice, PlanItem, Status, Tone, ToolCallData, ToolKind,
-        ToolLine, TouchedFile,
+        AgentEvent, CallState, LineKind, ModelChoice, PlanItem, Status, Tone, ToolCallData,
+        ToolKind, ToolLine, TouchedFile,
     };
     use crate::tui::style::Modifiers;
     use crate::tui::ui::frame::{self, frame};
@@ -97,6 +97,7 @@ mod tests {
                 text: "export async function refreshToken() {".into(),
                 ..Default::default()
             }],
+            state: CallState::Complete,
         }));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
             parent_call_id: None,
@@ -120,6 +121,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            state: CallState::Running,
         }));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
             parent_call_id: None,
@@ -134,6 +136,7 @@ mod tests {
                 text: "✓ all 6 tests passed".into(),
                 ..Default::default()
             }],
+            state: CallState::Complete,
         }));
         app.handle_event(AgentEvent::StatusChanged(Status::WaitingApproval));
         app

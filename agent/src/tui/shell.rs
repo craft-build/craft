@@ -128,7 +128,12 @@ impl ShellState {
     }
 }
 
-fn card(id: &str, command: &str, lines: Vec<ToolLine>) -> AgentEvent {
+fn card(
+    id: &str,
+    command: &str,
+    lines: Vec<ToolLine>,
+    state: crate::tui::provider::CallState,
+) -> AgentEvent {
     AgentEvent::ToolCall(ToolCallData {
         parent_call_id: None,
         id: id.to_owned(),
@@ -138,6 +143,7 @@ fn card(id: &str, command: &str, lines: Vec<ToolLine>) -> AgentEvent {
         lines,
         awaiting_approval: false,
         image: None,
+        state,
     })
 }
 
@@ -162,13 +168,27 @@ pub(crate) async fn run_shell(
     cancel: Cancellation,
     shell: Arc<Mutex<ShellState>>,
 ) {
-    let _ = tx.send(card(&id, &command, Vec::new()));
+    let _ = tx.send(card(
+        &id,
+        &command,
+        Vec::new(),
+        crate::tui::provider::CallState::Running,
+    ));
     let result = run_command(&command, &id, &tx, &cancel).await;
     let (output, is_error) = match result {
         Ok(out) => (out, false),
         Err(err) => (err, true),
     };
-    let _ = tx.send(card(&id, &command, body_lines(&output, is_error)));
+    let _ = tx.send(card(
+        &id,
+        &command,
+        body_lines(&output, is_error),
+        if is_error {
+            crate::tui::provider::CallState::Failed
+        } else {
+            crate::tui::provider::CallState::Complete
+        },
+    ));
     let mut shell_guard = shell.lock().unwrap_or_else(|e| e.into_inner());
     if visible {
         let label = if is_error { "Error" } else { "Output" };
@@ -291,8 +311,16 @@ async fn run_command(
     }
 }
 
+/// Stream a mid-run output snapshot. The run is still executing (or its
+/// exit status is not collected yet), so the card stays `Running`; only
+/// [`run_shell`]'s final card settles the state.
 fn flush_output(tx: &mpsc::UnboundedSender<AgentEvent>, id: &str, command: &str, output: &str) {
-    let _ = tx.send(card(id, command, body_lines(output, false)));
+    let _ = tx.send(card(
+        id,
+        command,
+        body_lines(output, false),
+        crate::tui::provider::CallState::Running,
+    ));
 }
 
 /// Hard cap on one stored output line (finding 60): a single endless
@@ -461,6 +489,26 @@ mod tests {
         .await;
 
         assert!(shell.lock().unwrap().drain_results().is_empty());
+    }
+
+    /// A mid-run stream flush must not settle the call: the card stays
+    /// `Running` until `run_shell`'s final card, whose merge is
+    /// authoritative.
+    #[test]
+    fn flush_output_keeps_the_call_running() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        flush_output(&tx, "shell-1", "echo hi", "hi");
+        match rx.try_recv() {
+            Ok(crate::tui::provider::AgentEvent::ToolCall(c)) => {
+                assert_eq!(c.id, "shell-1");
+                assert_eq!(c.state, crate::tui::provider::CallState::Running);
+                assert_eq!(
+                    c.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>(),
+                    ["hi"]
+                );
+            }
+            other => panic!("unexpected flush event: {other:?}"),
+        }
     }
 
     /// A cancelled token kills a long-running command: `run_shell` returns

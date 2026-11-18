@@ -5,11 +5,11 @@ use crate::tui::text::{Line, Span};
 
 use super::super::scrollback::SharedLines;
 use super::super::theme;
-use super::tools::seg_color;
-use super::wrap::{pad_row, wrap_text};
+use super::tools::{seg_color, tool_label, tool_summary};
+use super::wrap::{pad_row, spans_width, wrap_spans, wrap_text};
 use crate::markdown::Emphasis;
 use crate::markdown::render::{self, StyleToken};
-use crate::tui::provider::Tone;
+use crate::tui::provider::{CallState, Tone, ToolKind};
 
 pub(super) fn surface_style_with(bg: Color) -> Style {
     Style::default().bg(bg)
@@ -238,6 +238,111 @@ pub(super) fn thinking_header(active: bool, expanded: bool, tick: usize) -> Vec<
         ),
         Span::styled(chevron, Style::default().fg(t.text_tertiary)),
     ])]
+}
+
+/// Header row of a compact tool group: live counters (nonzero counts
+/// only) behind a spinner while any member runs, a settled sigil once
+/// they finish, and a chevron tracking the group's expansion. Mirrors
+/// [`thinking_header`]; nested groups indent two spaces under their
+/// code parent's card.
+pub(super) fn tool_group_header(
+    running: usize,
+    complete: usize,
+    failed: usize,
+    expanded: bool,
+    active: bool,
+    tick: usize,
+    indent: bool,
+) -> Vec<Line<'static>> {
+    let t = theme::current();
+    let sigil = if active {
+        crate::tui::animation::spinner_frame(tick)
+    } else {
+        '⚙'
+    };
+    let mut label = String::new();
+    if running > 0 {
+        label.push_str(&format!(
+            "{running} tool{} running",
+            if running == 1 { "" } else { "s" }
+        ));
+    }
+    if complete > 0 {
+        if !label.is_empty() {
+            label.push_str(" · ");
+        }
+        label.push_str(&format!("{complete} complete"));
+    }
+    if failed > 0 {
+        if !label.is_empty() {
+            label.push_str(" · ");
+        }
+        label.push_str(&format!("{failed} failed"));
+    }
+    if label.is_empty() {
+        label.push_str("tools");
+    }
+    let chevron = if expanded { "▾" } else { "▸" };
+    let mut spans = Vec::with_capacity(4);
+    if indent {
+        spans.push(Span::styled("  ", Style::default()));
+    }
+    spans.push(Span::styled(
+        format!("{sigil} "),
+        Style::default().fg(t.accent),
+    ));
+    spans.push(Span::styled(
+        format!("{label} "),
+        Style::default().fg(t.text_secondary).italic(),
+    ));
+    spans.push(Span::styled(chevron, Style::default().fg(t.text_tertiary)));
+    vec![Line::from(spans)]
+}
+
+/// One-line entry for a simplified (read-only) tool inside a compact
+/// group: dim label and summary, danger-toned on failure, "running"
+/// while the summary is still empty. Fits one display row.
+pub(super) fn tool_oneliner(
+    kind: &ToolKind,
+    state: CallState,
+    width: usize,
+    indent: bool,
+) -> Line<'static> {
+    let t = theme::current();
+    let summary = match state {
+        CallState::Running if tool_summary(kind).is_empty() => "running".to_owned(),
+        _ => tool_summary(kind),
+    };
+    let mut text = tool_label(kind);
+    if !summary.is_empty() {
+        text.push_str(" · ");
+        text.push_str(&summary);
+    }
+    let style = match state {
+        CallState::Failed => Style::default().fg(t.danger),
+        _ => Style::default().fg(t.text_secondary),
+    };
+    let mut spans = Vec::with_capacity(2);
+    if indent {
+        spans.push(Span::styled("  ", Style::default()));
+    }
+    spans.push(Span::styled(text, style));
+    // An entry that wraps past one row is cut to its first row; reserve
+    // two cells for a dim ellipsis so the cut reads as a cut.
+    let truncated = width > 0 && spans_width(&spans) > width;
+    let wrap_width = if truncated {
+        width.saturating_sub(2).max(1)
+    } else {
+        width
+    };
+    let mut row = wrap_spans(spans, wrap_width)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    if truncated {
+        row.push(Span::styled(" …", Style::default().fg(t.text_tertiary)));
+    }
+    Line::from(row)
 }
 
 /// A system notice: one muted line (wrapped when long) with a tone-colored
@@ -473,6 +578,41 @@ mod tests {
         cache.begin_frame();
         cache.end_frame();
         assert!(cache.entries.is_empty());
+    }
+
+    /// A one-liner that wraps past its width is cut to one row and the
+    /// cut is marked with a dim ellipsis; a fitting one-liner is not.
+    #[test]
+    fn tool_oneliner_marks_truncation() {
+        use unicode_width::UnicodeWidthStr;
+
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let long = ToolKind::Bash {
+            cmd: "cargo build --release --all-features --target x86_64".into(),
+        };
+        let line = tool_oneliner(&long, CallState::Complete, 20, false);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with('…'), "marker appended: {text:?}");
+        assert!(
+            text.width() <= 20,
+            "marked row fits the width: {text:?} ({})",
+            text.width()
+        );
+        assert!(
+            !text.contains("x86_64"),
+            "the overflow is cut, not wrapped: {text:?}"
+        );
+
+        let fits = tool_oneliner(
+            &ToolKind::Bash {
+                cmd: "cargo build".into(),
+            },
+            CallState::Complete,
+            20,
+            false,
+        );
+        let plain: String = fits.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!plain.contains('…'), "no marker when it fits: {plain:?}");
     }
 
     /// W1: a notice is one muted line with a tone-colored prefix glyph.

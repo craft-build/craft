@@ -184,13 +184,18 @@ pub(super) fn loaded_messages(items: &[crate::harness::ReplayItem]) -> Vec<super
                 code,
                 text,
                 full,
-                ..
+                is_error,
             } => super::LoadedMessage::Tool {
                 id: id.clone(),
                 parent_call_id: parent_call_id.clone(),
                 kind: super::cards::replayed_kind(name, input.as_ref(), code.as_ref()),
                 text: text.clone(),
                 full: full.clone(),
+                state: if *is_error {
+                    crate::tui::provider::CallState::Failed
+                } else {
+                    crate::tui::provider::CallState::Complete
+                },
             },
             crate::harness::ReplayItem::Compaction { kind, text } => {
                 super::LoadedMessage::Compaction {

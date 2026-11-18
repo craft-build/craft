@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use crate::tui::app::App;
-use crate::tui::provider::{AgentEvent, Status, ToolCallData, ToolKind};
+use crate::tui::provider::{AgentEvent, CallState, Status, ToolCallData, ToolKind};
 
 /// Terminal size for every scene.
 pub(crate) const W: u16 = 80;
@@ -77,6 +77,7 @@ fn scene_transcript() -> App {
         },
         lines: vec![],
         image: None,
+        state: CallState::Complete,
     }));
     app.handle_event(AgentEvent::AssistantText(
         "The file defines a `Widget` class with `render` and a default \
@@ -200,6 +201,7 @@ fn scene_todo() -> App {
             ToolLine::new(LineKind::Success, "dependency added"),
         ],
         image: None,
+        state: CallState::Complete,
     }));
     app.handle_event(AgentEvent::ToolCall(ToolCallData {
         parent_call_id: None,
@@ -224,6 +226,7 @@ fn scene_todo() -> App {
             },
         ],
         image: None,
+        state: CallState::Complete,
     }));
     // Edits start collapsed; open this one like a click would.
     app.conversation.collapsed.retain(|id| id != "e1");

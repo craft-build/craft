@@ -8,8 +8,8 @@ use tokio::task::AbortHandle;
 use tokio::time::sleep;
 
 use super::{
-    AgentEvent, Command, LineKind, PlanItem, Provider, Status, Tone, ToolCallData, ToolKind,
-    ToolLine, TouchedFile, UsageFetchState,
+    AgentEvent, CallState, Command, LineKind, PlanItem, Provider, Status, Tone, ToolCallData,
+    ToolKind, ToolLine, TouchedFile, UsageFetchState,
 };
 
 #[derive(Default)]
@@ -84,6 +84,7 @@ fn read_call(id: &str) -> ToolCallData {
             ..Default::default()
         })
         .collect(),
+        state: CallState::Complete,
     }
 }
 
@@ -112,6 +113,7 @@ fn grep_call(id: &str) -> ToolCallData {
             ..Default::default()
         })
         .collect(),
+        state: CallState::Complete,
     }
 }
 
@@ -154,6 +156,7 @@ fn edit_call(id: &str) -> ToolCallData {
             ..Default::default()
         })
         .collect(),
+        state: CallState::Complete,
     }
 }
 
@@ -166,6 +169,7 @@ fn bash_call(id: &str) -> ToolCallData {
             cmd: "pnpm test auth/refresh.spec.ts".into(),
         },
         image: None,
+        state: CallState::Complete,
         lines: vec![
             ToolLine {
                 kind: LineKind::Muted,
@@ -319,6 +323,7 @@ impl Provider for MockProvider {
                             lines: Vec::new(),
                             awaiting_approval: false,
                             image: None,
+                            state: CallState::Complete,
                         }));
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
@@ -503,7 +508,14 @@ mod tests {
                 AgentEvent::ToolCall(t) => match t.kind {
                     ToolKind::Read { .. } => saw_read = true,
                     ToolKind::Grep { .. } => saw_grep = true,
-                    ToolKind::Edit { .. } => saw_edit = true,
+                    ToolKind::Edit { .. } => {
+                        saw_edit = true;
+                        assert_eq!(
+                            t.state,
+                            CallState::Complete,
+                            "scripted cards arrive settled so compact groups close"
+                        );
+                    }
                     ToolKind::Bash { .. } => saw_bash = true,
                     ToolKind::Card { .. } | ToolKind::Code { .. } => {}
                 },

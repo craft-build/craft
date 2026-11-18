@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use crate::history;
 use crate::markdown::highlight::normalize_text;
 
-use super::{LineKind, Tone, ToolCallData, ToolKind, ToolLine, TouchedFile};
+use super::{CallState, LineKind, Tone, ToolCallData, ToolKind, ToolLine, TouchedFile};
 
 /// Mutating workspace tools; their results feed the Files panel.
 pub(super) const EDIT_TOOLS: [&str; 6] = [
@@ -285,6 +285,7 @@ pub(super) fn tool_done(
                 lines: Vec::new(),
                 awaiting_approval: false,
                 image: None,
+                state: CallState::Running,
             },
             touched: Vec::new(),
         };
@@ -419,6 +420,11 @@ pub(super) fn tool_done(
             lines,
             awaiting_approval: false,
             image: result_image(result),
+            state: if *is_error {
+                CallState::Failed
+            } else {
+                CallState::Complete
+            },
         },
         touched,
     }

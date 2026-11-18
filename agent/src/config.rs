@@ -361,6 +361,17 @@ impl Default for AdvisorConfig {
     }
 }
 
+/// How the TUI renders tool calls: one card per call ("cards", the
+/// default) or collapsible groups whose read-only members collapse to
+/// one-line entries ("compact"). Nested codemode children always group.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolDisplay {
+    #[default]
+    Cards,
+    Compact,
+}
+
 /// Defaults for each agent run, independent of provider/model selection.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -393,6 +404,11 @@ pub struct AgentConfig {
     /// Default on.
     #[serde(default = "default_memory_extraction")]
     pub memory_extraction: bool,
+    /// TUI tool-call rendering: full cards per call, or compact groups
+    /// (read-only tools as one-line entries). TUI-only; every other
+    /// surface ignores it.
+    #[serde(default)]
+    pub tool_display: ToolDisplay,
 }
 
 fn default_memory_extraction() -> bool {
@@ -415,6 +431,7 @@ impl Default for AgentConfig {
             advisor: AdvisorConfig::default(),
             prompt_format: crate::prompt::PromptFormat::default(),
             memory_extraction: default_memory_extraction(),
+            tool_display: ToolDisplay::default(),
         }
     }
 }
@@ -1157,6 +1174,18 @@ mod tests {
         for value in ["0", "\"nonsense\""] {
             assert!(Config::parse(&format!("always_thinking = {value}")).is_err());
         }
+    }
+
+    #[test]
+    fn tool_display_parses_and_rejects_unknown_values() {
+        let compact = Config::parse("agent { tool_display = \"compact\" }").unwrap();
+        assert_eq!(compact.agent.tool_display, ToolDisplay::Compact);
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.agent.tool_display, ToolDisplay::Cards);
+        assert!(
+            Config::parse("agent { tool_display = \"folded\" }").is_err(),
+            "unknown values are rejected"
+        );
     }
 
     #[test]

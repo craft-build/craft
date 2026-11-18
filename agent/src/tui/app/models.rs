@@ -3,7 +3,7 @@
 use crate::tui::geom::Rect;
 
 use crate::tui::provider::{
-    AgentEvent, LineKind, ModelChoice, Tone, ToolCallData, ToolKind, ToolLine,
+    AgentEvent, CallState, LineKind, ModelChoice, Tone, ToolCallData, ToolKind, ToolLine,
 };
 use crate::tui::selection::Selection;
 use crate::tui::ui::scrollback::{ScrollPos, SegmentCache};
@@ -67,6 +67,8 @@ pub enum Message {
         review: Option<AutoReviewLine>,
         /// Base64 image rendered inline under the card body (`view_image`).
         image: Option<String>,
+        /// Call lifecycle; the finish event's merge is authoritative.
+        state: CallState,
     },
 }
 
@@ -104,6 +106,10 @@ pub struct Conversation {
     /// Message indices of [`Message::Thinking`] blocks the user expanded;
     /// thinking renders collapsed behind its header unless listed here.
     pub expanded_thinking: Vec<usize>,
+    /// Pinned expansion of tool groups: group key → expanded. Unlisted
+    /// groups follow the auto rule (expanded while any member runs,
+    /// collapsed once every member settles).
+    pub group_pins: Vec<(String, bool)>,
     pub focused: Option<usize>, // message index of focused tool block
     /// True while a streamed [`Message::Assistant`] is still being appended to.
     pub(crate) assistant_open: bool,
@@ -120,6 +126,7 @@ impl Conversation {
             collapsed: Vec::new(),
             expanded_bodies: Vec::new(),
             expanded_thinking: Vec::new(),
+            group_pins: Vec::new(),
             focused: None,
             assistant_open: false,
             thinking_open: false,
@@ -176,6 +183,207 @@ impl Conversation {
         self.reveal = None;
         self.assistant_open = false;
         self.thinking_open = false;
+    }
+
+    /// End (exclusive) of the maximal contiguous run of tool messages
+    /// starting at `start`. Root groups and nested groups are both such
+    /// runs (children insert directly after their code parent).
+    pub(crate) fn tool_run_end(&self, start: usize) -> usize {
+        let mut end = start;
+        while matches!(self.messages.get(end), Some(Message::Tool { .. })) {
+            end += 1;
+        }
+        end
+    }
+
+    /// End (exclusive) of the maximal contiguous run of children sharing
+    /// `parent` starting at `start` (one nested group).
+    pub(crate) fn child_run_end(&self, start: usize, parent: &str) -> usize {
+        let mut end = start;
+        while let Some(Message::Tool {
+            parent_call_id: Some(p),
+            ..
+        }) = self.messages.get(end)
+        {
+            if p != parent {
+                break;
+            }
+            end += 1;
+        }
+        end
+    }
+
+    /// Stable key of the group whose first member is message `idx`:
+    /// the parent id for nested groups, the first root tool's id for
+    /// root groups. Indices shift when children insert mid-run; ids
+    /// never do.
+    pub(crate) fn group_key(&self, idx: usize) -> Option<String> {
+        match self.messages.get(idx)? {
+            Message::Tool {
+                parent_call_id: Some(parent),
+                ..
+            } => Some(format!("child:{parent}")),
+            Message::Tool { id, .. } => Some(format!("root:{id}")),
+            _ => None,
+        }
+    }
+
+    /// Whether any member the group's header counts is still running:
+    /// the children of a nested group, the root-level members of a root
+    /// group (nested headers track their own children).
+    pub(crate) fn group_running(&self, idx: usize) -> bool {
+        match self.messages.get(idx) {
+            Some(Message::Tool {
+                parent_call_id: Some(parent),
+                ..
+            }) => {
+                let end = self.child_run_end(idx, parent);
+                self.messages[idx..end].iter().any(|m| {
+                    matches!(
+                        m,
+                        Message::Tool {
+                            state: CallState::Running,
+                            ..
+                        }
+                    )
+                })
+            }
+            Some(Message::Tool { .. }) => {
+                let end = self.tool_run_end(idx);
+                self.messages[idx..end].iter().any(|m| {
+                    matches!(
+                        m,
+                        Message::Tool {
+                            parent_call_id: None,
+                            state: CallState::Running,
+                            ..
+                        }
+                    )
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the group keyed by `key` renders expanded. Unpinned groups
+    /// auto-expand while any counted member runs and auto-collapse when
+    /// all settle; a pin fixes the state until the group transitions
+    /// settled → running again.
+    pub(crate) fn group_expanded(&self, key: &str, running: bool) -> bool {
+        match self.group_pins.iter().find(|(k, _)| k == key) {
+            Some(&(_, pinned)) => pinned,
+            None => running,
+        }
+    }
+
+    /// Whether the tool message at `idx` renders: members of a collapsed
+    /// group are hidden behind its header. Nested children always group
+    /// by parent; root tools group by run only when `grouped_roots` is
+    /// set (compact display), mirroring the render walk.
+    pub(crate) fn tool_group_expanded(&self, idx: usize, grouped_roots: bool) -> bool {
+        match self.messages.get(idx) {
+            Some(Message::Tool {
+                parent_call_id: Some(parent),
+                ..
+            }) => {
+                let mut start = idx;
+                while start > 0
+                    && matches!(
+                        &self.messages[start - 1],
+                        Message::Tool {
+                            parent_call_id: Some(p),
+                            ..
+                        }
+                        if p == parent
+                    )
+                {
+                    start -= 1;
+                }
+                let key = format!("child:{parent}");
+                self.group_expanded(&key, self.group_running(start))
+            }
+            Some(Message::Tool {
+                parent_call_id: None,
+                ..
+            }) if grouped_roots => {
+                // The root group spans from the run's first root tool to
+                // the run's end; nested child runs at its head form their
+                // own groups.
+                let mut start = idx;
+                while start > 0
+                    && matches!(self.messages.get(start - 1), Some(Message::Tool { .. }))
+                {
+                    start -= 1;
+                }
+                while let Some(Message::Tool {
+                    parent_call_id: Some(p),
+                    ..
+                }) = self.messages.get(start)
+                {
+                    start = self.child_run_end(start, p);
+                }
+                match self.group_key(start) {
+                    Some(key) => self.group_expanded(&key, self.group_running(start)),
+                    None => true,
+                }
+            }
+            _ => true,
+        }
+    }
+
+    /// Pin the group's opposite state, surviving streaming.
+    pub(crate) fn toggle_group(&mut self, key: &str, running: bool) {
+        let expanded = !self.group_expanded(key, running);
+        match self.group_pins.iter_mut().find(|(k, _)| k == key) {
+            Some(pin) => pin.1 = expanded,
+            None => self.group_pins.push((key.to_owned(), expanded)),
+        }
+    }
+
+    /// Key of the group a newly added running tool restarts, when every
+    /// prior counted member had settled (the settled → running transition
+    /// that clears a pin). `id` identifies the new member to exclude.
+    fn restarted_group_key(&self, id: &str, parent_call_id: &Option<String>) -> Option<String> {
+        match parent_call_id.as_deref() {
+            Some(parent) => {
+                let restarted = !self.messages.iter().any(|m| {
+                    matches!(m, Message::Tool { id: mid, parent_call_id: Some(p), state: CallState::Running, .. }
+                        if p == parent && mid != id)
+                });
+                restarted.then(|| format!("child:{parent}"))
+            }
+            None => {
+                // Root runs only grow at their tail; walk back to the
+                // run's first root tool.
+                let mut start = self.messages.len() - 1;
+                while start > 0 && matches!(self.messages[start - 1], Message::Tool { .. }) {
+                    start -= 1;
+                }
+                let prior = &self.messages[start..self.messages.len() - 1];
+                let settled = !prior.iter().any(|m| {
+                    matches!(
+                        m,
+                        Message::Tool {
+                            parent_call_id: None,
+                            state: CallState::Running,
+                            ..
+                        }
+                    )
+                });
+                settled
+                    .then(|| {
+                        prior.iter().find_map(|m| match m {
+                            Message::Tool {
+                                id,
+                                parent_call_id: None,
+                                ..
+                            } => Some(format!("root:{id}")),
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+            }
+        }
     }
 
     /// Merge a provider event into the message list. Non-message events
@@ -281,12 +489,13 @@ impl Conversation {
                 lines,
                 awaiting_approval,
                 image,
+                state,
             }) => {
                 // Tool boundaries close any open streamed paragraph.
                 self.assistant_open = false;
                 self.thinking_open = false;
                 // Cards merge by id: a start event shows the running card, the
-                // completion event fills in its body.
+                // completion event fills in its body (and state).
                 let existing = self
                     .messages
                     .iter_mut()
@@ -297,13 +506,15 @@ impl Conversation {
                         lines: body,
                         diff,
                         image: slot,
+                        state: card_state,
                         ..
                     }) => {
                         // Completion events carry the authoritative kind
-                        // (summaries arrive with the result).
+                        // (summaries arrive with the result) and state.
                         *existing_kind = kind;
                         *body = lines;
                         *slot = image;
+                        *card_state = state;
                         if awaiting_approval {
                             if matches!(diff, None | Some(DiffState::Pending)) {
                                 *diff = Some(DiffState::Pending);
@@ -330,6 +541,7 @@ impl Conversation {
                             diff,
                             review: None,
                             image,
+                            state,
                         });
                         if parent_call_id.is_some() {
                             // Exclude the newly pushed child itself from the
@@ -352,6 +564,14 @@ impl Conversation {
                                 .unwrap_or(self.messages.len() - 1);
                             let card = self.messages.pop().expect("card was just pushed");
                             self.messages.insert(subtree_end, card);
+                        }
+                        // A group restarting after every counted member had
+                        // settled drops its pin: the pin described the
+                        // previous run's preferred state.
+                        if state == CallState::Running
+                            && let Some(key) = self.restarted_group_key(&id, &parent_call_id)
+                        {
+                            self.group_pins.retain(|(k, _)| k != &key);
                         }
                         if collapsible {
                             self.collapsed.push(id);
@@ -510,6 +730,9 @@ pub struct PaintData {
     /// One-row screen rects of thinking-block headers: (message index,
     /// rect). A click toggles the reasoning body's visibility.
     pub thinking_regions: Vec<(usize, Rect)>,
+    /// One-row screen rects of tool-group headers: (message index of the
+    /// group's first member, rect). A click toggles the group.
+    pub group_regions: Vec<(usize, Rect)>,
     /// One-row screen rects of the todo widget's section headers; a click
     /// folds/unfolds that section.
     pub todo_header: Rect,
@@ -557,6 +780,9 @@ pub enum PendingClick {
     Notice(usize),
     /// A thinking block's header row: toggles its collapsed body.
     Thinking(usize),
+    /// A tool group's header row (the message index of its first
+    /// member): toggles the group's pinned expansion.
+    Group(usize),
     /// The todo widget's plan header.
     Todo,
     /// The todo widget's files-touched header.
@@ -677,6 +903,7 @@ mod tests {
             lines: vec![],
             awaiting_approval: false,
             image: None,
+            state: CallState::Running,
         }));
         conv.apply(AgentEvent::ToolCall(ToolCallData {
             parent_call_id: None,
@@ -692,12 +919,20 @@ mod tests {
             }],
             awaiting_approval: false,
             image: None,
+            state: CallState::Complete,
         }));
         assert_eq!(conv.messages.len(), 1);
         match &conv.messages[0] {
-            Message::Tool { kind, lines, .. } => {
+            Message::Tool {
+                kind, lines, state, ..
+            } => {
                 assert!(matches!(kind, ToolKind::Read { summary, .. } if summary == "1 lines"));
                 assert_eq!(lines.len(), 1);
+                assert_eq!(
+                    *state,
+                    CallState::Complete,
+                    "the finish merge is authoritative"
+                );
             }
             _ => panic!("expected a tool card"),
         }
@@ -720,6 +955,7 @@ mod tests {
                 lines: vec![],
                 awaiting_approval: false,
                 image: None,
+                state: CallState::Running,
             }));
             conv.apply(AgentEvent::ToolCall(ToolCallData {
                 parent_call_id: Some(parent.into()),
@@ -731,6 +967,7 @@ mod tests {
                 lines: vec![],
                 awaiting_approval: false,
                 image: None,
+                state: CallState::Running,
             }));
         }
         conv.apply(AgentEvent::ToolProgress {
@@ -748,6 +985,7 @@ mod tests {
             lines: vec![ToolLine::new(LineKind::Success, "final")],
             awaiting_approval: false,
             image: None,
+            state: CallState::Complete,
         }));
         let ids: Vec<(&str, Option<&str>)> = conv
             .messages
@@ -796,6 +1034,7 @@ mod tests {
             lines: vec![],
             awaiting_approval: false,
             image: None,
+            state: CallState::Running,
         }));
         conv.apply(AgentEvent::AutoReview {
             id: "t1".into(),
@@ -816,6 +1055,7 @@ mod tests {
             }],
             awaiting_approval: false,
             image: None,
+            state: CallState::Complete,
         }));
         match &conv.messages[0] {
             Message::Tool {
@@ -834,5 +1074,131 @@ mod tests {
             }
             _ => panic!("expected a tool card"),
         }
+    }
+
+    /// A failed result merge (or any ToolCall carrying `Failed`) settles
+    /// the card as failed, feeding the group counters.
+    #[test]
+    fn failed_result_merges_mark_the_card_failed() {
+        let mut conv = Conversation::new();
+        conv.apply(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
+            id: "t1".into(),
+            kind: ToolKind::Bash {
+                cmd: "cargo test".into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Running,
+        }));
+        conv.apply(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
+            id: "t1".into(),
+            kind: ToolKind::Bash {
+                cmd: "cargo test".into(),
+            },
+            lines: vec![ToolLine::new(LineKind::Del, "error: test failed")],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Failed,
+        }));
+        match &conv.messages[0] {
+            Message::Tool { state, .. } => assert_eq!(*state, CallState::Failed),
+            _ => panic!("expected a tool card"),
+        }
+    }
+
+    /// Group expansion: auto while running, auto-collapsed once settled,
+    /// pinned by a click, and the pin clears when a settled group starts
+    /// running again.
+    #[test]
+    fn group_pins_follow_auto_expansion_until_repinned() {
+        let mut conv = Conversation::new();
+        let parent_start = AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
+            id: "t1".into(),
+            kind: ToolKind::Code {
+                script: "print(1)".into(),
+                summary: String::new(),
+                failure: None,
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Running,
+        });
+        conv.apply(parent_start);
+        let child = |id: &str, state: CallState| {
+            AgentEvent::ToolCall(ToolCallData {
+                parent_call_id: Some("t1".into()),
+                id: id.into(),
+                kind: ToolKind::Read {
+                    path: "a.rs".into(),
+                    summary: String::new(),
+                },
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+                state,
+            })
+        };
+        conv.apply(child("t1:c0", CallState::Running));
+        // The finish merge settles the only child.
+        conv.apply(child("t1:c0", CallState::Complete));
+        let key = "child:t1";
+        // Auto: expanded while any member runs, collapsed once settled.
+        assert!(conv.group_expanded(key, true), "running groups expand");
+        assert!(!conv.group_expanded(key, false), "settled groups collapse");
+        // Pin collapsed while running: stays collapsed through the stream.
+        conv.toggle_group(key, true);
+        assert!(conv.group_pins.contains(&(key.to_owned(), false)));
+        assert!(!conv.group_expanded(key, true));
+        // Pin expanded while settled: stays expanded.
+        conv.toggle_group(key, false);
+        assert!(conv.group_expanded(key, false));
+        // The settled → running transition clears the pin (auto again).
+        conv.apply(child("t1:c2", CallState::Running));
+        assert!(
+            !conv.group_pins.iter().any(|(k, _)| k == key),
+            "the restarted group drops its pin"
+        );
+        assert!(conv.group_expanded(key, true));
+    }
+
+    /// Root groups pin on the run's first root tool id; a run that keeps
+    /// streaming (settled member then a new running root tool) keeps its
+    /// pin, and a fully settled run's pin clears when it restarts.
+    #[test]
+    fn root_group_pins_key_on_the_runs_first_root_tool() {
+        let mut conv = Conversation::new();
+        let bash = |id: &str, state: CallState| {
+            AgentEvent::ToolCall(ToolCallData {
+                parent_call_id: None,
+                id: id.into(),
+                kind: ToolKind::Bash {
+                    cmd: "echo hi".into(),
+                },
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+                state,
+            })
+        };
+        conv.apply(bash("r1", CallState::Complete));
+        conv.apply(bash("r2", CallState::Running));
+        let key = conv.group_key(0).expect("root group key");
+        assert_eq!(key, "root:r1");
+        assert!(conv.group_running(0), "r2 still runs");
+        // Toggling the auto-expanded running group pins it collapsed.
+        conv.toggle_group(&key, true);
+        assert_eq!(conv.group_pins, [(key.clone(), false)]);
+        // Settle r2, then restart the run with r3: the pin clears.
+        conv.apply(bash("r2", CallState::Complete));
+        conv.apply(bash("r3", CallState::Running));
+        assert!(
+            !conv.group_pins.iter().any(|(k, _)| *k == key),
+            "the restarted root run drops its pin"
+        );
     }
 }

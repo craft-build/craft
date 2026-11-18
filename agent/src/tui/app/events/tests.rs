@@ -530,6 +530,7 @@ fn click_notice_row_expands_and_retruncates_body() {
         lines,
         awaiting_approval: false,
         image: None,
+        state: crate::tui::provider::CallState::Complete,
     }));
     draw_app(&mut app, 80, 24);
     let press = |app: &mut App, row, col| {
@@ -600,6 +601,92 @@ fn thinking_header_press_toggles_the_body() {
     assert!(
         app.conversation.expanded_thinking.is_empty(),
         "second press re-collapses"
+    );
+}
+
+/// A tool group's header row toggles the group; a card inside an
+/// expanded group keeps its own click target and toggles only itself.
+#[test]
+fn group_header_press_toggles_the_group_not_its_cards() {
+    let mut app = App::new();
+    // A running nested group: header row + an expanded member card.
+    app.handle_event(AgentEvent::ToolCall(ToolCallData {
+        parent_call_id: None,
+        id: "t1".into(),
+        kind: ToolKind::Code {
+            script: "print(1)".into(),
+            summary: String::new(),
+            failure: None,
+        },
+        lines: Vec::new(),
+        awaiting_approval: false,
+        image: None,
+        state: crate::tui::provider::CallState::Running,
+    }));
+    app.handle_event(AgentEvent::ToolCall(ToolCallData {
+        parent_call_id: Some("t1".into()),
+        id: "t1:c0".into(),
+        kind: ToolKind::Read {
+            path: "src/x.ts".into(),
+            summary: String::new(),
+        },
+        lines: Vec::new(),
+        awaiting_approval: false,
+        image: None,
+        state: crate::tui::provider::CallState::Running,
+    }));
+    draw_app(&mut app, 80, 24);
+    let group = |app: &App| {
+        app.view
+            .paint
+            .lock()
+            .unwrap()
+            .group_regions
+            .first()
+            .copied()
+    };
+    let press = |app: &mut App, row, col| {
+        app.handle_mouse(mouse(MouseKind::Down(MouseButton::Left), row, col));
+        app.handle_mouse(mouse(MouseKind::Up(MouseButton::Left), row, col));
+    };
+    let (_, rect) = group(&app).expect("group header carries a region");
+    press(&mut app, rect.y, rect.x + 4);
+    assert!(
+        app.conversation
+            .group_pins
+            .contains(&("child:t1".to_owned(), false)),
+        "header press pins the group collapsed: {:?}",
+        app.conversation.group_pins
+    );
+    // The card's own region is untouched by the group pin: a press on a
+    // card row toggles the card, not the group.
+    assert!(
+        app.conversation.collapsed.contains(&"t1:c0".to_owned()),
+        "precondition: the read card starts collapsed"
+    );
+    draw_app(&mut app, 80, 24);
+    app.conversation.toggle_group("child:t1", true); // re-expand by hand
+    draw_app(&mut app, 80, 24);
+    let (_, card_rect) = app
+        .view
+        .paint
+        .lock()
+        .unwrap()
+        .tool_regions
+        .first()
+        .copied()
+        .expect("member card carries a region while the group is expanded");
+    press(&mut app, card_rect.y, card_rect.x + 4);
+    assert!(
+        !app.conversation.collapsed.contains(&"t1:c0".to_owned()),
+        "card press toggles the card itself"
+    );
+    assert!(
+        app.conversation
+            .group_pins
+            .contains(&("child:t1".to_owned(), true)),
+        "card press leaves the group's pin alone: {:?}",
+        app.conversation.group_pins
     );
 }
 
