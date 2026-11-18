@@ -17,6 +17,7 @@ pub(super) fn tool_label(kind: &ToolKind) -> String {
         ToolKind::Card { cmd, .. } => cmd.clone(),
         ToolKind::Edit { path, .. } => format!("Edit {path}"),
         ToolKind::Code { .. } => "Code".to_owned(),
+        ToolKind::Task { description, .. } => format!("Task {description}"),
     }
 }
 
@@ -25,7 +26,8 @@ pub(super) fn tool_summary(kind: &ToolKind) -> String {
         ToolKind::Read { summary, .. }
         | ToolKind::Grep { summary, .. }
         | ToolKind::Edit { summary, .. }
-        | ToolKind::Card { summary, .. } => summary.clone(),
+        | ToolKind::Card { summary, .. }
+        | ToolKind::Task { summary, .. } => summary.clone(),
         ToolKind::Code {
             summary, failure, ..
         } => {

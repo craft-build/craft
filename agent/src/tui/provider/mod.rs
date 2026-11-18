@@ -195,6 +195,14 @@ pub enum ToolKind {
         summary: String,
         failure: Option<String>,
     },
+    /// A `task` call: a subagent run with its own chat (the task-chat
+    /// picker). A spawned subagent is a peer of the whole turn, not one
+    /// of its steps, so it never joins a compact group — it always
+    /// renders as its own dedicated card.
+    Task {
+        description: String,
+        summary: String,
+    },
 }
 
 impl ToolKind {

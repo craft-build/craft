@@ -146,6 +146,11 @@ pub(super) fn tool_head(name: &str, arguments: &serde_json::Value) -> ToolKind {
         // bodies, outlines) that would otherwise flood the scrollback.
         name if crate::knowledge::is_argosy_tool(name) => card_kind(name, &detail),
         "code" => code_kind(arguments),
+        // Subagent calls keep a dedicated card (see `ToolKind::Task`).
+        "task" => ToolKind::Task {
+            description: detail,
+            summary: String::new(),
+        },
         other => ToolKind::Bash {
             cmd: format!("{other} {detail}").trim().to_string(),
         },
@@ -404,6 +409,17 @@ pub(super) fn tool_done(
                 Vec::new(),
             )
         }
+        // The subagent's final report is the card body, truncated like
+        // Code output (the full text stays reachable through the
+        // expand notice).
+        "task" => (
+            ToolKind::Task {
+                description: detail,
+                summary: card_line_summary(&text),
+            },
+            context_lines(&text),
+            Vec::new(),
+        ),
         other => (
             ToolKind::Bash {
                 cmd: format!("{other} {detail}").trim().to_string(),
@@ -981,6 +997,36 @@ mod tests {
         let head = tool_head("bash", &serde_json::json!({"command": "ls"}));
         assert!(matches!(&head, ToolKind::Bash { cmd } if cmd == "bash ls"));
         assert!(!head.collapsible());
+    }
+
+    /// `task` calls get a dedicated (never folded) card kind: the label
+    /// carries the description and the done card summarizes the child's
+    /// report into its body.
+    #[test]
+    fn task_calls_get_a_dedicated_card() {
+        let head = tool_head(
+            "task",
+            &serde_json::json!({"description": "refactor tests", "prompt": "do it"}),
+        );
+        assert!(matches!(&head, ToolKind::Task { description, summary }
+                if description == "refactor tests" && summary.is_empty()));
+        let result = history::ext::tool_result(
+            "t1",
+            Some("task"),
+            "done — 3 files updated\n2 tests fixed",
+            false,
+        );
+        let done = tool_done(
+            "t1".into(),
+            "task",
+            &serde_json::json!({"description": "refactor tests", "prompt": "do it"}),
+            &result,
+        );
+        assert!(
+            matches!(&done.card.kind, ToolKind::Task { description, summary }
+                if description == "refactor tests" && summary == "2 lines")
+        );
+        assert_eq!(done.card.lines.len(), 2);
     }
 
     /// A call with no string argument still gets a bare-tool-name label.

@@ -82,6 +82,12 @@ pub(super) fn tool_block(
                 Style::default().fg(t.accent).bg(card_bg),
             ));
         }
+        ToolKind::Task { .. } => {
+            prefix.push(Span::styled(
+                "» ",
+                Style::default().fg(t.accent).bg(card_bg),
+            ));
+        }
     }
     let prefix_w = spans_width(&prefix);
     // The label wraps onto continuation rows indented under it, so a long
@@ -133,7 +139,7 @@ pub(super) fn tool_block(
             })
         }
         ToolKind::Grep { .. } | ToolKind::Bash { .. } | ToolKind::Card { .. } => None,
-        ToolKind::Code { .. } => None,
+        ToolKind::Code { .. } | ToolKind::Task { .. } => None,
     };
     // Prepend the bar to every laid-out row.
     let with_bar = |lines: Vec<Line<'static>>| -> Vec<Line<'static>> {

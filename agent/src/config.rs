@@ -362,8 +362,11 @@ impl Default for AdvisorConfig {
 }
 
 /// How the TUI renders tool calls: one card per call ("cards", the
-/// default) or collapsible groups whose read-only members collapse to
-/// one-line entries ("compact"). Nested codemode children always group.
+/// default) or collapsible groups ("compact") whose header counts
+/// members by kind — "2 reads · 1 command · 3 thoughts" — and whose
+/// read-only members collapse to one-line entries. A compact group
+/// absorbs the thinking blocks interleaved with its tools. Nested
+/// codemode children always group.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolDisplay {
@@ -405,8 +408,9 @@ pub struct AgentConfig {
     #[serde(default = "default_memory_extraction")]
     pub memory_extraction: bool,
     /// TUI tool-call rendering: full cards per call, or compact groups
-    /// (read-only tools as one-line entries). TUI-only; every other
-    /// surface ignores it.
+    /// whose headers count members by kind (thinking blocks between a
+    /// run's tools included) and whose read-only tools render as
+    /// one-line entries. TUI-only; every other surface ignores it.
     #[serde(default)]
     pub tool_display: ToolDisplay,
 }

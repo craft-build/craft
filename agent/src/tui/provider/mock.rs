@@ -517,7 +517,7 @@ mod tests {
                         );
                     }
                     ToolKind::Bash { .. } => saw_bash = true,
-                    ToolKind::Card { .. } | ToolKind::Code { .. } => {}
+                    ToolKind::Card { .. } | ToolKind::Code { .. } | ToolKind::Task { .. } => {}
                 },
                 AgentEvent::StatusChanged(Status::WaitingApproval) => break,
                 _ => {}

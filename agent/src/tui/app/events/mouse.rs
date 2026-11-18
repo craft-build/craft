@@ -59,7 +59,8 @@ impl App {
     /// settled → running transition.
     fn toggle_group(&mut self, idx: usize) {
         if let Some(key) = self.conversation.group_key(idx) {
-            let running = self.conversation.group_running(idx);
+            let grouped_roots = self.tool_display == crate::config::ToolDisplay::Compact;
+            let running = self.conversation.group_running(idx, grouped_roots);
             self.conversation.toggle_group(&key, running);
         }
     }

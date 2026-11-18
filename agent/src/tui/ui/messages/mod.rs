@@ -203,25 +203,65 @@ struct RenderWalk {
     pending_images: Vec<(usize, String, String)>,
 }
 
-/// (running, complete, failed) over the members a group header counts.
-fn count_states(messages: &[Message], roots_only: bool) -> (usize, usize, usize) {
-    let mut counts = (0, 0, 0);
-    for msg in messages {
-        if let Message::Tool {
-            parent_call_id,
-            state,
-            ..
-        } = msg
-            && (!roots_only || parent_call_id.is_none())
-        {
-            match state {
-                CallState::Running => counts.0 += 1,
-                CallState::Complete => counts.1 += 1,
-                CallState::Failed => counts.2 += 1,
+/// Counts a group's members for its header: per-kind tallies of
+/// running and complete tools, thinking blocks (root compact groups
+/// absorb them), failures kept separate (failed members render as full
+/// cards), and the live-member count that drives the header's running
+/// cue.
+#[derive(Clone, Copy, Debug, Default)]
+struct GroupTally {
+    reads: usize,
+    greps: usize,
+    commands: usize,
+    edits: usize,
+    scripts: usize,
+    tasks: usize,
+    tools: usize,
+    thoughts: usize,
+    running: usize,
+    failed: usize,
+}
+
+impl GroupTally {
+    /// Tally the members in `messages`. `roots_only` counts root-level
+    /// tools and thinking blocks (a root group's header skips its nested
+    /// children); nested groups count every member and never contain
+    /// thinking.
+    fn count(messages: &[Message], roots_only: bool) -> Self {
+        let mut t = Self::default();
+        for msg in messages {
+            match msg {
+                Message::Thinking(_) => t.thoughts += 1,
+                Message::Tool {
+                    kind,
+                    parent_call_id,
+                    state,
+                    ..
+                } if !roots_only || parent_call_id.is_none() => match state {
+                    CallState::Failed => t.failed += 1,
+                    CallState::Running => {
+                        t.running += 1;
+                        t.count_kind(kind);
+                    }
+                    CallState::Complete => t.count_kind(kind),
+                },
+                _ => {}
             }
         }
+        t
     }
-    counts
+
+    fn count_kind(&mut self, kind: &ToolKind) {
+        match kind {
+            ToolKind::Read { .. } => self.reads += 1,
+            ToolKind::Grep { .. } => self.greps += 1,
+            ToolKind::Bash { .. } => self.commands += 1,
+            ToolKind::Edit { .. } => self.edits += 1,
+            ToolKind::Code { .. } => self.scripts += 1,
+            ToolKind::Task { .. } => self.tasks += 1,
+            ToolKind::Card { .. } => self.tools += 1,
+        }
+    }
 }
 
 /// Render one tool card (message `idx`) exactly as an ungrouped card
@@ -313,18 +353,10 @@ fn push_nested_group(
         _ => return idx,
     };
     let end = app.conversation.child_run_end(idx, &parent);
-    let (running, complete, failed) = count_states(&app.conversation.messages[idx..end], false);
+    let tally = GroupTally::count(&app.conversation.messages[idx..end], false);
     let key = format!("child:{parent}");
-    let expanded = app.conversation.group_expanded(&key, running > 0);
-    let lines = tool_group_header(
-        running,
-        complete,
-        failed,
-        expanded,
-        running > 0,
-        app.status_tick,
-        true,
-    );
+    let expanded = app.conversation.group_expanded(&key, tally.running > 0);
+    let lines = tool_group_header(&tally, expanded, tally.running > 0, app.status_tick, true);
     walk.group_seg_rows.push((idx, app.view.segments.len(), 0));
     app.view.segments.push(Segment::with_lines(lines));
     if expanded {
@@ -412,28 +444,27 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
         } else if app.tool_display == ToolDisplay::Compact
             && matches!(
                 app.conversation.messages.get(idx),
-                Some(Message::Tool { .. })
+                Some(Message::Tool { .. } | Message::Thinking(_))
             )
+            && app.conversation.compact_run_has_tool(idx)
         {
-            // Contiguous root tool runs share a group header; within an
-            // expanded group Edit and Code keep full cards, and so do
+            // Contiguous root tool runs share a group header; in compact
+            // display the run also absorbs the thinking blocks
+            // interleaved with its tools (a thinking block groups only
+            // when tools follow) and splits around always-card calls
+            // (`task`, root `Edit`), which always render their dedicated
+            // cards. The group opens only by a header click (a pin) —
+            // while live the header tracks the running count. Within an
+            // expanded group Code keeps its full card, and so do
             // image-bearing and failed members (their whole output must
             // stay reachable); every other tool collapses to a one-line
             // entry.
-            let end = app.conversation.tool_run_end(idx);
-            let (running, complete, failed) =
-                count_states(&app.conversation.messages[idx..end], true);
+            let end = app.conversation.compact_run_end(idx);
+            let tally = GroupTally::count(&app.conversation.messages[idx..end], true);
             let key = app.conversation.group_key(idx).unwrap_or_default();
-            let expanded = app.conversation.group_expanded(&key, running > 0);
-            let lines = tool_group_header(
-                running,
-                complete,
-                failed,
-                expanded,
-                running > 0,
-                app.status_tick,
-                false,
-            );
+            let active = tally.running > 0 || app.conversation.trailing_thinking_active(end);
+            let expanded = app.conversation.group_expanded(&key, false);
+            let lines = tool_group_header(&tally, expanded, active, app.status_tick, false);
             walk.group_seg_rows.push((idx, app.view.segments.len(), 0));
             app.view.segments.push(Segment::with_lines(lines));
             if expanded {
@@ -456,7 +487,7 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                     } else if matches!(
                         m,
                         Message::Tool {
-                            kind: ToolKind::Edit { .. } | ToolKind::Code { .. },
+                            kind: ToolKind::Code { .. },
                             ..
                         } | Message::Tool { image: Some(_), .. }
                             | Message::Tool {
@@ -472,6 +503,22 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
                             .push(Segment::with_lines(vec![tool_oneliner(
                                 kind, *state, width, false,
                             )]));
+                        member += 1;
+                    } else if let Message::Thinking(text) = m {
+                        // An absorbed thinking block renders as the
+                        // standalone block does: a clickable collapsed
+                        // header of its own.
+                        let tidx = member;
+                        let expanded_thinking = app.conversation.expanded_thinking.contains(&tidx);
+                        let active_thinking = app.conversation.thinking_active(tidx);
+                        let body = app.conversation.visible_text(tidx).unwrap_or(text);
+                        let mut tlines =
+                            thinking_header(active_thinking, expanded_thinking, app.status_tick);
+                        if expanded_thinking {
+                            tlines.extend(thinking_block(body, width));
+                        }
+                        thinking_seg_rows.push((tidx, app.view.segments.len(), 0));
+                        app.view.segments.push(Segment::with_lines(tlines));
                         member += 1;
                     } else {
                         member += 1;
@@ -1808,7 +1855,7 @@ mod tests {
         app.handle_event(read_call("t1:c0", Some("t1"), "", CallState::Running));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("1 tool running")),
+            rows.iter().any(|r| r.contains("1 read 1 running")),
             "live header while a child streams: {rows:?}"
         );
         assert!(
@@ -1826,7 +1873,7 @@ mod tests {
         ));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("1 complete")),
+            rows.iter().any(|r| r.contains("1 read")),
             "settled header counts: {rows:?}"
         );
         assert!(
@@ -1843,8 +1890,9 @@ mod tests {
         );
     }
 
-    /// The header counters transition running → complete → failed as the
-    /// member events merge in.
+    /// The header counts members by kind across their lifetime, and
+    /// failures split out of the kind counts (failed members keep full
+    /// cards).
     #[test]
     fn nested_group_counts_track_member_states() {
         let mut app = App::new();
@@ -1853,28 +1901,29 @@ mod tests {
         app.handle_event(read_call("t1:c1", Some("t1"), "", CallState::Running));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("2 tools running")),
+            rows.iter().any(|r| r.contains("2 reads 2 running")),
             "{rows:?}"
         );
+        // A completed member stays counted under its kind while its
+        // sibling still runs.
         app.handle_event(read_call("t1:c0", Some("t1"), "ok", CallState::Complete));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter()
-                .any(|r| r.contains("1 tool running · 1 complete")),
-            "{rows:?}"
+            rows.iter().any(|r| r.contains("2 reads 1 running")),
+            "one child still running: {rows:?}"
         );
         app.handle_event(read_call("t1:c1", Some("t1"), "boom", CallState::Failed));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("1 complete · 1 failed")),
+            rows.iter().any(|r| r.contains("1 read · 1 failed")),
             "{rows:?}"
         );
     }
 
     /// Compact mode: contiguous root tool runs render behind a group
-    /// header; within the expanded group Edit and Code keep full cards
-    /// while read-only tools collapse to one-line entries; the settled
-    /// run collapses to the header.
+    /// header that never auto-expands — the header tracks the running
+    /// count — and a pinned expansion shows Edit/Code full cards while
+    /// read-only tools collapse to one-line entries.
     #[test]
     fn compact_mode_groups_root_tools_and_simplifies_cards() {
         use crate::config::ToolDisplay;
@@ -1895,9 +1944,30 @@ mod tests {
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
             rows.iter()
-                .any(|r| r.contains("1 tool running · 1 complete")),
-            "root header counts root-level tools only: {rows:?}"
+                .any(|r| r.contains("1 read · 1 command 1 running")),
+            "live header counts members and running: {rows:?}"
         );
+        assert!(
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "a running group stays collapsed: {rows:?}"
+        );
+
+        // The run settles: the live cue drops, the group stays closed.
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        let header = rows
+            .iter()
+            .find(|r| r.contains("1 read · 1 command"))
+            .expect("settled root header counts by kind");
+        assert!(
+            !header.contains("running"),
+            "settled header drops the running cue: {header:?}"
+        );
+
+        // A pinned expansion renders the members: read-only tools as
+        // one-line entries, bash without card chrome.
+        app.conversation.toggle_group("root:r1", false);
+        let rows = frame_rows(&mut app, 80, 24);
         assert!(
             rows.iter().any(|r| r.contains("src/main.rs · 10 lines")),
             "read-only tools render one-line entries: {rows:?}"
@@ -1910,17 +1980,337 @@ mod tests {
             rows.iter().all(|r| !r.contains("$ cargo build")),
             "bash renders without card chrome in compact mode: {rows:?}"
         );
+    }
 
-        // The run settles: everything collapses to the header.
-        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+    /// Compact mode never folds a `task` call into a group: the run
+    /// splits around its dedicated card, headers count only their own
+    /// members, and the card survives when the surrounding groups
+    /// collapse.
+    #[test]
+    fn task_cards_stay_outside_compact_groups() {
+        use crate::config::ToolDisplay;
+        let task_call = |id: &str, state: CallState| {
+            AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+                parent_call_id: None,
+                id: id.into(),
+                kind: crate::tui::provider::ToolKind::Task {
+                    description: "investigate the flake".into(),
+                    summary: String::new(),
+                },
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+                state,
+            })
+        };
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Running));
+        app.handle_event(task_call("t1", CallState::Running));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Running));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("2 complete")),
-            "settled root header: {rows:?}"
+            rows.iter()
+                .any(|r| r.contains("» Task investigate the flake")),
+            "task renders its dedicated card while running: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("1 read 1 running")),
+            "each side group's header tracks its running member: {rows:?}"
         );
         assert!(
             rows.iter().all(|r| !r.contains("src/main.rs")),
-            "settled root group hides members: {rows:?}"
+            "surrounding groups stay collapsed while members run: {rows:?}"
+        );
+
+        // Everything settles: the groups collapse but the task card
+        // stays.
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
+        app.handle_event(task_call("t1", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "settled groups hide their members: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("» Task investigate the flake")),
+            "the task card outlives the collapsed groups: {rows:?}"
+        );
+    }
+
+    /// Like `task`, a root `Edit` never folds into a compact group: the
+    /// run splits around its card so file mutations are always visible,
+    /// and the card survives the surrounding groups' collapse.
+    #[test]
+    fn edit_cards_stay_outside_compact_groups() {
+        use crate::config::ToolDisplay;
+        let edit_call = |id: &str, state: CallState| {
+            AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+                parent_call_id: None,
+                id: id.into(),
+                kind: crate::tui::provider::ToolKind::Edit {
+                    path: "src/main.rs".into(),
+                    summary: "overwrote (10 bytes)".into(),
+                },
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+                state,
+            })
+        };
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Running));
+        app.handle_event(edit_call("e1", CallState::Running));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Running));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("Edit src/main.rs")),
+            "the edit card renders outside the groups while running: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("1 read · 1 edit")),
+            "headers count only their side of the split: {rows:?}"
+        );
+
+        // Everything settles: the groups collapse, the mutation stays.
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
+        app.handle_event(edit_call("e1", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().all(|r| !r.contains("Read src/main.rs")),
+            "settled groups hide their members: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("Edit src/main.rs")),
+            "the edit card outlives the collapsed groups: {rows:?}"
+        );
+    }
+
+    /// A thinking block followed by a `task` call never groups: without
+    /// a groupable tool after it, the thinking block keeps its own
+    /// header and the task keeps its card.
+    #[test]
+    fn thinking_before_a_task_stays_standalone() {
+        use crate::config::ToolDisplay;
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(AgentEvent::ReasoningDelta("hmm".into()));
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "t1".into(),
+            kind: crate::tui::provider::ToolKind::Task {
+                description: "investigate the flake".into(),
+                summary: String::new(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Running,
+        }));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("Thinking")),
+            "the thinking block keeps its own header: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("» Task investigate the flake")),
+            "the task card follows it: {rows:?}"
+        );
+    }
+
+    /// A settled root run's header counts members by kind: reads, greps,
+    /// commands, and generic Card tools each get their own
+    /// (singular/plural) segment.
+    #[test]
+    fn compact_header_counts_tool_categories() {
+        use crate::config::ToolDisplay;
+        use crate::tui::provider::ToolCallData;
+
+        let call = |id: &str, kind| {
+            AgentEvent::ToolCall(ToolCallData {
+                parent_call_id: None,
+                id: id.into(),
+                kind,
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+                state: CallState::Complete,
+            })
+        };
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
+        app.handle_event(call(
+            "g1",
+            crate::tui::provider::ToolKind::Grep {
+                pattern: "todo".into(),
+                summary: "2 matches".into(),
+            },
+        ));
+        app.handle_event(call(
+            "b1",
+            crate::tui::provider::ToolKind::Bash {
+                cmd: "cargo build".into(),
+            },
+        ));
+        app.handle_event(call(
+            "a1",
+            crate::tui::provider::ToolKind::Card {
+                cmd: "search q".into(),
+                summary: "3 hits".into(),
+            },
+        ));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("2 reads · 1 grep · 1 command · 1 tool")),
+            "settled header counts every kind: {rows:?}"
+        );
+    }
+
+    /// Compact groups absorb the thinking blocks interleaved with their
+    /// tools: one header counts them as thoughts and hides their
+    /// standalone rendering; a pinned expansion shows them as collapsed
+    /// headers inside the group.
+    #[test]
+    fn compact_group_absorbs_thinking_blocks() {
+        use crate::config::ToolDisplay;
+
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(AgentEvent::ReasoningDelta("first thought".into()));
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        app.handle_event(AgentEvent::ReasoningDelta("second thought".into()));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("2 reads · 2 thoughts")),
+            "one header counts the whole think-work cycle: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("Thinking")),
+            "absorbed blocks hide their standalone headers: {rows:?}"
+        );
+
+        app.conversation.toggle_group("root:r1", false);
+        let rows = frame_rows(&mut app, 80, 24);
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("Thinking")).count(),
+            2,
+            "pinned expansion shows both thinking headers: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("src/main.rs")),
+            "tool members render inside the expansion: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("first thought")),
+            "thinking bodies stay collapsed behind their headers: {rows:?}"
+        );
+    }
+
+    /// A thinking block still streaming after a settled run keeps the
+    /// group live (bare "running" cue in the header — no tool runs) but
+    /// never expands it; the run still collapses behind its header —
+    /// thought included — once the turn moves on.
+    #[test]
+    fn streaming_thinking_keeps_the_group_live_but_collapsed() {
+        use crate::config::ToolDisplay;
+
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().all(|r| !r.contains("Thinking")),
+            "settled run starts without thinking: {rows:?}"
+        );
+
+        app.handle_event(AgentEvent::ReasoningDelta("next step".into()));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("1 read · 1 thought running")),
+            "streaming thinking keeps the header live: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("Thinking…")),
+            "the streaming block stays hidden behind the collapsed group: {rows:?}"
+        );
+
+        // A pin opens the group and reveals the streaming block's own
+        // header.
+        app.conversation.toggle_group("root:r1", false);
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("Thinking…")),
+            "the pinned expansion shows the streaming block: {rows:?}"
+        );
+
+        app.handle_event(AgentEvent::AssistantText("done".into()));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("1 read · 1 thought")),
+            "settled header counts the thought: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("running")),
+            "the live cue drops once the turn moves on: {rows:?}"
+        );
+    }
+
+    /// A thinking block never followed by a tool stays standalone in
+    /// compact display: groups form around tools, not thinking alone.
+    #[test]
+    fn pure_thinking_turn_stays_standalone_in_compact() {
+        use crate::config::ToolDisplay;
+
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(AgentEvent::ReasoningDelta("no tools here".into()));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("Thinking")),
+            "an ungrouped thinking block keeps its standalone header: {rows:?}"
+        );
+
+        app.handle_event(AgentEvent::AssistantText("answer".into()));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("Thinking")),
+            "still standalone after settling: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("thought")),
+            "nothing was grouped or counted: {rows:?}"
+        );
+    }
+
+    /// Cards mode (the default) never groups: thinking blocks between
+    /// tool calls keep standalone headers and no group header counts
+    /// them.
+    #[test]
+    fn cards_mode_keeps_thinking_standalone_between_runs() {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ReasoningDelta("first".into()));
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
+        app.handle_event(AgentEvent::ReasoningDelta("second".into()));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("Thinking")).count(),
+            2,
+            "both thinking blocks render standalone in cards mode: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("thought")),
+            "no group header counts them: {rows:?}"
         );
     }
 
@@ -1940,7 +2330,6 @@ mod tests {
 
         let mut app = App::new();
         app.tool_display = ToolDisplay::Compact;
-        // A running member keeps the root group auto-expanded.
         app.handle_event(read_call("r0", None, "", CallState::Running));
         app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
             parent_call_id: None,
@@ -1967,6 +2356,9 @@ mod tests {
             image: None,
             state: CallState::Failed,
         }));
+        // Running members never auto-expand the group; open it with a
+        // pin so the full-card members render.
+        app.conversation.toggle_group("root:r0", false);
         let rows = frame_rows(&mut app, 80, 30);
 
         assert!(
@@ -1993,7 +2385,8 @@ mod tests {
 
     /// Expanded-group members each record their own render position (so
     /// focus scrolls to the right row), and collapsed groups hide their
-    /// members from keyboard focus entirely.
+    /// members from keyboard focus entirely — running included, since
+    /// root groups only open by a pin.
     #[test]
     fn compact_groups_record_member_starts_and_exclude_hidden_focus() {
         use crate::config::ToolDisplay;
@@ -2005,18 +2398,23 @@ mod tests {
         app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("1 tool running")),
-            "the running code parent keeps the group expanded: {rows:?}"
+            rows.iter().any(|r| r.contains("1 script 1 running")),
+            "the running parent shows in the header count, not by expanding: {rows:?}"
         );
-        let starts = app.view.msg_starts.clone();
-        assert_eq!(starts.len(), 3, "one start entry per message");
         assert!(
-            starts[0] < starts[1] && starts[1] < starts[2],
-            "rendered members record their own rows: {starts:?}"
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "members stay hidden behind the header while it runs: {rows:?}"
         );
-        assert_eq!(app.focus_targets(), vec![1, 2], "reads are focusable");
+        assert!(
+            app.focus_targets().is_empty(),
+            "hidden members are not focusable"
+        );
+        assert_eq!(
+            app.view.msg_starts[1], app.view.msg_starts[2],
+            "unrendered members share the position past the group"
+        );
 
-        // Settle the run: the group auto-collapses and hides its members.
+        // Settle the run: nothing changes — the group was never open.
         app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
             parent_call_id: None,
             id: "t1".into(),
@@ -2035,14 +2433,6 @@ mod tests {
             rows.iter().all(|r| !r.contains("src/main.rs")),
             "collapsed group hides members: {rows:?}"
         );
-        assert!(
-            app.focus_targets().is_empty(),
-            "hidden members are not focusable"
-        );
-        assert_eq!(
-            app.view.msg_starts[1], app.view.msg_starts[2],
-            "unrendered members share the position past the group"
-        );
 
         // A pinned expansion restores the members as focus targets.
         app.conversation.toggle_group("root:t1", false);
@@ -2051,11 +2441,18 @@ mod tests {
             rows.iter().any(|r| r.contains("src/main.rs")),
             "pinned expansion shows members: {rows:?}"
         );
+        let starts = app.view.msg_starts.clone();
+        assert!(
+            starts[0] < starts[1] && starts[1] < starts[2],
+            "rendered members record their own rows: {starts:?}"
+        );
         assert_eq!(app.focus_targets(), vec![1, 2]);
     }
 
     /// Nested groups keep their own header and cards inside an expanded
-    /// root group in compact mode.
+    /// root group in compact mode: the root opens by a pin (running
+    /// never expands it), the nested group auto-expands while its
+    /// children run.
     #[test]
     fn nested_group_renders_inside_an_expanded_root_group() {
         use crate::config::ToolDisplay;
@@ -2064,13 +2461,17 @@ mod tests {
         app.handle_event(code_parent("t1"));
         app.handle_event(read_call("t1:c0", Some("t1"), "", CallState::Running));
         app.handle_event(read_call("r1", None, "", CallState::Running));
+        // The root group never auto-expands; open it with a pin.
+        app.conversation.toggle_group("root:t1", false);
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("2 tools running")),
-            "root header counts the code parent and the read: {rows:?}"
+            rows.iter()
+                .any(|r| r.contains("1 read · 1 script 2 running")),
+            "root header counts the code parent and the read, both live: {rows:?}"
         );
         assert!(
-            rows.iter().any(|r| r.contains("1 tool running")),
+            rows.iter()
+                .any(|r| r.contains("1 read 1 running") && !r.contains("script")),
             "nested header counts its children: {rows:?}"
         );
         assert!(
@@ -2078,7 +2479,9 @@ mod tests {
             "nested member card visible while the nested group runs: {rows:?}"
         );
 
-        // Everything settles: both groups collapse.
+        // Everything settles: the nested group auto-collapses; the root
+        // stays pinned open, so its members render but the child card
+        // hides behind the nested header.
         app.handle_event(read_call(
             "t1:c0",
             Some("t1"),
@@ -2101,8 +2504,13 @@ mod tests {
         }));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().all(|r| !r.contains("src/main.rs")),
-            "settled groups hide everything but headers: {rows:?}"
+            rows.iter()
+                .any(|r| r.contains("Read src/main.rs · 3 lines")),
+            "the root group stays pinned open — its member oneliner renders: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("▸ Read src/main.rs")),
+            "the settled nested group hides its member cards: {rows:?}"
         );
     }
 

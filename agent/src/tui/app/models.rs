@@ -94,6 +94,32 @@ impl Message {
             }
         )
     }
+
+    /// A root tool call that never joins a compact group: a subagent
+    /// `task` (a peer of the whole turn) or an `Edit` mutation (the
+    /// user must always see file changes). Both always render their
+    /// dedicated cards outside the folded group. Nested children of
+    /// any kind stay with their code parent's run.
+    pub(crate) fn is_always_card(&self) -> bool {
+        matches!(
+            self,
+            Message::Tool {
+                kind: ToolKind::Task { .. } | ToolKind::Edit { .. },
+                parent_call_id: None,
+                ..
+            }
+        )
+    }
+}
+
+/// Whether `m` can belong to a compact root group (see
+/// [`Message::is_always_card`]).
+fn joins_compact_run(m: &Message) -> bool {
+    match m {
+        Message::Thinking(_) => true,
+        Message::Tool { .. } => !m.is_always_card(),
+        _ => false,
+    }
 }
 
 /// Message-list state: what the provider streams in, plus focus/collapse
@@ -196,6 +222,27 @@ impl Conversation {
         end
     }
 
+    /// End (exclusive) of the maximal contiguous run of tool and thinking
+    /// messages starting at `start`: a compact root group's span, which
+    /// absorbs the thinking blocks interleaved with its tools. Always-
+    /// card calls (root `task`, root `Edit`) terminate the run — they
+    /// never fold into a group, so the run splits around their
+    /// dedicated cards.
+    pub(crate) fn compact_run_end(&self, start: usize) -> usize {
+        let mut end = start;
+        while self.messages.get(end).is_some_and(joins_compact_run) {
+            end += 1;
+        }
+        end
+    }
+
+    /// Whether the compact run starting at `idx` contains a tool call: a
+    /// thinking block groups only when tools follow before the run breaks.
+    pub(crate) fn compact_run_has_tool(&self, idx: usize) -> bool {
+        (idx..self.compact_run_end(idx))
+            .any(|i| matches!(self.messages.get(i), Some(Message::Tool { .. })))
+    }
+
     /// End (exclusive) of the maximal contiguous run of children sharing
     /// `parent` starting at `start` (one nested group).
     pub(crate) fn child_run_end(&self, start: usize, parent: &str) -> usize {
@@ -215,9 +262,14 @@ impl Conversation {
 
     /// Stable key of the group whose first member is message `idx`:
     /// the parent id for nested groups, the first root tool's id for
-    /// root groups. Indices shift when children insert mid-run; ids
-    /// never do.
+    /// root groups (a compact run starting at a thinking block keys on
+    /// its first tool — thinking members carry no id). Indices shift
+    /// when children insert mid-run; ids never do.
     pub(crate) fn group_key(&self, idx: usize) -> Option<String> {
+        let mut idx = idx;
+        while matches!(self.messages.get(idx), Some(Message::Thinking(_))) {
+            idx += 1;
+        }
         match self.messages.get(idx)? {
             Message::Tool {
                 parent_call_id: Some(parent),
@@ -228,10 +280,12 @@ impl Conversation {
         }
     }
 
-    /// Whether any member the group's header counts is still running:
-    /// the children of a nested group, the root-level members of a root
-    /// group (nested headers track their own children).
-    pub(crate) fn group_running(&self, idx: usize) -> bool {
+    /// Whether any member the group's header counts is still live: the
+    /// children of a nested group, the root-level members of a root
+    /// group (nested headers track their own children). In compact
+    /// display a root group also spans its thinking members, and a
+    /// trailing thinking block still streaming keeps it live.
+    pub(crate) fn group_running(&self, idx: usize, grouped_roots: bool) -> bool {
         match self.messages.get(idx) {
             Some(Message::Tool {
                 parent_call_id: Some(parent),
@@ -248,40 +302,57 @@ impl Conversation {
                     )
                 })
             }
-            Some(Message::Tool { .. }) => {
-                let end = self.tool_run_end(idx);
-                self.messages[idx..end].iter().any(|m| {
-                    matches!(
-                        m,
-                        Message::Tool {
-                            parent_call_id: None,
-                            state: CallState::Running,
-                            ..
-                        }
-                    )
-                })
+            Some(Message::Tool { .. }) | Some(Message::Thinking(_)) if grouped_roots => {
+                self.root_run_live(idx, self.compact_run_end(idx))
             }
+            Some(Message::Tool { .. }) => self.root_run_live(idx, self.tool_run_end(idx)),
             _ => false,
         }
     }
 
-    /// Whether the group keyed by `key` renders expanded. Unpinned groups
-    /// auto-expand while any counted member runs and auto-collapse when
-    /// all settle; a pin fixes the state until the group transitions
-    /// settled → running again.
+    /// Whether the root run `idx..end` has a running root member or ends
+    /// in a thinking block still being streamed into.
+    fn root_run_live(&self, idx: usize, end: usize) -> bool {
+        self.messages[idx..end].iter().any(|m| {
+            matches!(
+                m,
+                Message::Tool {
+                    parent_call_id: None,
+                    state: CallState::Running,
+                    ..
+                }
+            )
+        }) || self.trailing_thinking_active(end)
+    }
+
+    /// Whether the run ending at `end` (exclusive) ends in a thinking
+    /// block still being streamed into.
+    pub(crate) fn trailing_thinking_active(&self, end: usize) -> bool {
+        matches!(self.messages.get(end - 1), Some(Message::Thinking(_)))
+            && self.thinking_active(end - 1)
+    }
+
+    /// Whether the group keyed by `key` renders expanded. Nested
+    /// (codemode-children) groups auto-expand while any member runs and
+    /// auto-collapse when they settle; compact root groups never
+    /// auto-expand — their header tracks the live count instead, and
+    /// only a pin (a header click) opens them. `running` feeds only the
+    /// nested auto policy; root keys ignore it.
     pub(crate) fn group_expanded(&self, key: &str, running: bool) -> bool {
         match self.group_pins.iter().find(|(k, _)| k == key) {
             Some(&(_, pinned)) => pinned,
-            None => running,
+            None => running && key.starts_with("child:"),
         }
     }
 
     /// Whether the tool message at `idx` renders: members of a collapsed
     /// group are hidden behind its header. Nested children always group
     /// by parent; root tools group by run only when `grouped_roots` is
-    /// set (compact display), mirroring the render walk.
+    /// set (compact display), mirroring the render walk. Always-card
+    /// kinds (`task`, root `Edit`) never group, so they always render.
     pub(crate) fn tool_group_expanded(&self, idx: usize, grouped_roots: bool) -> bool {
         match self.messages.get(idx) {
+            Some(m) if m.is_always_card() => true,
             Some(Message::Tool {
                 parent_call_id: Some(parent),
                 ..
@@ -300,19 +371,18 @@ impl Conversation {
                     start -= 1;
                 }
                 let key = format!("child:{parent}");
-                self.group_expanded(&key, self.group_running(start))
+                self.group_expanded(&key, self.group_running(start, grouped_roots))
             }
             Some(Message::Tool {
                 parent_call_id: None,
                 ..
             }) if grouped_roots => {
-                // The root group spans from the run's first root tool to
-                // the run's end; nested child runs at its head form their
-                // own groups.
+                // The root group spans from the run's first member — a
+                // root tool or a leading thinking block — to the run's
+                // end; nested child runs at its head form their own
+                // groups.
                 let mut start = idx;
-                while start > 0
-                    && matches!(self.messages.get(start - 1), Some(Message::Tool { .. }))
-                {
+                while start > 0 && self.messages.get(start - 1).is_some_and(joins_compact_run) {
                     start -= 1;
                 }
                 while let Some(Message::Tool {
@@ -323,7 +393,7 @@ impl Conversation {
                     start = self.child_run_end(start, p);
                 }
                 match self.group_key(start) {
-                    Some(key) => self.group_expanded(&key, self.group_running(start)),
+                    Some(key) => self.group_expanded(&key, false),
                     None => true,
                 }
             }
@@ -340,50 +410,17 @@ impl Conversation {
         }
     }
 
-    /// Key of the group a newly added running tool restarts, when every
-    /// prior counted member had settled (the settled → running transition
-    /// that clears a pin). `id` identifies the new member to exclude.
-    fn restarted_group_key(&self, id: &str, parent_call_id: &Option<String>) -> Option<String> {
-        match parent_call_id.as_deref() {
-            Some(parent) => {
-                let restarted = !self.messages.iter().any(|m| {
-                    matches!(m, Message::Tool { id: mid, parent_call_id: Some(p), state: CallState::Running, .. }
-                        if p == parent && mid != id)
-                });
-                restarted.then(|| format!("child:{parent}"))
-            }
-            None => {
-                // Root runs only grow at their tail; walk back to the
-                // run's first root tool.
-                let mut start = self.messages.len() - 1;
-                while start > 0 && matches!(self.messages[start - 1], Message::Tool { .. }) {
-                    start -= 1;
-                }
-                let prior = &self.messages[start..self.messages.len() - 1];
-                let settled = !prior.iter().any(|m| {
-                    matches!(
-                        m,
-                        Message::Tool {
-                            parent_call_id: None,
-                            state: CallState::Running,
-                            ..
-                        }
-                    )
-                });
-                settled
-                    .then(|| {
-                        prior.iter().find_map(|m| match m {
-                            Message::Tool {
-                                id,
-                                parent_call_id: None,
-                                ..
-                            } => Some(format!("root:{id}")),
-                            _ => None,
-                        })
-                    })
-                    .flatten()
-            }
-        }
+    /// Key of the nested group a newly added running child restarts,
+    /// when every prior counted child had settled (the settled →
+    /// running transition that clears a nested pin; root pins are
+    /// manual choices and never clear). `id` identifies the new child
+    /// to exclude.
+    fn restarted_child_group_key(&self, id: &str, parent: &str) -> Option<String> {
+        let restarted = !self.messages.iter().any(|m| {
+            matches!(m, Message::Tool { id: mid, parent_call_id: Some(p), state: CallState::Running, .. }
+                if p == parent && mid != id)
+        });
+        restarted.then(|| format!("child:{parent}"))
     }
 
     /// Merge a provider event into the message list. Non-message events
@@ -565,11 +602,14 @@ impl Conversation {
                             let card = self.messages.pop().expect("card was just pushed");
                             self.messages.insert(subtree_end, card);
                         }
-                        // A group restarting after every counted member had
-                        // settled drops its pin: the pin described the
-                        // previous run's preferred state.
+                        // A nested group restarting after every counted
+                        // child had settled drops its pin: the pin
+                        // described the previous run's preferred state.
+                        // Root groups never auto-expand, so their pins
+                        // are purely manual and survive restarts.
                         if state == CallState::Running
-                            && let Some(key) = self.restarted_group_key(&id, &parent_call_id)
+                            && let Some(parent) = parent_call_id.as_deref()
+                            && let Some(key) = self.restarted_child_group_key(&id, parent)
                         {
                             self.group_pins.retain(|(k, _)| k != &key);
                         }
@@ -1166,9 +1206,9 @@ mod tests {
         assert!(conv.group_expanded(key, true));
     }
 
-    /// Root groups pin on the run's first root tool id; a run that keeps
-    /// streaming (settled member then a new running root tool) keeps its
-    /// pin, and a fully settled run's pin clears when it restarts.
+    /// Root groups pin on the run's first root tool id; running never
+    /// expands them (only a pin opens a root group), and a root pin is
+    /// a manual choice that survives a restart of the run.
     #[test]
     fn root_group_pins_key_on_the_runs_first_root_tool() {
         let mut conv = Conversation::new();
@@ -1189,16 +1229,94 @@ mod tests {
         conv.apply(bash("r2", CallState::Running));
         let key = conv.group_key(0).expect("root group key");
         assert_eq!(key, "root:r1");
-        assert!(conv.group_running(0), "r2 still runs");
-        // Toggling the auto-expanded running group pins it collapsed.
+        assert!(conv.group_running(0, true), "r2 still runs");
+        // Running never expands a root group: the header tracks the
+        // live count instead.
+        assert!(
+            !conv.group_expanded(&key, true),
+            "a running root group stays collapsed"
+        );
+        // A header click pins it open.
         conv.toggle_group(&key, true);
-        assert_eq!(conv.group_pins, [(key.clone(), false)]);
-        // Settle r2, then restart the run with r3: the pin clears.
+        assert_eq!(conv.group_pins, [(key.clone(), true)]);
+        // Settle r2, then restart the run with r3: the manual pin
+        // survives.
         conv.apply(bash("r2", CallState::Complete));
         conv.apply(bash("r3", CallState::Running));
+        assert_eq!(
+            conv.group_pins,
+            [(key, true)],
+            "a root pin survives the run restarting"
+        );
+    }
+
+    /// Compact root groups span their thinking members: the run keys on
+    /// its first root tool, goes live while a trailing thinking block
+    /// streams, and cards-mode grouping ignores thinking entirely.
+    #[test]
+    fn compact_root_groups_span_thinking_members() {
+        let bash = |id: &str, state: CallState| {
+            AgentEvent::ToolCall(ToolCallData {
+                parent_call_id: None,
+                id: id.into(),
+                kind: ToolKind::Bash {
+                    cmd: "echo hi".into(),
+                },
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+                state,
+            })
+        };
+        let mut conv = Conversation::new();
+        conv.apply(AgentEvent::ReasoningDelta("first".into()));
+        conv.apply(bash("r1", CallState::Complete));
+        assert_eq!(
+            conv.group_key(0).as_deref(),
+            Some("root:r1"),
+            "a thinking-led run keys on its first tool"
+        );
         assert!(
-            !conv.group_pins.iter().any(|(k, _)| *k == key),
-            "the restarted root run drops its pin"
+            !conv.group_running(0, true),
+            "a settled run with settled thinking is not live"
+        );
+
+        // A new thinking block joins the run and keeps it live.
+        conv.apply(AgentEvent::ReasoningDelta("next".into()));
+        assert!(
+            conv.group_running(0, true),
+            "a trailing thinking block still streaming keeps the run live"
+        );
+        assert!(
+            !conv.group_running(0, false),
+            "cards-mode grouping ignores thinking members"
+        );
+    }
+
+    /// Opening a new thinking block after a settled root run keeps the
+    /// run's pin: root pins are manual choices, and thinking joining
+    /// the run only lights the header's live cue.
+    #[test]
+    fn new_thinking_block_keeps_a_settled_root_pin() {
+        let mut conv = Conversation::new();
+        conv.apply(AgentEvent::ToolCall(ToolCallData {
+            parent_call_id: None,
+            id: "r1".into(),
+            kind: ToolKind::Bash {
+                cmd: "echo hi".into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Complete,
+        }));
+        conv.toggle_group("root:r1", false);
+        assert_eq!(conv.group_pins, [("root:r1".to_owned(), true)]);
+        conv.apply(AgentEvent::ReasoningDelta("more".into()));
+        assert_eq!(
+            conv.group_pins,
+            [("root:r1".to_owned(), true)],
+            "a thinking block joining the run leaves the pin alone"
         );
     }
 }

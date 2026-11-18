@@ -5,6 +5,7 @@ use crate::tui::text::{Line, Span};
 
 use super::super::scrollback::SharedLines;
 use super::super::theme;
+use super::GroupTally;
 use super::tools::{seg_color, tool_label, tool_summary};
 use super::wrap::{pad_row, spans_width, wrap_spans, wrap_text};
 use crate::markdown::Emphasis;
@@ -240,15 +241,15 @@ pub(super) fn thinking_header(active: bool, expanded: bool, tick: usize) -> Vec<
     ])]
 }
 
-/// Header row of a compact tool group: live counters (nonzero counts
-/// only) behind a spinner while any member runs, a settled sigil once
-/// they finish, and a chevron tracking the group's expansion. Mirrors
-/// [`thinking_header`]; nested groups indent two spaces under their
-/// code parent's card.
+/// Header row of a compact tool group: per-kind counters (nonzero
+/// counts only) for tools and absorbed thinking blocks, failures kept
+/// separate (failed members render as full cards), a live cue — the
+/// number of running members — while any runs or a trailing thinking
+/// block streams, and a chevron tracking the group's expansion.
+/// Mirrors [`thinking_header`]; nested groups indent two spaces under
+/// their code parent's card.
 pub(super) fn tool_group_header(
-    running: usize,
-    complete: usize,
-    failed: usize,
+    tally: &GroupTally,
     expanded: bool,
     active: bool,
     tick: usize,
@@ -261,23 +262,42 @@ pub(super) fn tool_group_header(
         '⚙'
     };
     let mut label = String::new();
-    if running > 0 {
-        label.push_str(&format!(
-            "{running} tool{} running",
-            if running == 1 { "" } else { "s" }
-        ));
-    }
-    if complete > 0 {
+    for (count, one, many) in [
+        (tally.reads, "read", "reads"),
+        (tally.greps, "grep", "greps"),
+        (tally.commands, "command", "commands"),
+        (tally.edits, "edit", "edits"),
+        (tally.scripts, "script", "scripts"),
+        (tally.tasks, "task", "tasks"),
+        (tally.tools, "tool", "tools"),
+        (tally.thoughts, "thought", "thoughts"),
+    ] {
+        if count == 0 {
+            continue;
+        }
         if !label.is_empty() {
             label.push_str(" · ");
         }
-        label.push_str(&format!("{complete} complete"));
+        label.push_str(&format!("{count} {}", if count == 1 { one } else { many }));
     }
-    if failed > 0 {
+    if tally.failed > 0 {
         if !label.is_empty() {
             label.push_str(" · ");
         }
-        label.push_str(&format!("{failed} failed"));
+        label.push_str(&format!("{} failed", tally.failed));
+    }
+    if active {
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        // The live cue counts running members; a trailing streaming
+        // thinking block (no tool running yet) falls back to the bare
+        // cue.
+        if tally.running > 0 {
+            label.push_str(&format!("{} running", tally.running));
+        } else {
+            label.push_str("running");
+        }
     }
     if label.is_empty() {
         label.push_str("tools");
@@ -613,6 +633,65 @@ mod tests {
         );
         let plain: String = fits.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!plain.contains('…'), "no marker when it fits: {plain:?}");
+    }
+
+    /// The group header labels member counts by kind (singular vs
+    /// plural, `·`-joined in a fixed order), keeps failures separate,
+    /// appends the running cue to live groups, and falls back to a bare
+    /// label when nothing counted.
+    #[test]
+    fn tool_group_header_labels_counts_by_kind() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let text = |tally: &GroupTally, active: bool| -> String {
+            tool_group_header(tally, false, active, 0, false)
+                .into_iter()
+                .next()
+                .unwrap()
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+
+        let tally = GroupTally {
+            reads: 4,
+            commands: 3,
+            thoughts: 5,
+            ..GroupTally::default()
+        };
+        assert_eq!(text(&tally, false), "⚙ 4 reads · 3 commands · 5 thoughts ▸");
+
+        let tally = GroupTally {
+            greps: 1,
+            failed: 2,
+            ..GroupTally::default()
+        };
+        assert_eq!(text(&tally, false), "⚙ 1 grep · 2 failed ▸");
+
+        let tally = GroupTally {
+            reads: 1,
+            running: 1,
+            ..GroupTally::default()
+        };
+        let live = text(&tally, true);
+        assert!(
+            live.contains("1 read 1 running"),
+            "live cue counts: {live:?}"
+        );
+        assert!(
+            !live.contains('⚙'),
+            "the spinner replaces the settled sigil while live: {live:?}"
+        );
+
+        // A live cue with no tool running (a trailing streaming
+        // thinking block) falls back to the bare word.
+        let tally = GroupTally {
+            thoughts: 1,
+            ..GroupTally::default()
+        };
+        assert_eq!(text(&tally, true), "⠋ 1 thought running ▸");
+
+        assert_eq!(text(&GroupTally::default(), false), "⚙ tools ▸");
     }
 
     /// W1: a notice is one muted line with a tone-colored prefix glyph.
