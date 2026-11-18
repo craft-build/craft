@@ -1,0 +1,28 @@
+[book]
+title = "Craft Docs"
+authors = ["Craft contributors"]
+language = "en"
+src = "src"
+description = "Documentation for crafty, Craft's terminal coding agent — a context-thrifty CLI harness written in Rust on the animist stack."
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/craft-build/craft"
+no-section-label = true
+additional-css = ["css/custom.css"]
+additional-js = ["js/heading-anchors.js"]
+
+[output.html.fold]
+enable = true
+level = 0
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 2
