@@ -47,7 +47,7 @@ fn picker_row(
 // The slt picker sheets
 // ─────────────────────────────────────────────────────────────────────────
 
-use super::{SheetRow, centered_slt, row_spans, sheet_slt};
+use super::{SheetRow, centered_slt, row_spans, sheet_slt, visible_rows, window_start};
 
 /// The bold sheet title row (one column in from the box edge).
 pub(super) fn title_span(title: &str) -> Span<'static> {
@@ -114,6 +114,8 @@ pub(super) fn render_thinking_picker_slt(ui: &mut slt::Context, app: &App) {
     sheet_slt(ui, x, y, w, h, rows);
 }
 
+const SESSIONS_MAX_ROWS: usize = 8;
+
 /// `/sessions` on the slt frame.
 pub(super) fn render_sessions_slt(ui: &mut slt::Context, app: &App) {
     let t = theme::current();
@@ -123,24 +125,28 @@ pub(super) fn render_sessions_slt(ui: &mut slt::Context, app: &App) {
     };
     let (entries, selected) = (entries, *selected);
     let (sw, sh) = (ui.width(), ui.height());
-    let n = entries.len().clamp(1, 8) as u32;
+    let empty = entries.is_empty();
+    let visible = visible_rows(entries.len(), SESSIONS_MAX_ROWS, sh);
+    let start = window_start(selected, entries.len(), visible);
     let width = 60.min(sw.saturating_sub(4));
-    let (x, y, w, h) = centered_slt(width, n + 4, sw, sh);
+    let (x, y, w, h) = centered_slt(width, visible as u32 + 4, sw, sh);
     let content_w = w.saturating_sub(2) as usize;
-    let spans: Vec<Vec<Span<'static>>> = if entries.is_empty() {
+    let spans: Vec<Vec<Span<'static>>> = if empty {
         vec![vec![Span::styled(
             " no sessions yet".to_string(),
             Style::default().fg(t.text_tertiary),
         )]]
     } else {
-        entries
+        entries[start..start + visible]
             .iter()
             .map(|entry| {
                 let updated = format!("{} ", entry.updated);
                 let title_w = content_w.saturating_sub(updated.chars().count() + 1);
                 let mut title: String = entry.title.chars().take(title_w).collect();
                 if entry.title.chars().count() > title_w && title_w > 1 {
-                    title.truncate(title_w - 1);
+                    // Byte-truncate at the last full char so the ellipsis fits.
+                    let bytes: usize = title.chars().map(char::len_utf8).take(title_w - 1).sum();
+                    title.truncate(bytes);
                     title.push('…');
                 }
                 let title = format!(" {title}");
@@ -153,11 +159,7 @@ pub(super) fn render_sessions_slt(ui: &mut slt::Context, app: &App) {
             })
             .collect()
     };
-    let selected = if entries.is_empty() {
-        usize::MAX
-    } else {
-        selected
-    };
+    let selected = if empty { usize::MAX } else { selected - start };
     let mut rows = vec![SheetRow {
         dx: 1,
         dy: 1,
@@ -171,6 +173,8 @@ pub(super) fn render_sessions_slt(ui: &mut slt::Context, app: &App) {
     sheet_slt(ui, x, y, w, h, rows);
 }
 
+const TASK_PICKER_MAX_ROWS: usize = 11; // the main chat + ten task chats
+
 /// Ctrl-N task-chat picker on the slt frame.
 pub(super) fn render_task_picker_slt(ui: &mut slt::Context, app: &App) {
     let t = theme::current();
@@ -181,9 +185,11 @@ pub(super) fn render_task_picker_slt(ui: &mut slt::Context, app: &App) {
     let selected = *selected;
     let active = app.active_task.map_or(0, |i| i + 1);
     let (sw, sh) = (ui.width(), ui.height());
-    let n = app.task_chats.len().clamp(1, 10) as u32 + 1;
+    let total = 1 + app.task_chats.len();
+    let visible = visible_rows(total, TASK_PICKER_MAX_ROWS, sh);
+    let start = window_start(selected, total, visible);
     let width = 60.min(sw.saturating_sub(4));
-    let (x, y, w, h) = centered_slt(width, n + 4, sw, sh);
+    let (x, y, w, h) = centered_slt(width, visible as u32 + 4, sw, sh);
     let content_w = w.saturating_sub(2) as usize;
     let mut all_rows: Vec<Vec<Span<'static>>> = vec![picker_row(
         "Main chat",
@@ -205,13 +211,24 @@ pub(super) fn render_task_picker_slt(ui: &mut slt::Context, app: &App) {
         dy: 1,
         spans: vec![title_span("Task chats — enter to open, esc to close")],
     }];
-    rows.extend(all_rows.iter().enumerate().map(|(i, spans)| SheetRow {
-        dx: 1,
-        dy: 2 + i as u32,
-        spans: row_spans(spans.clone(), i == selected, content_w),
-    }));
+    rows.extend(
+        all_rows[start..start + visible]
+            .iter()
+            .enumerate()
+            .map(|(i, spans)| SheetRow {
+                dx: 1,
+                dy: 2 + i as u32,
+                spans: row_spans(
+                    spans.clone(),
+                    i == selected.saturating_sub(start),
+                    content_w,
+                ),
+            }),
+    );
     sheet_slt(ui, x, y, w, h, rows);
 }
+
+const RECIPES_MAX_ROWS: usize = 8;
 
 /// `/recipe` picker on the slt frame.
 pub(super) fn render_recipes_slt(ui: &mut slt::Context, app: &App) {
@@ -222,17 +239,19 @@ pub(super) fn render_recipes_slt(ui: &mut slt::Context, app: &App) {
     };
     let (entries, selected) = (entries, *selected);
     let (sw, sh) = (ui.width(), ui.height());
-    let n = entries.len().clamp(1, 8) as u32;
+    let empty = entries.is_empty();
+    let visible = visible_rows(entries.len(), RECIPES_MAX_ROWS, sh);
+    let start = window_start(selected, entries.len(), visible);
     let width = 60.min(sw.saturating_sub(4));
-    let (x, y, w, h) = centered_slt(width, n + 4, sw, sh);
+    let (x, y, w, h) = centered_slt(width, visible as u32 + 4, sw, sh);
     let content_w = w.saturating_sub(2) as usize;
-    let spans: Vec<Vec<Span<'static>>> = if entries.is_empty() {
+    let spans: Vec<Vec<Span<'static>>> = if empty {
         vec![vec![Span::styled(
             " no recipes found (.craft/recipes/*.yaml)".to_string(),
             Style::default().fg(t.text_tertiary),
         )]]
     } else {
-        entries
+        entries[start..start + visible]
             .iter()
             .map(|entry| {
                 let params = if entry.params.is_empty() {
@@ -244,7 +263,9 @@ pub(super) fn render_recipes_slt(ui: &mut slt::Context, app: &App) {
                 let name_w = content_w.saturating_sub(hint.chars().count() + 1);
                 let mut name: String = entry.name.chars().take(name_w).collect();
                 if entry.name.chars().count() > name_w && name_w > 1 {
-                    name.truncate(name_w - 1);
+                    // Byte-truncate at the last full char so the ellipsis fits.
+                    let bytes: usize = name.chars().map(char::len_utf8).take(name_w - 1).sum();
+                    name.truncate(bytes);
                     name.push('…');
                 }
                 let name = format!(" {name}");
@@ -257,11 +278,7 @@ pub(super) fn render_recipes_slt(ui: &mut slt::Context, app: &App) {
             })
             .collect()
     };
-    let selected = if entries.is_empty() {
-        usize::MAX
-    } else {
-        selected
-    };
+    let selected = if empty { usize::MAX } else { selected - start };
     let mut rows = vec![SheetRow {
         dx: 1,
         dy: 1,
@@ -330,4 +347,131 @@ pub(super) fn render_theme_picker_slt(ui: &mut slt::Context, app: &App) {
             }),
     );
     sheet_slt(ui, x, y, w, h, rows);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TaskChat;
+    use crate::tui::modals::{Modal, RecipeEntry, SessionEntry};
+
+    fn lines(render: impl FnOnce(&mut slt::Context)) -> Vec<String> {
+        let mut tb = slt::TestBackend::new(80, 24);
+        tb.render(|ui| render(ui));
+        (0..tb.height()).map(|y| tb.line(y)).collect()
+    }
+
+    fn text(render: impl FnOnce(&mut slt::Context)) -> String {
+        lines(render).join("\n")
+    }
+
+    fn sessions_app(n: usize, selected: usize) -> App {
+        let mut app = App::new();
+        app.overlays.modal = Modal::Sessions {
+            entries: (0..n)
+                .map(|i| SessionEntry {
+                    id: format!("id{i}"),
+                    title: format!("s{i:02}"),
+                    updated: "2h ago".into(),
+                })
+                .collect(),
+            selected,
+        };
+        app
+    }
+
+    /// A long session list renders one bounded window, not every entry.
+    #[test]
+    fn sessions_sheet_windows_long_lists() {
+        let app = sessions_app(30, 0);
+        let text = text(|ui| render_sessions_slt(ui, &app));
+        assert!(text.contains("s00"), "{text}");
+        assert!(!text.contains("s08"), "{text}");
+    }
+
+    /// The window scrolls to keep the selection visible.
+    #[test]
+    fn sessions_sheet_scrolls_to_the_selection() {
+        let app = sessions_app(30, 29);
+        let text = text(|ui| render_sessions_slt(ui, &app));
+        assert!(text.contains("s22"), "{text}");
+        assert!(text.contains("s29"), "{text}");
+        assert!(!text.contains("s00"), "{text}");
+    }
+
+    /// Entry rows stay within the sheet (the accent bar's extent), never
+    /// painted past its bottom edge.
+    #[test]
+    fn sessions_sheet_rows_stay_inside_the_box() {
+        let app = sessions_app(30, 0);
+        let rows = lines(|ui| render_sessions_slt(ui, &app));
+        let bar_rows: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains('▎'))
+            .map(|(y, _)| y)
+            .collect();
+        let (top, bottom) = (*bar_rows.first().unwrap(), *bar_rows.last().unwrap());
+        for (y, line) in rows.iter().enumerate() {
+            if ["s0", "s1", "s2"].iter().any(|t| line.contains(t)) {
+                assert!(y >= top && y <= bottom, "row {y} outside the sheet: {line}");
+            }
+        }
+    }
+
+    /// Long multibyte titles truncate on a char boundary instead of
+    /// panicking on `String::truncate` (byte-indexed cut).
+    #[test]
+    fn sessions_sheet_truncates_multibyte_titles() {
+        let mut app = App::new();
+        app.overlays.modal = Modal::Sessions {
+            entries: vec![SessionEntry {
+                id: "id".into(),
+                title: "会話".repeat(60),
+                updated: "2h ago".into(),
+            }],
+            selected: 0,
+        };
+        let text = text(|ui| render_sessions_slt(ui, &app));
+        assert!(text.contains("会話"), "{text}");
+    }
+
+    /// The task picker windows main + task chats to its row cap and
+    /// scrolls to the selection.
+    #[test]
+    fn task_picker_windows_long_lists() {
+        let mut app = App::new();
+        for i in 0..15 {
+            app.task_chats
+                .push(TaskChat::new(format!("t{i}"), format!("task {i:02}"), "m"));
+        }
+        app.overlays.modal = Modal::TaskPicker { selected: 0 };
+        let top = text(|ui| render_task_picker_slt(ui, &app));
+        assert!(top.contains("Main chat"), "{top}");
+        assert!(top.contains("task 09"), "{top}");
+        assert!(!top.contains("task 10"), "{top}");
+
+        app.overlays.modal = Modal::TaskPicker { selected: 15 };
+        let bottom = text(|ui| render_task_picker_slt(ui, &app));
+        assert!(bottom.contains("task 14"), "{bottom}");
+        assert!(!bottom.contains("Main chat"), "{bottom}");
+    }
+
+    /// The recipe picker windows long lists to its row cap.
+    #[test]
+    fn recipes_sheet_windows_long_lists() {
+        let mut app = App::new();
+        app.overlays.modal = Modal::Recipes {
+            entries: (0..20)
+                .map(|i| RecipeEntry {
+                    name: format!("recipe {i:02}"),
+                    params: vec![],
+                })
+                .collect(),
+            selected: 19,
+        };
+        let text = text(|ui| render_recipes_slt(ui, &app));
+        assert!(text.contains("recipe 19"), "{text}");
+        assert!(!text.contains("recipe 00"), "{text}");
+    }
 }

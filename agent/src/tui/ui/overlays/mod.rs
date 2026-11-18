@@ -50,6 +50,21 @@ pub(super) struct SheetRow {
     pub spans: Vec<Span<'static>>,
 }
 
+/// Rows a picker sheet shows: its own cap, bounded by the terminal
+/// height minus the two rows the box reserves above the content.
+pub(super) fn visible_rows(len: usize, max: usize, term_h: u32) -> usize {
+    len.clamp(1, max.max(1))
+        .min(term_h.saturating_sub(2).max(1) as usize)
+}
+
+/// Window start that keeps `selected` on screen, pinned to the top until
+/// the selection reaches the bottom edge.
+pub(super) fn window_start(selected: usize, len: usize, visible: usize) -> usize {
+    selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(len.saturating_sub(visible))
+}
+
 /// A full-screen `bg_sunken` fill that erases the UI beneath. Painted as
 /// a trailing draw region — the transcript's deferred painters run after
 /// every container bg, so container-based fills cannot cover them.
@@ -255,4 +270,38 @@ pub(super) fn clip_spans<'a>(spans: Vec<Span<'a>>, w: usize) -> Vec<Span<'a>> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The row count binds to the list length, the sheet cap, and the
+    /// terminal height (the box clamps to `sh`, so content must fit in
+    /// `sh - 2` rows), and never drops below one row.
+    #[test]
+    fn visible_rows_binds_to_length_cap_and_terminal() {
+        assert_eq!(visible_rows(0, 8, 24), 1);
+        assert_eq!(visible_rows(5, 8, 24), 5);
+        assert_eq!(visible_rows(30, 8, 24), 8);
+        assert_eq!(visible_rows(30, 8, 5), 3);
+        assert_eq!(visible_rows(30, 8, 2), 1);
+        assert_eq!(visible_rows(30, 8, 1), 1);
+        assert_eq!(visible_rows(30, 0, 24), 1);
+    }
+
+    /// The window starts at the top until the selection reaches the
+    /// bottom edge, and clamps to the last full window.
+    #[test]
+    fn window_start_keeps_the_selection_visible() {
+        assert_eq!(window_start(0, 30, 8), 0);
+        assert_eq!(window_start(7, 30, 8), 0);
+        assert_eq!(window_start(8, 30, 8), 1);
+        assert_eq!(window_start(29, 30, 8), 22);
+        // Selection beyond the list: the last full window.
+        assert_eq!(window_start(99, 30, 8), 22);
+        // Lists shorter than the window sit at the top.
+        assert_eq!(window_start(3, 5, 8), 0);
+        assert_eq!(window_start(1, 1, 1), 0);
+    }
 }

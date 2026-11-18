@@ -7,7 +7,7 @@ use crate::tui::modals::Modal;
 use crate::tui::style::{Color, Style};
 use crate::tui::text::Span;
 
-use super::{SheetRow, centered_slt, row_spans, sheet_slt};
+use super::{SheetRow, centered_slt, row_spans, sheet_slt, visible_rows, window_start};
 
 /// `/mcp` on the slt frame.
 pub(super) fn render_mcp_slt(ui: &mut slt::Context, app: &App) {
@@ -82,17 +82,18 @@ fn render_mcp_sheet_slt(
     }
 
     let width = 78.min(sw.saturating_sub(4));
-    // 16 not 10: an expanded resource list adds rows under its server.
-    let n = all_rows.len().clamp(1, 16) as u32;
-    let (x, y, w, h) = centered_slt(width, n + 4, sw, sh);
     if all_rows.is_empty() {
         all_rows.push(vec![Span::styled(
             " no MCP servers configured".to_string(),
             Style::default().fg(t.text_tertiary),
         )]);
     }
-    let content_w = w.saturating_sub(2) as usize;
+    // 16 not 10: an expanded resource list adds rows under its server.
+    let visible = visible_rows(all_rows.len(), 16, sh);
     let sel_row = header_rows.get(selected).copied().unwrap_or(usize::MAX);
+    let start = window_start(sel_row, all_rows.len(), visible);
+    let (x, y, w, h) = centered_slt(width, visible as u32 + 4, sw, sh);
+    let content_w = w.saturating_sub(2) as usize;
     let mut rows = vec![SheetRow {
         dx: 1,
         dy: 1,
@@ -100,11 +101,16 @@ fn render_mcp_sheet_slt(
             "MCP servers — t toggle, r reconnect, enter resources, esc close",
         )],
     }];
-    rows.extend(all_rows.iter().enumerate().map(|(i, spans)| SheetRow {
-        dx: 1,
-        dy: 2 + i as u32,
-        spans: row_spans(spans.clone(), i == sel_row, content_w),
-    }));
+    rows.extend(
+        all_rows[start..start + visible]
+            .iter()
+            .enumerate()
+            .map(|(i, spans)| SheetRow {
+                dx: 1,
+                dy: 2 + i as u32,
+                spans: row_spans(spans.clone(), i == sel_row.saturating_sub(start), content_w),
+            }),
+    );
     sheet_slt(ui, x, y, w, h, rows);
 }
 /// Status label and theme color for one server row: Running rides success,
@@ -238,5 +244,26 @@ mod tests {
     fn mcp_sheet_renders_an_empty_placeholder() {
         let reader = McpSnapshotReader::empty();
         assert!(sheet_text(&reader, 0, None).contains("no MCP servers configured"));
+    }
+
+    /// More servers than the sheet's row cap: a bounded window renders,
+    /// scrolled to the selection, instead of rows past the sheet's edge.
+    #[test]
+    fn mcp_sheet_windows_long_server_lists() {
+        let reader = McpSnapshotReader::from_snapshot(McpSnapshot {
+            infos: (0..20)
+                .map(|i| server_info(&format!("srv{i:02}"), McpServerStatus::Running))
+                .collect(),
+            prompts: Vec::new(),
+            resources: Vec::new(),
+            generation: 1,
+        });
+        let top = sheet_text(&reader, 0, None);
+        assert!(top.contains("srv00"), "{top}");
+        assert!(!top.contains("srv16"), "{top}");
+
+        let bottom = sheet_text(&reader, 19, None);
+        assert!(bottom.contains("srv19"), "{bottom}");
+        assert!(!bottom.contains("srv00"), "{bottom}");
     }
 }
