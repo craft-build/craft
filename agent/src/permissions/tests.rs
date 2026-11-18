@@ -499,6 +499,40 @@ fn write_back_round_trips_through_the_parser() {
 }
 
 #[test]
+fn auto_review_resolves_project_over_global_and_defaults_off() {
+    fn parse(text: &str) -> PermissionsFileConfig {
+        PermissionsFileConfig::from_statement(&crate::bml::parse(text).unwrap())
+    }
+
+    let absent = build_permissions(
+        PermissionsFileConfig::default(),
+        PermissionsFileConfig::default(),
+    );
+    assert!(!absent.auto_review, "no auto_review key anywhere = off");
+
+    // Global spelling: a `permissions { auto_review = true }` block inside
+    // the merged global doc.
+    let doc = crate::bml::parse("permissions { auto_review = true }").unwrap();
+    let global_block =
+        PermissionsFileConfig::from_statement(doc.get_child("permissions", &[]).unwrap());
+    let global_on = build_permissions(global_block, PermissionsFileConfig::default());
+    assert!(global_on.auto_review, "global permissions block sets it");
+
+    let project_wins = build_permissions(parse("auto_review = true"), parse("auto_review = false"));
+    assert!(
+        !project_wins.auto_review,
+        "an explicit project value overrides the global one"
+    );
+
+    let project_on = build_permissions(
+        PermissionsFileConfig::default(),
+        parse("auto_review = true"),
+    );
+    let mgr = PermissionManager::new(project_on, std::env::temp_dir());
+    assert!(mgr.is_auto_review(), "the engine seeds from the config");
+}
+
+#[test]
 fn parse_keys_wire_names_as_mcp_tools() {
     assert_eq!(
         ToolKey::parse("github__create_issue"),

@@ -424,6 +424,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_enabled_auto_review_allows_an_ask_into_execution() {
+        // Same posture as the flag test above, but seeded from
+        // `permissions { auto_review = true }` through PermissionsConfig:
+        // the engine starts with review on and the installed reviewer
+        // answers the bash ask.
+        // SAFETY: single process-wide test knob, same as the bash tool tests.
+        unsafe { std::env::set_var("CRAFT_SANDBOX", "off") };
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig {
+                auto_review: true,
+                ..Default::default()
+            },
+            tmp.path().to_path_buf(),
+        ));
+        assert!(permissions.is_auto_review());
+        let (reviewer, _calls) = allow_reviewer();
+        let marker = tmp.path().join("config-reviewed-marker");
+        let model = mock(vec![
+            crate::testing::tool_turn(vec![tool_event(
+                "t1",
+                "bash",
+                serde_json::json!({"command": format!("touch {}", marker.display())}),
+            )]),
+            crate::testing::text_turn("done"),
+        ]);
+        let (events, _) = gated_turn(model, &tmp, permissions, Some(reviewer)).await;
+        assert!(
+            marker.exists(),
+            "a config-enabled reviewer verdict must let the call execute: {events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn batch_children_go_through_the_headless_gate() {
         let tmp = tempfile::tempdir().unwrap();
         let permissions = manager(tmp.path());

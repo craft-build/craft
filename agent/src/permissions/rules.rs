@@ -212,6 +212,7 @@ enum ScopeSet {
 #[derive(Default)]
 pub(super) struct PermissionsFileConfig {
     default: Option<DefaultEffect>,
+    auto_review: Option<bool>,
     tools: HashMap<String, ToolPermissions>,
     mcp_rules: Vec<PermissionRule>,
     mcp_defaults: HashMap<ToolKey, DefaultEffect>,
@@ -238,6 +239,11 @@ impl PermissionsFileConfig {
                         .is_some_and(|b| *b)
                     {
                         out.default = Some(DefaultEffect::Allow);
+                    }
+                }
+                "auto_review" => {
+                    if let Some(value) = child.get_value().and_then(|v| v.as_bool()) {
+                        out.auto_review = Some(*value);
                     }
                 }
                 "mcp" => {
@@ -407,6 +413,7 @@ pub(super) fn build_permissions(
         Some(d) => d,
         None => global_default,
     };
+    let auto_review = project.auto_review.or(global.auto_review).unwrap_or(false);
 
     let mut tool_defaults = HashMap::new();
     for (tool, perms) in &global.tools {
@@ -471,6 +478,7 @@ pub(super) fn build_permissions(
     }
     PermissionsConfig {
         default,
+        auto_review,
         tool_defaults,
         rules,
     }

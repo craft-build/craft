@@ -22,6 +22,7 @@ craft [OPTIONS] [PROMPT]
 | `-m`, `--model <provider/model>` | model choice; ids the catalog doesn't list stay usable |
 | `--mode <build\|plan>` | seed a fresh session's mode |
 | `--permission-mode <default\|plan\|bypassPermissions>` | permission posture (`acceptEdits` rejected as unsupported) |
+| `--codemode <off\|alongside\|exclusive>` | Python code-execution mode for this run (default `off`; see [Configuration](./configuration.md#codemode)) |
 
 In resumed sessions the stored mode wins over `--mode`/`--permission-mode plan` (see [Sessions](./sessions.md#mode-persistence)).
 
@@ -41,7 +42,11 @@ Semantics and accepted name forms: [Permissions & Snapshots](./permissions.md).
 - `--output-format <text|stream-json>` — output shape (stream-json is Claude Code-compatible).
 - `--image <PATH>` — attach an image.
 - `--max-turns <N>` — bound the run.
-- `--system-prompt` — system prompt overrides.
+- `--system-prompt` — replace the agent preamble.
+- `--append-system-prompt <TEXT>` — append to the agent preamble instead of replacing it.
+- `--exit-on-done` — exit after the agent completes (automation workflows).
+- `--verbose` — verbose transcript output (**accepted but not implemented yet**, warned).
+- `--include-partial-messages` — partial streaming messages in SDK output (**accepted but not implemented yet**, warned).
 - `--input-format stream-json` — **not yet implemented** (SDK mode), warned at runtime.
 
 A set of Claude Code SDK compatibility flags is accepted but ignored.
@@ -73,7 +78,7 @@ Manual model declarations can override `supports_thinking`, `requires_thinking`,
 | `craft acp` | Agent Client Protocol server on stdio ([ACP](./acp.md)) |
 | `craft completions <shell>` | shell completions |
 | `craft models` | resolved model catalog |
-| `craft stats [--sessions]` | usage ledger |
+| `craft stats [--sessions\|--codemode]` | usage ledger; `--codemode` summarizes `codemode.jsonl` runs instead of the cost ledger |
 | `craft doctor [--export]` | diagnose and self-heal provider config |
 | `craft update [-y]` / `craft rollback` | digest-pinned self-update / undo one update |
 | `craft prompt [system\|research\|general] [--plan\|--tools\|--names]` | print built-in prompts |

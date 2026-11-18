@@ -187,6 +187,8 @@ pub struct Workspace {
     /// installed by the surface). `bash` reads it at execution time.
     sandbox: crate::sandbox::SandboxPolicyCell,
     codemode: crate::config::CodemodeConfig,
+    bash: crate::config::BashConfig,
+    webfetch: crate::config::WebfetchConfig,
     /// Telemetry context for the `code` tool: the model spec and session
     /// id of the conversation that owns this registry. `None` records
     /// `"unknown"` in codemode telemetry.
@@ -217,6 +219,8 @@ impl Workspace {
             subagents: Arc::new(task::NoSubagents),
             sandbox: Default::default(),
             codemode: Default::default(),
+            bash: Default::default(),
+            webfetch: Default::default(),
             model: None,
             session_id: None,
         })
@@ -229,6 +233,27 @@ impl Workspace {
 
     pub fn codemode(&self) -> crate::config::CodemodeConfig {
         self.codemode
+    }
+
+    /// `bash`/`bash_watch` timeout defaults, read at execution time so
+    /// per-call `timeout` values still win.
+    pub fn with_bash_config(mut self, bash: crate::config::BashConfig) -> Self {
+        self.bash = bash;
+        self
+    }
+
+    pub fn bash_config(&self) -> crate::config::BashConfig {
+        self.bash
+    }
+
+    /// `webfetch` timeout/retry defaults, read at execution time.
+    pub fn with_webfetch_config(mut self, webfetch: crate::config::WebfetchConfig) -> Self {
+        self.webfetch = webfetch;
+        self
+    }
+
+    pub fn webfetch_config(&self) -> crate::config::WebfetchConfig {
+        self.webfetch
     }
 
     /// Codemode telemetry context; taken after the session's model and id
@@ -628,7 +653,7 @@ impl Workspace {
             ))?;
         }
         if allowed.contains(&"webfetch") {
-            registry.register(Webfetch)?;
+            registry.register(Webfetch(self.webfetch_config()))?;
         }
         if allowed.contains(&"websearch") {
             registry.register(Websearch)?;

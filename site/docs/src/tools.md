@@ -14,8 +14,9 @@ Editing stages beside the destination and atomically replaces it, preserving per
 
 ## Execution
 
-- `bash` — with `bash_status`, `bash_watch`, `bash_kill` for background tasks; sandbox profiles; tree-sitter command parsing for [permission scoping](./permissions.md).
+- `bash` — with `bash_status`, `bash_watch`, `bash_kill` for background tasks; sandbox profiles; tree-sitter command parsing for [permission scoping](./permissions.md). Default timeouts come from the `[bash]` config ([Configuration](./configuration.md#tool-timeouts)).
 - `batch` — parallel dispatch of independent tool calls under the parent's budgets.
+- `code` — Python orchestration: one script drives the same tools with real `await`s (codemode). Off by default; enabled per session with `--codemode`/`/codemode` or the `[codemode]` config.
 - `worktree` — linked worktree creation for isolated mutations.
 
 ## Interaction and support
@@ -23,7 +24,7 @@ Editing stages beside the destination and atomically replaces it, preserving per
 - `question` — structured user prompts during a run.
 - `todo_write` — plan-mode todo cards.
 - `view_image` — images as vision input.
-- `webfetch` — SSRF-guarded URL fetching (private/loopback IP and redirect checks).
+- `webfetch` — SSRF-guarded URL fetching (private/loopback IP and redirect checks). Timeout and retry defaults come from the `[webfetch]` config ([Configuration](./configuration.md#tool-timeouts)).
 - `websearch` — web search.
 - `sessions` — session listing.
 - `skill` / `list_skills` — skill discovery and loading.

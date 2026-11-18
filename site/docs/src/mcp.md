@@ -20,8 +20,30 @@ mcp "filesystem" {
 ```bml
 mcp "remote" {
   url = "https://mcp.example.com/mcp"
+  headers = { Authorization = "Bearer ${EXAMPLE_TOKEN}" }
 }
 ```
+
+`headers` (with `${VAR}` expansion) rides every request to the server.
+
+### OAuth
+
+For servers without a registration endpoint, declare a static OAuth client. The callback listener always binds loopback; `callback_port` fixes the redirect URI's port so it can be pre-registered:
+
+```bml
+mcp "acme" {
+  url = "https://mcp.acme.example.com/mcp"
+  oauth {
+    client_id = "acme-client"
+    client_secret = "${ACME_CLIENT_SECRET}"
+    callback_port = 3118               # fixed loopback port
+    callback_path = "/callback"        # default /mcp/oauth/callback
+    callback_hostname = "localhost"    # default 127.0.0.1; loopback only
+  }
+}
+```
+
+Every key except `client_id` is optional; `callback_hostname` must resolve to loopback.
 
 ## Details
 

@@ -88,6 +88,16 @@ impl PermissionPolicy {
     }
 }
 
+/// Whether a headless run installs the auto-review reviewer: the
+/// `-A/--auto-review` flag, or `permissions { auto_review = true }`
+/// seeded onto the engine from config (project value wins over global).
+fn wants_auto_review(
+    policy: PermissionPolicy,
+    permissions: &crate::permissions::PermissionManager,
+) -> bool {
+    policy == PermissionPolicy::AutoReview || permissions.is_auto_review()
+}
+
 /// `--permission-mode` (Claude Code SDK spellings preserved). `default` is
 /// the standard posture; `bypassPermissions` matches `--yolo`; `plan` maps
 /// to plan mode; `acceptEdits` parses but is rejected by [`Cli::validate`]
@@ -1242,7 +1252,7 @@ pub(crate) async fn run_headless_query_with(
     if let Some(mcp) = env.workspace.mcp() {
         env.permissions.sync_mcp_annotations(&mcp);
     }
-    let reviewer = (q.policy == PermissionPolicy::AutoReview)
+    let reviewer = wants_auto_review(q.policy, &env.permissions)
         .then(|| crate::auto_review::reviewer_for(model.clone(), config.agent.prompt_format));
     let mut policy = crate::harness::PolicyLayerInputs::new(
         Arc::clone(&env.permissions),
@@ -1251,7 +1261,11 @@ pub(crate) async fn run_headless_query_with(
     if let Some(reviewer) = reviewer {
         policy = policy.reviewer(reviewer);
     }
-    let workspace = env.workspace.with_codemode(config.codemode);
+    let workspace = env
+        .workspace
+        .with_codemode(config.codemode)
+        .with_bash_config(config.bash)
+        .with_webfetch_config(config.webfetch);
 
     let mode = match q.mode {
         CliMode::Plan => crate::harness::AgentMode::Plan(
@@ -1435,6 +1449,27 @@ mod tests {
             // Piped stdin the test harness controls is not portable across
             // runners; the terminal-attached branch above pins the contract.
         }
+    }
+
+    /// The headless reviewer installs on `-A` or on a config-seeded
+    /// `permissions { auto_review = true }`; either alone is enough.
+    #[test]
+    fn wants_auto_review_flag_or_config() {
+        let off = crate::permissions::PermissionManager::new(
+            crate::permissions::PermissionsConfig::default(),
+            std::env::temp_dir(),
+        );
+        let on = crate::permissions::PermissionManager::new(
+            crate::permissions::PermissionsConfig {
+                auto_review: true,
+                ..Default::default()
+            },
+            std::env::temp_dir(),
+        );
+        assert!(wants_auto_review(PermissionPolicy::AutoReview, &off));
+        assert!(wants_auto_review(PermissionPolicy::Standard, &on));
+        assert!(!wants_auto_review(PermissionPolicy::Standard, &off));
+        assert!(!wants_auto_review(PermissionPolicy::Yolo, &off));
     }
 
     #[test]

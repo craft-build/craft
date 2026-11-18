@@ -126,7 +126,10 @@ impl CraftProvider {
         .await?;
         let (instructions, permissions, workspace) =
             (env.instructions, env.permissions, env.workspace);
-        let workspace = workspace.with_codemode(config.codemode);
+        let workspace = workspace
+            .with_codemode(config.codemode)
+            .with_bash_config(config.bash)
+            .with_webfetch_config(config.webfetch);
         if let Some(note) = env.sandbox_note {
             notes.push(note);
         }
@@ -354,6 +357,8 @@ pub(super) async fn build_session_state(
         .workspace
         .clone()
         .with_codemode(config.codemode)
+        .with_bash_config(config.bash)
+        .with_webfetch_config(config.webfetch)
         .with_model(LoopCtx::model_spec(selection))
         .with_session_id(session_ref.id().to_string());
     // Register MCP tool annotations once the tool set is settled

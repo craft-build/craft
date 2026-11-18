@@ -190,7 +190,7 @@ fn claim_table_matches_the_documented_scheme() {
     let todos = claim(&TodoWrite(workspace.clone()), json!({"todos": []}));
     assert_eq!(writes_of(&todos), vec!["todos".to_owned()]);
     for tool in [
-        claim(&Webfetch, json!({"url": "https://example.com"})),
+        claim(&Webfetch::default(), json!({"url": "https://example.com"})),
         claim(&Websearch, json!({"query": "q"})),
         claim(
             &Retrieve(animist::history::History::new()),

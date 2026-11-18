@@ -261,6 +261,10 @@ pub struct PermissionRule {
 #[derive(Debug, Clone, Default)]
 pub struct PermissionsConfig {
     pub default: DefaultEffect,
+    /// Start auto-review on: `-A/--auto-review` implies it, and
+    /// `permissions { auto_review = true }` (project wins over global)
+    /// seeds it from config.
+    pub auto_review: bool,
     pub tool_defaults: HashMap<ToolKey, DefaultEffect>,
     pub rules: Vec<PermissionRule>,
 }
@@ -480,7 +484,7 @@ impl PermissionManager {
             default: config.default,
             tool_defaults,
             cwd,
-            auto_review: AtomicBool::new(false),
+            auto_review: AtomicBool::new(config.auto_review),
             mcp_annotations: Mutex::new(McpAnnotationTable::default()),
             yolo: AtomicBool::new(false),
         }

@@ -1,7 +1,10 @@
 # Copy to ~/.config/craft.bml (or split into ~/.config/craft/*.bml) and set
 # credentials in your environment. Provider and mcp block labels are names
 # you choose. Permissions live in a separate permissions.bml next to this
-# file or in a project's .craft/ directory.
+# file or in a project's .craft/ directory; start every session with
+# auto-review on by setting `auto_review` to true there (inside a
+# permissions block when in a split file next to this one) — see the
+# permissions documentation.
 
 # New-session thinking default; /thinking opens a picker. Accepts true/false,
 # "off", "adaptive", "minimal", "low", "medium", "high", "xhigh", "max", or a
@@ -79,6 +82,32 @@ compaction "llm" {
 #   enabled = true
 #   mode = "workspace_write"
 #   network = true
+# }
+
+# Python code execution (`code` tool): scripted sub-agents that call the
+# same tools from one Python script. mode is "off" (default), "alongside"
+# (both entry styles), or "exclusive" (only code). `--codemode` and the
+# /codemode command override per run/session. type_check is reserved and
+# rejected for now. These are the defaults.
+# codemode {
+#   mode = "off"
+#   timeout_secs = 30
+#   wall_clock_secs = 600
+#   max_tool_calls = 200
+#   max_output_kib = 32
+#   telemetry = true
+# }
+
+# Tool timeouts used when a call omits `timeout`. Per-call values still
+# win. These are the defaults.
+# bash {
+#   default_timeout_secs = 120      # bash default; min 5
+#   default_watch_timeout_secs = 60 # bash_watch default; min 5
+# }
+# webfetch {
+#   timeout_secs = 30     # default request timeout
+#   max_timeout_secs = 120 # cap for per-call timeouts too
+#   max_retries = 3       # transport errors and 5xx; max 10
 # }
 
 # TUI keybinding overlay: action id → chord list. An empty list disables the

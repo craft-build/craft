@@ -37,3 +37,13 @@ Undo restores file contents only; deactivated history entries survive in session
 ## Auto-review mode
 
 With `-A`, every permission prompt is answered by an LLM reviewer that sees the command and its context. Low confidence fails closed, so a confused reviewer can never silently approve a dangerous call. `/auto-review` toggles it from the TUI.
+
+Auto-review can also be the default posture — no flag needed. In the global config (`~/.config/craft.bml` or a split `~/.config/craft/*.bml`, e.g. a `permissions.bml` there), set it inside the `permissions` block:
+
+```bml
+permissions {
+  auto_review = true
+}
+```
+
+A project's `.craft/permissions.bml` sets the same key at the top level — `auto_review = true` beside its tool blocks — and its value wins over the global one. Every surface starts with the reviewer on: the TUI installs it at startup, and headless runs (`--print`, `term run`, `recipe run`) install it whenever the flag *or* the config enables it. `-A` implies the same posture; `--yolo` still bypasses prompting entirely, and the two stay mutually exclusive. There is no off flag — `/auto-review` toggles the current session. ACP sessions never install a reviewer locally, so an enabled auto-review still falls through to the client's permission prompt.

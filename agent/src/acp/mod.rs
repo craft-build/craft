@@ -363,12 +363,15 @@ impl AppState {
         let (replay_connection, replay_session_id) = (connection.clone(), session_id.clone());
         let mut session = self
             .build_session(BuildInputs {
-                workspace: workspace.with_codemode(crate::config::CodemodeConfig {
-                    mode: stored_codemode
-                        .and_then(crate::config::CodemodeMode::parse_str)
-                        .unwrap_or(self.config.codemode.mode),
-                    ..self.config.codemode
-                }),
+                workspace: workspace
+                    .with_codemode(crate::config::CodemodeConfig {
+                        mode: stored_codemode
+                            .and_then(crate::config::CodemodeMode::parse_str)
+                            .unwrap_or(self.config.codemode.mode),
+                        ..self.config.codemode
+                    })
+                    .with_bash_config(self.config.bash)
+                    .with_webfetch_config(self.config.webfetch),
                 codemode: stored_codemode
                     .and_then(crate::config::CodemodeMode::parse_str)
                     .unwrap_or(self.config.codemode.mode),
@@ -477,6 +480,8 @@ impl AppState {
                 mode: codemode,
                 ..self.config.codemode
             })
+            .with_bash_config(self.config.bash)
+            .with_webfetch_config(self.config.webfetch)
             .with_model(format!("{provider_name}/{model}"))
             .with_session_id(session_id.0.to_string());
 

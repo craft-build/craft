@@ -34,9 +34,7 @@ use super::MAX_OUTPUT_BYTES;
 use super::error::{Error, Result, definition, denied, failure, finish, invalid};
 use super::{Workspace, clip};
 
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MIN_TIMEOUT_SECS: u64 = 5;
-const DEFAULT_WATCH_TIMEOUT_SECS: u64 = 60;
 /// Poll cadence for background task supervision and `bash_watch`.
 const POLL: Duration = Duration::from_millis(100);
 /// Cadence for streaming accumulated output as call progress.
@@ -512,7 +510,8 @@ fn spawn(
 pub struct BashArgs {
     /// The bash command to execute.
     pub command: String,
-    /// Timeout in seconds (default 120, minimum 5).
+    /// Timeout in seconds (default 120; the `[bash]` config's
+    /// `default_timeout_secs` overrides that default; minimum 5).
     pub timeout: Option<u64>,
     /// Working directory, relative to the workspace (default: workspace
     /// root, or the directory in a leading `cd DIR && `).
@@ -559,7 +558,7 @@ impl Bash {
         }
         let timeout_secs = args
             .timeout
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .unwrap_or(workspace.bash_config().default_timeout_secs)
             .max(MIN_TIMEOUT_SECS);
         let (guard, note) = spawn(workspace.root(), &command, &cwd, &self.1)?;
         let output: OutputBuf = Arc::default();
@@ -740,7 +739,8 @@ fn spawn_readers(
 
 const BASH_DESCRIPTION: &str = "Executes a non-interactive bash command (`bash -c`) with combined stdout/stderr captured. \
 Runs in the workspace root unless workdir is given or the command starts with \
-`cd DIR && `. Default timeout is 120s (minimum 5): timed-out commands are killed and the \
+`cd DIR && `. Default timeout is 120s, minimum 5 (the `[bash]` config sets the default): \
+timed-out commands are killed and the \
 partial output is returned. Set background:true to run long tasks in the background and \
 poll them with bash_status, bash_watch, and bash_kill. Use for system commands (git, \
 builds, tests); prefer the file tools for file operations.";
@@ -787,7 +787,8 @@ pub struct BashWatchArgs {
     pub task_id: String,
     /// Substring to wait for in the task's output.
     pub pattern: Option<String>,
-    /// Max seconds to wait (default 60).
+    /// Max seconds to wait (default 60; the `[bash]` config's
+    /// `default_watch_timeout_secs` overrides that default).
     pub timeout: Option<u64>,
 }
 
@@ -875,7 +876,8 @@ impl ToolImpl for BashWatch {
         definition::<BashWatchArgs>(
             "bash_watch",
             "Wait for a substring in a background bash task's output, or for the task to exit. \
-Polls until the pattern matches, the task exits, or the timeout (default 60s) elapses.",
+Polls until the pattern matches, the task exits, or the timeout (default 60s, \
+configurable via `[bash]` default_watch_timeout_secs) elapses.",
         )
     }
 
@@ -886,7 +888,9 @@ Polls until the pattern matches, the task exits, or the timeout (default 60s) el
                 .bash_jobs
                 .get(&args.task_id)
                 .ok_or_else(|| unknown_task(&args.task_id))?;
-            let timeout_secs = args.timeout.unwrap_or(DEFAULT_WATCH_TIMEOUT_SECS);
+            let timeout_secs = args
+                .timeout
+                .unwrap_or(self.0.bash_config().default_watch_timeout_secs);
             let pattern = args.pattern;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
             let mut emitted = usize::MAX;
@@ -1135,6 +1139,25 @@ mod tests {
         .await;
         assert!(err.is_error);
         assert!(bash_text(&err).contains("partial"), "{}", bash_text(&err));
+        assert!(
+            bash_text(&err).contains("timed out after 5s"),
+            "{}",
+            bash_text(&err)
+        );
+    }
+
+    #[tokio::test]
+    async fn omitted_timeout_uses_the_configured_bash_default() {
+        // `bash { default_timeout_secs = 5 }` must time out a call that
+        // omits `timeout` at 5s, while an explicit per-call value wins.
+        let (_dir, workspace) = workspace();
+        let workspace = workspace.with_bash_config(crate::config::BashConfig {
+            default_timeout_secs: 5,
+            ..Default::default()
+        });
+        let tool = Bash::new(workspace);
+        let err = invoke(&tool, json!({"command": "sleep 30"})).await;
+        assert!(err.is_error);
         assert!(
             bash_text(&err).contains("timed out after 5s"),
             "{}",

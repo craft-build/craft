@@ -40,6 +40,12 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub codemode: CodemodeConfig,
+    /// `bash` tool timeout defaults.
+    #[serde(default)]
+    pub bash: BashConfig,
+    /// `webfetch` tool timeout and retry defaults.
+    #[serde(default)]
+    pub webfetch: WebfetchConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
@@ -142,6 +148,85 @@ impl CodemodeConfig {
         if self.type_check {
             return InvalidSnafu {
                 reason: "codemode.type_check is reserved: the ty preflight is not yet available",
+            }
+            .fail();
+        }
+        Ok(())
+    }
+}
+
+/// `[bash]` section: the timeouts `bash` and `bash_watch` use when a call
+/// omits `timeout`. Per-call values still win; `bash` keeps clamping to
+/// the 5s floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BashConfig {
+    pub default_timeout_secs: u64,
+    pub default_watch_timeout_secs: u64,
+}
+
+impl Default for BashConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_secs: 120,
+            default_watch_timeout_secs: 60,
+        }
+    }
+}
+
+impl BashConfig {
+    /// The floor `bash.rs` clamps every timeout to.
+    pub const MIN_TIMEOUT_SECS: u64 = 5;
+
+    fn validate(&self) -> Result<()> {
+        if self.default_timeout_secs < Self::MIN_TIMEOUT_SECS {
+            return InvalidSnafu {
+                reason: "bash.default_timeout_secs must be at least 5",
+            }
+            .fail();
+        }
+        if self.default_watch_timeout_secs < Self::MIN_TIMEOUT_SECS {
+            return InvalidSnafu {
+                reason: "bash.default_watch_timeout_secs must be at least 5",
+            }
+            .fail();
+        }
+        Ok(())
+    }
+}
+
+/// `[webfetch]` section: the default and max request timeout plus the
+/// transport-error/5xx retry count. Per-call `timeout` values are still
+/// capped by `max_timeout_secs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebfetchConfig {
+    pub timeout_secs: u64,
+    pub max_timeout_secs: u64,
+    pub max_retries: u32,
+}
+
+impl Default for WebfetchConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 30,
+            max_timeout_secs: 120,
+            max_retries: 3,
+        }
+    }
+}
+
+impl WebfetchConfig {
+    fn validate(&self) -> Result<()> {
+        if self.timeout_secs == 0 || self.timeout_secs > self.max_timeout_secs {
+            return InvalidSnafu {
+                reason: "webfetch.timeout_secs must be between 1 and webfetch.max_timeout_secs",
+            }
+            .fail();
+        }
+        if self.max_retries > 10 {
+            return InvalidSnafu {
+                reason: "webfetch.max_retries must be at most 10",
             }
             .fail();
         }
@@ -1000,8 +1085,8 @@ impl Config {
 
     /// Extract a [`Config`] from a merged BarkML document, taking only the
     /// sections that belong to the main config (`agent`, `provider`,
-    /// `compaction`, `compression`, `sandbox`, `codemode`, `keybind`/`keybindings`);
-    /// unrelated
+    /// `compaction`, `compression`, `sandbox`, `codemode`, `bash`,
+    /// `webfetch`, `keybind`/`keybindings`); unrelated
     /// blocks (`mcp`, `permissions`) are left for their own loaders.
     pub fn from_statement(doc: &barkml::Statement) -> Result<Self> {
         use serde_json::Value as Json;
@@ -1011,7 +1096,14 @@ impl Config {
         if let Some(value) = root.get("always_thinking") {
             map.insert("always_thinking".into(), value.clone());
         }
-        for section in ["agent", "compression", "sandbox", "codemode"] {
+        for section in [
+            "agent",
+            "compression",
+            "sandbox",
+            "codemode",
+            "bash",
+            "webfetch",
+        ] {
             if let Some(child) = doc.get_child(section, &[]) {
                 map.insert(section.to_string(), crate::bml::container_json(child));
             }
@@ -1107,6 +1199,8 @@ impl Config {
     fn validate(config: Self) -> Result<Self> {
         config.agent.validate()?;
         config.codemode.validate()?;
+        config.bash.validate()?;
+        config.webfetch.validate()?;
         if let Err(reason) = config.compression.validate() {
             return InvalidSnafu { reason }.fail();
         }
@@ -1273,6 +1367,58 @@ mod tests {
             );
         }
         assert!(Config::parse("codemode { timeout_secs = 18446744073709551616 }").is_err());
+    }
+
+    #[test]
+    fn bash_and_webfetch_defaults_and_overrides_parse() {
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.bash, BashConfig::default());
+        assert_eq!(default.webfetch, WebfetchConfig::default());
+        assert_eq!(default.bash.default_timeout_secs, 120);
+        assert_eq!(default.bash.default_watch_timeout_secs, 60);
+        assert_eq!(default.webfetch.timeout_secs, 30);
+        assert_eq!(default.webfetch.max_timeout_secs, 120);
+        assert_eq!(default.webfetch.max_retries, 3);
+
+        let config = Config::parse(
+            "bash { default_timeout_secs = 5\n default_watch_timeout_secs = 10 }\n\
+             webfetch { timeout_secs = 10\n max_timeout_secs = 60\n max_retries = 0 }",
+        )
+        .unwrap();
+        assert_eq!(config.bash.default_timeout_secs, 5);
+        assert_eq!(config.bash.default_watch_timeout_secs, 10);
+        assert_eq!(config.webfetch.timeout_secs, 10);
+        assert_eq!(config.webfetch.max_timeout_secs, 60);
+        assert_eq!(config.webfetch.max_retries, 0);
+    }
+
+    #[test]
+    fn rejects_invalid_bash_and_webfetch_settings() {
+        for field in [
+            "default_timeout_secs = 4",
+            "default_timeout_secs = 0",
+            "default_watch_timeout_secs = 4",
+            "unknown = 1",
+        ] {
+            assert!(
+                Config::parse(&format!("bash {{ {field} }}")).is_err(),
+                "{field}"
+            );
+        }
+        for field in [
+            "timeout_secs = 0",
+            "timeout_secs = 121",
+            "max_retries = 11",
+            "unknown = 1",
+        ] {
+            assert!(
+                Config::parse(&format!("webfetch {{ {field} }}")).is_err(),
+                "{field}"
+            );
+        }
+        // timeout_secs above max_timeout_secs is rejected even when both
+        // are individually plausible.
+        assert!(Config::parse("webfetch { timeout_secs = 60\n max_timeout_secs = 30 }").is_err());
     }
 
     #[test]

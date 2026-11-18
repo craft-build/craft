@@ -89,6 +89,39 @@ Applied to the model's request view; history keeps raw outputs. These are the de
 
 See [Sandbox](./sandbox.md).
 
+## Codemode
+
+Python code execution: the `code` tool runs a scripted sub-agent that calls the same tool set from one Python script. These are the defaults — `mode = "off"` keeps the tool unregistered:
+
+```bml
+# codemode {
+#   mode = "off"            # off | alongside | exclusive
+#   timeout_secs = 30
+#   wall_clock_secs = 600
+#   max_tool_calls = 200
+#   max_output_kib = 32
+#   telemetry = true
+# }
+```
+
+`--codemode <off|alongside|exclusive>` overrides the mode per run and the `/codemode` command toggles it per session (see [CLI](./cli.md)); `type_check` is reserved and rejected. The `code` tool itself: [Tools](./tools.md#execution).
+
+## Tool timeouts
+
+The timeouts `bash` and `webfetch` use when a call omits `timeout`. Per-call values still win. These are the defaults:
+
+```bml
+# bash {
+#   default_timeout_secs = 120       # bash default; minimum 5
+#   default_watch_timeout_secs = 60  # bash_watch default; minimum 5
+# }
+# webfetch {
+#   timeout_secs = 30      # default request timeout
+#   max_timeout_secs = 120 # cap for per-call timeouts too
+#   max_retries = 3        # transport errors and 5xx; maximum 10
+# }
+```
+
 ## Keybinds
 
 TUI keybindings, action id → chord list. An empty list disables the action; unknown ids are warned and dropped.
@@ -132,4 +165,4 @@ mcp "filesystem" {
 
 ## Permissions
 
-Permission rules live in a separate `permissions.bml` next to the config file, or in a project's `.craft/` directory. See [Permissions & Snapshots](./permissions.md).
+Permission rules live in a separate `permissions.bml` next to the config file, or in a project's `.craft/` directory. The same `permissions` block also holds `auto_review = true` — starting every session with the auto-review reviewer on. See [Permissions & Snapshots](./permissions.md).

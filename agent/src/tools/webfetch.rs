@@ -17,11 +17,9 @@ use super::bash::wrap_untrusted;
 use super::error::{Error, Result, definition, finish, invalid};
 use super::ssrf::{self, GuardedDns};
 use super::truncate_output;
+use crate::config::WebfetchConfig;
 
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const MAX_TIMEOUT_SECS: u64 = 120;
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
-const MAX_RETRIES: u32 = 3;
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
      AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const FALLBACK_USER_AGENT: &str = "craft";
@@ -37,7 +35,8 @@ pub struct WebfetchArgs {
     pub url: String,
     /// Output format: markdown (default), text, or html.
     pub format: Option<String>,
-    /// Timeout in seconds (default 30, max 120).
+    /// Timeout in seconds (default from the `webfetch` config, 30; capped
+    /// by its `max_timeout_secs`, 120).
     pub timeout: Option<u64>,
 }
 
@@ -54,7 +53,7 @@ impl super::error::IntoToolResult for WebfetchOutput {
 
 /// Fetch a URL through the SSRF guard and return its contents as text.
 #[derive(Clone, Copy, Default)]
-pub struct Webfetch;
+pub struct Webfetch(pub(crate) WebfetchConfig);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -85,7 +84,8 @@ impl Format {
 const WEBFETCH_DESCRIPTION: &str = "Fetch a URL and return its contents.\n\n\
      - Supports markdown (default), text, or html output formats.\n\
      - HTTP URLs are auto-upgraded to HTTPS.\n\
-     - Max response size is 5MB, max timeout is 120s.\n\
+     - Max response size is 5MB; default and max timeouts come from the \
+`[webfetch]` config (30s and 120s by default).\n\
      - Best used inside code_execution with some truncation / filter to \
      avoid context bloat.";
 
@@ -118,9 +118,11 @@ impl ToolImpl for Webfetch {
                     Format::parse(raw).ok_or_else(|| invalid(format!("unknown format: {raw}")))?
                 }
             };
-            let timeout = resolve_timeout(args.timeout);
+            let timeout = self.resolve_timeout(args.timeout);
 
-            let body = fetch(&url, format, timeout).await.map_err(invalid)?;
+            let body = fetch(&url, format, timeout, self.0.max_retries)
+                .await
+                .map_err(invalid)?;
             Ok(WebfetchOutput {
                 text: wrap_untrusted(&truncate_output(&body)),
             })
@@ -130,11 +132,13 @@ impl ToolImpl for Webfetch {
     }
 }
 
-fn resolve_timeout(raw: Option<u64>) -> Duration {
-    Duration::from_secs(
-        raw.unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .clamp(1, MAX_TIMEOUT_SECS),
-    )
+impl Webfetch {
+    fn resolve_timeout(&self, raw: Option<u64>) -> Duration {
+        Duration::from_secs(
+            raw.unwrap_or(self.0.timeout_secs)
+                .clamp(1, self.0.max_timeout_secs),
+        )
+    }
 }
 
 /// Guard, connect, and follow redirects one validated hop at a time. Each
@@ -144,13 +148,14 @@ async fn fetch(
     url: &str,
     format: Format,
     timeout: Duration,
+    max_retries: u32,
 ) -> std::result::Result<String, String> {
     let mut url = url.to_string();
     let mut redirects = 0usize;
 
     loop {
         let guarded = ssrf::resolve_and_check_ssrf(&url).await?;
-        let response = request_with_retries(&url, format, timeout, &guarded).await?;
+        let response = request_with_retries(&url, format, timeout, &guarded, max_retries).await?;
 
         // A stopped redirect comes back as the 3xx response itself; re-guard
         // the target before connecting again.
@@ -220,14 +225,16 @@ async fn fetch(
     }
 }
 
-/// One client with DNS pinned to `guarded`, plus a retry ladder: up to three
-/// retries on transport errors and 5xx, and one `craft` User-Agent retry when
-/// a GET is answered by a Cloudflare challenge page.
+/// One client with DNS pinned to `guarded`, plus a retry ladder: retries on
+/// transport errors and 5xx (default 3, from the `webfetch` config), and one
+/// `craft` User-Agent retry when a GET is answered by a Cloudflare challenge
+/// page.
 async fn request_with_retries(
     url: &str,
     format: Format,
     timeout: Duration,
     guarded: &GuardedDns,
+    max_retries: u32,
 ) -> std::result::Result<reqwest::Response, String> {
     let client = reqwest::Client::builder()
         .resolve_to_addrs(&guarded.host, &guarded.addrs)
@@ -237,7 +244,7 @@ async fn request_with_retries(
         .map_err(|e| format!("client error: {e}"))?;
 
     let mut last_err = String::new();
-    for attempt in 0..=MAX_RETRIES {
+    for attempt in 0..=max_retries {
         let request = client
             .get(url)
             .header("User-Agent", USER_AGENT)
@@ -264,13 +271,13 @@ async fn request_with_retries(
                         Ok(response) => return Ok(response),
                         Err(e) => last_err = format!("request failed: {e}"),
                     }
-                } else if status >= 500 && attempt < MAX_RETRIES {
+                } else if status >= 500 && attempt < max_retries {
                     last_err = format!("HTTP {status}");
                 } else {
                     return Ok(response);
                 }
             }
-            Err(e) if attempt < MAX_RETRIES => last_err = format!("request failed: {e}"),
+            Err(e) if attempt < max_retries => last_err = format!("request failed: {e}"),
             Err(e) => return Err(format!("request failed: {e}")),
         }
     }
@@ -369,10 +376,21 @@ mod tests {
 
     #[test]
     fn timeout_clamping() {
-        assert_eq!(resolve_timeout(None), Duration::from_secs(30));
-        assert_eq!(resolve_timeout(Some(10)), Duration::from_secs(10));
-        assert_eq!(resolve_timeout(Some(999)), Duration::from_secs(120));
-        assert_eq!(resolve_timeout(Some(0)), Duration::from_secs(1));
+        let default = Webfetch::default();
+        assert_eq!(default.resolve_timeout(None), Duration::from_secs(30));
+        assert_eq!(default.resolve_timeout(Some(10)), Duration::from_secs(10));
+        assert_eq!(default.resolve_timeout(Some(999)), Duration::from_secs(120));
+        assert_eq!(default.resolve_timeout(Some(0)), Duration::from_secs(1));
+
+        // Config defaults replace the built-ins: an omitted timeout uses
+        // `timeout_secs`, and every call is capped by `max_timeout_secs`.
+        let tuned = Webfetch(crate::config::WebfetchConfig {
+            timeout_secs: 2,
+            max_timeout_secs: 5,
+            max_retries: 1,
+        });
+        assert_eq!(tuned.resolve_timeout(None), Duration::from_secs(2));
+        assert_eq!(tuned.resolve_timeout(Some(10)), Duration::from_secs(5));
     }
 
     #[test]
@@ -466,7 +484,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_unknown_format_before_any_network() {
         let output = invoke(
-            Webfetch,
+            Webfetch::default(),
             serde_json::json!({
                 "url": "https://example.com", "format": "pdf"
             }),
@@ -489,7 +507,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_non_http_scheme_before_any_network() {
-        let output = invoke(Webfetch, serde_json::json!({ "url": "ftp://example.com" })).await;
+        let output = invoke(
+            Webfetch::default(),
+            serde_json::json!({ "url": "ftp://example.com" }),
+        )
+        .await;
         assert!(output.is_error);
         let text = invoke_text(output);
         assert!(text.contains("URL"), "{text}");

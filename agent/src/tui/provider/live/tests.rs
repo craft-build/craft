@@ -285,6 +285,52 @@ async fn selecting_a_model_persists_it_to_the_session() {
     assert_eq!(reloaded.model, "anthropic/claude-sonnet-4");
 }
 
+/// `with_permission_flags` must OR auto-review onto the engine, never
+/// clobber it: a bare TUI launch keeps `permissions { auto_review = true }`
+/// on, the `-A` flag still turns it on when config leaves it off.
+#[test]
+fn with_permission_flags_or_instead_of_clobbering_auto_review() {
+    fn provider(auto_review: bool) -> CraftProvider {
+        let tmp = tempfile::tempdir().unwrap();
+        CraftProvider {
+            config: Arc::new(offline_config()),
+            workspace: Workspace::new(tmp.path()).unwrap(),
+            instructions: Default::default(),
+            permissions: Arc::new(PermissionManager::new(
+                PermissionsConfig {
+                    auto_review,
+                    ..Default::default()
+                },
+                tmp.path().to_path_buf(),
+            )),
+            catalogs: Default::default(),
+            catalog: Arc::default(),
+            notes: Default::default(),
+            selection: mock_selection(),
+            cwd_label: String::new(),
+            branch: String::new(),
+            resume_latest: false,
+            resume_session: None,
+            mcp: None,
+            mcp_evt_rx: mpsc::unbounded_channel().1,
+            custom_commands: true,
+            starts_in_plan_mode: false,
+        }
+    }
+
+    let on = provider(true).with_permission_flags(false, false);
+    assert!(
+        on.permissions.is_auto_review(),
+        "a bare launch must keep config-enabled auto-review"
+    );
+
+    let off = provider(false).with_permission_flags(false, false);
+    assert!(!off.permissions.is_auto_review());
+
+    let flagged = provider(false).with_permission_flags(false, true);
+    assert!(flagged.permissions.is_auto_review());
+}
+
 /// A minimal LoopCtx for the queue/persist tests: only `state`, `shell`,
 /// and `wake` are exercised; the kit's offline-resolvable provider lets
 /// session rebuilds succeed where tests trigger them.
