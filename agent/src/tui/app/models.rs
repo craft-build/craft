@@ -95,16 +95,20 @@ impl Message {
         )
     }
 
-    /// A root tool call that never joins a compact group: a subagent
-    /// `task` (a peer of the whole turn) or an `Edit` mutation (the
-    /// user must always see file changes). Both always render their
-    /// dedicated cards outside the folded group. Nested children of
-    /// any kind stay with their code parent's run.
+    /// A tool call that renders as its own dedicated card instead of a
+    /// group member: every `task` call (root or nested — a subagent is
+    /// a peer of the whole turn), and at root level an `Edit` mutation
+    /// (the user must always see file changes) and a `Code` run. Root
+    /// groups split around always-card calls; nested groups keep every
+    /// other child kind, edits included.
     pub(crate) fn is_always_card(&self) -> bool {
         matches!(
             self,
             Message::Tool {
-                kind: ToolKind::Task { .. } | ToolKind::Edit { .. },
+                kind: ToolKind::Task { .. },
+                ..
+            } | Message::Tool {
+                kind: ToolKind::Edit { .. } | ToolKind::Code { .. },
                 parent_call_id: None,
                 ..
             }
@@ -244,17 +248,18 @@ impl Conversation {
     }
 
     /// End (exclusive) of the maximal contiguous run of children sharing
-    /// `parent` starting at `start` (one nested group).
+    /// `parent` starting at `start` (one nested group). A `task` child
+    /// never joins: the nested group splits around its dedicated card.
     pub(crate) fn child_run_end(&self, start: usize, parent: &str) -> usize {
         let mut end = start;
         while let Some(Message::Tool {
+            kind,
             parent_call_id: Some(p),
             ..
         }) = self.messages.get(end)
+            && p == parent
+            && !matches!(kind, ToolKind::Task { .. })
         {
-            if p != parent {
-                break;
-            }
             end += 1;
         }
         end
@@ -359,14 +364,13 @@ impl Conversation {
             }) => {
                 let mut start = idx;
                 while start > 0
-                    && matches!(
-                        &self.messages[start - 1],
-                        Message::Tool {
-                            parent_call_id: Some(p),
-                            ..
-                        }
-                        if p == parent
-                    )
+                    && let Some(Message::Tool {
+                        kind,
+                        parent_call_id: Some(p),
+                        ..
+                    }) = self.messages.get(start - 1)
+                    && p == parent
+                    && !matches!(kind, ToolKind::Task { .. })
                 {
                     start -= 1;
                 }
@@ -380,17 +384,23 @@ impl Conversation {
                 // The root group spans from the run's first member — a
                 // root tool or a leading thinking block — to the run's
                 // end; nested child runs at its head form their own
-                // groups.
+                // groups (task children split them and render as
+                // cards).
                 let mut start = idx;
                 while start > 0 && self.messages.get(start - 1).is_some_and(joins_compact_run) {
                     start -= 1;
                 }
                 while let Some(Message::Tool {
+                    kind,
                     parent_call_id: Some(p),
                     ..
                 }) = self.messages.get(start)
                 {
-                    start = self.child_run_end(start, p);
+                    start = if matches!(kind, ToolKind::Task { .. }) {
+                        start + 1
+                    } else {
+                        self.child_run_end(start, p)
+                    };
                 }
                 match self.group_key(start) {
                     Some(key) => self.group_expanded(&key, false),
@@ -414,11 +424,12 @@ impl Conversation {
     /// when every prior counted child had settled (the settled →
     /// running transition that clears a nested pin; root pins are
     /// manual choices and never clear). `id` identifies the new child
-    /// to exclude.
+    /// to exclude; `task` children never join a nested group, so they
+    /// are not counted.
     fn restarted_child_group_key(&self, id: &str, parent: &str) -> Option<String> {
         let restarted = !self.messages.iter().any(|m| {
-            matches!(m, Message::Tool { id: mid, parent_call_id: Some(p), state: CallState::Running, .. }
-                if p == parent && mid != id)
+            matches!(m, Message::Tool { id: mid, kind, parent_call_id: Some(p), state: CallState::Running, .. }
+                if p == parent && mid != id && !matches!(kind, ToolKind::Task { .. }))
         });
         restarted.then(|| format!("child:{parent}"))
     }

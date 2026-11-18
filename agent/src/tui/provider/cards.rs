@@ -146,8 +146,10 @@ pub(super) fn tool_head(name: &str, arguments: &serde_json::Value) -> ToolKind {
         // bodies, outlines) that would otherwise flood the scrollback.
         name if crate::knowledge::is_argosy_tool(name) => card_kind(name, &detail),
         "code" => code_kind(arguments),
-        // Subagent calls keep a dedicated card (see `ToolKind::Task`).
-        "task" => ToolKind::Task {
+        // Subagent-spawning calls keep a dedicated card (see
+        // `ToolKind::Task`): `task` and `review` both launch a child
+        // agent with its own chat.
+        "task" | "review" => ToolKind::Task {
             description: detail,
             summary: String::new(),
         },
@@ -412,7 +414,7 @@ pub(super) fn tool_done(
         // The subagent's final report is the card body, truncated like
         // Code output (the full text stays reachable through the
         // expand notice).
-        "task" => (
+        "task" | "review" => (
             ToolKind::Task {
                 description: detail,
                 summary: card_line_summary(&text),
@@ -999,9 +1001,9 @@ mod tests {
         assert!(!head.collapsible());
     }
 
-    /// `task` calls get a dedicated (never folded) card kind: the label
-    /// carries the description and the done card summarizes the child's
-    /// report into its body.
+    /// `task` and `review` calls get a dedicated (never folded) card
+    /// kind: the label carries the description and the done card
+    /// summarizes the child's report into its body.
     #[test]
     fn task_calls_get_a_dedicated_card() {
         let head = tool_head(
@@ -1010,6 +1012,11 @@ mod tests {
         );
         assert!(matches!(&head, ToolKind::Task { description, summary }
                 if description == "refactor tests" && summary.is_empty()));
+        // `review` spawns a subagent through the same seam and gets the
+        // same dedicated card (its first argument is the review task).
+        let review = tool_head("review", &serde_json::json!({"task": "audit auth"}));
+        assert!(matches!(&review, ToolKind::Task { description, .. }
+                if description == "audit auth"));
         let result = history::ext::tool_result(
             "t1",
             Some("task"),

@@ -573,7 +573,11 @@ mod tests {
         ctx.codemode = CodemodeMode::Alongside;
         let rule = codemode_tool_rule(CodemodeMode::Alongside).unwrap();
         assert!(chat(&ctx).contains(rule));
-        assert!(PromptFormat::Markdown.render(&research(&ctx)).contains(rule));
+        assert!(
+            PromptFormat::Markdown
+                .render(&research(&ctx))
+                .contains(rule)
+        );
         assert!(PromptFormat::Markdown.render(&general(&ctx)).contains(rule));
         ctx.codemode = CodemodeMode::Exclusive;
         assert!(chat(&ctx).contains(codemode_tool_rule(CodemodeMode::Exclusive).unwrap()));

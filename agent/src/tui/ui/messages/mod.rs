@@ -431,107 +431,128 @@ fn build_frame(app: &mut App, inner: crate::tui::geom::Rect) -> FrameBuild {
         // shared card renderer, so it dispatches before the per-message
         // match borrows a message. Each branch owns its trailing blank
         // separator and index advance.
-        let group_end = if matches!(
-            app.conversation.messages.get(idx),
+        let group_end = match app.conversation.messages.get(idx) {
+            // A task child keeps its dedicated card even under its code
+            // parent: the nested group splits around it. Nested style
+            // keeps it indented with the parent's run.
+            Some(Message::Tool {
+                kind: ToolKind::Task { .. },
+                parent_call_id: Some(_),
+                ..
+            }) => {
+                push_tool_card(app, &mut walk, idx, true);
+                Some(idx + 1)
+            }
+            // Nested codemode children always render inside a compact
+            // group behind one header, regardless of `tool_display`.
             Some(Message::Tool {
                 parent_call_id: Some(_),
                 ..
-            })
-        ) {
-            // Nested codemode children always render inside a compact
-            // group behind one header, regardless of `tool_display`.
-            Some(push_nested_group(app, &mut walk, idx, &mut msg_seg_start))
-        } else if app.tool_display == ToolDisplay::Compact
-            && matches!(
-                app.conversation.messages.get(idx),
-                Some(Message::Tool { .. } | Message::Thinking(_))
-            )
-            && app.conversation.compact_run_has_tool(idx)
-        {
-            // Contiguous root tool runs share a group header; in compact
-            // display the run also absorbs the thinking blocks
-            // interleaved with its tools (a thinking block groups only
-            // when tools follow) and splits around always-card calls
-            // (`task`, root `Edit`), which always render their dedicated
-            // cards. The group opens only by a header click (a pin) —
-            // while live the header tracks the running count. Within an
-            // expanded group Code keeps its full card, and so do
-            // image-bearing and failed members (their whole output must
-            // stay reachable); every other tool collapses to a one-line
-            // entry.
-            let end = app.conversation.compact_run_end(idx);
-            let tally = GroupTally::count(&app.conversation.messages[idx..end], true);
-            let key = app.conversation.group_key(idx).unwrap_or_default();
-            let active = tally.running > 0 || app.conversation.trailing_thinking_active(end);
-            let expanded = app.conversation.group_expanded(&key, false);
-            let lines = tool_group_header(&tally, expanded, active, app.status_tick, false);
-            walk.group_seg_rows.push((idx, app.view.segments.len(), 0));
-            app.view.segments.push(Segment::with_lines(lines));
-            if expanded {
-                let mut member = idx;
-                while member < end {
-                    let m = &app.conversation.messages[member];
-                    if member > idx {
-                        msg_seg_start.push(app.view.segments.len());
-                    }
-                    if matches!(
-                        m,
-                        Message::Tool {
-                            parent_call_id: Some(_),
-                            ..
+            }) => Some(push_nested_group(app, &mut walk, idx, &mut msg_seg_start)),
+            _ if app.tool_display == ToolDisplay::Compact
+                && matches!(
+                    app.conversation.messages.get(idx),
+                    Some(Message::Tool { .. } | Message::Thinking(_))
+                )
+                && app.conversation.compact_run_has_tool(idx) =>
+            {
+                // Contiguous root tool runs share a group header; in compact
+                // display the run also absorbs the thinking blocks
+                // interleaved with its tools (a thinking block groups only
+                // when tools follow) and splits around always-card calls
+                // (`task`, root `Edit` and `Code`), which always render
+                // their dedicated cards. The group opens only by a header
+                // click (a pin) — while live the header tracks the running
+                // count. Within an expanded group image-bearing and failed
+                // members keep full cards (their whole output must stay
+                // reachable); every other tool collapses to a one-line
+                // entry.
+                let end = app.conversation.compact_run_end(idx);
+                let tally = GroupTally::count(&app.conversation.messages[idx..end], true);
+                let key = app.conversation.group_key(idx).unwrap_or_default();
+                let active = tally.running > 0 || app.conversation.trailing_thinking_active(end);
+                let expanded = app.conversation.group_expanded(&key, false);
+                let lines = tool_group_header(&tally, expanded, active, app.status_tick, false);
+                walk.group_seg_rows.push((idx, app.view.segments.len(), 0));
+                app.view.segments.push(Segment::with_lines(lines));
+                if expanded {
+                    let mut member = idx;
+                    while member < end {
+                        let m = &app.conversation.messages[member];
+                        if member > idx {
+                            msg_seg_start.push(app.view.segments.len());
                         }
-                    ) {
-                        // Nested groups keep their own header (and cards)
-                        // directly under their code parent.
-                        member = push_nested_group(app, &mut walk, member, &mut msg_seg_start);
-                    } else if matches!(
-                        m,
-                        Message::Tool {
-                            kind: ToolKind::Code { .. },
-                            ..
-                        } | Message::Tool { image: Some(_), .. }
-                            | Message::Tool {
-                                state: CallState::Failed,
+                        if matches!(
+                            m,
+                            Message::Tool {
+                                kind: ToolKind::Task { .. },
+                                parent_call_id: Some(_),
                                 ..
                             }
-                    ) {
-                        push_tool_card(app, &mut walk, member, false);
-                        member += 1;
-                    } else if let Message::Tool { kind, state, .. } = m {
-                        app.view
-                            .segments
-                            .push(Segment::with_lines(vec![tool_oneliner(
-                                kind, *state, width, false,
-                            )]));
-                        member += 1;
-                    } else if let Message::Thinking(text) = m {
-                        // An absorbed thinking block renders as the
-                        // standalone block does: a clickable collapsed
-                        // header of its own.
-                        let tidx = member;
-                        let expanded_thinking = app.conversation.expanded_thinking.contains(&tidx);
-                        let active_thinking = app.conversation.thinking_active(tidx);
-                        let body = app.conversation.visible_text(tidx).unwrap_or(text);
-                        let mut tlines =
-                            thinking_header(active_thinking, expanded_thinking, app.status_tick);
-                        if expanded_thinking {
-                            tlines.extend(thinking_block(body, width));
+                        ) {
+                            // A task child splits the nested group: its
+                            // dedicated card renders directly.
+                            push_tool_card(app, &mut walk, member, true);
+                            member += 1;
+                        } else if matches!(
+                            m,
+                            Message::Tool {
+                                parent_call_id: Some(_),
+                                ..
+                            }
+                        ) {
+                            // Nested groups keep their own header (and cards)
+                            // directly under their code parent.
+                            member = push_nested_group(app, &mut walk, member, &mut msg_seg_start);
+                        } else if matches!(
+                            m,
+                            Message::Tool { image: Some(_), .. }
+                                | Message::Tool {
+                                    state: CallState::Failed,
+                                    ..
+                                }
+                        ) {
+                            push_tool_card(app, &mut walk, member, false);
+                            member += 1;
+                        } else if let Message::Tool { kind, state, .. } = m {
+                            app.view
+                                .segments
+                                .push(Segment::with_lines(vec![tool_oneliner(
+                                    kind, *state, width, false,
+                                )]));
+                            member += 1;
+                        } else if let Message::Thinking(text) = m {
+                            // An absorbed thinking block renders as the
+                            // standalone block does: a clickable collapsed
+                            // header of its own.
+                            let tidx = member;
+                            let expanded_thinking =
+                                app.conversation.expanded_thinking.contains(&tidx);
+                            let active_thinking = app.conversation.thinking_active(tidx);
+                            let body = app.conversation.visible_text(tidx).unwrap_or(text);
+                            let mut tlines = thinking_header(
+                                active_thinking,
+                                expanded_thinking,
+                                app.status_tick,
+                            );
+                            if expanded_thinking {
+                                tlines.extend(thinking_block(body, width));
+                            }
+                            thinking_seg_rows.push((tidx, app.view.segments.len(), 0));
+                            app.view.segments.push(Segment::with_lines(tlines));
+                            member += 1;
+                        } else {
+                            member += 1;
                         }
-                        thinking_seg_rows.push((tidx, app.view.segments.len(), 0));
-                        app.view.segments.push(Segment::with_lines(tlines));
-                        member += 1;
-                    } else {
-                        member += 1;
+                    }
+                } else {
+                    for _ in idx + 1..end {
+                        msg_seg_start.push(app.view.segments.len());
                     }
                 }
-            } else {
-                for _ in idx + 1..end {
-                    msg_seg_start.push(app.view.segments.len());
-                }
+                Some(end)
             }
-            Some(end)
-        } else {
-            None
+            _ => None,
         };
         if let Some(end) = group_end {
             idx = end;
@@ -2393,13 +2414,25 @@ mod tests {
 
         let mut app = App::new();
         app.tool_display = ToolDisplay::Compact;
-        app.handle_event(code_parent("t1"));
+        let bash = AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "b1".into(),
+            kind: crate::tui::provider::ToolKind::Bash {
+                cmd: "cargo build".into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Running,
+        });
+        app.handle_event(bash);
         app.handle_event(read_call("r1", None, "10 lines", CallState::Complete));
         app.handle_event(read_call("r2", None, "4 lines", CallState::Complete));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("1 script 1 running")),
-            "the running parent shows in the header count, not by expanding: {rows:?}"
+            rows.iter()
+                .any(|r| r.contains("2 reads · 1 command 1 running")),
+            "the running member shows in the header count, not by expanding: {rows:?}"
         );
         assert!(
             rows.iter().all(|r| !r.contains("src/main.rs")),
@@ -2417,11 +2450,9 @@ mod tests {
         // Settle the run: nothing changes — the group was never open.
         app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
             parent_call_id: None,
-            id: "t1".into(),
-            kind: crate::tui::provider::ToolKind::Code {
-                script: "print(1)".into(),
-                summary: "1 call · ok".into(),
-                failure: None,
+            id: "b1".into(),
+            kind: crate::tui::provider::ToolKind::Bash {
+                cmd: "cargo build".into(),
             },
             lines: vec![],
             awaiting_approval: false,
@@ -2435,7 +2466,7 @@ mod tests {
         );
 
         // A pinned expansion restores the members as focus targets.
-        app.conversation.toggle_group("root:t1", false);
+        app.conversation.toggle_group("root:b1", false);
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
             rows.iter().any(|r| r.contains("src/main.rs")),
@@ -2449,10 +2480,9 @@ mod tests {
         assert_eq!(app.focus_targets(), vec![1, 2]);
     }
 
-    /// Nested groups keep their own header and cards inside an expanded
-    /// root group in compact mode: the root opens by a pin (running
-    /// never expands it), the nested group auto-expands while its
-    /// children run.
+    /// A root `Code` call is an always-card: it renders its own card
+    /// outside any root group, its children nest directly under it,
+    /// and the following root tools form their own group.
     #[test]
     fn nested_group_renders_inside_an_expanded_root_group() {
         use crate::config::ToolDisplay;
@@ -2460,35 +2490,59 @@ mod tests {
         app.tool_display = ToolDisplay::Compact;
         app.handle_event(code_parent("t1"));
         app.handle_event(read_call("t1:c0", Some("t1"), "", CallState::Running));
-        app.handle_event(read_call("r1", None, "", CallState::Running));
-        // The root group never auto-expands; open it with a pin.
-        app.conversation.toggle_group("root:t1", false);
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "b1".into(),
+            kind: crate::tui::provider::ToolKind::Bash {
+                cmd: "cargo build".into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Running,
+        }));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter()
-                .any(|r| r.contains("1 read · 1 script 2 running")),
-            "root header counts the code parent and the read, both live: {rows:?}"
+            rows.iter().any(|r| r.contains("py Code")),
+            "the code parent renders its own card: {rows:?}"
         );
         assert!(
             rows.iter()
                 .any(|r| r.contains("1 read 1 running") && !r.contains("script")),
-            "nested header counts its children: {rows:?}"
+            "the nested header counts its children and auto-expands while they run: {rows:?}"
         );
         assert!(
             rows.iter().any(|r| r.contains("src/main.rs")),
             "nested member card visible while the nested group runs: {rows:?}"
         );
+        assert!(
+            rows.iter().any(|r| r.contains("1 command 1 running")),
+            "the following root tools form their own group: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("cargo build ·")),
+            "the root group stays collapsed while it runs: {rows:?}"
+        );
 
-        // Everything settles: the nested group auto-collapses; the root
-        // stays pinned open, so its members render but the child card
-        // hides behind the nested header.
+        // Everything settles: the nested group auto-collapses, the root
+        // group stays closed.
         app.handle_event(read_call(
             "t1:c0",
             Some("t1"),
             "5 lines",
             CallState::Complete,
         ));
-        app.handle_event(read_call("r1", None, "3 lines", CallState::Complete));
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: None,
+            id: "b1".into(),
+            kind: crate::tui::provider::ToolKind::Bash {
+                cmd: "cargo build".into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Complete,
+        }));
         app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
             parent_call_id: None,
             id: "t1".into(),
@@ -2504,13 +2558,118 @@ mod tests {
         }));
         let rows = frame_rows(&mut app, 80, 24);
         assert!(
-            rows.iter()
-                .any(|r| r.contains("Read src/main.rs · 3 lines")),
-            "the root group stays pinned open — its member oneliner renders: {rows:?}"
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "the settled nested group hides its members: {rows:?}"
         );
         assert!(
-            rows.iter().all(|r| !r.contains("▸ Read src/main.rs")),
-            "the settled nested group hides its member cards: {rows:?}"
+            rows.iter().any(|r| r.contains("py Code")),
+            "the code card stays outside the groups: {rows:?}"
+        );
+    }
+
+    /// Like `task` and root `Edit`, a root `Code` call never folds into
+    /// a compact group: the run splits around its card.
+    #[test]
+    fn code_cards_stay_outside_compact_groups() {
+        use crate::config::ToolDisplay;
+        let mut app = App::new();
+        app.tool_display = ToolDisplay::Compact;
+        app.handle_event(read_call("r1", None, "10 lines", CallState::Running));
+        app.handle_event(code_parent("t1"));
+        app.handle_event(read_call("r2", None, "4 lines", CallState::Running));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("py Code")),
+            "the code card renders outside the groups while running: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains("1 read · 1 script")),
+            "headers count only their side of the split: {rows:?}"
+        );
+    }
+
+    /// A `task` child splits its code parent's nested group — its
+    /// dedicated card always renders — while every other child kind
+    /// (edits included) stays folded behind the nested header.
+    #[test]
+    fn task_children_split_the_nested_group() {
+        let task_child = AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: Some("t1".into()),
+            id: "t1:task".into(),
+            kind: crate::tui::provider::ToolKind::Task {
+                description: "investigate the flake".into(),
+                summary: String::new(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Running,
+        });
+        let edit_child = |state: CallState| {
+            AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+                parent_call_id: Some("t1".into()),
+                id: "t1:e0".into(),
+                kind: crate::tui::provider::ToolKind::Edit {
+                    path: "src/lib.rs".into(),
+                    summary: "overwrote (5 bytes)".into(),
+                },
+                lines: vec![],
+                awaiting_approval: false,
+                image: None,
+                state,
+            })
+        };
+        let mut app = App::new();
+        app.handle_event(code_parent("t1"));
+        app.handle_event(read_call("t1:c0", Some("t1"), "", CallState::Running));
+        app.handle_event(task_child);
+        app.handle_event(edit_child(CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("» Task investigate the flake")),
+            "the task child renders its dedicated card under the code parent: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("src/main.rs")),
+            "the running read group before it auto-expands: {rows:?}"
+        );
+        // The settled edit-only group behind the task stays collapsed.
+        assert!(
+            rows.iter().all(|r| !r.contains("src/lib.rs")),
+            "the settled nested group keeps its edit folded: {rows:?}"
+        );
+
+        // Settle everything: both nested groups collapse, the task card
+        // stays.
+        app.handle_event(read_call(
+            "t1:c0",
+            Some("t1"),
+            "5 lines",
+            CallState::Complete,
+        ));
+        app.handle_event(AgentEvent::ToolCall(crate::tui::provider::ToolCallData {
+            parent_call_id: Some("t1".into()),
+            id: "t1:task".into(),
+            kind: crate::tui::provider::ToolKind::Task {
+                description: "investigate the flake".into(),
+                summary: "2 lines".into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+            image: None,
+            state: CallState::Complete,
+        }));
+        app.handle_event(edit_child(CallState::Complete));
+        let rows = frame_rows(&mut app, 80, 24);
+        assert!(
+            rows.iter().all(|r| !r.contains("src/main.rs")),
+            "the settled read group collapses: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("» Task investigate the flake")),
+            "the task child card outlives the nested groups: {rows:?}"
         );
     }
 
