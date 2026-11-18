@@ -1,6 +1,8 @@
 # Context Management
 
-Craft keeps context lean continuously instead of summarizing reactively when the window fills. Four mechanisms work together: pre-compression, the read lifecycle, staged compaction, and an overflow ladder. All of them are **reversible** — originals are never deleted.
+Craft reduces the conversation content sent to the model as you work. It compresses long tool results, replaces outdated file reads with markers, and compacts older history into summaries. The original content remains in the saved history and can be recovered with the `retrieve` tool.
+
+You usually do not need to manage this yourself. Use `/compact` in the TUI to compact immediately, or adjust the [compression and compaction settings](./configuration.md#compaction-stages).
 
 ## Tool-output compression
 
@@ -14,7 +16,7 @@ The verbatim originals stay in the entry sources, and the `retrieve` tool restor
 
 Nothing lives in a side store: a marker survives session reloads, and retrieval works in any later turn. Within a run, the request layer recomputes only the run's own suffix (everything older arrives pre-altered).
 
-Tuning lives in the `[compression]` block — rates, line caps, per-file match caps, and `protect_recent_tool_outputs` (the last N tool outputs stay verbatim). See [Configuration](./configuration.md#tool-output-compression).
+Tune rates, line limits, per-file match limits, and `protect_recent_tool_outputs` in the `compression` block. The last setting leaves the most recent N tool outputs unchanged. See [Configuration](./configuration.md#tool-output-compression).
 
 ## Read lifecycle
 
@@ -26,7 +28,7 @@ File reads are tracked fresh → stale → superseded. As the conversation moves
 
 ## Two-stage compaction
 
-`[[compaction]]` entries configure staged compaction, each with a `kind` and a `context` fill ratio. Between runs the driver estimates history size and runs every armed stage whose threshold is crossed, lowest ratio first:
+Named `compaction` blocks select a strategy and a `context` fill ratio. For example, `"0.6"` means 60% of the context window. Between runs, Craft estimates history size and runs eligible stages whose thresholds have been crossed, lowest ratio first:
 
 ```bml
 compaction "vcc" {
@@ -52,7 +54,7 @@ When a request still overflows after compaction, an escalating ladder collapses 
 
 ## Dedup cache
 
-Identical read-only tool invocations return cached output; entries are invalidated structurally when files change. The dedup `Respond` runs in the [guardrail layer](./harness.md).
+Identical read-only tool invocations return cached output; entries are invalidated when files change. This cache is part of the [guardrail layer](./harness.md).
 
 ## Compaction on demand
 

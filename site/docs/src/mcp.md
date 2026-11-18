@@ -1,10 +1,12 @@
 # MCP
 
-Connect external tool servers over stdio or HTTP. MCP blocks merge from the global config (`~/.config/craft.bml` and `~/.config/craft/*.bml`) and the project's `.craft/mcp.bml` — the project wins on name conflicts.
+Use the Model Context Protocol (MCP) to give the agent access to external tools. Craft connects to servers over stdio or HTTP.
+
+Add `mcp "name"` blocks to the global configuration (`~/.config/craft.bml` or `~/.config/craft/*.bml`) or the project's `.craft/mcp.bml`. Blocks are merged; a project block takes precedence over a global block with the same name.
 
 ## Stdio transport
 
-`command` is the program plus arguments:
+Craft starts the program in `command` and communicates with it over standard input and output. Include the program and each argument as separate list items. This example requires Node.js and `npx`:
 
 ```bml
 mcp "filesystem" {
@@ -24,7 +26,7 @@ mcp "remote" {
 }
 ```
 
-`headers` (with `${VAR}` expansion) rides every request to the server.
+`headers` are sent with every request to the server. `${VAR}` expands from Craft's process environment; set `EXAMPLE_TOKEN` before starting Craft rather than putting a token in the file.
 
 ### OAuth
 
@@ -45,10 +47,15 @@ mcp "acme" {
 
 Every key except `client_id` is optional; `callback_hostname` must resolve to loopback.
 
-## Details
+## Common settings
 
-- Names are ASCII alphanumeric + hyphens and must not collide with built-in tools.
-- `${VAR}` in `environment`/`headers` values expands from the process environment.
+- The block name can contain ASCII letters, digits, and hyphens. It must not collide with a built-in tool name.
+- `enabled` defaults to `true`; set it to `false` to disable a server.
+- `timeout` is in milliseconds, from `1` to `300000`; the default is `30000`.
+- `environment` sets variables for a stdio server. `${VAR}` in environment and header values expands from Craft's process environment.
+
+## Use connected tools
+
 - MCP tools are proxied as portable `server__tool` names; permission rules can scope them (`mcp__server` for a whole server — see [Permissions](./permissions.md#tool-policy-flags)).
 - `/mcp` in the TUI lists connected servers.
-- Craft's own knowledge layer does **not** ride MCP — argosy is linked in-process (see [Argosy](./argosy.md)).
+- Craft's built-in [Argosy knowledge layer](./argosy.md) does not need an MCP server.

@@ -1,12 +1,16 @@
 # ACP
 
-`craft acp` runs an Agent Client Protocol server on stdio, for editor and IDE integration (e.g. [Zed](https://zed.dev) and other ACP-speaking clients).
+`craft acp` runs an Agent Client Protocol (ACP) server over standard input and output. Use it to connect an ACP-capable editor or IDE, such as [Zed](https://zed.dev), to Craft.
 
-```json
-{
-  "adapter": { "command": "craft", "args": ["acp"] }
-}
+## Connect an editor
+
+Configure your client's agent command as `craft`, with `acp` as its argument:
+
+```sh
+craft acp
 ```
+
+Use your client's ACP configuration format; there is no universal editor JSON schema. Make sure the client can find `craft` on its `PATH` and inherits the provider credential environment variables.
 
 ## What the server exposes
 
@@ -17,4 +21,4 @@
 
 ## Configuration
 
-Provider and model selection come from the same BML config as every surface (see [Configuration](./configuration.md)); no editor-specific setup exists beyond pointing the client at the binary.
+Provider and model selection use the same [BML configuration](./configuration.md) as the TUI and headless runs. Permission requests are presented by the ACP client; Craft does not install a local auto-review permission responder for ACP sessions.

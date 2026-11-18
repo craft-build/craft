@@ -5,6 +5,8 @@
 # Getting Started
 
 - [Quick Start](./quick-start.md)
+- [TUI](./tui.md)
+- [Sessions](./sessions.md)
 - [Configuration](./configuration.md)
 - [Providers](./providers.md)
 
@@ -22,10 +24,8 @@
 - [Review](./review.md)
 - [Skills & Recipes](./skills-recipes.md)
 
-# Surfaces
+# Integrations & Automation
 
-- [TUI](./tui.md)
-- [Sessions](./sessions.md)
 - [Headless Mode](./headless.md)
 - [ACP](./acp.md)
 - [MCP](./mcp.md)

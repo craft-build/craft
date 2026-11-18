@@ -1,13 +1,17 @@
 # The Harness
 
-One long-lived `harness::Conversation` per session drives an animist `Agent` over an animist `History`; surfaces never run a loop of their own. This page describes what runs under the TUI, `--print`, and ACP alike.
+The harness is the shared runtime behind the TUI, headless mode (`--print`), and ACP. It applies permissions, context management, retries, and persistence consistently across those interfaces.
+
+This page is an architecture overview for contributors. For everyday use, start with [TUI](./tui.md), [Headless Mode](./headless.md), or [ACP](./acp.md).
+
+Each session has one long-lived `harness::Conversation`, which drives an animist `Agent` over an animist `History`. The interfaces collect input and display results rather than implementing their own agent loops.
 
 ## Runtime setup contract
 
 Every execution surface obtains the shared pieces of a session from `agent/src/runtime.rs`, so equivalent sessions receive equivalent run policies:
 
 - `runtime::workspace_env(cwd, mcp)` — instruction discovery, the workspace (MCP handle installed), and the permission engine. Every surface constructs the `PermissionManager` and consults it: the TUI prompt overlay, the ACP `session/request_permission`, and the headless permission gate.
-- `model_selection::resolve_or_default` — a model choice plus its catalog window; output ceilings ride the model handle, where request shaping reads them. Lookup only: `--model` ids the catalog does not list stay usable.
+- `model_selection::resolve_or_default` — resolves the model choice and catalog context window. The model handle carries output limits for request shaping. This is a lookup, not a validation gate: `--model` IDs absent from the catalog remain usable.
 
 ## The layer chain
 
@@ -31,7 +35,7 @@ Model switching happens between runs by rebuilding the agent on the same history
 
 The `task` tool spawns child agents as their own `Conversation` with:
 
-- a fresh history — delegation never pollutes the main session;
+- a fresh history, keeping intermediate work separate from the main session;
 - a restricted tool registry;
 - their own layer instances built from the parent's shared services;
 - model tiers (`weak` / `medium` / `strong`, capped at the parent's tier);
@@ -39,7 +43,7 @@ The `task` tool spawns child agents as their own `Conversation` with:
 
 `batch` fans children out concurrently under the parent's claims and budgets.
 
-In the TUI, each subagent gets its own chat window (Ctrl-N / Ctrl-P; `/tasks` view). See [Tools](./tools.md) for the tool surface and [TUI](./tui.md) for the windows.
+In the TUI, each subagent gets its own chat window. Use Ctrl-N or `/tasks` to open the chat picker. See [Tools](./tools.md) for available operations and [TUI](./tui.md) for interactive controls.
 
 ## Advisor
 

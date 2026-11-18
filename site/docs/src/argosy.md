@@ -1,19 +1,19 @@
 # Argosy
 
-The `argosy` knowledge crate is linked **in-process** — no subprocess, no MCP transport. Its tools register as first-class native tools with the same typed-JSON interface as the builtins.
+Argosy is Craft's project knowledge layer. It stores documents, memory, skills, and styleguide rules so the agent can find them across sessions. It is built in: you do not need to start a separate process or configure an MCP server.
 
-Argosy keeps its own state keyed by project root: writes from craft are visible to the standalone `argosy mcp` server, and vice versa. Embeddings run locally (ONNX, via the argosy crate) — nothing leaves your machine for indexing.
+Knowledge is associated with the project root. Craft and the standalone `argosy mcp` server can read each other's writes for the same project. Indexing and embeddings run locally; this does not mean model requests or optional decision-endpoint requests stay on your machine.
 
 ## Search and ask
 
-- `search` — hybrid semantic search over the project's knowledge (documents, memory, skills, rules): exact-term BM25 and vector similarity fused by reciprocal rank fusion. Exact identifiers and rule IDs rank alongside paraphrases.
-- `ask` — retrieval augmented by an optional Jev-compatible decision endpoint: hybrid-retrieves candidates, then asks the endpoint which (if any) answers the question, returning the selection with a calibrated confidence.
+- `search` combines exact-term and semantic search over project knowledge, so it can find both exact identifiers and paraphrased concepts.
+- `ask` retrieves candidate passages and can use an optional Jev-compatible decision endpoint to select which, if any, answers the question. The result includes a confidence score.
 
 Retrieval is passage-level: hits carry the matched passage, a heading breadcrumb, and line numbers, so the agent often answers without a further read.
 
 ## Documents, memory, rules
 
-Reads and writes for every concept kind: documents (curated project knowledge), memory (session learnings), and styleguide rules (conventions the project wants enforced). Writes reconcile the index immediately.
+The agent can read and write documents (curated project knowledge), memory (facts learned during work), and styleguide rules (project conventions). Writes update the index immediately.
 
 ## Skills
 
@@ -21,8 +21,10 @@ Project-stored skills join the `skill` tool's discovery with shadowing precedenc
 
 ## Review toolset
 
-Grounded like `argosy mcp`: `start_review`, `review_diff`, `report_finding`, `review_findings`. `start_review` runs the deterministic styleguide pattern pre-pass over the diff's added lines; `report_finding` validates rule URIs. See [Review](./review.md).
+The review tools are `start_review`, `review_diff`, `report_finding`, and `review_findings`. `start_review` first checks added lines against styleguide patterns; `report_finding` validates references to styleguide rules. See [Review](./review.md) for the workflow.
 
 ## Memory extraction
 
-Post-turn memory extraction (on by default; `agent.memory_extraction`) writes durable facts from a turn into the project's local argosy, so future sessions find them via `search`. `/memory` opens the workflow in the TUI.
+After a successful run, Craft extracts durable facts into local project memory so later sessions can find them with `search`. This is enabled by default. `/memory` opens the workflow in the TUI.
+
+To disable automatic extraction, set `memory_extraction = false` inside the `agent` block in your [configuration](./configuration.md#memory-and-display).

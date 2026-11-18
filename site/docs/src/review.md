@@ -1,17 +1,19 @@
 # Review
 
-Craft ships a reviewer workflow on top of the [argosy](./argosy.md) review toolset.
+Use `/review` in the TUI to review your working-tree changes. Craft runs a read-only reviewer and returns prioritized findings with a verdict. This is a code-review workflow, not the [auto-review permission responder](./permissions.md#auto-review-mode).
+
+Findings use priorities from **P0** (most urgent) through **P3** (least urgent).
 
 ## The reviewer subagent
 
-`/review` — or the `review` tool — snapshots the working-tree diff (or the current state of named paths, with `paths` for a whole-area review of unchanged code) and returns prioritized **P0–P3** findings with a verdict.
+The agent can also invoke the `review` tool. It snapshots the working-tree diff by default; its `paths` option can review the current state of named paths, including unchanged code.
 
 The reviewer is read-only: it records findings through `report_finding`, never edits files.
 
-## The session flow
+## How a review works
 
 1. `start_review` snapshots the git diff — local tracked changes against a base (`HEAD` by default), exactly one commit, or the current state of named paths (`base "empty"` materializes every tracked line as added).
-2. A deterministic pattern pre-pass runs immediately over the added lines when the project's argosy holds styleguide rules with a `pattern` — those findings land first, confidence 1.0.
+2. If the project's Argosy knowledge contains styleguide rules with a `pattern`, a deterministic check runs over added lines first. Those findings are recorded with confidence `1.0`.
 3. The reviewer agent reads the diff, checks the rules, and reports verified defects with `report_finding`: priority, confidence, affected lines, rule URIs, and a machine-applicable fix when one exists.
 4. `review_findings` lists the set (filterable by priority and path) and can export SARIF for GitHub code scanning or reviewdog JSONL for one-click PR comments.
 

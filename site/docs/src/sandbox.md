@@ -1,6 +1,8 @@
 # Sandbox
 
-The `bash` tool runs under an OS command sandbox configured by the `[sandbox]` section:
+The sandbox limits the files and network resources that the `bash` tool can access. It is separate from [permission rules](./permissions.md), which decide whether a tool call may run at all.
+
+Configure it with a `sandbox` block in your [BML configuration](./configuration.md):
 
 ```bml
 sandbox {
@@ -10,10 +12,12 @@ sandbox {
 }
 ```
 
-## Backends
+`workspace_write` is the default mode. Use `read_only` to restrict writes, or `danger_full_access` / `off` when confinement is not wanted. `network = false` blocks sandboxed network access.
+
+## Platform requirements
 
 - **macOS** — the stock `sandbox-exec`.
-- **Linux** — argv is wrapped with `bubblewrap` (`bwrap`, prerequisite).
+- **Linux** — install `bubblewrap` (`bwrap`); Craft uses it to wrap commands.
 
 ## Enforcement is fail-closed
 
@@ -21,8 +25,10 @@ On supported platforms, if the backend binary is missing while confinement is re
 
 ## Escape hatches
 
-- `--yolo` disables the sandbox entirely (predecessor parity).
-- `CRAFT_SANDBOX=off` is the documented env escape hatch with highest precedence (debug/CI).
+- `--yolo` disables the sandbox and bypasses permission prompts.
+- `CRAFT_SANDBOX=off` disables the sandbox with highest precedence, for example during debugging or CI.
+
+Both remove OS confinement. Use them only when you intend commands to run without that protection.
 
 ## Plan mode and read-only workers
 

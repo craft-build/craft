@@ -1,24 +1,43 @@
 # Sessions
 
-Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (`craft stats`, `/stats`).
+Craft saves conversation history so you can resume work or branch from an earlier session.
 
-## Format
+## Resume
+
+In the TUI, use `/sessions` to find saved work. From the command line:
+
+```sh
+craft --continue
+craft --session <ID>
+```
+
+`--continue` resumes the latest session; `--session` resumes the specified ID. ACP clients can resume with `session/load`.
+
+## Fork a session
+
+Add `--fork-session` to work from a copy without changing the source session:
+
+```sh
+craft --continue --fork-session
+```
+
+`--session-id <ID>` names a **new** session; it never resumes an existing one.
+
+## Saved format and compatibility
 
 Messages persist as animist **entry records** (log format 4): `entry`, `insert`, `revise`, `deactivate`, `replace`, mapping one to one onto the history change feed — plus `sub_entry` subagent histories and the trailing meta record.
 
 One loader reads every older shape (pre-animist message records, `.json` files) and folds their raw `tool_outputs` copies into entry sources; saving rewrites the current shape. A corrupt or truncated trailing record is skipped with a warning; a record whose index is out of range for the replayed list **fails the load** with an actionable error.
 
-> **One-way upgrade:** older `craft` builds cannot read the new saves — upgrade before rolling back.
+**Save compatibility:** older Craft builds cannot read the current save format. Keep a backup of existing session files before opening them with a newer build if you may need to return to the older build.
 
-## Resume
+## What the transcript restores
 
-`/sessions` (TUI), `-c` / `--continue` (latest), `-s/--session <id>` (specific), and ACP `session/load` all replay the same shared transcript builder:
+The TUI, command-line resume, and ACP use the same transcript loader:
 
 - inactive (compacted-away) entries are hidden;
 - compaction summaries render as cards;
 - markers render by tag — altered tool results show their altered text with the verbatim original one click away (see [Context Management](./context.md)).
-
-`--fork-session` copies a `--session`/`--continue` source under a new id without touching the source. `--session-id` sets the persistence id for a **new** session; it never resumes.
 
 ## Mode persistence
 

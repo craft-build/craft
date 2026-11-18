@@ -1,23 +1,42 @@
 # Permissions & Snapshots
 
+Permission rules decide whether a tool call is allowed, denied, or needs approval. The [sandbox](./sandbox.md) is a separate layer that limits what shell commands can access. Configure both for the level of access you want.
+
 ## Rules
 
-Permission rules are BML blocks — allow / deny / ask — scoped to bash or MCP, with wildcards. They live in a `permissions.bml` next to the config or in a project's `.craft/` directory.
+Rules use BML blocks with `allow`, `deny`, or `ask` settings. They can apply to native tools or MCP tools, with scope patterns for commands and paths.
 
-Bash commands are parsed with tree-sitter, so compound commands request each sub-command's approval separately: `git diff && rm -rf /` asks for `git *` and `rm *` approval separately. Subshells, command substitution, and pipes are handled the same way — most agents only see the first command.
+For project-specific rules, create `.craft/permissions.bml`. For example:
 
-## Every surface enforces
+```bml
+bash {
+  allow = ["git status", "git diff *"]
+  deny = ["rm *"]
+}
+```
 
-The TUI prompt overlay, the ACP `session/request_permission`, and the headless gate all consult the same `PermissionManager` built by `runtime::workspace_env`.
+This allows the matching status/diff commands and denies matching `rm` commands. It is an example policy, not a complete safety policy.
 
-Headless runs (`--print`, `term run`, `recipe run`) enforce the same rules with no interactive approver: unresolved **asks fail closed** with guidance naming the opt-outs, and denied calls never execute. The gate covers batch children and subagent dispatch.
+Global rules go in a `permissions` block in the [global configuration](./configuration.md), including split files such as `~/.config/craft/permissions.bml`. Project files use tool blocks at the top level, without the outer `permissions` block.
 
-## Opt-outs
+Bash commands are parsed with tree-sitter. A compound command such as `git status && git diff` is checked by subcommand, not just by its first command. The parser also handles subshells, command substitution, and pipes.
 
-- `--yolo` / `--dangerously-skip-permissions` — bypass everything, disables the [sandbox](./sandbox.md).
-- `-A` / `--auto-review` — an LLM (or decision-endpoint) reviewer answers permission prompts, fail-closed below a confidence threshold.
+## How approval works
 
-They are mutually exclusive and rejected at `Cli::validate`.
+The same rule engine is used by the TUI, ACP, and headless runs:
+
+- **TUI:** calls needing approval open a permission prompt.
+- **ACP:** the client presents permission requests.
+- **Headless** (`--print`, `term run`, `recipe run`): there is no interactive approver, so unresolved asks block the call (“fail closed”). Denied calls never execute.
+
+These checks also cover batch children and subagent dispatch.
+
+## Automated approval and bypass
+
+- `-A` / `--auto-review` asks an LLM or decision-endpoint reviewer to answer permission prompts. Low confidence blocks the call. It does not remove the sandbox.
+- `--yolo` / `--dangerously-skip-permissions` bypasses permission prompting **and disables the sandbox**.
+
+The two options cannot be combined; Craft rejects the combination at startup.
 
 ## Tool policy flags
 
@@ -30,13 +49,13 @@ Both accept PascalCase or snake_case native names (`Read`, `bash`) and MCP forms
 
 ## Snapshots and /undo
 
-Files are snapshotted before mutations — first-wins, ≤ 5 MiB, text only — and `/undo` walks them back.
+Craft snapshots text files before supported file-tool mutations. The first snapshot of a file is kept; files larger than 5 MiB are not snapshotted. Use `/undo` in the TUI to restore snapshotted contents.
 
-Undo restores file contents only; deactivated history entries survive in session sources but are not restored.
+Undo restores file contents only. It is not a general rollback for shell commands, external services, or every effect of an agent run. It also does not restore deactivated conversation entries, although those entries remain in the saved session sources.
 
 ## Auto-review mode
 
-With `-A`, every permission prompt is answered by an LLM reviewer that sees the command and its context. Low confidence fails closed, so a confused reviewer can never silently approve a dangerous call. `/auto-review` toggles it from the TUI.
+With `-A`, a reviewer sees the command and its context and answers permission prompts. Low confidence blocks the call, but a model's approval is not a guarantee of safety. `/auto-review` toggles the reviewer in the TUI.
 
 Auto-review can also be the default posture — no flag needed. In the global config (`~/.config/craft.bml` or a split `~/.config/craft/*.bml`, e.g. a `permissions.bml` there), set it inside the `permissions` block:
 
@@ -46,4 +65,12 @@ permissions {
 }
 ```
 
-A project's `.craft/permissions.bml` sets the same key at the top level — `auto_review = true` beside its tool blocks — and its value wins over the global one. Every surface starts with the reviewer on: the TUI installs it at startup, and headless runs (`--print`, `term run`, `recipe run`) install it whenever the flag *or* the config enables it. `-A` implies the same posture; `--yolo` still bypasses prompting entirely, and the two stay mutually exclusive. There is no off flag — `/auto-review` toggles the current session. ACP sessions never install a reviewer locally, so an enabled auto-review still falls through to the client's permission prompt.
+A project's `.craft/permissions.bml` sets the same key at the top level, beside its tool blocks:
+
+```bml
+auto_review = true
+```
+
+The project value takes precedence over the global value. The TUI and headless runs enable the reviewer when either the flag or configuration requests it. There is no command-line off flag; `/auto-review` toggles it for the current TUI session.
+
+ACP does not install a local reviewer. Permission requests still go to the client even when auto-review is enabled in configuration.
