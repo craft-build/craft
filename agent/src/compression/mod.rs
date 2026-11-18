@@ -170,7 +170,24 @@ pub fn compress(text: &str, content_type: ContentType, config: &CompressionConfi
 /// - `grep`: matched lines, already capped by `max_matches`/`MAX_OUTPUT_BYTES`.
 /// - `retrieve`: the original text recovered by content hash; re-compressing it
 ///   would defeat the point of the reversible-compression store.
-const VERBATIM_TOOLS: &[&str] = &["read", "grep", "retrieve"];
+/// - argosy code tools: pre-rendered, caller-bounded reports. `review_diff`
+///   returns the exact patch under review (argosy caps the snapshot at 2 MiB)
+///   and the diff compressor would truncate it; the outline/zoom/inspect/
+///   callgraph/repomap/astgrep/conflicts reports carry `N: ` numbering that
+///   trips the code detector.
+const VERBATIM_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "retrieve",
+    "review_diff",
+    "outline",
+    "zoom",
+    "inspect",
+    "callgraph",
+    "repomap",
+    "astgrep",
+    "conflicts",
+];
 
 /// Whether a tool result should pass through request-view pre-compression.
 pub fn should_compress_tool(tool: &str) -> bool {
@@ -317,6 +334,14 @@ mod tests {
         assert!(!should_compress_tool("read"));
         assert!(!should_compress_tool("grep"));
         assert!(!should_compress_tool("retrieve"));
+        // The reviewer's evidence must arrive whole: the patch under review
+        // and the structural reports.
+        assert!(!should_compress_tool("review_diff"));
+        assert!(!should_compress_tool("outline"));
+        assert!(!should_compress_tool("zoom"));
+        assert!(!should_compress_tool("inspect"));
+        assert!(!should_compress_tool("callgraph"));
+        assert!(!should_compress_tool("repomap"));
         assert!(should_compress_tool("bash"));
         assert!(should_compress_tool("glob"));
     }

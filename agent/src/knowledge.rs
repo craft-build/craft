@@ -148,11 +148,15 @@ pub struct ArgosyService {
     init_error: Option<String>,
 }
 
-fn build_store() -> Result<Store, String> {
-    let config = argosy::config::Config::load().map_err(|e| format!("argosy config: {e:#}"))?;
+fn build_store(
+    config: &argosy::config::Config,
+    decision: Arc<dyn argosy::decision::DecisionProvider>,
+) -> Result<Store, String> {
     let default_k = config.index.mcp_default_k;
     let db_name = config.index_db_name().to_string();
     let embed_cache: Option<PathBuf> = config.embed_cache_dir();
+    let chunk_config = config.chunk_config();
+    let trust = config.trust_policy();
     let spec = argosy::index::tract::ModelSpec::from_name(config.model_name())
         .ok_or_else(|| format!("unknown argosy embedding model `{}`", config.model_name()))?;
     // Projects open lazily by canonical root and stay cached for the
@@ -169,7 +173,8 @@ fn build_store() -> Result<Store, String> {
         let mut index = argosy::index::Index::new(
             argosy::index::tract::LazyTractProvider::new(spec, embed_cache.clone())?,
             store,
-        );
+        )
+        .with_chunk_config(chunk_config);
         if let Err(err) = index.reconcile(&context) {
             tracing::warn!(
                 root = %root.display(),
@@ -177,36 +182,73 @@ fn build_store() -> Result<Store, String> {
                 "argosy index reconcile failed; serving degraded"
             );
         }
-        Ok(argosy::mcp::ProjectSession::new(context, index).with_default_k(default_k))
+        Ok(argosy::mcp::ProjectSession::new(context, index)
+            .with_default_k(default_k)
+            .with_trust_policy(trust.clone()))
     });
-    let mut state = Store::new(factory);
-    let provider = argosy::decision::provider_from_config(&config.decision)
-        .map_err(|e| format!("argosy decision config: {e:#}"))?;
-    state = state.with_decision(Arc::from(provider));
-    Ok(state)
+    Ok(Store::new(factory)
+        .with_session_limits(config.session.project_ttl(), config.session.project_max)
+        .with_decision(decision))
+}
+
+/// The code-tools half of the service, grounded like `argosy mcp`:
+/// `start_review` runs the deterministic pattern pre-pass over the
+/// project's styleguide rules and `report_finding` validates rule URIs.
+/// Grounding opens the project context directly, so it stays available
+/// when the index store failed to initialize.
+fn build_code_tools(
+    config: &argosy::config::Config,
+    decision: Arc<dyn argosy::decision::DecisionProvider>,
+) -> Arc<argosy::codetools::CodeTools> {
+    let trust = config.trust_policy();
+    let grounding: argosy::codetools::review::ReviewGrounding = Arc::new(move |root| {
+        let context = argosy::context::ProjectContext::open_project(root)?;
+        argosy::codetools::review::ReviewRuleSet::from_context(&context, &trust)
+    });
+    Arc::new(
+        argosy::codetools::CodeTools::default()
+            .with_decision(decision)
+            .with_review_limits(config.session.review_ttl(), config.session.review_max)
+            .with_review_grounding(grounding),
+    )
 }
 
 impl ArgosyService {
     fn new() -> Self {
-        let decision: Arc<dyn argosy::decision::DecisionProvider> =
-            match argosy::config::Config::load() {
-                Ok(config) => match argosy::decision::provider_from_config(&config.decision) {
-                    Ok(provider) => Arc::from(provider),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "argosy decision provider disabled");
-                        Arc::new(argosy::decision::Disabled)
-                    }
-                },
-                Err(_) => Arc::new(argosy::decision::Disabled),
-            };
-        match build_store() {
-            Ok(store) => Self {
-                store: std::sync::Mutex::new(Some(store)),
-                decision,
-                code: Arc::new(argosy::codetools::CodeTools::default()),
-                init_error: None,
+        let config = argosy::config::Config::load();
+        let decision: Arc<dyn argosy::decision::DecisionProvider> = match &config {
+            Ok(config) => match argosy::decision::provider_from_config(&config.decision) {
+                Ok(provider) => Arc::from(provider),
+                Err(err) => {
+                    tracing::warn!(error = %err, "argosy decision provider disabled");
+                    Arc::new(argosy::decision::Disabled)
+                }
             },
+            Err(_) => Arc::new(argosy::decision::Disabled),
+        };
+        match config {
+            Ok(config) => {
+                let code = build_code_tools(&config, decision.clone());
+                match build_store(&config, decision.clone()) {
+                    Ok(store) => Self {
+                        store: std::sync::Mutex::new(Some(store)),
+                        decision,
+                        code,
+                        init_error: None,
+                    },
+                    Err(err) => {
+                        tracing::warn!(error = %err, "argosy service failed to initialize");
+                        Self {
+                            store: std::sync::Mutex::new(None),
+                            decision,
+                            code,
+                            init_error: Some(err),
+                        }
+                    }
+                }
+            }
             Err(err) => {
+                let err = format!("argosy config: {err:#}");
                 tracing::warn!(error = %err, "argosy service failed to initialize");
                 Self {
                     store: std::sync::Mutex::new(None),
@@ -674,6 +716,43 @@ pub fn render_report_text(tool: &str, report: &serde_json::Value) -> String {
                         .join("\n")
                 ));
             }
+            if let Some(prepass) = report.get("prepass") {
+                let count = |key: &str| {
+                    prepass
+                        .get(key)
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                };
+                match prepass.get("status").and_then(serde_json::Value::as_str) {
+                    Some("ran") => {
+                        out.push_str(&format!(
+                            "\npattern pre-pass ran: {} rules, {} findings already recorded \
+                             with origin `pattern` (audit them via review_findings)",
+                            count("rules"),
+                            count("findings"),
+                        ));
+                        if count("invalid_patterns") > 0 {
+                            out.push_str(&format!(
+                                "; {} rules had invalid patterns and were skipped",
+                                count("invalid_patterns")
+                            ));
+                        }
+                        if prepass
+                            .get("truncated")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        {
+                            out.push_str("; flood caps dropped further matches");
+                        }
+                    }
+                    Some("unavailable") => {
+                        if let Some(reason) = report_str(prepass, "reason") {
+                            out.push_str(&format!("\npattern pre-pass unavailable: {reason}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
             out
         }
         "review_diff" => {
@@ -854,5 +933,93 @@ mod tests {
     fn unknown_shapes_fall_back_to_pretty_json() {
         let text = render_report_text("nope", &json!({"a": 1}));
         assert_eq!(text, "{\n  \"a\": 1\n}");
+    }
+
+    #[test]
+    fn start_review_renders_the_prepass_outcome() {
+        let ran = json!({
+            "review_id": "r1",
+            "comparison": "Working tree compared with HEAD",
+            "changed_files": ["a.rs"],
+            "prepass": {
+                "status": "ran",
+                "rules": 3,
+                "invalid_patterns": 1,
+                "findings": 2,
+                "truncated": true,
+            }
+        });
+        let text = render_report_text("start_review", &ran);
+        assert!(
+            text.contains("pattern pre-pass ran: 3 rules, 2 findings"),
+            "{text}"
+        );
+        assert!(text.contains("origin `pattern`"), "{text}");
+        assert!(text.contains("1 rules had invalid patterns"), "{text}");
+        assert!(text.contains("flood caps dropped"), "{text}");
+
+        let unavailable = json!({
+            "review_id": "r2",
+            "comparison": "Working tree compared with HEAD",
+            "changed_files": [],
+            "prepass": {"status": "unavailable", "reason": "no argosy for this root"}
+        });
+        let text = render_report_text("start_review", &unavailable);
+        assert!(
+            text.contains("pattern pre-pass unavailable: no argosy for this root"),
+            "{text}"
+        );
+    }
+
+    /// A committed temporary repository with one modified tracked file.
+    fn git_repo_with_change() -> tempfile::TempDir {
+        let repo = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(git(&["init", "-q"]), "git init");
+        std::fs::write(repo.path().join("file.txt"), "one\n").unwrap();
+        assert!(git(&["add", "."]), "git add");
+        assert!(
+            git(&[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "init"
+            ]),
+            "git commit"
+        );
+        std::fs::write(repo.path().join("file.txt"), "two\n").unwrap();
+        repo
+    }
+
+    /// `start_review` must run grounded: the report carries a pre-pass
+    /// outcome even when the project has no argosy (unavailable), because
+    /// without grounding the field is absent and the deterministic
+    /// pattern findings never exist.
+    #[test]
+    fn start_review_runs_the_pattern_prepass() {
+        let repo = git_repo_with_change();
+        let report = ArgosyService::global()
+            .execute("start_review", json!({ "cwd": repo.path() }))
+            .expect("start_review opens the review");
+        let prepass = report.get("prepass").expect("grounding is wired");
+        assert_eq!(
+            prepass.get("status"),
+            Some(&json!("unavailable")),
+            "a project without an argosy degrades to unavailable, never absent"
+        );
+        let text = render_report_text("start_review", &report);
+        assert!(text.contains("pattern pre-pass unavailable"), "{text}");
     }
 }

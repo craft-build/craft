@@ -75,8 +75,10 @@ pub const GENERAL_TOOLS: &[&str] = &[
     "todo_write",
 ];
 
-/// The reviewer subagent's budget: the read-only research set
-/// plus the argosy review workflow, minus the network tools.
+/// The reviewer subagent's budget: read-only builtins, the argosy
+/// knowledge tools, the structural code tools the review workflow traces
+/// callers with, and the review workflow itself. No network, no writers:
+/// `astgrep` (apply) and `conflicts` (resolve) mutate files and stay out.
 pub const REVIEWER_TOOLS: &[&str] = &[
     "read",
     "grep",
@@ -85,8 +87,13 @@ pub const REVIEWER_TOOLS: &[&str] = &[
     "inspect",
     "search",
     "search_rules",
+    "ask",
     "read_document",
     "read_memory",
+    "outline",
+    "zoom",
+    "callgraph",
+    "repomap",
     "start_review",
     "review_diff",
     "report_finding",
@@ -1208,6 +1215,50 @@ mod tests {
         assert!(research.contains(&"read".to_string()));
         assert!(general.contains(&"write".to_string()));
         assert!(general.contains(&"bash".to_string()));
+    }
+
+    /// Every REVIEWER_TOOLS entry must resolve to a registered tool:
+    /// `register_argosy` filters by name, so a name that matches nothing
+    /// would drop out of the reviewer's table silently.
+    #[test]
+    fn reviewer_registry_registers_every_reviewer_tool_and_no_writers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = Workspace::new(tmp.path()).unwrap();
+        let registry = workspace
+            .reviewer_registry(&animist::history::History::new())
+            .unwrap();
+        let names: Vec<String> = registry
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        for tool in REVIEWER_TOOLS {
+            assert!(
+                names.contains(&tool.to_string()),
+                "{tool} missing from the reviewer registry"
+            );
+        }
+        // Structural reachability tools joined the budget; writers never do.
+        for structural in ["ask", "outline", "zoom", "callgraph", "repomap"] {
+            assert!(
+                REVIEWER_TOOLS.contains(&structural),
+                "{structural} dropped from the budget"
+            );
+        }
+        for banned in [
+            "bash",
+            "edit",
+            "write",
+            "apply_patch",
+            "astgrep",
+            "conflicts",
+            "task",
+        ] {
+            assert!(
+                !names.contains(&banned.to_string()),
+                "{banned} leaked into the reviewer table"
+            );
+        }
     }
 
     #[tokio::test]
