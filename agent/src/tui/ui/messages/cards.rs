@@ -280,12 +280,15 @@ pub(super) fn tool_block(
             (&all[..SOURCE_CAP], all.len() - SOURCE_CAP)
         };
         let mut python = Highlighter::for_token("python");
+        // Width fits the deepest shown line number so rows stay aligned
+        // once an expanded card crosses 99 lines.
+        let gutter_w = shown.len().to_string().len().max(2);
         for (nr, source) in shown.iter().enumerate() {
             let segs = python.highlight_line(source);
             let base = Style::default().fg(t.text_secondary).bg(card_bg);
             let lead = vec![
                 Span::styled(indent.clone(), surf),
-                gutter_span(nr + 1, 2, card_bg),
+                gutter_span(nr + 1, gutter_w, card_bg),
             ];
             let content = styled_diff_spans(source, Some(segs.as_slice()), &[], base, base);
             let avail = width.saturating_sub(spans_width(&lead)).max(1);

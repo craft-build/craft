@@ -3,6 +3,15 @@ use serde_json::{Number, Value};
 
 /// Converts a Monty value into JSON, using its representation when no JSON type fits.
 pub fn to_json(value: ObjectRef<'_>) -> Value {
+    to_json_depth(value, 0)
+}
+
+/// Containers this deep are pathologically nested (built iteratively on the
+/// worker); recursing further risks overflowing the worker's stack. Aligned
+/// with serde_json's default recursion limit.
+const MAX_DEPTH: usize = 128;
+
+fn to_json_depth(value: ObjectRef<'_>, depth: usize) -> Value {
     if let Some(value) = value.as_bool() {
         return Value::Bool(value);
     }
@@ -18,8 +27,16 @@ pub fn to_json(value: ObjectRef<'_>) -> Value {
     if value.type_name() == "NoneType" {
         return Value::Null;
     }
+    if depth >= MAX_DEPTH {
+        return Value::String("<max depth exceeded>".to_owned());
+    }
     if let Some(items) = value.items() {
-        return Value::Array(items.iter().map(|item| to_json(*item)).collect());
+        return Value::Array(
+            items
+                .iter()
+                .map(|item| to_json_depth(*item, depth + 1))
+                .collect(),
+        );
     }
     if let Some(pairs) = value.pairs() {
         return Value::Object(
@@ -27,7 +44,7 @@ pub fn to_json(value: ObjectRef<'_>) -> Value {
                 .into_iter()
                 .map(|(key, value)| {
                     let key = key.as_str().map_or_else(|| key.py_repr(), str::to_owned);
-                    (key, to_json(value))
+                    (key, to_json_depth(value, depth + 1))
                 })
                 .collect(),
         );
@@ -96,5 +113,25 @@ mod tests {
             to_json(MontyObject::float(f64::INFINITY).as_ref()),
             Value::Null
         );
+    }
+
+    #[test]
+    fn deep_containers_hit_the_depth_cap_instead_of_overflowing() {
+        // Built iteratively, so the Monty side is shallow work per step even
+        // though the structure is far deeper than any stack can convert.
+        let mut value = MontyObject::none();
+        for _ in 0..(MAX_DEPTH + 64) {
+            value = MontyObject::list([value]);
+        }
+        // The placeholder sits exactly at the cap; levels above it stay real.
+        let mut node = &to_json(value.as_ref());
+        for _ in 0..MAX_DEPTH {
+            node = node
+                .as_array()
+                .expect("levels above the cap stay arrays")
+                .first()
+                .unwrap();
+        }
+        assert_eq!(node, &Value::String("<max depth exceeded>".to_owned()));
     }
 }

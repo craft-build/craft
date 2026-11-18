@@ -299,6 +299,8 @@ impl Workspace {
         child.sandbox = self.sandbox.clone();
         child.locks = self.locks.clone();
         child.codemode = self.codemode;
+        child.bash = self.bash;
+        child.webfetch = self.webfetch;
         child.model = self.model.clone();
         child.session_id = self.session_id.clone();
         Ok(child)

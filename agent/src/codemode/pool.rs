@@ -222,9 +222,20 @@ impl Pool {
             return;
         };
         if let Ok(worker) = spawn_worker(Some(permit)).await {
-            let mut state = self.state.lock().unwrap();
-            if state.idle.is_empty() {
-                state.idle.push(worker);
+            // Scope the guard: it must not be live across the await below.
+            let spare = {
+                let mut state = self.state.lock().unwrap();
+                if state.idle.is_empty() {
+                    state.idle.push(worker);
+                    None
+                } else {
+                    Some(worker)
+                }
+            };
+            if let Some(mut worker) = spare {
+                // Lost the refill race: dispose of the spare so its pid
+                // deregisters instead of leaking into LIVE_PIDS.
+                worker.handle.shutdown().await;
             }
         }
     }
@@ -298,17 +309,30 @@ async fn process_spawn(command: Result<OsString, Failure>) -> Result<ProcessWork
         }
     });
     let mut reader = AsyncFrameReader::new(stdout);
-    let ready = tokio::time::timeout(READY_TIMEOUT, reader.read_frame())
-        .await
-        .map_err(|_| Failure::crash("codemode worker did not start in time"))?
-        .map_err(|error| Failure::crash(format!("could not start codemode worker: {error}")))?;
-    match ready.map(|body| proto::parse_frame::<FromWorker>(&body)) {
-        Some(Ok(FromWorker::Ready)) => {}
-        _ => {
-            return Err(Failure::crash(
+    let ready = match tokio::time::timeout(READY_TIMEOUT, reader.read_frame()).await {
+        Err(_) => Err(Failure::crash("codemode worker did not start in time")),
+        Ok(Err(error)) => Err(Failure::crash(format!(
+            "could not start codemode worker: {error}"
+        ))),
+        Ok(Ok(Some(body))) => match proto::parse_frame::<FromWorker>(&body) {
+            Ok(FromWorker::Ready) => Ok(()),
+            _ => Err(Failure::crash(
                 "codemode worker did not send its ready frame",
-            ));
+            )),
+        },
+        Ok(Ok(None)) => Err(Failure::crash(
+            "codemode worker did not send its ready frame",
+        )),
+    };
+    if let Err(failure) = ready {
+        // Reap before failing: the pid registered at spawn must not leak
+        // into LIVE_PIDS (kill_on_drop alone leaves no trace of the exit).
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        if let Some(pid) = pid {
+            deregister_pid(pid);
         }
+        return Err(failure);
     }
     Ok(ProcessWorker {
         child,
@@ -394,9 +418,13 @@ fn deregister_pid(pid: u32) {
 }
 
 /// Test hook: SIGKILL every live worker subprocess, simulating an engine
-/// crash at the OS level.
+/// crash at the OS level. Inert unless a worker-command override is
+/// configured (the integration-test setup arms it); production never does.
 #[doc(hidden)]
 pub fn debug_kill_all() {
+    if std::env::var_os(WORKER_CMD_ENV).is_none() {
+        return;
+    }
     #[cfg(unix)]
     for pid in LIVE_PIDS.lock().unwrap().iter().copied() {
         // ESRCH for an already-dead pid is fine.

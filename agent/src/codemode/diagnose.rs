@@ -375,6 +375,13 @@ pub fn preflight(code: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Blanks every byte of `character` so multi-byte sequences stay valid UTF-8.
+fn mask_char(masked: &mut [u8], offset: usize, character: char) {
+    for byte in 0..character.len_utf8() {
+        masked[offset + byte] = b' ';
+    }
+}
+
 /// Replaces string-literal and comment bytes with spaces while preserving byte
 /// offsets, so lexical checks never interpret payload text as source.
 pub(super) fn mask_strings_and_comments(code: &str) -> String {
@@ -397,7 +404,7 @@ pub(super) fn mask_strings_and_comments(code: &str) -> String {
         let (offset, character) = chars[index];
         state = match state {
             State::Normal if character == '#' => {
-                masked[offset] = b' ';
+                mask_char(&mut masked, offset, character);
                 State::Comment
             }
             State::Normal if is_string_start(&chars, index) => {
@@ -419,7 +426,7 @@ pub(super) fn mask_strings_and_comments(code: &str) -> String {
             }
             State::Comment if character == '\n' => State::Normal,
             State::Comment => {
-                masked[offset] = b' ';
+                mask_char(&mut masked, offset, character);
                 State::Comment
             }
             State::String {
@@ -427,7 +434,7 @@ pub(super) fn mask_strings_and_comments(code: &str) -> String {
                 triple,
                 escaped,
             } => {
-                masked[offset] = b' ';
+                mask_char(&mut masked, offset, character);
                 if escaped {
                     State::String {
                         quote,
@@ -848,5 +855,17 @@ mod tests {
         let masked = mask_strings_and_comments(source);
         assert!(!masked.contains("'ToolError'"));
         assert!(masked.trim_start_matches(' ').contains("except ToolError:"));
+    }
+
+    #[test]
+    fn masking_non_ascii_payload_keeps_the_buffer_valid_utf8() {
+        // First-byte-only masking would split the multi-byte characters and
+        // make from_utf8() yield "", disabling every lexical check.
+        let source = "value = 'except ToolError: 世界'  # 例外\nexcept ToolError:\n    pass\n";
+        let masked = mask_strings_and_comments(source);
+        assert!(masked.contains("except ToolError:"));
+        assert!(!masked.contains("世界"));
+        assert!(!masked.contains("例外"));
+        preflight(source).unwrap();
     }
 }
