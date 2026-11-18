@@ -543,8 +543,11 @@ fn report_str<'a>(report: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 }
 
 /// `search`-shaped reports (`SearchReport.hits`): one URI row per hit with
-/// score and description, indented facets. `search_rules` hits also carry
-/// the `good`/`bad` sections.
+/// score and description, indented facets. Rule hits also carry the
+/// `priority` word and the `## Good`/`## Bad` sections; every hit carries
+/// its provenance (`argosy`/`kind`/`trust`) and the matched `passage` —
+/// imported passages arrive `<untrusted-content …>`-wrapped upstream and
+/// are passed through verbatim.
 fn render_hits(report: &serde_json::Value) -> Option<String> {
     let hits = report.get("hits")?.as_array()?;
     if hits.is_empty() {
@@ -558,6 +561,10 @@ fn render_hits(report: &serde_json::Value) -> Option<String> {
             None => uri.to_string(),
         };
         let mut row = vec![head];
+        if let (Some(argosy), Some(kind)) = (report_str(hit, "argosy"), report_str(hit, "kind")) {
+            let trust = report_str(hit, "trust").unwrap_or("unverified");
+            row.push(format!("  from {argosy} ({kind}, trust: {trust})"));
+        }
         if let Some(desc) = report_str(hit, "description") {
             row.push(format!("  {desc}"));
         }
@@ -571,6 +578,12 @@ fn render_hits(report: &serde_json::Value) -> Option<String> {
             if !tags.is_empty() {
                 row.push(format!("  tags: {}", tags.join(", ")));
             }
+        }
+        if let Some(priority) = report_str(hit, "priority") {
+            row.push(format!("  priority: {priority}"));
+        }
+        if let Some(passage) = report_str(hit, "passage") {
+            row.push(format!("  passage: {passage}"));
         }
         for key in ["good", "bad"] {
             if let Some(text) = report_str(hit, key) {
@@ -894,9 +907,14 @@ mod tests {
             "hits": [
                 {
                     "uri": "argosy://local/rules/naming",
+                    "argosy": "craft",
+                    "kind": "local",
+                    "trust": "verified",
                     "score": 0.91,
                     "description": "names things",
                     "tags": ["rust"],
+                    "priority": "error",
+                    "passage": "Names carry meaning.",
                 }
             ]
         });
@@ -905,12 +923,52 @@ mod tests {
             text.contains("argosy://local/rules/naming (score 0.91)"),
             "{text}"
         );
+        assert!(
+            text.contains("from craft (local, trust: verified)"),
+            "{text}"
+        );
         assert!(text.contains("names things"));
         assert!(text.contains("tags: rust"));
+        assert!(text.contains("priority: error"), "{text}");
+        assert!(text.contains("passage: Names carry meaning."), "{text}");
         assert_eq!(
             render_report_text("search", &json!({"hits": []})),
             "no hits"
         );
+    }
+
+    /// Rule hits keep the material the reviewer applies: the provenance
+    /// row (imported books are usable, just labeled), the priority word,
+    /// and the matched passage with its upstream `<untrusted-content>`
+    /// delimiters intact.
+    #[test]
+    fn imported_rule_hits_keep_provenance_priority_and_passage() {
+        let report = json!({
+            "hits": [
+                {
+                    "uri": "argosy://stylish/styleguide/rust/error_handling/NO-ANYHOW",
+                    "argosy": "stylish",
+                    "kind": "imported",
+                    "trust": "unverified",
+                    "score": 0.03,
+                    "description": "No anyhow in this crate",
+                    "language": "rust",
+                    "category": "error_handling",
+                    "priority": "error",
+                    "passage": "<untrusted-content argosy=\"stylish\">Use snafu.</untrusted-content>",
+                    "good": "<untrusted-content argosy=\"stylish\">use snafu;</untrusted-content>",
+                    "bad": "<untrusted-content argosy=\"stylish\">use anyhow;</untrusted-content>",
+                }
+            ]
+        });
+        let text = render_report_text("search_rules", &report);
+        assert!(
+            text.contains("from stylish (imported, trust: unverified)"),
+            "{text}"
+        );
+        assert!(text.contains("priority: error"), "{text}");
+        assert!(text.contains("passage: <untrusted-content"), "{text}");
+        assert!(text.contains("good: <untrusted-content"), "{text}");
     }
 
     #[test]

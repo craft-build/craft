@@ -76,9 +76,11 @@ pub const GENERAL_TOOLS: &[&str] = &[
 ];
 
 /// The reviewer subagent's budget: read-only builtins, the argosy
-/// knowledge tools, the structural code tools the review workflow traces
-/// callers with, and the review workflow itself. No network, no writers:
-/// `astgrep` (apply) and `conflicts` (resolve) mutate files and stay out.
+/// knowledge tools (skills included — imported books carry whole
+/// playbooks the reviewer should apply), the structural code tools the
+/// review workflow traces callers with, and the review workflow itself.
+/// No network, no writers: `astgrep` (apply) and `conflicts` (resolve)
+/// mutate files and stay out.
 pub const REVIEWER_TOOLS: &[&str] = &[
     "read",
     "grep",
@@ -90,6 +92,8 @@ pub const REVIEWER_TOOLS: &[&str] = &[
     "ask",
     "read_document",
     "read_memory",
+    "list_skills",
+    "skill",
     "outline",
     "zoom",
     "callgraph",
@@ -1239,10 +1243,18 @@ mod tests {
             );
         }
         // Structural reachability tools joined the budget; writers never do.
-        for structural in ["ask", "outline", "zoom", "callgraph", "repomap"] {
+        for reachable in [
+            "ask",
+            "outline",
+            "zoom",
+            "callgraph",
+            "repomap",
+            "skill",
+            "list_skills",
+        ] {
             assert!(
-                REVIEWER_TOOLS.contains(&structural),
-                "{structural} dropped from the budget"
+                REVIEWER_TOOLS.contains(&reachable),
+                "{reachable} dropped from the budget"
             );
         }
         for banned in [
