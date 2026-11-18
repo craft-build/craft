@@ -1,6 +1,6 @@
 # Sessions
 
-Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (`crafty stats`, `/stats`).
+Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (`craft stats`, `/stats`).
 
 ## Format
 
@@ -8,7 +8,7 @@ Messages persist as animist **entry records** (log format 4): `entry`, `insert`,
 
 One loader reads every older shape (pre-animist message records, `.json` files) and folds their raw `tool_outputs` copies into entry sources; saving rewrites the current shape. A corrupt or truncated trailing record is skipped with a warning; a record whose index is out of range for the replayed list **fails the load** with an actionable error.
 
-> **One-way upgrade:** older `crafty` builds cannot read the new saves — upgrade before rolling back.
+> **One-way upgrade:** older `craft` builds cannot read the new saves — upgrade before rolling back.
 
 ## Resume
 
@@ -28,4 +28,4 @@ Print-mode resume (`-c`/`-s`) restores history and the stored model, but not the
 
 ## Stats
 
-`crafty stats` reports the usage ledger; `--sessions` breaks it down per session. In the TUI, `/stats` and `/usage` show the same data live.
+`craft stats` reports the usage ledger; `--sessions` breaks it down per session. In the TUI, `/stats` and `/usage` show the same data live.

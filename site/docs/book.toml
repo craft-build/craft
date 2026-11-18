@@ -3,7 +3,7 @@ title = "Craft Docs"
 authors = ["Craft contributors"]
 language = "en"
 src = "src"
-description = "Documentation for crafty, Craft's terminal coding agent — a context-thrifty CLI harness written in Rust on the animist stack."
+description = "Documentation for craft, Craft's terminal coding agent — a context-thrifty CLI harness written in Rust on the animist stack."
 
 [output.html]
 default-theme = "light"

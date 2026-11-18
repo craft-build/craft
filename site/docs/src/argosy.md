@@ -2,7 +2,7 @@
 
 The `argosy` knowledge crate is linked **in-process** — no subprocess, no MCP transport. Its tools register as first-class native tools with the same typed-JSON interface as the builtins.
 
-Argosy keeps its own state keyed by project root: writes from crafty are visible to the standalone `argosy mcp` server, and vice versa. Embeddings run locally (ONNX, via the argosy crate) — nothing leaves your machine for indexing.
+Argosy keeps its own state keyed by project root: writes from craft are visible to the standalone `argosy mcp` server, and vice versa. Embeddings run locally (ONNX, via the argosy crate) — nothing leaves your machine for indexing.
 
 ## Search and ask
 

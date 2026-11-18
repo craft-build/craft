@@ -1,6 +1,6 @@
 # Development
 
-The CLI harness lives in [`agent/`](https://github.com/craft-build/craft/tree/main/agent) (crate `craft`, binary `crafty`), built on the [animist](https://crates.io/crates/animist) provider/agent/history stack with the `argosy` knowledge crate linked in-process.
+The CLI harness lives in [`agent/`](https://github.com/craft-build/craft/tree/main/agent) (crate `craft`, binary `craft`), built on the [animist](https://crates.io/crates/animist) provider/agent/history stack with the `argosy` knowledge crate linked in-process.
 
 ## Build and test
 

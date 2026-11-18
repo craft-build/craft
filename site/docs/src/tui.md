@@ -1,10 +1,10 @@
 # TUI
 
-The terminal UI is built on **superlighttui**: native, no JavaScript runtime, fast startup and a high frame rate even on small laptop screens. `crafty` starts it by default.
+The terminal UI is built on **superlighttui**: native, no JavaScript runtime, fast startup and a high frame rate even on small laptop screens. `craft` starts it by default.
 
 ## Daily driving
 
-- **Prompt** — type and press Enter. A positional `PROMPT` argument submits as the first message; piped stdin (`echo "do x" | crafty`) is read the same way.
+- **Prompt** — type and press Enter. A positional `PROMPT` argument submits as the first message; piped stdin (`echo "do x" | craft`) is read the same way.
 - **Plan mode** — Tab toggles build/plan. The plan form and todo cards keep the plan first-class; plan-mode turns run read-only (see [Sandbox](./sandbox.md)). The mode persists in the session and is restored on resume.
 - **`!` and `!!`** — run a bash command with or without the agent seeing the output.
 - **Editor integration** — Ctrl-O / Alt+O opens the input (or a file) in `$EDITOR`.

@@ -124,7 +124,7 @@ Overridable metadata: `name`, `description`, `context_length`, `max_output_token
 
 Discovery merges configured models with live provider listings and the [models.dev](https://models.dev) catalog (disk-cached 24 h), sorted by ID; `discover_models = false` disables listing. Discovery errors propagate rather than silently yielding an empty catalog. Token limits are catalog metadata — they feed compaction thresholds and usage display, not request parameters. Set `[agent].max_tokens` for an output cap.
 
-Unknown models fall back to provider/family dialects; discovery is advisory, not a reason to reject an otherwise usable model ID. `crafty models` lists what a config resolves to.
+Unknown models fall back to provider/family dialects; discovery is advisory, not a reason to reject an otherwise usable model ID. `craft models` lists what a config resolves to.
 
 ## Dropped kinds
 

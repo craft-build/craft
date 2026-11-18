@@ -3,7 +3,7 @@
 Run non-interactively with `--print` (also spelled `-p`):
 
 ```sh
-crafty --print "summarize the retry logic in agent/src"
+craft --print "summarize the retry logic in agent/src"
 ```
 
 ## Output formats
@@ -17,7 +17,7 @@ crafty --print "summarize the retry logic in agent/src"
 
 ## Prompting
 
-The positional `PROMPT` is honored by `--print` **and** the interactive TUI; piped stdin (`echo "do x" | crafty`, no `--print`) is read the same way. The positional wins over piped stdin. Empty/whitespace input starts the TUI normally.
+The positional `PROMPT` is honored by `--print` **and** the interactive TUI; piped stdin (`echo "do x" | craft`, no `--print`) is read the same way. The positional wins over piped stdin. Empty/whitespace input starts the TUI normally.
 
 In resume sessions (`-c` / `-s`) the prompt waits for the session to load, so its first turn runs in the loaded mode.
 

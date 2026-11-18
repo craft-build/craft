@@ -1,5 +1,5 @@
 //! The codemode worker wire protocol: `u32` LE length-prefixed JSON frames
-//! over stdio (the `crafty __codemode-worker` subprocess) or an in-memory
+//! over stdio (the `craft __codemode-worker` subprocess) or an in-memory
 //! duplex (tests). One protocol, two transports — the child-side serve loop
 //! and every parent-side handle go through this module.
 //!

@@ -5,7 +5,7 @@ Implement this task in the active `agent/` harness. Follow the hardening README.
 ## Problem
 
 `agent/src/storage/version.rs` and `agent/src/update.rs` target the predecessor's
-`craft-build/craft` releases/install script, while the new binary is `crafty`.
+`craft-build/craft` releases/install script, while the harness's own binary is `craft`.
 The version comparator also treats prerelease versions as not newer; inspect
 behavior for the current beta version.
 

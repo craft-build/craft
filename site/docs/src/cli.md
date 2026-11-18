@@ -1,9 +1,9 @@
 # CLI
 
-`crafty` is the binary (crate `craft`). This page is the flag and subcommand reference.
+`craft` is the binary (crate `craft`). This page is the flag and subcommand reference.
 
 ```sh
-crafty [OPTIONS] [PROMPT]
+craft [OPTIONS] [PROMPT]
 ```
 
 ## Session flags
@@ -48,7 +48,7 @@ A set of Claude Code SDK compatibility flags is accepted but ignored.
 
 ## Startup prompt
 
-The positional `PROMPT` is honored by `--print` **and** the interactive TUI — `crafty "do x"` submits it as the first message right after provider startup. Piped stdin (`echo "do x" | crafty`, no `--print`) is read the same way; the positional wins. In resume sessions the prompt waits for the session to load.
+The positional `PROMPT` is honored by `--print` **and** the interactive TUI — `craft "do x"` submits it as the first message right after provider startup. Piped stdin (`echo "do x" | craft`, no `--print`) is read the same way; the positional wins. In resume sessions the prompt waits for the session to load.
 
 ## Thinking controls
 
@@ -70,16 +70,16 @@ Manual model declarations can override `supports_thinking`, `requires_thinking`,
 
 | Command | Purpose |
 | --- | --- |
-| `crafty acp` | Agent Client Protocol server on stdio ([ACP](./acp.md)) |
-| `crafty completions <shell>` | shell completions |
-| `crafty models` | resolved model catalog |
-| `crafty stats [--sessions]` | usage ledger |
-| `crafty doctor [--export]` | diagnose and self-heal provider config |
-| `crafty update [-y]` / `crafty rollback` | digest-pinned self-update / undo one update |
-| `crafty prompt [system\|research\|general] [--plan\|--tools\|--names]` | print built-in prompts |
-| `crafty term init\|log\|run\|info` | shell integration ([Terminal integration](#terminal-integration)) |
-| `crafty recipe list\|run` | recipes ([Skills & Recipes](./skills-recipes.md)) |
+| `craft acp` | Agent Client Protocol server on stdio ([ACP](./acp.md)) |
+| `craft completions <shell>` | shell completions |
+| `craft models` | resolved model catalog |
+| `craft stats [--sessions]` | usage ledger |
+| `craft doctor [--export]` | diagnose and self-heal provider config |
+| `craft update [-y]` / `craft rollback` | digest-pinned self-update / undo one update |
+| `craft prompt [system\|research\|general] [--plan\|--tools\|--names]` | print built-in prompts |
+| `craft term init\|log\|run\|info` | shell integration ([Terminal integration](#terminal-integration)) |
+| `craft recipe list\|run` | recipes ([Skills & Recipes](./skills-recipes.md)) |
 
 ## Terminal integration
 
-`crafty term init` sets up shell integration: shell history logging, `@craft` queries, and a command-not-found handler. `crafty term log`, `crafty term run`, and `crafty term info` work with it.
+`craft term init` sets up shell integration: shell history logging, `@craft` queries, and a command-not-found handler. `craft term log`, `craft term run`, and `craft term info` work with it.

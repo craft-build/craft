@@ -1,10 +1,10 @@
 # ACP
 
-`crafty acp` runs an Agent Client Protocol server on stdio, for editor and IDE integration (e.g. [Zed](https://zed.dev) and other ACP-speaking clients).
+`craft acp` runs an Agent Client Protocol server on stdio, for editor and IDE integration (e.g. [Zed](https://zed.dev) and other ACP-speaking clients).
 
 ```json
 {
-  "adapter": { "command": "crafty", "args": ["acp"] }
+  "adapter": { "command": "craft", "args": ["acp"] }
 }
 ```
 

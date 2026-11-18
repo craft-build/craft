@@ -232,7 +232,7 @@ fn write_frame<W: io::Write>(write: &mut W, frame: &impl serde::Serialize) -> io
     write.flush()
 }
 
-/// `crafty __codemode-worker` entry: a fast, side-effect-free protocol
+/// `craft __codemode-worker` entry: a fast, side-effect-free protocol
 /// loop. Nothing but frames may reach its stdout; stderr stays free for
 /// panic output the parent logs at debug level.
 pub fn worker_main() -> ! {

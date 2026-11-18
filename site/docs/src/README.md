@@ -1,6 +1,6 @@
 # Craft
 
-**crafty** is Craft's terminal coding agent: a TUI (or `--print` headless) harness written from scratch in Rust on top of the [animist](https://crates.io/crates/animist) provider/agent/history stack, with the `argosy` knowledge crate linked in-process.
+**craft** is Craft's terminal coding agent: a TUI (or `--print` headless) harness written from scratch in Rust on top of the [animist](https://crates.io/crates/animist) provider/agent/history stack, with the `argosy` knowledge crate linked in-process.
 
 It is designed to spend as few tokens as possible without giving up speed or ergonomics. Most coding agents burn context reactively — wait until the window is full, then summarize everything in one expensive pass. Craft keeps context lean continuously, so the model spends tokens on your work instead of on stale reads and verbose tool output:
 
@@ -16,11 +16,11 @@ It is designed to spend as few tokens as possible without giving up speed or erg
 - **Subagents and parallel dispatch**: the `task` tool with model tiers and optional worktree isolation; `batch` fans children out concurrently.
 - **MCP** servers over stdio and HTTP.
 - **Skills and recipes**: reusable workflows as markdown skills, parameterized YAML/JSON blueprints.
-- **An ACP server** (`crafty acp`) for editor/IDE integration.
+- **An ACP server** (`craft acp`) for editor/IDE integration.
 - **Permissions and snapshots**: tree-sitter bash parsing, allow/deny/ask rules, `/undo`, and an OS sandbox.
 - **Argosy knowledge**: semantic search and ask, review sessions with P0–P3 findings, and post-turn memory extraction — in-process, local embeddings.
 
-> This repository is mid-migration. The active agent lives in [`agent/`](https://github.com/craft-build/craft/tree/main/agent) (crate `craft`, binary `crafty`); the root CraftCode app is being reworked and is not documented here yet. These docs cover the CLI harness only.
+> This repository is mid-migration. The active agent lives in [`agent/`](https://github.com/craft-build/craft/tree/main/agent) (crate `craft`, binary `craft`); the root CraftCode app is being reworked and is not documented here yet. These docs cover the CLI harness only.
 
 ## Honesty note
 

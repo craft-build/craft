@@ -1,6 +1,6 @@
 # Migrating `agent/` from rig to animist 0.7.0
 
-Craft's harness (`agent/`, package `craft`, binary `crafty`) runs on
+Craft's harness (`agent/`, package `craft`, binary `craft`) runs on
 `rig-core`/`rig-bedrock`/`rig-reqwest` 0.44 behind a crate-owned loop
 (`agent/src/run/`). This workplan moves it onto
 [`animist`](https://crates.io/crates/animist) **0.7.0**. animist covers

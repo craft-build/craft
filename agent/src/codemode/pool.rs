@@ -1,4 +1,4 @@
-//! The process-global codemode worker pool: warm `crafty __codemode-worker`
+//! The process-global codemode worker pool: warm `craft __codemode-worker`
 //! subprocesses shared across every surface (TUI, ACP, `--print`, subagents,
 //! the reviewer). Per-run state travels in the `run` frame, so workers stay
 //! interchangeable.
@@ -25,7 +25,7 @@ const WARM_IDLE_WORKERS: usize = 1;
 /// How long a fresh subprocess gets to send its `ready` frame.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Worker executable override; integration tests point it at
-/// `CARGO_BIN_EXE_crafty`. Without it (production) the pool re-execs the
+/// `CARGO_BIN_EXE_craft`. Without it (production) the pool re-execs the
 /// running binary.
 const WORKER_CMD_ENV: &str = "CRAFT_CODEMODE_WORKER_CMD";
 
@@ -261,7 +261,7 @@ fn resolved_command() -> Result<OsString, Failure> {
 
 // --- stdio subprocess transport -------------------------------------------
 
-/// A `crafty __codemode-worker` subprocess speaking framed JSON over its
+/// A `craft __codemode-worker` subprocess speaking framed JSON over its
 /// stdio pipes.
 struct ProcessWorker {
     child: tokio::process::Child,

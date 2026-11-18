@@ -1,7 +1,7 @@
-//! Phase 4 gate tests: the real `crafty __codemode-worker` subprocess, end
+//! Phase 4 gate tests: the real `craft __codemode-worker` subprocess, end
 //! to end through the pool. These run with the lib compiled without
 //! `cfg(test)`, so the pool spawns genuine processes through
-//! `CRAFT_CODEMODE_WORKER_CMD` (pointed at `CARGO_BIN_EXE_crafty`).
+//! `CRAFT_CODEMODE_WORKER_CMD` (pointed at `CARGO_BIN_EXE_craft`).
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -27,7 +27,7 @@ fn serial() -> MutexGuard<'static, ()> {
     let guard = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     // SAFETY: set before any pool use, under the serial lock; nothing else
     // in this process reads the variable.
-    unsafe { std::env::set_var(WORKER_ENV, env!("CARGO_BIN_EXE_crafty")) };
+    unsafe { std::env::set_var(WORKER_ENV, env!("CARGO_BIN_EXE_craft")) };
     guard
 }
 
@@ -118,7 +118,7 @@ fn subprocess_runs_gather_scripts_with_output_parity() {
 
 #[test]
 fn worker_subcommand_is_hidden_from_help() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_crafty"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_craft"))
         .arg("--help")
         .output()
         .unwrap();

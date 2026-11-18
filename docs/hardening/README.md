@@ -73,7 +73,7 @@ differences. The CLI built, and unsupported SDK input and Flow mode were rejecte
 No paid-model quality, cost or latency comparison was performed.
 
 Use the package selector `-p craft` for the active harness; its binary is
-`crafty`. Verify current commands and results rather than treating this baseline
+`craft`. Verify current commands and results rather than treating this baseline
 as permanently accurate.
 
 ## Deliberately not blanket porting

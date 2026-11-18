@@ -2,7 +2,7 @@
 
 ## Install
 
-Install from the repository (installs the binary as `crafty`):
+Install from the repository (installs the binary as `craft`):
 
 ```sh
 cargo install --locked --git https://github.com/craft-build/craft.git craft
@@ -14,34 +14,34 @@ Or build from a checkout:
 git clone https://github.com/craft-build/craft.git
 cd craft
 cargo build -p craft --release
-# binary at target/release/crafty
+# binary at target/release/craft
 ```
 
-The self-updater is built in: `crafty update` applies a digest-pinned update and `crafty rollback` undoes one.
+The self-updater is built in: `craft update` applies a digest-pinned update and `craft rollback` undoes one.
 
 ## API keys
 
-crafty never stores secrets in its config — `api_key_env` names an environment variable that holds the key:
+craft never stores secrets in its config — `api_key_env` names an environment variable that holds the key:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
 # or OPENAI_API_KEY=…, SYNTHETIC_API_KEY=…, ZHIPU_API_KEY=…
 ```
 
-On first run, crafty auto-detects providers from credential environment variables when the config declares none, so the fastest path to a working agent is: export one key, run `crafty`.
+On first run, craft auto-detects providers from credential environment variables when the config declares none, so the fastest path to a working agent is: export one key, run `craft`.
 
 ## Run
 
 From your project directory:
 
 ```sh
-crafty
+craft
 ```
 
 Type a prompt, press **Enter**, and the agent starts working. A startup prompt also works without the TUI:
 
 ```sh
-crafty "find the flaky retry test and fix it" --print
+craft "find the flaky retry test and fix it" --print
 ```
 
 Useful first commands inside the TUI:
@@ -75,7 +75,7 @@ See [Configuration](./configuration.md) for the full file layout and [Providers]
 
 ## Where to go next
 
-- [Context Management](./context.md) — how crafty keeps the window lean.
+- [Context Management](./context.md) — how craft keeps the window lean.
 - [The Harness](./harness.md) — the layer architecture behind every surface.
 - [Permissions & Snapshots](./permissions.md) — approvals, `--yolo`, and `/undo`.
 - [Headless Mode](./headless.md) — `--print` for scripts and CI.

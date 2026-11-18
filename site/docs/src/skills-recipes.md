@@ -16,8 +16,8 @@ Skill bodies are trusted instructions only when their provenance is: imported ar
 Recipes are parameterized YAML/JSON blueprints rendered with minijinja and run via the CLI:
 
 ```sh
-crafty recipe list
-crafty recipe run <name> [params…]
+craft recipe list
+craft recipe run <name> [params…]
 ```
 
 Recipe runs are headless surfaces: they enforce the same [permission gate](./permissions.md) as `--print`, with the same opt-outs.

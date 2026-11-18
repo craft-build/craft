@@ -151,7 +151,7 @@ writes into it.
 - `agent/src/edge.rs` and the old `history` enums are gone, apart from the
   serde-only legacy module.
 - Every pre-existing session fixture and test passes, with the format change
-  documented in user docs: older crafty builds cannot read new saves.
+  documented in user docs: older craft builds cannot read new saves.
 - No rig message types remain anywhere.
 
 ## Finish
@@ -207,7 +207,7 @@ to `Vec<Message>` at the provider call.
   timestamps approximated to the session's `created_at`) and `.json` files
   (current shape first, then the legacy shape converted); a loaded legacy
   session rewrites in the new shape on save, and `tool_outputs` stays
-  readable but is never written. **Downgrade caveat**: older `crafty` builds
+  readable but is never written. **Downgrade caveat**: older `craft` builds
   cannot read new saves (documented in `agent/README.md`).
 - **Coalescing**: kept. animist's Anthropic/Bedrock adapters map messages
   one to one with no merging, and both protocols require a step's tool

@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [[bin]]
-name = "crafty"
+name = "craft"
 path = "src/main.rs"
 
 # superlighttui's lib target is named `slt` (every use is `slt::…`), so

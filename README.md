@@ -2,7 +2,7 @@
 
 **Craft** is an AI coding agent written in Rust, designed to spend as few tokens as possible without giving up speed or ergonomics. Native terminal UI, subagents, MCP, and a multi-stage context-management pipeline that keeps the model working on your task instead of wading through stale reads and verbose tool output.
 
-> This repository is mid-migration. The active agent lives in [`agent/`](./agent) (crate `craft`, binary `crafty`); the root CraftCode app is being reworked and is not documented here yet.
+> This repository is mid-migration. The active agent lives in [`agent/`](./agent) (crate `craft`, binary `craft`); the root CraftCode app is being reworked and is not documented here yet.
 
 ## Why craft
 
