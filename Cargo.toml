@@ -9,9 +9,9 @@ resolver = "3"
 members = ["agent"]
 
 [workspace.dependencies]
-agent-client-protocol = { version = "5.0", features = ["stdio", "process"] }
+agent-client-protocol = { version = "5", features = ["stdio", "process"] }
 aho-corasick = "1"
-animist = { version = "0.8.1", features = ["bedrock"] }
+animist = { version = "0.8", features = ["bedrock"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 arc-swap = "1"
 argosy = "0.8"
@@ -42,7 +42,7 @@ nucleo-matcher = "0.3"
 regex = "1"
 reqwest = "0.13"
 rmcp = {
-  version = "3.8",
+  version = "3.11",
   default-features = false,
   features = [
     "auth",
@@ -82,7 +82,7 @@ unicode-normalization = "0.1"
 unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
-zip = "^9.2"
+zip = "^9.7"
 [[bin]]
 name = "craft_code"
 path = "src/main.rs"
