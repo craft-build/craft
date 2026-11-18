@@ -30,7 +30,7 @@ mkdir -p "$OUT"
 cp index.html "$OUT/"
 cp favicon.ico favicon-16x16.png favicon-32x32.png "$OUT/"
 cp apple-touch-icon.png android-chrome-192x192.png android-chrome-512x512.png "$OUT/"
-cp site.webmanifest "$OUT/"
+cp site.webmanifest logo.png "$OUT/"
 
 # 2. mdBook docs
 mdbook build docs --dest-dir "$OUT/docs"

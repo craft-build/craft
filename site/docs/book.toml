@@ -6,7 +6,7 @@ src = "src"
 description = "Documentation for craft, Craft's terminal coding agent — a context-thrifty CLI harness written in Rust on the animist stack."
 
 [output.html]
-default-theme = "light"
+default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/craft-build/craft"
 no-section-label = true

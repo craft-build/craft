@@ -1,0 +1,1007 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Craft Docs</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Documentation for craft, Craft&#x27;s terminal coding agent — a context-thrifty CLI harness written in Rust on the animist stack.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-0392ca55.css">
+        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="css/custom-bea49c95.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-1843438e.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-8193b354.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Craft Docs</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/craft-build/craft" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="craft"><a class="header" href="#craft">Craft</a></h1>
+<p><strong>craft</strong> is Craft’s terminal coding agent: a TUI (or <code>--print</code> headless) harness written from scratch in Rust on top of the <a href="https://crates.io/crates/animist">animist</a> provider/agent/history stack, with the <code>argosy</code> knowledge crate linked in-process.</p>
+<p>It is designed to spend as few tokens as possible without giving up speed or ergonomics. Most coding agents burn context reactively — wait until the window is full, then summarize everything in one expensive pass. Craft keeps context lean continuously, so the model spends tokens on your work instead of on stale reads and verbose tool output:</p>
+<ul>
+<li>Tool output is pre-compressed before it ever enters history — code, logs, diffs, JSON arrays, and search results each get a tailored compressor.</li>
+<li>Stale and superseded file reads are replaced with compact markers before each turn.</li>
+<li>Deterministic (no-LLM) compaction kicks in at 60% of the context window; an LLM summarization pass only runs at 80% if the cheap stage wasn’t enough.</li>
+<li>Compressed originals stay retrievable — durably, from the history entry itself — in any later turn or after a session reload.</li>
+<li>Subagents run in their own context windows, so delegation never pollutes the main session.</li>
+</ul>
+<h2 id="whats-in-the-box"><a class="header" href="#whats-in-the-box">What’s in the box</a></h2>
+<ul>
+<li><strong>A native terminal UI</strong> (superlighttui): fast startup, 30 themes, command palette, fuzzy search, plan mode, subagent chat windows.</li>
+<li><strong>Subagents and parallel dispatch</strong>: the <code>task</code> tool with model tiers and optional worktree isolation; <code>batch</code> fans children out concurrently.</li>
+<li><strong>MCP</strong> servers over stdio and HTTP.</li>
+<li><strong>Skills and recipes</strong>: reusable workflows as markdown skills, parameterized YAML/JSON blueprints.</li>
+<li><strong>An ACP server</strong> (<code>craft acp</code>) for editor/IDE integration.</li>
+<li><strong>Permissions and snapshots</strong>: tree-sitter bash parsing, allow/deny/ask rules, <code>/undo</code>, and an OS sandbox.</li>
+<li><strong>Argosy knowledge</strong>: semantic search and ask, review sessions with P0–P3 findings, and post-turn memory extraction — in-process, local embeddings.</li>
+</ul>
+<blockquote>
+<p>This repository is mid-migration. The active agent lives in <a href="https://github.com/craft-build/craft/tree/main/agent"><code>agent/</code></a> (crate <code>craft</code>, binary <code>craft</code>); the root CraftCode app is being reworked and is not documented here yet. These docs cover the CLI harness only.</p>
+</blockquote>
+<h2 id="honesty-note"><a class="header" href="#honesty-note">Honesty note</a></h2>
+<p>A large share of the codebase was written by an AI, guided by humans. Being upfront about how software is made matters.</p>
+<p>Ready to try it? Head to the <a href="#quick-start">Quick Start</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h1>
+<h2 id="install"><a class="header" href="#install">Install</a></h2>
+<p>Install from the repository (installs the binary as <code>craft</code>):</p>
+<pre><code class="language-sh">cargo install --locked --git https://github.com/craft-build/craft.git craft
+</code></pre>
+<p>Or build from a checkout:</p>
+<pre><code class="language-sh">git clone https://github.com/craft-build/craft.git
+cd craft
+cargo build -p craft --release
+# binary at target/release/craft
+</code></pre>
+<p>The self-updater is built in: <code>craft update</code> applies a digest-pinned update and <code>craft rollback</code> undoes one.</p>
+<h2 id="api-keys"><a class="header" href="#api-keys">API keys</a></h2>
+<p>craft never stores secrets in its config — <code>api_key_env</code> names an environment variable that holds the key:</p>
+<pre><code class="language-sh">export ANTHROPIC_API_KEY=sk-ant-…
+# or OPENAI_API_KEY=…, SYNTHETIC_API_KEY=…, ZHIPU_API_KEY=…
+</code></pre>
+<p>On first run, craft auto-detects providers from credential environment variables when the config declares none, so the fastest path to a working agent is: export one key, run <code>craft</code>.</p>
+<h2 id="run"><a class="header" href="#run">Run</a></h2>
+<p>From your project directory:</p>
+<pre><code class="language-sh">craft
+</code></pre>
+<p>Type a prompt, press <strong>Enter</strong>, and the agent starts working. A startup prompt also works without the TUI:</p>
+<pre><code class="language-sh">craft "find the flaky retry test and fix it" --print
+</code></pre>
+<p>Useful first commands inside the TUI:</p>
+<ul>
+<li><code>/model</code> — pick a model (configured models merge with live listings and the models.dev catalog).</li>
+<li><code>/sessions</code> — list and resume sessions.</li>
+<li><code>/usage</code> and <code>/stats</code> — token spend and session stats.</li>
+<li><code>Ctrl-H</code> — keybindings; <code>Ctrl-P</code> — command palette.</li>
+</ul>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<p>Configuration lives in BML format at <code>~/.config/craft.bml</code> (or split across <code>~/.config/craft/*.bml</code>). A minimal provider setup:</p>
+<pre><code class="language-bml">provider "anthropic" {
+  kind = "anthropic"
+  api_key_env = "ANTHROPIC_API_KEY"
+}
+</code></pre>
+<p>Local models work too — a keyless loopback endpoint needs no key at all:</p>
+<pre><code class="language-bml">provider "local" {
+  kind = "openai-compatible"
+  base_url = "http://localhost:8080/v1"
+}
+</code></pre>
+<p>See <a href="#configuration-1">Configuration</a> for the full file layout and <a href="#providers-1">Providers</a> for every provider kind. A fully commented example ships in the repository as <a href="https://github.com/craft-build/craft/blob/main/agent/agent.example.bml"><code>agent/agent.example.bml</code></a>.</p>
+<h2 id="where-to-go-next"><a class="header" href="#where-to-go-next">Where to go next</a></h2>
+<ul>
+<li><a href="#context-management">Context Management</a> — how craft keeps the window lean.</li>
+<li><a href="#the-harness">The Harness</a> — the layer architecture behind every surface.</li>
+<li><a href="#permissions--snapshots">Permissions &amp; Snapshots</a> — approvals, <code>--yolo</code>, and <code>/undo</code>.</li>
+<li><a href="#headless-mode">Headless Mode</a> — <code>--print</code> for scripts and CI.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="configuration-1"><a class="header" href="#configuration-1">Configuration</a></h1>
+<p>Configuration lives in <a href="https://crates.io/crates/barkml">BML</a> format (<code>barkml</code>):</p>
+<ul>
+<li><code>~/.config/craft.bml</code> — the main file, or</li>
+<li><code>~/.config/craft/*.bml</code> — split files that merge together.</li>
+</ul>
+<p>A legacy <code>~/.craft/</code> location is still searched. A missing file is an empty configuration; malformed files, unknown fields, invalid URLs, and invalid limits are errors. Loading never writes files or contacts a provider.</p>
+<p>On first run, providers are auto-detected from credential environment variables when the config declares none.</p>
+<p>A fully commented example ships as <a href="https://github.com/craft-build/craft/blob/main/agent/agent.example.bml"><code>agent/agent.example.bml</code></a> — it is the canonical reference for every key below.</p>
+<h2 id="agent-settings"><a class="header" href="#agent-settings">Agent settings</a></h2>
+<pre><code class="language-bml">agent {
+  # Extra instructions appended to the system prompt.
+  preamble = ""
+  # System prompt rendering: "markdown" (default) or "xml".
+  # prompt_format = "xml"
+  # Generation overrides; omitted keeps provider/model defaults.
+  # temperature = 0.2
+  # max_tokens = 8192
+  # Default thinking for runs and inherited subagents.
+  # thinking = "medium"
+  # Bounds on a single run.
+  # max_turns = 50
+  # max_concurrent_tools = 8
+  # Write durable facts to the project argosy after each run (default true).
+  # memory_extraction = false
+  # TUI tool-call rendering: "cards" or "compact".
+  # tool_display = "compact"
+
+  # Post-turn advisor: a lightweight reviewer per reply. Off by default.
+  # advisor {
+  #   enabled = true
+  #   auto_act = "concern"   # off | nit | concern | blocker
+  #   max_act_turns = 2
+  # }
+}
+</code></pre>
+<p><code>always_thinking</code> (top level) seeds new-session thinking: <code>"off"</code>, <code>"adaptive"</code>, <code>"minimal"</code>, <code>"low"</code>, <code>"medium"</code>, <code>"high"</code>, <code>"xhigh"</code>, <code>"max"</code>, or a positive token budget. See <a href="#thinking-controls">CLI → Thinking controls</a>.</p>
+<p><code>compaction_buffer</code> (top level) reserves context so compaction fires before the window fills: an absolute token count (≥ 1000) or a quoted percent. Default <code>"20%"</code>.</p>
+<h2 id="compaction-stages"><a class="header" href="#compaction-stages">Compaction stages</a></h2>
+<pre><code class="language-bml">compaction "vcc" {
+  context = "0.6"
+}
+compaction "llm" {
+  context = "0.8"
+}
+</code></pre>
+<p>Stages run ascending by context fill ratio. This pair is the default — omit the blocks to keep it. Details in <a href="#context-management">Context Management</a>.</p>
+<h2 id="tool-output-compression"><a class="header" href="#tool-output-compression">Tool-output compression</a></h2>
+<p>Applied to the model’s request view; history keeps raw outputs. These are the defaults:</p>
+<pre><code class="language-bml"># compression {
+#   enabled = true
+#   code_compression_rate = 0.3
+#   max_log_lines = 50
+#   max_search_files = 20
+#   max_matches_per_file = 5
+#   max_diff_lines = 100
+#   max_json_items = 15
+#   json_first_keep = 5
+#   json_last_keep = 3
+#   protect_recent_tool_outputs = 2
+# }
+</code></pre>
+<h2 id="sandbox"><a class="header" href="#sandbox">Sandbox</a></h2>
+<pre><code class="language-bml"># sandbox {
+#   enabled = true
+#   mode = "workspace_write"   # read_only | danger_full_access | off
+#   network = true
+# }
+</code></pre>
+<p>See <a href="#sandbox-1">Sandbox</a>.</p>
+<h2 id="codemode"><a class="header" href="#codemode">Codemode</a></h2>
+<p>Python code execution: the <code>code</code> tool runs a scripted sub-agent that calls the same tool set from one Python script. These are the defaults — <code>mode = "off"</code> keeps the tool unregistered:</p>
+<pre><code class="language-bml"># codemode {
+#   mode = "off"            # off | alongside | exclusive
+#   timeout_secs = 30
+#   wall_clock_secs = 600
+#   max_tool_calls = 200
+#   max_output_kib = 32
+#   telemetry = true
+# }
+</code></pre>
+<p><code>--codemode &lt;off|alongside|exclusive&gt;</code> overrides the mode per run and the <code>/codemode</code> command toggles it per session (see <a href="#cli">CLI</a>); <code>type_check</code> is reserved and rejected. The <code>code</code> tool itself: <a href="#execution">Tools</a>.</p>
+<h2 id="tool-timeouts"><a class="header" href="#tool-timeouts">Tool timeouts</a></h2>
+<p>The timeouts <code>bash</code> and <code>webfetch</code> use when a call omits <code>timeout</code>. Per-call values still win. These are the defaults:</p>
+<pre><code class="language-bml"># bash {
+#   default_timeout_secs = 120       # bash default; minimum 5
+#   default_watch_timeout_secs = 60  # bash_watch default; minimum 5
+# }
+# webfetch {
+#   timeout_secs = 30      # default request timeout
+#   max_timeout_secs = 120 # cap for per-call timeouts too
+#   max_retries = 3        # transport errors and 5xx; maximum 10
+# }
+</code></pre>
+<h2 id="keybinds"><a class="header" href="#keybinds">Keybinds</a></h2>
+<p>TUI keybindings, action id → chord list. An empty list disables the action; unknown ids are warned and dropped.</p>
+<pre><code class="language-bml"># keybind "palette" {
+#   keys = ["ctrl+p", "ctrl+k"]
+# }
+</code></pre>
+<p>Actions: <code>quit</code>, <code>help</code>, <code>palette</code>, <code>sidebar</code>, <code>model_menu</code>, <code>search</code>, <code>file_picker</code>, <code>plan_toggle</code>, <code>open_editor</code>, <code>scroll_half_up</code>, <code>scroll_half_down</code>, <code>delete_word</code>, <code>kill_line</code>, <code>line_start</code>, <code>line_end</code>, <code>edit_input</code>, <code>cycle_effort</code>, <code>paste_image</code>, <code>task_chat_picker</code>.</p>
+<h2 id="providers"><a class="header" href="#providers">Providers</a></h2>
+<p>Each <code>[providers.&lt;alias&gt;]</code> block chooses a <code>kind</code> with per-alias credentials, base URLs, and model catalogs. Multiple aliases may use the same kind. See <a href="#providers-1">Providers</a>:</p>
+<pre><code class="language-bml">provider "openai" {
+  kind = "openai"
+  api_key_env = "OPENAI_API_KEY"
+
+  model "gpt-5.2" {
+    name = "GPT-5.2"
+    context_length = 400000
+    max_output_tokens = 32768
+  }
+}
+</code></pre>
+<h2 id="mcp-servers"><a class="header" href="#mcp-servers">MCP servers</a></h2>
+<p>Stdio and HTTP transports, merged from the global config and the project’s <code>.craft/mcp.bml</code> (project wins on name conflicts). <code>${VAR}</code> in environment/headers values expands from the process environment. See <a href="#mcp">MCP</a>:</p>
+<pre><code class="language-bml">mcp "filesystem" {
+  command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  environment = { API_TOKEN = "${MY_MCP_TOKEN}" }
+  timeout = 30000
+}
+</code></pre>
+<h2 id="permissions"><a class="header" href="#permissions">Permissions</a></h2>
+<p>Permission rules live in a separate <code>permissions.bml</code> next to the config file, or in a project’s <code>.craft/</code> directory. The same <code>permissions</code> block also holds <code>auto_review = true</code> — starting every session with the auto-review reviewer on. See <a href="#permissions--snapshots">Permissions &amp; Snapshots</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="providers-1"><a class="header" href="#providers-1">Providers</a></h1>
+<p>Providers are configured by alias in the BML config; each <code>[providers.&lt;alias&gt;]</code> chooses a <code>kind</code>. Multiple aliases may use the same kind with different credentials, URLs, and model catalogs.</p>
+<p><code>api_key_env</code> names an environment variable, <strong>not the key itself</strong> — keep secrets in your shell or secret manager. With overrides, <code>api_key_env</code> defaults to the provider’s usual key variable (<code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, …).</p>
+<p>Supported kinds: <code>anthropic</code>, <code>openai</code>, <code>openai-compatible</code>, <code>synthetic</code>, <code>zai-coding-plan</code>, <code>ollama</code>, <code>llama-cpp</code>, <code>omlx</code>, <code>amazon-bedrock</code>.</p>
+<h2 id="anthropic"><a class="header" href="#anthropic">anthropic</a></h2>
+<pre><code class="language-bml">provider "anthropic" {
+  kind = "anthropic"
+  api_key_env = "ANTHROPIC_API_KEY"
+}
+</code></pre>
+<p>Accepts <code>base_url</code> for Anthropic-compatible services — supply the complete base URL including any path prefix.</p>
+<h2 id="openai"><a class="header" href="#openai">openai</a></h2>
+<p>Speaks the Responses API by default; <code>protocol = "chat_completions"</code> selects Chat Completions. Both accept <code>base_url</code>, plus <code>organization</code> and <code>project</code>.</p>
+<pre><code class="language-bml">provider "openai" {
+  kind = "openai"
+  api_key_env = "OPENAI_API_KEY"
+}
+</code></pre>
+<h2 id="openai-compatible"><a class="header" href="#openai-compatible">openai-compatible</a></h2>
+<p>Any OpenAI-dialect endpoint, over Chat Completions:</p>
+<pre><code class="language-bml">provider "deepseek" {
+  kind = "openai-compatible"
+  base_url = "https://api.deepseek.com/v1"
+  api_key_env = "DEEPSEEK_API_KEY"
+}
+</code></pre>
+<p>A <strong>keyless local endpoint</strong> (loopback or private host, no key configured) automatically rides animist’s keyless llama.cpp client — local llama.cpp, vLLM, and LM Studio servers work with no dummy key. Non-local hosts require a key.</p>
+<p>This is also the migration path for every dropped vendor kind (below).</p>
+<h2 id="ollama"><a class="header" href="#ollama">ollama</a></h2>
+<p>Local models, no credential needed:</p>
+<pre><code class="language-bml">provider "ollama" {
+  kind = "ollama"
+}
+</code></pre>
+<h2 id="llama-cpp"><a class="header" href="#llama-cpp">llama-cpp</a></h2>
+<p>Local llama.cpp server. Accepts an optional key; also serves System One decisions on <code>/systemone</code>.</p>
+<pre><code class="language-bml">provider "llamacpp" {
+  kind = "llama-cpp"
+  base_url = "http://localhost:9931/v1"
+}
+</code></pre>
+<h2 id="omlx"><a class="header" href="#omlx">omlx</a></h2>
+<p>Local omlx server; thinking knobs map to <code>enable_thinking</code>/<code>thinking_budget</code>.</p>
+<pre><code class="language-bml">provider "omlx" {
+  kind = "omlx"
+  base_url = "http://localhost:8000/v1"
+  api_key_env = "OMLX_API_KEY"   # optional
+}
+</code></pre>
+<h2 id="synthetic"><a class="header" href="#synthetic">synthetic</a></h2>
+<p>Hosted Synthetic coding plan; default env <code>SYNTHETIC_API_KEY</code>. Also accepts <code>base_url</code> and <code>max_output_tokens</code>.</p>
+<pre><code class="language-bml">provider "synthetic" {
+  kind = "synthetic"
+}
+</code></pre>
+<h2 id="zai-coding-plan"><a class="header" href="#zai-coding-plan">zai-coding-plan</a></h2>
+<p>Hosted ZAI coding plan; default env <code>ZHIPU_API_KEY</code>. Existing <code>openai-compatible</code> configs pointing at its endpoints keep working.</p>
+<pre><code class="language-bml">provider "zai" {
+  kind = "zai-coding-plan"
+}
+</code></pre>
+<h2 id="amazon-bedrock"><a class="header" href="#amazon-bedrock">amazon-bedrock</a></h2>
+<p>Feature <code>bedrock</code>. Authenticates through the AWS default credential chain (env vars, <code>~/.aws</code> profiles incl. <code>AWS_PROFILE</code>, SSO, assume-role, <code>credential_process</code>, web identity, container/IMDS roles) and takes its region from <code>AWS_REGION</code>/<code>AWS_DEFAULT_REGION</code>, the active profile, or <code>region</code> on the provider. Also accepts <code>profile</code>, <code>endpoint_url</code>, <code>protocol</code>, <code>max_attempts</code> (in-provider 429/503 retries, default 3), <code>anthropic_version</code>, <code>anthropic_beta</code>. Model ids are Bedrock model ids or inference-profile ARNs.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Model family</th><th>Protocol</th><th>Wire</th></tr>
+</thead>
+<tbody>
+<tr><td>Claude (<code>anthropic.*</code> or ids containing <code>claude</code>)</td><td><code>anthropic_messages</code></td><td><code>/model/{id}/invoke-with-response-stream</code></td></tr>
+<tr><td><code>openai.*</code> deployments</td><td><code>responses</code></td><td><code>/openai/v1/responses</code></td></tr>
+<tr><td>other OpenAI-surface models (<code>deepseek.*</code>, <code>moonshotai.*</code>)</td><td><code>chat_completions</code></td><td><code>/openai/v1/chat-completions</code></td></tr>
+<tr><td>everything else</td><td><code>converse</code></td><td><code>/model/{id}/converse-stream</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>A per-model <code>protocol</code> override wins (<code>protocol = "converse"</code> in the model block). <strong>Converse caveat:</strong> reasoning configs other than off are rejected on Converse — Claude-on-Bedrock thinking requires the <code>anthropic_messages</code> protocol.</p>
+<h2 id="model-catalogs"><a class="header" href="#model-catalogs">Model catalogs</a></h2>
+<p><code>[providers.&lt;alias&gt;.models."&lt;exact-model-id&gt;"]</code> declares or partially overrides a model:</p>
+<pre><code class="language-bml">model "my-coding-model" {
+  context_length = 32768
+}
+</code></pre>
+<p>Overridable metadata: <code>name</code>, <code>description</code>, <code>context_length</code>, <code>max_output_tokens</code>, <code>supports_thinking</code>, <code>requires_thinking</code>, <code>protocol</code>, <code>reasoning_options</code> (e.g. <code>[{ type = "effort", values = ["low", "high"] }]</code>). Local backends can declare <code>thinking_fields</code> with JSON-shaped BML fragments keyed by <code>off</code>, <code>adaptive</code>, or effort level; those fragments are deep-merged into the request.</p>
+<p>Discovery merges configured models with live provider listings and the <a href="https://models.dev">models.dev</a> catalog (disk-cached 24 h), sorted by ID; <code>discover_models = false</code> disables listing. Discovery errors propagate rather than silently yielding an empty catalog. Token limits are catalog metadata — they feed compaction thresholds and usage display, not request parameters. Set <code>[agent].max_tokens</code> for an output cap.</p>
+<p>Unknown models fall back to provider/family dialects; discovery is advisory, not a reason to reject an otherwise usable model ID. <code>craft models</code> lists what a config resolves to.</p>
+<h2 id="dropped-kinds"><a class="header" href="#dropped-kinds">Dropped kinds</a></h2>
+<p>The predecessor’s vendor-specific kinds are <strong>dropped</strong> (unsupported since the animist cutover): <code>azure</code>, <code>chatgpt</code>, <code>cohere</code>, <code>copilot</code>, <code>deepseek</code>, <code>doubleword</code>, <code>gemini</code>, <code>groq</code>, <code>huggingface</code>, <code>hyperbolic</code>, <code>llamafile</code>, <code>minimax</code>, <code>mira</code>, <code>mistral</code>, <code>moonshot</code>, <code>openrouter</code>, <code>perplexity</code>, <code>together</code>, <code>venice</code>, <code>voyageai</code>, <code>xai</code>, <code>xiaomimo</code>, <code>zai</code>. A config naming one fails with an actionable error; the OAuth/device flows (<code>chatgpt</code>, <code>copilot</code>) are gone with their kinds.</p>
+<p>Migration for any OpenAI-dialect vendor is to point <code>openai-compatible</code> at its base URL:</p>
+<pre><code class="language-bml"># before: kind = "deepseek"
+provider "deepseek" {
+  kind = "openai-compatible"
+  base_url = "https://api.deepseek.com/v1"
+  api_key_env = "DEEPSEEK_API_KEY"
+}
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="context-management"><a class="header" href="#context-management">Context Management</a></h1>
+<p>Craft keeps context lean continuously instead of summarizing reactively when the window fills. Four mechanisms work together: pre-compression, the read lifecycle, staged compaction, and an overflow ladder. All of them are <strong>reversible</strong> — originals are never deleted.</p>
+<h2 id="tool-output-compression-1"><a class="header" href="#tool-output-compression-1">Tool-output compression</a></h2>
+<p>Between runs, an alteration pass classifies every oversized tool result by content type — code, log, diff, JSON array, search result, plain text — and rewrites it into a compact marker as a history <em>revision</em>. Log and code compression use an aho-corasick keyword classifier (error, warning, security, definition, import, …) so the lines that matter survive.</p>
+<p>The verbatim originals stay in the entry sources, and the <code>retrieve</code> tool restores them by content hash:</p>
+<pre><code>[137 lines compressed from 892. Retrieve original: hash=a91f33c2]
+</code></pre>
+<p>Nothing lives in a side store: a marker survives session reloads, and retrieval works in any later turn. Within a run, the request layer recomputes only the run’s own suffix (everything older arrives pre-altered).</p>
+<p>Tuning lives in the <code>[compression]</code> block — rates, line caps, per-file match caps, and <code>protect_recent_tool_outputs</code> (the last N tool outputs stay verbatim). See <a href="#tool-output-compression">Configuration</a>.</p>
+<h2 id="read-lifecycle"><a class="header" href="#read-lifecycle">Read lifecycle</a></h2>
+<p>File reads are tracked fresh → stale → superseded. As the conversation moves on:</p>
+<ul>
+<li><strong>stale</strong> reads get durable marker revisions, so old snapshots stop occupying context;</li>
+<li><strong>superseded</strong> reads (the file was edited since) collapse the same way;</li>
+<li><code>retrieve</code> still serves the original bytes from the entry source.</li>
+</ul>
+<h2 id="two-stage-compaction"><a class="header" href="#two-stage-compaction">Two-stage compaction</a></h2>
+<p><code>[[compaction]]</code> entries configure staged compaction, each with a <code>kind</code> and a <code>context</code> fill ratio. Between runs the driver estimates history size and runs every armed stage whose threshold is crossed, lowest ratio first:</p>
+<pre><code class="language-bml">compaction "vcc" {
+  context = "0.6"
+}
+compaction "llm" {
+  context = "0.8"
+}
+</code></pre>
+<ul>
+<li><strong><code>vcc</code></strong> — deterministic, no-LLM compaction: the head of the history is replaced by a structured summary entry (tagged <code>craft.compaction</code>); the recent tail is kept verbatim; repeated runs merge with the previous summary.</li>
+<li><strong><code>llm</code></strong> — one-shot summarization call replacing the head with a handoff summary (deterministic fallback if the call fails).</li>
+</ul>
+<p>Omitting the blocks defaults to vcc at 0.6 then llm at 0.8.</p>
+<p><strong>Effectiveness gating</strong> skips a stage whose last run saved under 10% of estimated context until another stage compacts effectively, so compaction never cycles. Sessions without a known <code>context_length</code> never compact. Compacted-away entries are <em>deactivated</em>, never deleted — their originals stay in entry sources for <code>retrieve</code>.</p>
+<p><code>compaction_buffer</code> (absolute tokens ≥ 1000, or a quoted percent like <code>"20%"</code>) reserves headroom so compaction fires before the window fills.</p>
+<h2 id="overflow-recovery"><a class="header" href="#overflow-recovery">Overflow recovery</a></h2>
+<p>When a request still overflows after compaction, an escalating ladder collapses tool results progressively — 10%, 20%, 50%, 100% — before failing the turn. A failed run keeps whatever compaction it did; originals are never lost.</p>
+<h2 id="dedup-cache"><a class="header" href="#dedup-cache">Dedup cache</a></h2>
+<p>Identical read-only tool invocations return cached output; entries are invalidated structurally when files change. The dedup <code>Respond</code> runs in the <a href="#the-harness">guardrail layer</a>.</p>
+<h2 id="compaction-on-demand"><a class="header" href="#compaction-on-demand">Compaction on demand</a></h2>
+<p><code>/compact</code> in the TUI runs the compaction stages immediately. Compaction summaries render as cards in the transcript (see <a href="#sessions">Sessions</a>).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="the-harness"><a class="header" href="#the-harness">The Harness</a></h1>
+<p>One long-lived <code>harness::Conversation</code> per session drives an animist <code>Agent</code> over an animist <code>History</code>; surfaces never run a loop of their own. This page describes what runs under the TUI, <code>--print</code>, and ACP alike.</p>
+<h2 id="runtime-setup-contract"><a class="header" href="#runtime-setup-contract">Runtime setup contract</a></h2>
+<p>Every execution surface obtains the shared pieces of a session from <code>agent/src/runtime.rs</code>, so equivalent sessions receive equivalent run policies:</p>
+<ul>
+<li><code>runtime::workspace_env(cwd, mcp)</code> — instruction discovery, the workspace (MCP handle installed), and the permission engine. Every surface constructs the <code>PermissionManager</code> and consults it: the TUI prompt overlay, the ACP <code>session/request_permission</code>, and the headless permission gate.</li>
+<li><code>model_selection::resolve_or_default</code> — a model choice plus its catalog window; output ceilings ride the model handle, where request shaping reads them. Lookup only: <code>--model</code> ids the catalog does not list stay usable.</li>
+</ul>
+<h2 id="the-layer-chain"><a class="header" href="#the-layer-chain">The layer chain</a></h2>
+<p>Craft policy lives in an ordered <code>AgentLayer</code> chain (head → tail):</p>
+<ol>
+<li><strong>PolicyLayer</strong> — permission rules → auto-review → the approval responder → the plan-mode gate.</li>
+<li><strong>GuardrailLayer</strong> — doom-loop detection (grace/hard-stop), per-tool guardrails, dedup <code>Respond</code>.</li>
+<li><strong>RequestLayer</strong> — the per-request view: in-run read-lifecycle and compression rewrites, Chat-Completions image relocation, the output-token clamp, sampling options, fallback-model selection.</li>
+<li><strong>RecoveryLayer</strong> — <code>recover</code>: linear backoff, API-key rotation, model fallback chain, reauth wait, overflow compaction.</li>
+<li><strong>ContinuationLayer</strong> — <code>MaxTokens</code> continuation and stalled-turn nudges as <code>step_end</code> appends.</li>
+<li><strong>SnapshotLayer</strong> — <code>/undo</code> pre-captures at the tail, so only calls that really run are captured.</li>
+<li><strong>PersistLayer</strong> — flushes the history change feed to the session log.</li>
+</ol>
+<h2 id="the-driver"><a class="header" href="#the-driver">The driver</a></h2>
+<p>A thin driver (<code>harness::driver::run_turn</code>) does what no hook can: builds the input, runs and awaits the agent, adds terminal markers, runs the between-run alteration/compaction passes, and re-runs for the advisor and <code>ContextWindowExceeded</code>.</p>
+<p>Model switching happens between runs by rebuilding the agent on the same history handle; fallback models inside a run go through the request layer.</p>
+<h2 id="subagents"><a class="header" href="#subagents">Subagents</a></h2>
+<p>The <code>task</code> tool spawns child agents as their own <code>Conversation</code> with:</p>
+<ul>
+<li>a fresh history — delegation never pollutes the main session;</li>
+<li>a restricted tool registry;</li>
+<li>their own layer instances built from the parent’s shared services;</li>
+<li>model tiers (<code>weak</code> / <code>medium</code> / <code>strong</code>, capped at the parent’s tier);</li>
+<li>cancel tokens, optional worktree isolation, and optional JSON-schema-validated output.</li>
+</ul>
+<p><code>batch</code> fans children out concurrently under the parent’s claims and budgets.</p>
+<p>In the TUI, each subagent gets its own chat window (Ctrl-N / Ctrl-P; <code>/tasks</code> view). See <a href="#tools">Tools</a> for the tool surface and <a href="#tui">TUI</a> for the windows.</p>
+<h2 id="advisor"><a class="header" href="#advisor">Advisor</a></h2>
+<p>An optional post-turn reviewer (<code>agent.advisor</code>, off by default) reads each reply and emits at most one note. <code>auto_act</code> (<code>off</code> / <code>nit</code> / <code>concern</code> / <code>blocker</code>) sets the minimum severity that triggers an automatic follow-up turn instead of stopping, bounded by <code>max_act_turns</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="tools"><a class="header" href="#tools">Tools</a></h1>
+<p>All tools use strict typed JSON arguments and produce literal text for the model.</p>
+<h2 id="filesystem"><a class="header" href="#filesystem">Filesystem</a></h2>
+<ul>
+<li><code>read</code> — numbered lines, <code>offset</code>/<code>limit</code> paging, continuation notices.</li>
+<li><code>grep</code> — regex or literal, ignore-aware, bounded scan budget.</li>
+<li><code>edit</code> / <code>inplace_edit</code> / <code>multiedit</code> / <code>fuzzy_replace</code> / <code>apply_patch</code> — replace-based editing with fuzzy matching; <code>edit_lines</code>-style line edits and multi-edit batches ride these.</li>
+<li><code>write</code>, <code>delete</code>, <code>move_file</code> — the canonical mutations (<code>move_file</code> is the sanctioned move; see <a href="#permissions--snapshots">permissions</a>).</li>
+<li><code>glob</code>, <code>list</code> — discovery.</li>
+</ul>
+<p>Editing stages beside the destination and atomically replaces it, preserving permissions and bytes outside the replacement.</p>
+<h2 id="execution"><a class="header" href="#execution">Execution</a></h2>
+<ul>
+<li><code>bash</code> — with <code>bash_status</code>, <code>bash_watch</code>, <code>bash_kill</code> for background tasks; sandbox profiles; tree-sitter command parsing for <a href="#permissions--snapshots">permission scoping</a>. Default timeouts come from the <code>[bash]</code> config (<a href="#tool-timeouts">Configuration</a>).</li>
+<li><code>batch</code> — parallel dispatch of independent tool calls under the parent’s budgets.</li>
+<li><code>code</code> — Python orchestration: one script drives the same tools with real <code>await</code>s (codemode). Off by default; enabled per session with <code>--codemode</code>/<code>/codemode</code> or the <code>[codemode]</code> config.</li>
+<li><code>worktree</code> — linked worktree creation for isolated mutations.</li>
+</ul>
+<h2 id="interaction-and-support"><a class="header" href="#interaction-and-support">Interaction and support</a></h2>
+<ul>
+<li><code>question</code> — structured user prompts during a run.</li>
+<li><code>todo_write</code> — plan-mode todo cards.</li>
+<li><code>view_image</code> — images as vision input.</li>
+<li><code>webfetch</code> — SSRF-guarded URL fetching (private/loopback IP and redirect checks). Timeout and retry defaults come from the <code>[webfetch]</code> config (<a href="#tool-timeouts">Configuration</a>).</li>
+<li><code>websearch</code> — web search.</li>
+<li><code>sessions</code> — session listing.</li>
+<li><code>skill</code> / <code>list_skills</code> — skill discovery and loading.</li>
+<li><code>review</code>, <code>task</code>, <code>retrieve</code>, <code>list_tools</code> — see <a href="#review">Review</a>, <a href="#the-harness">The Harness</a>, and <a href="#context-management">Context Management</a>.</li>
+</ul>
+<h2 id="argosy-knowledge"><a class="header" href="#argosy-knowledge">Argosy knowledge</a></h2>
+<p>Linked in-process (no subprocess, no MCP transport): semantic <code>search</code> and <code>ask</code>, document/memory/rule reads and writes, and the review session toolset. See <a href="#argosy">Argosy</a>.</p>
+<h2 id="mcp-tools"><a class="header" href="#mcp-tools">MCP tools</a></h2>
+<p>MCP servers register as <code>server__tool</code> portable tools. See <a href="#mcp">MCP</a>.</p>
+<h2 id="paths-and-limits"><a class="header" href="#paths-and-limits">Paths and limits</a></h2>
+<p>Paths are workspace-relative or absolute beneath the canonical workspace root; <code>..</code>, <code>.git</code>, and symlink components are refused.</p>
+<p>Text tools support UTF-8 files up to 8 MiB, including CRLF. Reads and searches bound excerpts to 64 KiB (individual lines to 2048 bytes) and report incomplete results rather than implying exhaustiveness.</p>
+<p>Workspace checks are guardrails for a trusted local project, <strong>not</strong> an OS security sandbox; the host supplies approval hooks and <a href="#sandbox-1">sandbox policy</a> before exposing the agent to untrusted workspaces.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="sandbox-1"><a class="header" href="#sandbox-1">Sandbox</a></h1>
+<p>The <code>bash</code> tool runs under an OS command sandbox configured by the <code>[sandbox]</code> section:</p>
+<pre><code class="language-bml">sandbox {
+  enabled = true
+  mode = "workspace_write"   # workspace_write (default) | read_only | danger_full_access | off
+  network = true             # false blocks sandboxed network access
+}
+</code></pre>
+<h2 id="backends"><a class="header" href="#backends">Backends</a></h2>
+<ul>
+<li><strong>macOS</strong> — the stock <code>sandbox-exec</code>.</li>
+<li><strong>Linux</strong> — argv is wrapped with <code>bubblewrap</code> (<code>bwrap</code>, prerequisite).</li>
+</ul>
+<h2 id="enforcement-is-fail-closed"><a class="header" href="#enforcement-is-fail-closed">Enforcement is fail-closed</a></h2>
+<p>On supported platforms, if the backend binary is missing while confinement is requested, the command errors before it starts — install it or set <code>sandbox.mode = "off"</code>. On platforms without a sandbox implementation, commands run unsandboxed with a visible one-time note.</p>
+<h2 id="escape-hatches"><a class="header" href="#escape-hatches">Escape hatches</a></h2>
+<ul>
+<li><code>--yolo</code> disables the sandbox entirely (predecessor parity).</li>
+<li><code>CRAFT_SANDBOX=off</code> is the documented env escape hatch with highest precedence (debug/CI).</li>
+</ul>
+<h2 id="plan-mode-and-read-only-workers"><a class="header" href="#plan-mode-and-read-only-workers">Plan mode and read-only workers</a></h2>
+<p>Plan-mode turns and read-only workers (the reviewer subagent, research subagents) run bash read-only; the allocated plan file stays writable via an exact-path grant.</p>
+<p>See <a href="#permissions--snapshots">Permissions &amp; Snapshots</a> for the approval rules that sit on top, and <a href="#configuration-1">Configuration</a> for where the block lives.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="permissions--snapshots"><a class="header" href="#permissions--snapshots">Permissions &amp; Snapshots</a></h1>
+<h2 id="rules"><a class="header" href="#rules">Rules</a></h2>
+<p>Permission rules are BML blocks — allow / deny / ask — scoped to bash or MCP, with wildcards. They live in a <code>permissions.bml</code> next to the config or in a project’s <code>.craft/</code> directory.</p>
+<p>Bash commands are parsed with tree-sitter, so compound commands request each sub-command’s approval separately: <code>git diff &amp;&amp; rm -rf /</code> asks for <code>git *</code> and <code>rm *</code> approval separately. Subshells, command substitution, and pipes are handled the same way — most agents only see the first command.</p>
+<h2 id="every-surface-enforces"><a class="header" href="#every-surface-enforces">Every surface enforces</a></h2>
+<p>The TUI prompt overlay, the ACP <code>session/request_permission</code>, and the headless gate all consult the same <code>PermissionManager</code> built by <code>runtime::workspace_env</code>.</p>
+<p>Headless runs (<code>--print</code>, <code>term run</code>, <code>recipe run</code>) enforce the same rules with no interactive approver: unresolved <strong>asks fail closed</strong> with guidance naming the opt-outs, and denied calls never execute. The gate covers batch children and subagent dispatch.</p>
+<h2 id="opt-outs"><a class="header" href="#opt-outs">Opt-outs</a></h2>
+<ul>
+<li><code>--yolo</code> / <code>--dangerously-skip-permissions</code> — bypass everything, disables the <a href="#sandbox-1">sandbox</a>.</li>
+<li><code>-A</code> / <code>--auto-review</code> — an LLM (or decision-endpoint) reviewer answers permission prompts, fail-closed below a confidence threshold.</li>
+</ul>
+<p>They are mutually exclusive and rejected at <code>Cli::validate</code>.</p>
+<h2 id="tool-policy-flags"><a class="header" href="#tool-policy-flags">Tool policy flags</a></h2>
+<ul>
+<li><code>--allowed-tools</code> <strong>pre-approves</strong> tools (scope-universal allow rules — every tool stays advertised; it does not restrict the tool set).</li>
+<li><code>--disallowed-tools</code> <strong>denies</strong> tools at the permission gate (calls fail with a permission-denied message; batch children and subagents are covered).</li>
+</ul>
+<p>Both accept PascalCase or snake_case native names (<code>Read</code>, <code>bash</code>) and MCP forms (<code>server__tool</code>, <code>mcp__server__tool</code>, <code>mcp__server</code> for a whole server). Unknown names error with the valid-tool list; a tool named by both flags is a hard error. The rules live for the process only — they never persist into sessions or <code>permissions.bml</code>.</p>
+<p><code>--permission-mode</code> maps to the same posture: <code>default</code>, <code>plan</code> (plan mode; conflicts with an explicit <code>--mode build</code>), or <code>bypassPermissions</code> (matches <code>--yolo</code>).</p>
+<h2 id="snapshots-and-undo"><a class="header" href="#snapshots-and-undo">Snapshots and /undo</a></h2>
+<p>Files are snapshotted before mutations — first-wins, ≤ 5 MiB, text only — and <code>/undo</code> walks them back.</p>
+<p>Undo restores file contents only; deactivated history entries survive in session sources but are not restored.</p>
+<h2 id="auto-review-mode"><a class="header" href="#auto-review-mode">Auto-review mode</a></h2>
+<p>With <code>-A</code>, every permission prompt is answered by an LLM reviewer that sees the command and its context. Low confidence fails closed, so a confused reviewer can never silently approve a dangerous call. <code>/auto-review</code> toggles it from the TUI.</p>
+<p>Auto-review can also be the default posture — no flag needed. In the global config (<code>~/.config/craft.bml</code> or a split <code>~/.config/craft/*.bml</code>, e.g. a <code>permissions.bml</code> there), set it inside the <code>permissions</code> block:</p>
+<pre><code class="language-bml">permissions {
+  auto_review = true
+}
+</code></pre>
+<p>A project’s <code>.craft/permissions.bml</code> sets the same key at the top level — <code>auto_review = true</code> beside its tool blocks — and its value wins over the global one. Every surface starts with the reviewer on: the TUI installs it at startup, and headless runs (<code>--print</code>, <code>term run</code>, <code>recipe run</code>) install it whenever the flag <em>or</em> the config enables it. <code>-A</code> implies the same posture; <code>--yolo</code> still bypasses prompting entirely, and the two stay mutually exclusive. There is no off flag — <code>/auto-review</code> toggles the current session. ACP sessions never install a reviewer locally, so an enabled auto-review still falls through to the client’s permission prompt.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="argosy"><a class="header" href="#argosy">Argosy</a></h1>
+<p>The <code>argosy</code> knowledge crate is linked <strong>in-process</strong> — no subprocess, no MCP transport. Its tools register as first-class native tools with the same typed-JSON interface as the builtins.</p>
+<p>Argosy keeps its own state keyed by project root: writes from craft are visible to the standalone <code>argosy mcp</code> server, and vice versa. Embeddings run locally (ONNX, via the argosy crate) — nothing leaves your machine for indexing.</p>
+<h2 id="search-and-ask"><a class="header" href="#search-and-ask">Search and ask</a></h2>
+<ul>
+<li><code>search</code> — hybrid semantic search over the project’s knowledge (documents, memory, skills, rules): exact-term BM25 and vector similarity fused by reciprocal rank fusion. Exact identifiers and rule IDs rank alongside paraphrases.</li>
+<li><code>ask</code> — retrieval augmented by an optional Jev-compatible decision endpoint: hybrid-retrieves candidates, then asks the endpoint which (if any) answers the question, returning the selection with a calibrated confidence.</li>
+</ul>
+<p>Retrieval is passage-level: hits carry the matched passage, a heading breadcrumb, and line numbers, so the agent often answers without a further read.</p>
+<h2 id="documents-memory-rules"><a class="header" href="#documents-memory-rules">Documents, memory, rules</a></h2>
+<p>Reads and writes for every concept kind: documents (curated project knowledge), memory (session learnings), and styleguide rules (conventions the project wants enforced). Writes reconcile the index immediately.</p>
+<h2 id="skills"><a class="header" href="#skills">Skills</a></h2>
+<p>Project-stored skills join the <code>skill</code> tool’s discovery with shadowing precedence (see <a href="#skills--recipes">Skills &amp; Recipes</a>).</p>
+<h2 id="review-toolset"><a class="header" href="#review-toolset">Review toolset</a></h2>
+<p>Grounded like <code>argosy mcp</code>: <code>start_review</code>, <code>review_diff</code>, <code>report_finding</code>, <code>review_findings</code>. <code>start_review</code> runs the deterministic styleguide pattern pre-pass over the diff’s added lines; <code>report_finding</code> validates rule URIs. See <a href="#review">Review</a>.</p>
+<h2 id="memory-extraction"><a class="header" href="#memory-extraction">Memory extraction</a></h2>
+<p>Post-turn memory extraction (on by default; <code>agent.memory_extraction</code>) writes durable facts from a turn into the project’s local argosy, so future sessions find them via <code>search</code>. <code>/memory</code> opens the workflow in the TUI.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="review"><a class="header" href="#review">Review</a></h1>
+<p>Craft ships a reviewer workflow on top of the <a href="#argosy">argosy</a> review toolset.</p>
+<h2 id="the-reviewer-subagent"><a class="header" href="#the-reviewer-subagent">The reviewer subagent</a></h2>
+<p><code>/review</code> — or the <code>review</code> tool — snapshots the working-tree diff (or the current state of named paths, with <code>paths</code> for a whole-area review of unchanged code) and returns prioritized <strong>P0–P3</strong> findings with a verdict.</p>
+<p>The reviewer is read-only: it records findings through <code>report_finding</code>, never edits files.</p>
+<h2 id="the-session-flow"><a class="header" href="#the-session-flow">The session flow</a></h2>
+<ol>
+<li><code>start_review</code> snapshots the git diff — local tracked changes against a base (<code>HEAD</code> by default), exactly one commit, or the current state of named paths (<code>base "empty"</code> materializes every tracked line as added).</li>
+<li>A deterministic pattern pre-pass runs immediately over the added lines when the project’s argosy holds styleguide rules with a <code>pattern</code> — those findings land first, confidence 1.0.</li>
+<li>The reviewer agent reads the diff, checks the rules, and reports verified defects with <code>report_finding</code>: priority, confidence, affected lines, rule URIs, and a machine-applicable fix when one exists.</li>
+<li><code>review_findings</code> lists the set (filterable by priority and path) and can export SARIF for GitHub code scanning or reviewdog JSONL for one-click PR comments.</li>
+</ol>
+<p>Findings are validated against the snapshot — the path must be a changed file and the line range must fall inside the changed hunks.</p>
+<h2 id="related-commands"><a class="header" href="#related-commands">Related commands</a></h2>
+<ul>
+<li><code>/scan</code> — the same machinery aimed at the current state of the codebase.</li>
+<li><code>/dream</code> — speculative/exploratory review mode.</li>
+<li><code>/memory</code> — memory workflow over the argosy.</li>
+</ul>
+<p>Findings from review sessions are grounded: rule URIs must resolve to styleguide-rule concepts in the project’s argosy (see <a href="#argosy">Argosy</a>).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="skills--recipes"><a class="header" href="#skills--recipes">Skills &amp; Recipes</a></h1>
+<h2 id="skills-1"><a class="header" href="#skills-1">Skills</a></h2>
+<p>Skills are reusable workflows: markdown with instructions and frontmatter, discovered from two sources:</p>
+<ul>
+<li><strong>bundled</strong> — shipped with the binary (e.g. <code>debugging</code>, <code>run</code>, <code>verify</code>, <code>stuck</code>, <code>agents-md-init</code>);</li>
+<li><strong>filesystem</strong> — project-stored skills (<code>.craft/skills/</code>) join discovery via argosy.</li>
+</ul>
+<p>Discovery is surfaced through <code>list_skills</code> (origin, kind, shadowing status, trust tier); loading goes through the builtin <code>skill</code> tool. Local skills shadow bundled ones by name.</p>
+<p>Skill bodies are trusted instructions only when their provenance is: imported argosy skills arrive wrapped as untrusted content, capped at the user’s configured trust.</p>
+<h2 id="recipes"><a class="header" href="#recipes">Recipes</a></h2>
+<p>Recipes are parameterized YAML/JSON blueprints rendered with minijinja and run via the CLI:</p>
+<pre><code class="language-sh">craft recipe list
+craft recipe run &lt;name&gt; [params…]
+</code></pre>
+<p>Recipe runs are headless surfaces: they enforce the same <a href="#permissions--snapshots">permission gate</a> as <code>--print</code>, with the same opt-outs.</p>
+<h2 id="custom-slash-commands"><a class="header" href="#custom-slash-commands">Custom slash commands</a></h2>
+<p>Custom namespaced slash commands are discovered from project config; <code>--no-commands</code> skips discovery in the TUI. <code>/recipe</code> picks a recipe interactively.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="tui"><a class="header" href="#tui">TUI</a></h1>
+<p>The terminal UI is built on <strong>superlighttui</strong>: native, no JavaScript runtime, fast startup and a high frame rate even on small laptop screens. <code>craft</code> starts it by default.</p>
+<h2 id="daily-driving"><a class="header" href="#daily-driving">Daily driving</a></h2>
+<ul>
+<li><strong>Prompt</strong> — type and press Enter. A positional <code>PROMPT</code> argument submits as the first message; piped stdin (<code>echo "do x" | craft</code>) is read the same way.</li>
+<li><strong>Plan mode</strong> — Tab toggles build/plan. The plan form and todo cards keep the plan first-class; plan-mode turns run read-only (see <a href="#sandbox-1">Sandbox</a>). The mode persists in the session and is restored on resume.</li>
+<li><strong><code>!</code> and <code>!!</code></strong> — run a bash command with or without the agent seeing the output.</li>
+<li><strong>Editor integration</strong> — Ctrl-O / Alt+O opens the input (or a file) in <code>$EDITOR</code>.</li>
+</ul>
+<h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Action</th></tr>
+</thead>
+<tbody>
+<tr><td>Ctrl-P</td><td>command palette</td></tr>
+<tr><td>Ctrl-F</td><td>fuzzy search over the transcript</td></tr>
+<tr><td>Ctrl-N / Ctrl-P</td><td>subagent chat windows (also <code>/tasks</code>)</td></tr>
+<tr><td>Ctrl-V</td><td>paste clipboard image</td></tr>
+<tr><td>Ctrl-H</td><td>keybinding help</td></tr>
+<tr><td>Alt+E</td><td>cycle thinking/effort</td></tr>
+<tr><td>Tab</td><td>plan / build toggle</td></tr>
+<tr><td>Esc</td><td>cancel streaming / close overlays</td></tr>
+</tbody>
+</table>
+</div>
+<p>Keymaps are rebindable via <code>keybind</code> blocks in the config (see <a href="#keybinds">Configuration</a>) — action ids like <code>palette</code>, <code>plan_toggle</code>, <code>paste_image</code>, <code>task_chat_picker</code>; an empty chord list disables the action.</p>
+<h2 id="slash-commands"><a class="header" href="#slash-commands">Slash commands</a></h2>
+<p><code>/new</code>, <code>/resume</code>, <code>/continue</code>, <code>/sessions</code>, <code>/model</code>, <code>/clear</code>, <code>/undo</code>, <code>/mcp</code>, <code>/compact</code>, <code>/usage</code>, <code>/stats</code>, <code>/auto-review</code>, <code>/thinking</code>, <code>/theme</code>, <code>/recipe</code>, <code>/review</code>, <code>/scan</code>, <code>/dream</code>, <code>/memory</code> — plus custom namespaced commands (see <a href="#skills--recipes">Skills &amp; Recipes</a>).</p>
+<p><code>--no-commands</code> skips custom slash-command discovery.</p>
+<h2 id="themes"><a class="header" href="#themes">Themes</a></h2>
+<p>30 built-in themes via <code>/theme</code>; the choice persists. Tool-call rendering switches between <code>cards</code> (one card per call) and <code>compact</code> (collapsible groups; read-only tools as one-line entries) via <code>agent.tool_display</code>.</p>
+<h2 id="thinking"><a class="header" href="#thinking">Thinking</a></h2>
+<p><code>/thinking</code> opens the selector; <code>/thinking low</code>, <code>/thinking adaptive</code>, <code>/thinking off</code>, or <code>/thinking 4096</code> apply directly. Alt+E cycles. The preference is persisted with the session, restored on resume, and inherited by subagents. Details in <a href="#thinking-controls">CLI → Thinking controls</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="sessions"><a class="header" href="#sessions">Sessions</a></h1>
+<p>Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (<code>craft stats</code>, <code>/stats</code>).</p>
+<h2 id="format"><a class="header" href="#format">Format</a></h2>
+<p>Messages persist as animist <strong>entry records</strong> (log format 4): <code>entry</code>, <code>insert</code>, <code>revise</code>, <code>deactivate</code>, <code>replace</code>, mapping one to one onto the history change feed — plus <code>sub_entry</code> subagent histories and the trailing meta record.</p>
+<p>One loader reads every older shape (pre-animist message records, <code>.json</code> files) and folds their raw <code>tool_outputs</code> copies into entry sources; saving rewrites the current shape. A corrupt or truncated trailing record is skipped with a warning; a record whose index is out of range for the replayed list <strong>fails the load</strong> with an actionable error.</p>
+<blockquote>
+<p><strong>One-way upgrade:</strong> older <code>craft</code> builds cannot read the new saves — upgrade before rolling back.</p>
+</blockquote>
+<h2 id="resume"><a class="header" href="#resume">Resume</a></h2>
+<p><code>/sessions</code> (TUI), <code>-c</code> / <code>--continue</code> (latest), <code>-s/--session &lt;id&gt;</code> (specific), and ACP <code>session/load</code> all replay the same shared transcript builder:</p>
+<ul>
+<li>inactive (compacted-away) entries are hidden;</li>
+<li>compaction summaries render as cards;</li>
+<li>markers render by tag — altered tool results show their altered text with the verbatim original one click away (see <a href="#context-management">Context Management</a>).</li>
+</ul>
+<p><code>--fork-session</code> copies a <code>--session</code>/<code>--continue</code> source under a new id without touching the source. <code>--session-id</code> sets the persistence id for a <strong>new</strong> session; it never resumes.</p>
+<h2 id="mode-persistence"><a class="header" href="#mode-persistence">Mode persistence</a></h2>
+<p>The TUI persists its mode (build/plan) in the session file on every user-initiated change (Tab toggle, implementing a plan). A resumed session restores its stored mode — the stored mode wins over <code>--mode</code>/<code>--permission-mode plan</code>, which seed fresh sessions and legacy sessions with no stored mode. The stored model is restored too (unless <code>-m</code> overrides it).</p>
+<p>Print-mode resume (<code>-c</code>/<code>-s</code>) restores history and the stored model, but not the stored plan/build mode or thinking config — those are TUI/ACP surfaces.</p>
+<h2 id="stats"><a class="header" href="#stats">Stats</a></h2>
+<p><code>craft stats</code> reports the usage ledger; <code>--sessions</code> breaks it down per session. In the TUI, <code>/stats</code> and <code>/usage</code> show the same data live.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="headless-mode"><a class="header" href="#headless-mode">Headless Mode</a></h1>
+<p>Run non-interactively with <code>--print</code> (also spelled <code>-p</code>):</p>
+<pre><code class="language-sh">craft --print "summarize the retry logic in agent/src"
+</code></pre>
+<h2 id="output-formats"><a class="header" href="#output-formats">Output formats</a></h2>
+<p><code>--output-format</code> selects:</p>
+<ul>
+<li><code>text</code> — plain text reply.</li>
+<li><code>stream-json</code> — Claude Code-compatible streaming JSON, so scripts written for Claude Code SDK-style agents work unmodified.</li>
+</ul>
+<p><code>--image PATH</code> attaches an image to the prompt.</p>
+<h2 id="prompting"><a class="header" href="#prompting">Prompting</a></h2>
+<p>The positional <code>PROMPT</code> is honored by <code>--print</code> <strong>and</strong> the interactive TUI; piped stdin (<code>echo "do x" | craft</code>, no <code>--print</code>) is read the same way. The positional wins over piped stdin. Empty/whitespace input starts the TUI normally.</p>
+<p>In resume sessions (<code>-c</code> / <code>-s</code>) the prompt waits for the session to load, so its first turn runs in the loaded mode.</p>
+<h2 id="permissions-1"><a class="header" href="#permissions-1">Permissions</a></h2>
+<p>Headless runs enforce the same <a href="#permissions--snapshots">rules</a> through a permission gate with no interactive approver: unresolved asks fail closed with guidance naming the opt-outs, and denied calls never execute. <code>--yolo</code> (bypass everything) and <code>-A/--auto-review</code> (an LLM reviewer answers asks, fail-closed) are the deliberate opt-outs — mutually exclusive, rejected at startup. The gate covers batch children and subagent dispatch.</p>
+<h2 id="other-flags"><a class="header" href="#other-flags">Other flags</a></h2>
+<p><code>--max-turns</code> bounds the run; <code>-m/--model provider/model</code> selects the model; <code>--allowed-tools</code>/<code>--disallowed-tools</code> set process-lifetime tool policy (see <a href="#tool-policy-flags">Permissions</a>). A set of Claude Code SDK compatibility flags is accepted but ignored.</p>
+<p>Not yet implemented (flagged with warnings at runtime): <code>--input-format stream-json</code> (SDK mode), verbose transcript output, flow mode.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="acp"><a class="header" href="#acp">ACP</a></h1>
+<p><code>craft acp</code> runs an Agent Client Protocol server on stdio, for editor and IDE integration (e.g. <a href="https://zed.dev">Zed</a> and other ACP-speaking clients).</p>
+<pre><code class="language-json">{
+  "adapter": { "command": "craft", "args": ["acp"] }
+}
+</code></pre>
+<h2 id="what-the-server-exposes"><a class="header" href="#what-the-server-exposes">What the server exposes</a></h2>
+<ul>
+<li><strong>Sessions</strong> — <code>session/load</code> resumes a stored session through the same transcript builder as <code>/sessions</code> and <code>-s</code> (see <a href="#sessions">Sessions</a>).</li>
+<li><strong>Permissions</strong> — <code>session/request_permission</code> consults the same <code>PermissionManager</code> as every other surface; rule evaluation is identical to the TUI and headless gate (see <a href="#permissions--snapshots">Permissions</a>).</li>
+<li><strong>Thinking</strong> — a Thinking session option exposes the same controls as <code>/thinking</code> in the TUI (see <a href="#thinking-controls">CLI → Thinking controls</a>).</li>
+<li><strong>Attachments</strong> — client-provided attachments and client MCP servers are supported.</li>
+</ul>
+<h2 id="configuration-2"><a class="header" href="#configuration-2">Configuration</a></h2>
+<p>Provider and model selection come from the same BML config as every surface (see <a href="#configuration-1">Configuration</a>); no editor-specific setup exists beyond pointing the client at the binary.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="mcp"><a class="header" href="#mcp">MCP</a></h1>
+<p>Connect external tool servers over stdio or HTTP. MCP blocks merge from the global config (<code>~/.config/craft.bml</code> and <code>~/.config/craft/*.bml</code>) and the project’s <code>.craft/mcp.bml</code> — the project wins on name conflicts.</p>
+<h2 id="stdio-transport"><a class="header" href="#stdio-transport">Stdio transport</a></h2>
+<p><code>command</code> is the program plus arguments:</p>
+<pre><code class="language-bml">mcp "filesystem" {
+  command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  environment = { API_TOKEN = "${MY_MCP_TOKEN}" }
+  enabled = true       # default
+  timeout = 30000      # ms, 1..=300000
+}
+</code></pre>
+<h2 id="http-transport"><a class="header" href="#http-transport">HTTP transport</a></h2>
+<pre><code class="language-bml">mcp "remote" {
+  url = "https://mcp.example.com/mcp"
+  headers = { Authorization = "Bearer ${EXAMPLE_TOKEN}" }
+}
+</code></pre>
+<p><code>headers</code> (with <code>${VAR}</code> expansion) rides every request to the server.</p>
+<h3 id="oauth"><a class="header" href="#oauth">OAuth</a></h3>
+<p>For servers without a registration endpoint, declare a static OAuth client. The callback listener always binds loopback; <code>callback_port</code> fixes the redirect URI’s port so it can be pre-registered:</p>
+<pre><code class="language-bml">mcp "acme" {
+  url = "https://mcp.acme.example.com/mcp"
+  oauth {
+    client_id = "acme-client"
+    client_secret = "${ACME_CLIENT_SECRET}"
+    callback_port = 3118               # fixed loopback port
+    callback_path = "/callback"        # default /mcp/oauth/callback
+    callback_hostname = "localhost"    # default 127.0.0.1; loopback only
+  }
+}
+</code></pre>
+<p>Every key except <code>client_id</code> is optional; <code>callback_hostname</code> must resolve to loopback.</p>
+<h2 id="details"><a class="header" href="#details">Details</a></h2>
+<ul>
+<li>Names are ASCII alphanumeric + hyphens and must not collide with built-in tools.</li>
+<li><code>${VAR}</code> in <code>environment</code>/<code>headers</code> values expands from the process environment.</li>
+<li>MCP tools are proxied as portable <code>server__tool</code> names; permission rules can scope them (<code>mcp__server</code> for a whole server — see <a href="#tool-policy-flags">Permissions</a>).</li>
+<li><code>/mcp</code> in the TUI lists connected servers.</li>
+<li>Craft’s own knowledge layer does <strong>not</strong> ride MCP — argosy is linked in-process (see <a href="#argosy">Argosy</a>).</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="cli"><a class="header" href="#cli">CLI</a></h1>
+<p><code>craft</code> is the binary (crate <code>craft</code>). This page is the flag and subcommand reference.</p>
+<pre><code class="language-sh">craft [OPTIONS] [PROMPT]
+</code></pre>
+<h2 id="session-flags"><a class="header" href="#session-flags">Session flags</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Flag</th><th>Effect</th></tr>
+</thead>
+<tbody>
+<tr><td><code>-c</code>, <code>--continue</code></td><td>resume the latest session</td></tr>
+<tr><td><code>-s</code>, <code>--session &lt;ID&gt;</code></td><td>resume a specific session</td></tr>
+<tr><td><code>--fork-session</code></td><td>copy a <code>--session</code>/<code>--continue</code> source under a new id, source untouched</td></tr>
+<tr><td><code>--session-id &lt;ID&gt;</code></td><td>persistence id for a <strong>new</strong> session (never resumes)</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="mode-and-model"><a class="header" href="#mode-and-model">Mode and model</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Flag</th><th>Effect</th></tr>
+</thead>
+<tbody>
+<tr><td><code>-m</code>, <code>--model &lt;provider/model&gt;</code></td><td>model choice; ids the catalog doesn’t list stay usable</td></tr>
+<tr><td><code>--mode &lt;build|plan&gt;</code></td><td>seed a fresh session’s mode</td></tr>
+<tr><td><code>--permission-mode &lt;default|plan|bypassPermissions&gt;</code></td><td>permission posture (<code>acceptEdits</code> rejected as unsupported)</td></tr>
+<tr><td><code>--codemode &lt;off|alongside|exclusive&gt;</code></td><td>Python code-execution mode for this run (default <code>off</code>; see <a href="#codemode">Configuration</a>)</td></tr>
+</tbody>
+</table>
+</div>
+<p>In resumed sessions the stored mode wins over <code>--mode</code>/<code>--permission-mode plan</code> (see <a href="#mode-persistence">Sessions</a>).</p>
+<h2 id="tool-and-permission-flags"><a class="header" href="#tool-and-permission-flags">Tool and permission flags</a></h2>
+<ul>
+<li><code>--allowed-tools</code> — pre-approves tools (allow rules; the tool set is not restricted).</li>
+<li><code>--disallowed-tools</code> — denies tools at the permission gate.</li>
+<li><code>--yolo</code> / <code>--dangerously-skip-permissions</code> — bypass all prompting and the sandbox.</li>
+<li><code>-A</code>, <code>--auto-review</code> — LLM reviewer answers permission prompts, fail-closed.</li>
+<li><code>--no-commands</code> — skip custom slash-command discovery in the TUI.</li>
+</ul>
+<p>Semantics and accepted name forms: <a href="#permissions--snapshots">Permissions &amp; Snapshots</a>.</p>
+<h2 id="headless-flags"><a class="header" href="#headless-flags">Headless flags</a></h2>
+<ul>
+<li><code>--print</code> — headless run; see <a href="#headless-mode">Headless Mode</a>.</li>
+<li><code>--output-format &lt;text|stream-json&gt;</code> — output shape (stream-json is Claude Code-compatible).</li>
+<li><code>--image &lt;PATH&gt;</code> — attach an image.</li>
+<li><code>--max-turns &lt;N&gt;</code> — bound the run.</li>
+<li><code>--system-prompt</code> — replace the agent preamble.</li>
+<li><code>--append-system-prompt &lt;TEXT&gt;</code> — append to the agent preamble instead of replacing it.</li>
+<li><code>--exit-on-done</code> — exit after the agent completes (automation workflows).</li>
+<li><code>--verbose</code> — verbose transcript output (<strong>accepted but not implemented yet</strong>, warned).</li>
+<li><code>--include-partial-messages</code> — partial streaming messages in SDK output (<strong>accepted but not implemented yet</strong>, warned).</li>
+<li><code>--input-format stream-json</code> — <strong>not yet implemented</strong> (SDK mode), warned at runtime.</li>
+</ul>
+<p>A set of Claude Code SDK compatibility flags is accepted but ignored.</p>
+<h2 id="startup-prompt"><a class="header" href="#startup-prompt">Startup prompt</a></h2>
+<p>The positional <code>PROMPT</code> is honored by <code>--print</code> <strong>and</strong> the interactive TUI — <code>craft "do x"</code> submits it as the first message right after provider startup. Piped stdin (<code>echo "do x" | craft</code>, no <code>--print</code>) is read the same way; the positional wins. In resume sessions the prompt waits for the session to load.</p>
+<h2 id="thinking-controls"><a class="header" href="#thinking-controls">Thinking controls</a></h2>
+<p><code>/thinking</code> opens the TUI selector; <code>/thinking low</code>, <code>/thinking adaptive</code>, <code>/thinking off</code>, or <code>/thinking 4096</code> apply directly. Alt+E cycles. The preference persists with the session, restores on resume, and is inherited by subagents. ACP exposes a Thinking session option.</p>
+<p>For headless or startup overrides use one of <code>--thinking &lt;setting&gt;</code>, <code>--effort &lt;level&gt;</code>, or <code>--max-thinking-tokens &lt;positive-count&gt;</code> — mutually exclusive. Seed new sessions in <code>craft.bml</code>:</p>
+<pre><code class="language-bml">always_thinking = "low"
+</code></pre>
+<p>Modes are <code>off</code>, <code>adaptive</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>, or a positive token count. An unset preference means <strong>off</strong>. Providers that cannot disable reasoning use their lowest supported mode; “off” is not a universal promise of zero reasoning.</p>
+<p>Per-model <code>models.dev</code> reasoning metadata resolves accepted effort levels. Requests snap to the closest lower supported level, or the minimum accepted level if none is lower. Effort-only and toggle-only APIs cannot enforce a thinking-token budget; numeric settings map to an effort/toggle there. Budget APIs clamp to their published limits and half the effective output window, reserving room for an answer.</p>
+<p>Manual model declarations can override <code>supports_thinking</code>, <code>requires_thinking</code>, and <code>reasoning_options</code>; local backends can declare <code>thinking_fields</code> fragments (see <a href="#model-catalogs">Providers</a>).</p>
+<h2 id="subcommands"><a class="header" href="#subcommands">Subcommands</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Command</th><th>Purpose</th></tr>
+</thead>
+<tbody>
+<tr><td><code>craft acp</code></td><td>Agent Client Protocol server on stdio (<a href="#acp">ACP</a>)</td></tr>
+<tr><td><code>craft completions &lt;shell&gt;</code></td><td>shell completions</td></tr>
+<tr><td><code>craft models</code></td><td>resolved model catalog</td></tr>
+<tr><td><code>craft stats [--sessions|--codemode]</code></td><td>usage ledger; <code>--codemode</code> summarizes <code>codemode.jsonl</code> runs instead of the cost ledger</td></tr>
+<tr><td><code>craft doctor [--export]</code></td><td>diagnose and self-heal provider config</td></tr>
+<tr><td><code>craft update [-y]</code> / <code>craft rollback</code></td><td>digest-pinned self-update / undo one update</td></tr>
+<tr><td><code>craft prompt [system|research|general] [--plan|--tools|--names]</code></td><td>print built-in prompts</td></tr>
+<tr><td><code>craft term init|log|run|info</code></td><td>shell integration (<a href="#terminal-integration">Terminal integration</a>)</td></tr>
+<tr><td><code>craft recipe list|run</code></td><td>recipes (<a href="#skills--recipes">Skills &amp; Recipes</a>)</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="terminal-integration"><a class="header" href="#terminal-integration">Terminal integration</a></h2>
+<p><code>craft term init</code> sets up shell integration: shell history logging, <code>@craft</code> queries, and a command-not-found handler. <code>craft term log</code>, <code>craft term run</code>, and <code>craft term info</code> work with it.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="development"><a class="header" href="#development">Development</a></h1>
+<p>The CLI harness lives in <a href="https://github.com/craft-build/craft/tree/main/agent"><code>agent/</code></a> (crate <code>craft</code>, binary <code>craft</code>), built on the <a href="https://crates.io/crates/animist">animist</a> provider/agent/history stack with the <code>argosy</code> knowledge crate linked in-process.</p>
+<h2 id="build-and-test"><a class="header" href="#build-and-test">Build and test</a></h2>
+<pre><code class="language-sh">cargo test -p craft
+cargo fmt -p craft --check
+cargo clippy -p craft --all-targets -- -D warnings
+</code></pre>
+<p><code>ProviderHandle::from_config</code> builds only the selected animist provider; parsing configuration never constructs clients or initiates interactive authentication.</p>
+<h2 id="provider-conformance-offline"><a class="header" href="#provider-conformance-offline">Provider conformance (offline)</a></h2>
+<p><code>src/conformance/</code> drives every supported kind through a real <code>Conversation</code> against a local mock HTTP server speaking each protocol (Anthropic Messages, OpenAI Responses/Chat Completions, Bedrock Converse with AWS eventstream framing): text, thinking and tool-call round trips, tool-result image placement, retry/reauth/overflow recovery, Bedrock’s in-provider retries, usage, and catalog pricing. It is part of <code>cargo test</code> and needs no credentials.</p>
+<h2 id="live-smoke-tests-opt-in"><a class="header" href="#live-smoke-tests-opt-in">Live smoke tests (opt-in)</a></h2>
+<p>Real model calls, <code>#[ignore]</code>d and env-gated so CI never pays for inference:</p>
+<pre><code class="language-sh">CRAFT_LIVE_BASE_URL=http://127.0.0.1:8000/v1 \
+CRAFT_LIVE_MODEL=orion-26b \
+CRAFT_LIVE_API_KEY=…            # optional for keyless local servers
+  cargo test -p craft --lib conformance::live -- --ignored --nocapture
+</code></pre>
+<p><code>CRAFT_LIVE_KIND</code> selects the config kind (default <code>openai-compatible</code>; <code>llama-cpp</code>, <code>omlx</code>, <code>ollama</code>, <code>anthropic</code>, …). The two tests: a plain text round trip, and a tool round trip that must read a file and quote it back.</p>
+<h2 id="manual-qa"><a class="header" href="#manual-qa">Manual QA</a></h2>
+<p>The same env serves a manual QA session: run the TUI against a local model (a <code>provider</code> block with the same <code>kind</code>/<code>base_url</code>), exercise tool calls, cancel (Esc), resume (<code>/sessions</code>), and <code>/compact</code>.</p>
+<h2 id="this-site"><a class="header" href="#this-site">This site</a></h2>
+<p>The docs you are reading live in <a href="https://github.com/craft-build/craft/tree/main/site"><code>site/</code></a> — a static landing page plus this mdBook, built by <code>site/build.sh</code> and deployed on push to <code>main</code> via GitHub Pages.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-09f2665d.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="js/heading-anchors-e8ca9bb8.js"></script>
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>
