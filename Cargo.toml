@@ -29,7 +29,7 @@ http = "1"
 ignore = "0.4"
 image = "0.25"
 indexmap = "2"
-jiff = "0.2"
+jiff = "1"
 jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 libc = "0.2"
 minijinja = "3"

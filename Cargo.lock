@@ -152,9 +152,9 @@ dependencies = [
 
 [[package]]
 name = "animist"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c06fff9c417ee324a3b2373fc44bc9eead88d0ccf14323ecdfc7885898f19"
+checksum = "9402f54ef31f8b8707bfa101e40571ead421098fd7e1daa9407a498aab6a9d80"
 dependencies = [
  "arc-handle",
  "async-trait",
@@ -169,7 +169,7 @@ dependencies = [
  "flume 0.12.0",
  "futures-util",
  "http",
- "jiff",
+ "jiff 1.0.1",
  "macro_rules_attribute",
  "reqwest",
  "serde",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "craft"
-version = "1.0.0-beta.13"
+version = "1.0.0-beta.14"
 dependencies = [
  "agent-client-protocol",
  "aho-corasick",
@@ -2433,7 +2433,7 @@ dependencies = [
  "ignore",
  "image",
  "indexmap 2.14.2",
- "jiff",
+ "jiff 1.0.1",
  "jsonrepair",
  "libc",
  "minijinja",
@@ -4865,9 +4865,25 @@ version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175dc66334db3b9ab9985bf8b61cfed50dc16d20964bb47f9e479adcae984a7f"
 dependencies = [
- "jiff-core",
- "jiff-static",
- "jiff-tzdb-platform",
+ "jiff-core 0.1.8",
+ "jiff-static 0.2.46",
+ "jiff-tzdb-platform 0.1.3",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "jiff"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5d126d72eb017f10b302e73bdeca446bea405ee449af4d9e7866d6b082d83e"
+dependencies = [
+ "jiff-core 1.0.1",
+ "jiff-static 1.0.1",
+ "jiff-tzdb-platform 1.0.0",
  "log",
  "portable-atomic",
  "portable-atomic-util",
@@ -4885,15 +4901,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiff-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "jiff-static"
 version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7b1af7547d47354bc438d797e3854601bde8f8d185780c5ba4ab27afa54f1ba"
 dependencies = [
- "jiff-core",
+ "jiff-core 0.1.8",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0127e9bde3c6130d6169e7d8d68676e4be69c4bf7573c308b6f960a5089c428"
+dependencies = [
+ "jiff-core 1.0.1",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -4903,12 +4940,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0980fca2cc272465bd60e82397607ba9f33add9e48defd77923301bbd03808f2"
 
 [[package]]
+name = "jiff-tzdb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e71a1b68a875a44a33bb7a1dd84392cb77145a3367a552a3cfe6a4f5cf3afc"
+
+[[package]]
 name = "jiff-tzdb-platform"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
 dependencies = [
- "jiff-tzdb",
+ "jiff-tzdb 0.1.10",
+]
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc65b284afcfa8f6cf189c7274c805505314a7ab975c60e1f548bff56525420e"
+dependencies = [
+ "jiff-tzdb 1.0.0",
 ]
 
 [[package]]
@@ -5721,7 +5773,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a6d36dbb6f4f754e5f12ad3040e5c1d0455aee431f46cd48d36cf309e58691a"
 dependencies = [
  "chrono",
- "jiff",
+ "jiff 0.2.46",
  "monty-macros",
  "nix 0.31.4",
  "num-bigint",
@@ -8342,7 +8394,7 @@ dependencies = [
  "hex",
  "indexmap 1.9.3",
  "indexmap 2.14.2",
- "jiff",
+ "jiff 0.2.46",
  "schemars 0.9.0",
  "schemars 1.2.3",
  "serde_core",
@@ -8565,9 +8617,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.5"
+version = "1.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
+checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
 dependencies = [
  "serde",
 ]

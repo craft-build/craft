@@ -50,7 +50,7 @@ fn format_reset(reset_at: u64) -> String {
     match jiff::Timestamp::from_millisecond(reset_at as i64) {
         // Local wall-clock time.
         Ok(ts) => ts
-            .to_zoned(jiff::tz::TimeZone::system())
+            .to_zoned_datetime(jiff::tz::TimeZone::system())
             .strftime("%m-%d %H:%M")
             .to_string(),
         Err(_) => "unknown".to_string(),

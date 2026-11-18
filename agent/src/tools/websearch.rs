@@ -54,7 +54,7 @@ impl ToolImpl for Websearch {
     type Error = Error;
 
     fn definition(&self) -> ToolDefinition {
-        let today = jiff::Zoned::now().strftime("%Y-%m-%d");
+        let today = jiff::ZonedDateTime::now().strftime("%Y-%m-%d");
         definition::<WebsearchArgs>(
             "websearch",
             &format!(
