@@ -759,48 +759,51 @@ async fn tool_result_images_stay_inline_where_accepted() {
 /// message carries the image.
 #[tokio::test]
 async fn chat_completions_relocates_tool_result_images() {
-    let kind = kinds()
+    for (name, kind) in kinds()
         .into_iter()
-        .find(|(name, _)| *name == "openai-compatible")
-        .expect("openai-compatible row")
-        .1;
-    let (server, _events, outcome) = converse(
-        kind.bml,
-        vec![
-            sse_reply(view_image_call(kind.dialect, Usage::new(30, 2))),
-            sse_reply(text_reply(kind.dialect, "seen", Usage::new(40, 1))),
-        ],
-    )
-    .await;
-    assert!(matches!(outcome, TurnOutcome::Done { .. }), "{outcome:?}");
-    let messages = server.recorded()[1].body["messages"]
-        .as_array()
-        .expect("messages")
-        .clone();
-    let tool_index = messages
-        .iter()
-        .position(|message| message["role"] == "tool")
-        .expect("the tool result message");
-    let tool_message = &messages[tool_index];
-    let tool_text = match &tool_message["content"] {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
-    assert!(
-        !tool_text.contains("image_url"),
-        "the tool result carries no image"
-    );
-    let relocated = messages[tool_index..].iter().any(|message| {
-        message["role"] == "user"
-            && message["content"]
-                .as_array()
-                .is_some_and(|parts| parts.iter().any(|part| part["type"] == "image_url"))
-    });
-    if !relocated {
-        panic!(
-            "no relocated image; messages: {}",
-            serde_json::to_string_pretty(&messages).unwrap_or_default()
+        .filter(|(_, kind)| kind.dialect == Dialect::Chat)
+    {
+        let (server, _events, outcome) = converse(
+            kind.bml,
+            vec![
+                sse_reply(view_image_call(kind.dialect, Usage::new(30, 2))),
+                sse_reply(text_reply(kind.dialect, "seen", Usage::new(40, 1))),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, TurnOutcome::Done { .. }),
+            "{name}: {outcome:?}"
         );
+        let messages = server.recorded()[1].body["messages"]
+            .as_array()
+            .expect("messages")
+            .clone();
+        let tool_index = messages
+            .iter()
+            .position(|message| message["role"] == "tool")
+            .expect("the tool result message");
+        let tool_message = &messages[tool_index];
+        let tool_text = match &tool_message["content"] {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        assert!(
+            !tool_text.contains("image_url"),
+            "{name}: the tool result carries no image"
+        );
+        let relocated = messages[tool_index..].iter().any(|message| {
+            message["role"] == "user"
+                && message["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|part| part["type"] == "image_url"))
+        });
+        if !relocated {
+            panic!(
+                "{name}: no relocated image; messages: {}",
+                serde_json::to_string_pretty(&messages).unwrap_or_default()
+            );
+        }
     }
 }
 

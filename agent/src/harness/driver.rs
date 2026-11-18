@@ -551,6 +551,7 @@ async fn finish_error(sink: &EventSink, history: &History, error: AgentError) ->
 
 /// Record a failed run and its observation.
 async fn failed(sink: &EventSink, history: &History, message: &str) -> TurnOutcome {
+    tracing::error!(%message, "agent turn failed");
     sink.craft(CraftEvent::Error(message.to_owned()));
     history
         .add_stored(marker::observation(

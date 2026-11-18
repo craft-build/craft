@@ -989,12 +989,13 @@ fn chat_completions_target(config: &ProviderConfig, id: &str) -> bool {
         ProviderConfig::Ollama(_)
         | ProviderConfig::LlamaCpp(_)
         | ProviderConfig::Omlx(_)
+        | ProviderConfig::Synthetic(_)
         | ProviderConfig::ZaiCodingPlan(_)
         | ProviderConfig::OpenaiCompatible(_) => true,
         ProviderConfig::Openai(entry) => {
             matches!(entry.config.protocol, Protocol::ChatCompletions)
         }
-        ProviderConfig::Anthropic(_) | ProviderConfig::Synthetic(_) => false,
+        ProviderConfig::Anthropic(_) => false,
         ProviderConfig::AmazonBedrock(_) => {
             bedrock_protocol_for(config, id) == BedrockProtocol::ChatCompletions
         }
