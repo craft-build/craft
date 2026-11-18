@@ -545,6 +545,7 @@ pub async fn prompt(
                 platform: std::env::consts::OS,
                 date: &date,
                 instructions: &system_instructions,
+                codemode: config.codemode.mode,
             };
             let plan_path = plan.then(|| PathBuf::from("plan.md"));
             format.render(&prompt::system(&ctx, plan_path.as_deref()))
@@ -554,12 +555,14 @@ pub async fn prompt(
             platform: std::env::consts::OS,
             date: &date,
             instructions: &instructions.text,
+            codemode: config.codemode.mode,
         })),
         PromptVariant::General => format.render(&prompt::general(&prompt::Context {
             cwd: &cwd_str,
             platform: std::env::consts::OS,
             date: &date,
             instructions: &instructions.text,
+            codemode: config.codemode.mode,
         })),
     };
     println!("{output}");

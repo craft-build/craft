@@ -476,6 +476,7 @@ impl<'a> ConversationBuilder<'a> {
                 cwd: cwd.to_owned(),
                 sections,
                 prompt_format: config.agent.prompt_format,
+                codemode: config.codemode.mode,
                 model_tools,
             })),
             recovery: Layer::new(RecoveryLayer::new(

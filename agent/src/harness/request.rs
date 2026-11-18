@@ -82,6 +82,9 @@ pub(crate) struct RequestLayerInputs {
     pub sections: Vec<animist::agent::Section>,
     /// The rendering surface every system prompt in this conversation uses.
     pub prompt_format: crate::prompt::PromptFormat,
+    /// The codemode selection frozen beside `model_tools`: nonzero modes
+    /// add the `code` rule to the Tool usage section.
+    pub codemode: crate::config::CodemodeMode,
     pub model_tools: animist::agent::tool::ToolSelection,
 }
 
@@ -122,6 +125,7 @@ impl RequestLayer {
         instructions: &str,
         extra_sections: &[animist::agent::Section],
         format: crate::prompt::PromptFormat,
+        codemode: crate::config::CodemodeMode,
     ) -> String {
         let date = crate::prompt::today_utc();
         let ctx = crate::prompt::Context {
@@ -129,6 +133,7 @@ impl RequestLayer {
             platform: std::env::consts::OS,
             date: &date,
             instructions,
+            codemode,
         };
         let mut prompt = crate::prompt::system(&ctx, None);
         prompt.sections.extend(extra_sections.iter().cloned());
@@ -154,6 +159,7 @@ impl LayerImpl for RequestLayer {
             &self.inputs.instructions,
             &self.inputs.sections,
             self.inputs.prompt_format,
+            self.inputs.codemode,
         );
         // The run's own messages start after the current view (the input is
         // admitted after this hook); everything before it arrived
@@ -311,6 +317,7 @@ mod tests {
             platform: std::env::consts::OS,
             date: &date,
             instructions: "preamble text",
+            codemode: crate::config::CodemodeMode::Off,
         };
         for format in [
             crate::prompt::PromptFormat::Markdown,
@@ -322,6 +329,7 @@ mod tests {
                 "preamble text",
                 &[],
                 format,
+                crate::config::CodemodeMode::Off,
             );
             assert_eq!(
                 build,
@@ -337,6 +345,7 @@ mod tests {
                 "preamble text",
                 &[],
                 format,
+                crate::config::CodemodeMode::Off,
             );
             assert_eq!(
                 plan,
@@ -348,5 +357,35 @@ mod tests {
             );
             assert!(plan.contains("/project/plan.md"), "{format:?}");
         }
+    }
+
+    /// The codemode mode in the inputs reaches the rendered system
+    /// prompt: each nonzero mode adds its own `code` rule, `off` none.
+    #[test]
+    fn codemode_inputs_add_the_code_rule_to_the_system_prompt() {
+        let settings = TurnSettings {
+            mode: crate::harness::mode::AgentMode::Build,
+            thinking: ThinkingConfig::default(),
+            fast: false,
+            temperature: None,
+            max_tokens: None,
+        };
+        let build = |codemode| {
+            RequestLayer::system_prompt(
+                &settings,
+                "/project",
+                "preamble text",
+                &[],
+                crate::prompt::PromptFormat::Markdown,
+                codemode,
+            )
+        };
+        let off = build(crate::config::CodemodeMode::Off);
+        assert!(!off.contains("Prefer `code` over `batch`"));
+        assert!(!off.contains("Use `code` for parallel"));
+        let alongside = build(crate::config::CodemodeMode::Alongside);
+        assert!(alongside.contains("Prefer `code` over `batch` for parallel, chained, or fan-out"));
+        let exclusive = build(crate::config::CodemodeMode::Exclusive);
+        assert!(exclusive.contains("Use `code` for parallel, chained, or fan-out tool calls"));
     }
 }

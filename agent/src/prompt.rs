@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use animist::agent::{Prompt, Section};
 use serde::Deserialize;
 
-use crate::subagent::SubagentKind;
+use crate::{config::CodemodeMode, subagent::SubagentKind};
 
 pub const COMPACTION_USER: &str = include_str!("prompts/compaction_user.md");
 pub const COMPACTION_TARGETED_USER: &str = include_str!("prompts/compaction_targeted_user.md");
@@ -124,6 +124,9 @@ pub struct Context<'a> {
     pub date: &'a str,
     /// `config.agent.preamble` followed by the discovered instructions.
     pub instructions: &'a str,
+    /// Codemode selection; nonzero modes add the `code` rule to the
+    /// Tool usage section.
+    pub codemode: CodemodeMode,
 }
 
 fn section(name: &str, title: &str, summary: impl Into<String>, rules: &[&str]) -> Section {
@@ -149,10 +152,28 @@ fn section_vec(
         .build()
 }
 
+/// The Tool usage rule codemode adds. `alongside` still advertises
+/// `batch`, so the rule frames `code` as its replacement; `exclusive`
+/// does not, so it names `code` alone.
+fn codemode_tool_rule(codemode: CodemodeMode) -> Option<&'static str> {
+    match codemode {
+        CodemodeMode::Off => None,
+        CodemodeMode::Alongside => Some(
+            "Prefer `code` over `batch` for parallel, chained, or fan-out tool calls: one script awaits several tools, chains results between them, and returns one compact output.",
+        ),
+        CodemodeMode::Exclusive => Some(
+            "Use `code` for parallel, chained, or fan-out tool calls: one script awaits several tools, chains results between them, and returns one compact output.",
+        ),
+    }
+}
+
 /// The variant-specific rules with the shared built-in preference and
 /// efficient-tools lines appended.
-fn with_shared_tool_rules(rules: &[&str]) -> Vec<String> {
+fn with_shared_tool_rules(rules: &[&str], codemode: CodemodeMode) -> Vec<String> {
     let mut rules: Vec<String> = rules.iter().map(ToString::to_string).collect();
+    if let Some(rule) = codemode_tool_rule(codemode) {
+        rules.push(rule.to_string());
+    }
     rules.push(BUILTIN_TOOL_PREFERENCE_RULE.to_string());
     rules.push(efficient_tools_rule());
     rules
@@ -240,7 +261,7 @@ pub fn system(ctx: &Context<'_>, plan: Option<&Path>) -> Prompt {
             "Tool usage",
             "how to use the tools",
             "",
-            with_shared_tool_rules(TOOL_USAGE_RULES),
+            with_shared_tool_rules(TOOL_USAGE_RULES, ctx.codemode),
         ),
         section(
             "Delegating to subagents",
@@ -331,9 +352,10 @@ pub fn research(ctx: &Context<'_>) -> Prompt {
                 "Tool usage",
                 "how to use the tools",
                 "",
-                with_shared_tool_rules(&[
-                    "Every tool result grows your context. Minimize use of verbose tool calls, prefer compact results.",
-                ]),
+                with_shared_tool_rules(
+                    &["Every tool result grows your context. Minimize use of verbose tool calls, prefer compact results."],
+                    ctx.codemode,
+                ),
             ),
             section(
                 "Guidelines",
@@ -384,13 +406,16 @@ pub fn general(ctx: &Context<'_>) -> Prompt {
                 "Tool usage",
                 "how to use the tools",
                 "",
-                with_shared_tool_rules(&[
-                    "Every tool result grows your context. Minimize use of verbose tool calls, prefer compact results.",
-                    "Use batch for 2+ independent parallel calls,",
-                    "Read files before editing them. Look at surrounding context and imports to match conventions.",
-                    "Prefer edit over write; targeted edits use far fewer tokens.",
-                    "NEVER create files unless absolutely necessary. Prefer editing existing files.",
-                ]),
+                with_shared_tool_rules(
+                    &[
+                        "Every tool result grows your context. Minimize use of verbose tool calls, prefer compact results.",
+                        "Use batch for 2+ independent parallel calls,",
+                        "Read files before editing them. Look at surrounding context and imports to match conventions.",
+                        "Prefer edit over write; targeted edits use far fewer tokens.",
+                        "NEVER create files unless absolutely necessary. Prefer editing existing files.",
+                    ],
+                    ctx.codemode,
+                ),
             ),
             section(
                 "Conventions",
@@ -533,7 +558,26 @@ mod tests {
             platform: "macos",
             date: "2026-09-13",
             instructions: "INSTR",
+            codemode: CodemodeMode::Off,
         }
+    }
+
+    /// Every nonzero codemode mode adds its `code` rule to the Tool
+    /// usage section of each prompt variant; `off` adds none.
+    #[test]
+    fn codemode_adds_the_code_tool_usage_rule() {
+        let mut ctx = ctx();
+        let chat = |ctx: &Context<'_>| PromptFormat::Markdown.render(&system(ctx, None));
+        assert!(!chat(&ctx).contains("Prefer `code` over `batch`"));
+        assert!(!chat(&ctx).contains("Use `code` for parallel"));
+        ctx.codemode = CodemodeMode::Alongside;
+        let rule = codemode_tool_rule(CodemodeMode::Alongside).unwrap();
+        assert!(chat(&ctx).contains(rule));
+        assert!(PromptFormat::Markdown.render(&research(&ctx)).contains(rule));
+        assert!(PromptFormat::Markdown.render(&general(&ctx)).contains(rule));
+        ctx.codemode = CodemodeMode::Exclusive;
+        assert!(chat(&ctx).contains(codemode_tool_rule(CodemodeMode::Exclusive).unwrap()));
+        assert!(!chat(&ctx).contains("Prefer `code` over `batch`"));
     }
 
     const BUILD_MARKDOWN: &str = r#"# Identity - who you are

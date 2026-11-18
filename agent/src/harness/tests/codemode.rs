@@ -71,6 +71,20 @@ async fn provider_visibility_follows_the_codemode_mode() {
         let names = request_tool_names(&provider, 0);
         assert_eq!(names.contains(&"code".to_owned()), alongside || exclusive);
         assert!(!names.contains(&"read_text".to_owned()));
+        // The system prompt gains the matching `code` Tool usage rule.
+        let system = provider.requests()[0].system.clone();
+        let rule = match mode {
+            CodemodeMode::Off => None,
+            CodemodeMode::Alongside => Some("Prefer `code` over `batch`"),
+            CodemodeMode::Exclusive => Some("Use `code` for parallel"),
+        };
+        match rule {
+            Some(rule) => assert!(system.contains(rule), "{mode}: {system}"),
+            None => {
+                assert!(!system.contains("Prefer `code` over `batch`"), "{system}");
+                assert!(!system.contains("Use `code` for parallel"), "{system}");
+            }
+        }
         if exclusive {
             for allowed in ["code", "question", "todo_write", "task"] {
                 assert!(names.contains(&allowed.to_owned()), "missing {allowed}");

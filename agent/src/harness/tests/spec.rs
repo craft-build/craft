@@ -87,6 +87,7 @@ async fn output_cap_clamp_counts_request_overhead() {
         platform: std::env::consts::OS,
         date: &date,
         instructions: "",
+        codemode: crate::config::CodemodeMode::Off,
     };
     let system = crate::prompt::PromptFormat::Markdown.render(&crate::prompt::system(&ctx, None));
     let overhead = crate::compaction::RequestOverhead::from_parts(
