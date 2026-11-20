@@ -278,6 +278,11 @@ pub(crate) fn request_options(
     max_tokens: Option<u64>,
     temperature: Option<f64>,
 ) -> RequestOptions {
+    // The wire value is always snapped to what the serving model — which a
+    // fallback hop or reauth swap may have changed since the preference was
+    // set — can express: an unsupported effort is a Fatal provider error,
+    // not something to surface after retries are exhausted.
+    let thinking = crate::thinking::effective_for_model(thinking, &handle.model);
     let mut options = RequestOptions::builder()
         .thinking(thinking.to_animist())
         .fast(fast)
@@ -387,5 +392,38 @@ mod tests {
         assert!(alongside.contains("Prefer `code` over `batch` for parallel, chained, or fan-out"));
         let exclusive = build(crate::config::CodemodeMode::Exclusive);
         assert!(exclusive.contains("Use `code` for parallel, chained, or fan-out tool calls"));
+    }
+
+    /// The wire value is snapped to the serving model's expressible levels:
+    /// an effort the listing does not report becomes the closest supported
+    /// one instead of a Fatal unsupported-effort provider error, whatever
+    /// the stored preference said when it was set (a model switch, a
+    /// fallback hop, or a restored session may have changed the model).
+    #[test]
+    fn request_options_snaps_thinking_to_the_serving_model() {
+        let scripted = crate::testing::ScriptedProvider::new(Vec::new());
+        let mut info = crate::testing::model_info("scripted", 200_000, 8_192, true, false);
+        info.features.thinking = animist::provider::Thinking::builder()
+            .supported(true)
+            .required(false)
+            .efforts(vec![
+                animist::provider::Effort::Low,
+                animist::provider::Effort::Medium,
+            ])
+            .build();
+        let handle =
+            crate::provider::ModelHandle::scripted(crate::testing::scripted_model(&scripted, info));
+        let options = request_options(
+            &handle,
+            ThinkingConfig::Effort(crate::thinking::Effort::High),
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            options.thinking,
+            animist::provider::ThinkingConfig::Effort(animist::provider::Effort::Medium),
+            "unsupported High snaps to the closest supported effort"
+        );
     }
 }

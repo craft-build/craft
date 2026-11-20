@@ -754,6 +754,8 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<history::Co
 
     {
         let mut session = state.lock().await;
+        // Gating only — the stored preference survives a model switch; the
+        // request layer snaps what actually goes on the wire.
         let effective = crate::thinking::reconcile_for(session.thinking, Some(&model.model.info));
         if effective != session.thinking {
             session.thinking = effective;

@@ -114,13 +114,7 @@ pub(super) async fn run_turn(
     // resolved model is authoritative, so what goes on the wire is the
     // snapped effective value. The preference itself is kept — switching
     // back to a model that supports it restores it.
-    let mut resolved_info = model.model.info.clone();
-    // Fold the resolved capability (manual `supports_thinking` config
-    // applied): the raw catalog info alone misses it, and the snap logic
-    // below would wrongly disable thinking for such models.
-    resolved_info.features.thinking.supported = model.model.thinking_supported();
-    resolved_info.features.thinking.required = model.model.thinking_required();
-    let effective = crate::thinking::effective_for(thinking, Some(&resolved_info));
+    let effective = crate::thinking::effective_for_model(thinking, &model.model);
     conversation.update_settings(|settings| settings.thinking = effective);
     if effective != thinking {
         if let Some(persister) = conversation.persister() {

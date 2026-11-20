@@ -317,6 +317,19 @@ pub fn effective_for(
     }
 }
 
+/// [`effective_for`] against a resolved model, with the manual
+/// `supports_thinking`/`requires_thinking` overrides folded in — the raw
+/// catalog info alone misses them.
+pub fn effective_for_model(
+    config: ThinkingConfig,
+    model: &animist::provider::Model,
+) -> ThinkingConfig {
+    let mut resolved = model.info.clone();
+    resolved.features.thinking.supported = model.thinking_supported();
+    resolved.features.thinking.required = model.thinking_required();
+    effective_for(config, Some(&resolved))
+}
+
 /// Capability reconciliation for session surfaces: a model that cannot
 /// reason never keeps an enabled preference; a model that must reason
 /// never keeps `off`. `None` leaves the preference untouched, like the

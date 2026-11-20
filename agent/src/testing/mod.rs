@@ -462,6 +462,26 @@ pub fn bedrock_http_error(status: u16) -> Attempt {
     )
 }
 
+/// One failed attempt: the model's tool-call arguments failed to decode —
+/// the model-authored malformed call the recovery layer feeds back to the
+/// model as an observation instead of surfacing the run error.
+pub fn malformed_tool_arguments(id: &str) -> Attempt {
+    Attempt::new(
+        Vec::new(),
+        Err(ProviderError::Protocol {
+            source: animist::protocol::ProtocolError::OpenAI {
+                source: animist::protocol::openai::OpenAIProtocolError::DecodeToolArguments {
+                    id: id.to_owned(),
+                    source: serde_json::from_str::<serde_json::Value>(
+                        "{\"command\": echo unmatched quote}",
+                    )
+                    .expect_err("fixture arguments must be invalid JSON"),
+                },
+            },
+        }),
+    )
+}
+
 /// One failed attempt: the transport timed out.
 ///
 /// Connects to a loopback listener that never answers, so nothing leaves the

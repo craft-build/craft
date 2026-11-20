@@ -23,6 +23,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 dirs = "7"
 etcetera = "0.11"
+flume = "0.12"
 futures = "0.3"
 htmd = "0.5"
 http = "1"
@@ -34,9 +35,6 @@ jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 libc = "0.2"
 minijinja = "3"
 monty = "=1.5.0"
-# Dev-only probe target: never linked into the production graph (Phase 0/2
-# property — `cargo tree -p craft -e normal` contains no monty-type-checking).
-monty-type-checking = "=1.6.0"
 monty-types = "=1.5.0"
 nucleo-matcher = "0.3"
 regex = "1"
@@ -68,7 +66,6 @@ syntect = {
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 toml = "1"
-toml_edit = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tree-sitter = "0.27"
@@ -82,7 +79,7 @@ unicode-normalization = "0.1"
 unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
-zip = "^9.7"
+
 [[bin]]
 name = "craft_code"
 path = "src/main.rs"

@@ -897,3 +897,88 @@ async fn overflow_body_without_a_prompt_size_leaves_the_estimator_alone() {
         "no prompt size parsed ⇒ no recalibration"
     );
 }
+
+// --- Malformed tool-argument feedback ---
+
+/// A model-authored tool call whose arguments never parsed is fed back to
+/// the model as an observation and retried: the next request carries the
+/// explanation, and a corrected call completes the turn.
+#[tokio::test]
+async fn malformed_tool_arguments_are_fed_back_and_retried() {
+    let provider = script(vec![
+        crate::testing::malformed_tool_arguments("call_1"),
+        done_turn("recovered"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, mut stream) = workspace_conversation(&dir, &provider).await;
+    let outcome = run_turn(&conversation, "go").await;
+    assert!(
+        matches!(&outcome, TurnOutcome::Done { reply } if reply == "recovered"),
+        "{outcome:?}"
+    );
+    assert_eq!(provider.requests().len(), 2);
+    // The retried request tells the model which call failed and why.
+    let retry_message = provider.requests()[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            animist::history::ContentBlock::Text { text } if text.contains("not valid JSON") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("the retry carries the feedback observation");
+    assert!(
+        retry_message.contains("call_1"),
+        "the feedback names the failing call: {retry_message}"
+    );
+    // The observation is committed as a marker the history can identify.
+    let observations = history_entries(&conversation.history())
+        .await
+        .iter()
+        .filter_map(|entry| entry.current())
+        .filter(|stored| marker::is(stored, marker::TOOL_ARGUMENTS))
+        .count();
+    assert_eq!(observations, 1);
+    let retries: Vec<u32> = events_until_done(&mut stream)
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Craft(crate::harness::CraftEvent::Retry { attempt, .. }) => Some(attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retries, vec![1]);
+}
+
+/// The feedback budget bounds the loop: a model that keeps emitting
+/// invalid JSON surfaces the error after MAX_TOOL_ARGUMENT_FEEDBACK
+/// recoveries instead of looping on observations.
+#[tokio::test]
+async fn persistent_malformed_tool_arguments_surface_the_error() {
+    let provider = script(vec![
+        crate::testing::malformed_tool_arguments("call_1"),
+        crate::testing::malformed_tool_arguments("call_2"),
+        crate::testing::malformed_tool_arguments("call_3"),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let (conversation, _stream) = workspace_conversation(&dir, &provider).await;
+    let outcome = run_turn(&conversation, "go").await;
+    let TurnOutcome::Failed(reason) = &outcome else {
+        panic!("expected failure, got {outcome:?}");
+    };
+    assert!(
+        reason.contains("Invalid arguments for tool call call_3"),
+        "the surfaced error names the final malformed call: {reason}"
+    );
+    // Two feedback recoveries, then the third failure propagates.
+    assert_eq!(provider.requests().len(), 3);
+    let observations = history_entries(&conversation.history())
+        .await
+        .iter()
+        .filter_map(|entry| entry.current())
+        .filter(|stored| marker::is(stored, marker::TOOL_ARGUMENTS))
+        .count();
+    assert_eq!(observations, 2);
+}

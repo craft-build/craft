@@ -17,6 +17,7 @@ pub const FAILED: &str = "failed";
 pub const GRACE: &str = "grace";
 pub const NUDGE: &str = "nudge";
 pub const CONTINUATION: &str = "continuation";
+pub const TOOL_ARGUMENTS: &str = "tool_arguments";
 
 /// A marker observation: user role (the model must see it), `Observation`
 /// kind (the user did not author it), tagged with its marker identity.

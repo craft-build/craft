@@ -226,14 +226,9 @@ pub async fn complete_text(
     // Aux calls carry no user preference; a model that refuses to answer
     // without reasoning (Bedrock validates the field server-side) needs a
     // real level, so default to the lowest supported one instead of none.
-    // The capability comes from the Model's override-aware accessors —
-    // the raw catalog info misses manual `requires_thinking` config.
-    let mut resolved_info = handle.model.info.clone();
-    resolved_info.features.thinking.supported = handle.model.thinking_supported();
-    resolved_info.features.thinking.required = handle.model.thinking_required();
-    options.thinking = crate::thinking::effective_for(
+    options.thinking = crate::thinking::effective_for_model(
         crate::thinking::ThinkingConfig::default(),
-        Some(&resolved_info),
+        &handle.model,
     )
     .to_animist();
     if handle.moves_system_to_preamble() {

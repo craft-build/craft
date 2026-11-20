@@ -690,6 +690,8 @@ async fn reset_session(ctx: &LoopCtx, current_turn: &mut Option<AbortHandle>, cl
                     .find(|info| info.ids.first().is_some_and(|id| id == &selection.model))
             })
             .cloned();
+        // Gating only — the preference rides into the new session as typed;
+        // the request layer snaps what goes on the wire.
         crate::thinking::reconcile_for(thinking, info.as_ref())
     };
     // A failed rebuild keeps the current session (and says so): a fresh
@@ -737,6 +739,8 @@ pub(super) async fn handle_set_thinking(ctx: &LoopCtx, thinking: crate::thinking
                 .find(|info| info.ids.first().is_some_and(|id| id == &selection.model))
         })
         .cloned();
+    // Gating only — the stored preference stays as typed; the request layer
+    // snaps what goes on the wire.
     let effective = crate::thinking::reconcile_for(thinking, info.as_ref());
     if thinking != effective {
         let _ = ctx.kit.evt_tx.send(AgentEvent::Notice {

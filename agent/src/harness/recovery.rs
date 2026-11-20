@@ -5,8 +5,10 @@
 //! server/transport/timeout failures back off linearly (raced against the
 //! run's cancellation), auth failures pause for the surface's reauth hook,
 //! and context overflow recalibrates the estimator and forces the
-//! compaction engine before the one retry. Content-policy and fatal
-//! errors propagate.
+//! compaction engine before the one retry. A model-authored tool call
+//! whose arguments never parsed is fed back to the model as an
+//! observation and retried, bounded by a small budget. Content-policy and
+//! fatal errors propagate.
 //!
 //! The fallback hop and a reauth-swapped model live in the shared
 //! [`RecoveryRunState`] so the request layer serves them; the driver
@@ -43,6 +45,12 @@ pub(crate) const MAX_OVERFLOW_RECOVERIES: u32 = 1;
 /// Auth errors tolerated before the reauth wait gives up and the error
 /// surfaces. The counter resets after a successful attempt.
 pub(crate) const MAX_REAUTH_ATTEMPTS: u32 = 2;
+
+/// How many times a run feeds a model-authored malformed tool call back as
+/// an observation and retries. The error is deterministic in the model, not
+/// the transport, so the budget must stay small: a model that keeps emitting
+/// invalid JSON surfaces the error instead of looping on feedback.
+pub(crate) const MAX_TOOL_ARGUMENT_FEEDBACK: u32 = 2;
 
 /// Rearm cycles covered by animist's run-wide retry budget beyond the
 /// transient tally: reauth and overflow recoveries re-arm after every
@@ -125,6 +133,8 @@ pub(crate) fn classify_error(error: &ProviderError) -> ErrorKind {
     match error {
         ProviderError::Http { status: 429, .. } => return ErrorKind::RateLimited,
         ProviderError::Http { status: 401, .. } => return ErrorKind::Auth,
+        // 408 is the HTTP spelling of a timeout: retried like one.
+        ProviderError::Http { status: 408, .. } => return ErrorKind::Timeout,
         ProviderError::Http {
             status: 500..=599, ..
         } => return ErrorKind::Server,
@@ -145,6 +155,27 @@ pub(crate) fn classify_error(error: &ProviderError) -> ErrorKind {
         _ => {}
     }
     classify_string(&error.to_string())
+}
+
+/// The decode failure for a model-authored tool call whose arguments never
+/// parsed: the call was rejected before execution, so the model — not the
+/// run — should be told. `None` for every other failure.
+pub(crate) fn malformed_tool_arguments(error: &ProviderError) -> Option<String> {
+    let ProviderError::Protocol { source } = error else {
+        return None;
+    };
+    let animist::protocol::ProtocolError::OpenAI { source } = source else {
+        return None;
+    };
+    match source {
+        animist::protocol::openai::OpenAIProtocolError::DecodeToolArguments { id, source } => {
+            Some(format!("tool call {id}: {source}"))
+        }
+        animist::protocol::openai::OpenAIProtocolError::InvalidToolInput { id, .. } => {
+            Some(format!("tool call {id}: arguments are not a JSON object"))
+        }
+        _ => None,
+    }
 }
 
 /// Bedrock failures classify through the same taxonomy; 429/503 additionally
@@ -168,6 +199,7 @@ fn classify_bedrock(source: &animist::provider::bedrock::BedrockError) -> ErrorK
     match status {
         429 => ErrorKind::RateLimited,
         401 => ErrorKind::Auth,
+        408 => ErrorKind::Timeout,
         500..=599 => ErrorKind::Server,
         _ => {
             let body = String::from_utf8_lossy(body);
@@ -229,12 +261,21 @@ fn classify_string(message: &str) -> ErrorKind {
     {
         return ErrorKind::Server;
     }
+    // The server asked for patience in words instead of a status: the
+    // in-stream API error carries no HTTP status to match on.
+    if message.contains("please try again") || message.contains("please retry") {
+        return ErrorKind::Server;
+    }
     if [
         "connection",
         "network",
         "broken pipe",
         "connection reset",
         "error sending request",
+        // Mid-stream body decode failures: the connection dropped or the
+        // chunked body corrupted under the SSE reader.
+        "failed to read sse stream",
+        "error decoding response body",
     ]
     .iter()
     .any(|n| message.contains(n))
@@ -408,6 +449,10 @@ pub(crate) struct RecoveryRunState {
     /// Consecutive overflow recoveries; resets after a successful stream.
     /// The driver charges the same budget for stop-reason re-runs.
     overflow_recoveries: u32,
+    /// Malformed-tool-argument feedbacks this run has appended. Never
+    /// re-armed: the failure is model-authored, so patience does not grow
+    /// back within a turn.
+    tool_argument_feedbacks: u32,
     /// Whether the previous driver series iteration was itself a recovered
     /// stop-reason overflow: consecutive ones are one episode, and the
     /// second surfaces the error. Only the driver's stop-reason path sets
@@ -433,6 +478,7 @@ impl Default for RecoveryRunState {
             retry: RetryState::new(),
             reauth_attempts: 0,
             overflow_recoveries: 0,
+            tool_argument_feedbacks: 0,
             previous_stop_reason_overflow: false,
             last_seen_steps: 0,
             follow_up: false,
@@ -778,6 +824,45 @@ impl RecoveryLayer {
         Recovery::Retry
     }
 
+    /// The model authored a tool call whose arguments could not decode: the
+    /// call never executed, so the failure is appended as an observation the
+    /// next attempt carries and inference retried — the model sees why its
+    /// call failed instead of the run dying on a Fatal classification. The
+    /// budget bounds the loop for a model that keeps emitting invalid JSON.
+    #[expect(
+        clippy::result_large_err,
+        reason = "AgentError is animist's public error type and cannot be boxed here"
+    )]
+    async fn recover_tool_arguments(&self, agent: &Agent, detail: &str) -> Result<Recovery> {
+        let attempt = {
+            let mut state = lock(&self.state);
+            state.tool_argument_feedbacks += 1;
+            state.tool_argument_feedbacks
+        };
+        if attempt > MAX_TOOL_ARGUMENT_FEEDBACK {
+            return Ok(Recovery::Propagate);
+        }
+        self.sink.craft(CraftEvent::Retry {
+            attempt,
+            message: format!(
+                "model sent malformed tool arguments ({detail}); asking it to re-issue"
+            ),
+            delay_ms: 0,
+        });
+        agent
+            .history()
+            .add_stored(crate::history::marker::observation(
+                crate::history::marker::TOOL_ARGUMENTS,
+                format!(
+                    "Your previous response contained a tool call that was rejected before \
+                     execution because its arguments were not valid JSON ({detail}). \
+                     Re-issue the tool call with syntactically valid JSON arguments."
+                ),
+            ))
+            .await;
+        Ok(Recovery::Retry)
+    }
+
     /// The auth-failure policy: pause for the surface's reauth hook, up to
     /// [`MAX_REAUTH_ATTEMPTS`] consecutive waits.
     #[expect(
@@ -872,6 +957,11 @@ impl LayerImpl for RecoveryLayer {
         let AgentError::Inference { source, .. } = error else {
             return Ok(Recovery::Propagate);
         };
+        // Model-authored malformed tool arguments never classify: the
+        // feedback path owns them before the taxonomy calls them Fatal.
+        if let Some(detail) = malformed_tool_arguments(source) {
+            return self.recover_tool_arguments(agent, &detail).await;
+        }
         let kind = classify_error(source);
         // A stream succeeded since the last failure: re-arm the budgets.
         let steps = run.stats.snapshot().await.steps;
@@ -932,6 +1022,10 @@ mod tests {
             ("Too many requests", ErrorKind::RateLimited),
             ("provider is overloaded", ErrorKind::Server),
             ("server error (503)", ErrorKind::Server),
+            (
+                "Completion request failed. Please try again.",
+                ErrorKind::Server,
+            ),
             ("request timed out", ErrorKind::Timeout),
             ("operation timeout", ErrorKind::Timeout),
             (
@@ -939,6 +1033,10 @@ mod tests {
                 ErrorKind::Transport,
             ),
             ("network unreachable", ErrorKind::Transport),
+            (
+                "Failed to read SSE stream: error decoding response body",
+                ErrorKind::Transport,
+            ),
             (
                 "your credit balance is too low (billing hard limit)",
                 ErrorKind::Abort,
@@ -976,6 +1074,12 @@ mod tests {
             (500, "boom", ErrorKind::Server),
             (503, "boom", ErrorKind::Server),
             (401, "nope", ErrorKind::Auth),
+            // 408 is the HTTP spelling of a timeout, not a Fatal 4xx.
+            (
+                408,
+                "{\"error\":\"Error from inference backend: 408 status code (no body)\"}",
+                ErrorKind::Timeout,
+            ),
             (
                 400,
                 "This model's maximum context length is 200000 tokens. However, your messages resulted in 210744 tokens.",
@@ -1210,5 +1314,28 @@ mod tests {
         state.end_turn_overflow_episode();
         assert_eq!(state.overflow_recoveries, 0);
         assert!(state.try_charge_stop_reason_overflow(1));
+    }
+
+    #[test]
+    fn malformed_tool_arguments_detection() {
+        let error = ProviderError::Protocol {
+            source: animist::protocol::ProtocolError::OpenAI {
+                source: animist::protocol::openai::OpenAIProtocolError::DecodeToolArguments {
+                    id: "call_9".to_owned(),
+                    source: serde_json::from_str::<serde_json::Value>("nope")
+                        .expect_err("fixture must be invalid JSON"),
+                },
+            },
+        };
+        let detail = malformed_tool_arguments(&error).expect("detected");
+        assert!(detail.contains("call_9"), "detail: {detail}");
+        // Every other failure stays for the taxonomy.
+        let other = ProviderError::Http {
+            status: 500,
+            body: "boom".to_owned(),
+            body_truncated: false,
+            backtrace: snafu::Backtrace::generate(),
+        };
+        assert!(malformed_tool_arguments(&other).is_none());
     }
 }

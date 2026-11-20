@@ -357,12 +357,9 @@ impl SubagentLauncher {
         config.agent.max_tokens = self.agent.max_tokens;
         // The parent's current level, snapped to what the child's model
         // accepts (manual `supports_thinking` config folded in).
-        let mut child_info = model.model.info.clone();
-        child_info.features.thinking.supported = model.model.thinking_supported();
-        child_info.features.thinking.required = model.model.thinking_required();
-        config.agent.thinking = Some(crate::thinking::effective_for(
+        config.agent.thinking = Some(crate::thinking::effective_for_model(
             self.parent.settings().thinking,
-            Some(&child_info),
+            &model.model,
         ));
         config.agent.advisor = self.agent.advisor.clone();
         config.agent.prompt_format = self.agent.prompt_format;
