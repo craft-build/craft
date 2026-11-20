@@ -523,6 +523,7 @@ impl App {
                 self.session.cwd = cwd;
                 self.session.branch = branch;
             }
+            AgentEvent::SessionIdChanged { .. } => {}
             AgentEvent::UsageSnapshot(rows) => {
                 self.overlays.usage = rows;
                 // Keep an open /usage overlay fresh when a run completes.

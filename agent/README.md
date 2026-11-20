@@ -134,6 +134,12 @@ TUI (superlighttui): 30 built-in themes (`/theme`), rebindable keymaps, command 
 
 Sessions are crash-safe append-only JSONL files with an index, archive, and usage ledger (`craft stats`, `/stats`). Messages persist as animist **entry records** (log format 4): `entry`, `insert`, `revise`, `deactivate`, `replace`, mapping one to one onto the history change feed — plus `sub_entry` subagent histories and the trailing meta record. One loader reads every older shape (pre-animist message records, `.json` files) and folds their raw `tool_outputs` copies into entry sources; saving rewrites the current shape. A corrupt or truncated trailing record is skipped with a warning; a record whose index is out of range for the replayed list **fails the load** with an actionable error. **One-way upgrade:** older `craft` builds cannot read the new saves — upgrade before rolling back. Resume (`/sessions`, `-c`, `-s`, ACP `session/load`) replays the same shared transcript builder: inactive entries hidden, compaction summaries as cards, markers by tag, altered tool results showing their altered text with the verbatim original one click away. `--fork-session` copies a `--session`/`--continue` source under a new id without touching the source.
 
+## Herdr integration
+
+Inside the [Herdr](https://herdr.dev) terminal runtime, craft reports its state so the sidebar shows who needs attention and `herdr agent wait` and friends work; after a Herdr server restart the pane reopens the same session. Two mechanisms share one state source: the Herdr TUI CLI (`$HERDR_BIN_PATH pane report-agent`), enabled when `HERDR_ENV=1` with `HERDR_PANE_ID` and `HERDR_BIN_PATH` set, and OSC 7501 (Program Status Protocol) sequences on tty stdout, which terminals that don't implement the protocol ignore. Outside Herdr the CLI reporter stays inert (no child processes) and there is no config knob: the environment gates itself.
+
+Reported states: `working` while a turn runs, `blocked` when a permission prompt, question form, or approval wait needs the user (with a `--message` naming it), `idle` when ready for input, and error on a failed turn. The TUI reports the full set; `--print` reports working → done/error. The resume command (`craft --session <id>`) is re-reported whenever the session switches (`/new`, `/sessions`, resume) and the pane is released only on real quit. ACP does not report (its stdout is a JSON-RPC pipe).
+
 ## CLI
 
 ### Thinking controls

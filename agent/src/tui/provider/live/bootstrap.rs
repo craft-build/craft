@@ -431,6 +431,7 @@ pub(super) async fn build_session_state(
     let usage = UsageLedger::open().with_session_id(session_ref.id().to_string());
     Ok((
         SessionState {
+            session_id: session_ref.id().to_string(),
             thinking,
             codemode,
             conversation,
@@ -443,7 +444,8 @@ pub(super) async fn build_session_state(
 }
 
 /// Open the loop's first session: build the state, wrap it in its shared
-/// cell, and start the conversation's forwarder. Later rebuilds go through
+/// cell, start the conversation's forwarder, and announce the session id
+/// before the startup chrome settles. Later rebuilds go through
 /// [`install_session`] instead.
 pub(super) async fn open_session(
     kit: &SessionKit,
@@ -454,6 +456,7 @@ pub(super) async fn open_session(
     let codemode = kit.workspace.codemode().mode;
     let (session, stream) =
         build_session_state(kit, &selection, restore, thinking, codemode).await?;
+    let session_id = session.session_id.clone();
     let state = Arc::new(tokio::sync::Mutex::new(session));
     let signals = start_forwarder(
         stream,
@@ -463,13 +466,17 @@ pub(super) async fn open_session(
         kit.selection.clone(),
     );
     state.lock().await.signals = signals;
+    let _ = kit
+        .evt_tx
+        .send(AgentEvent::SessionIdChanged { id: session_id });
     Ok(state)
 }
 
 /// Build and install one session: assemble the state, start the new
-/// conversation's forwarder, and swap the state in — dropping the previous
-/// conversation ends its forwarder. Errors leave the current session
-/// untouched.
+/// conversation's forwarder, swap the state in — dropping the previous
+/// conversation ends its forwarder — and announce the new session id
+/// (a session swap is not a release for pane-tracking surfaces).
+/// Errors leave the current session untouched.
 pub(super) async fn install_session(
     kit: &SessionKit,
     state: &Arc<tokio::sync::Mutex<SessionState>>,
@@ -487,6 +494,10 @@ pub(super) async fn install_session(
         kit.files.clone(),
         kit.selection.clone(),
     );
+    let session_id = session.session_id.clone();
     *state.lock().await = SessionState { signals, ..session };
+    let _ = kit
+        .evt_tx
+        .send(AgentEvent::SessionIdChanged { id: session_id });
     Ok(())
 }

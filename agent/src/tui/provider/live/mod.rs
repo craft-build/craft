@@ -67,6 +67,10 @@ pub(super) type SharedPark = Arc<Mutex<ParkSlots>>;
 /// The conversation (history, model, tools, layers, persister) lives here;
 /// everything else the surfaces need is reached through it.
 struct SessionState {
+    /// The backing session's on-disk identity; announced to the UI as
+    /// [`AgentEvent::SessionIdChanged`] whenever a session swap changes
+    /// it (the Herdr resume command follows it).
+    session_id: String,
     thinking: crate::thinking::ThinkingConfig,
     codemode: crate::config::CodemodeMode,
     conversation: Conversation,
@@ -105,6 +109,7 @@ impl SessionState {
         .build()
         .expect("conversation builds");
         Self {
+            session_id: "test".into(),
             thinking: crate::thinking::ThinkingConfig::default(),
             codemode: crate::config::CodemodeMode::Off,
             conversation,

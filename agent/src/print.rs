@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
+use std::io::IsTerminal as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -518,14 +519,45 @@ pub async fn emit(run: PrintRun, format: &OutputFormat, verbose: bool) -> Result
     let mut stream = stream;
     let mut state = PrintState::new(session_id.clone(), model_spec.clone(), format, verbose);
     state.init(&cwd, &tool_names)?;
+    // Herdr pane reporting: working for the run's duration, done or error
+    // at the terminal event; released before exit so the pane drops the
+    // agent without waiting for Herdr's idle-shell fallback.
+    let herdr = crate::herdr::Herdr::for_surface(std::io::stdout().is_terminal());
+    herdr.set_session(&session_id.id().to_string());
+    herdr.update(crate::herdr::State::Working, None);
     let mut done_by_model = Default::default();
+    let mut outcome = None;
+    let mut observe_error = None;
     while let Some(event) = stream.next().await {
-        if let Event::Craft(CraftEvent::Done { by_model, .. }) = &event {
+        if let Event::Craft(CraftEvent::Done {
+            by_model, reason, ..
+        }) = &event
+        {
             done_by_model = by_model.clone();
+            outcome = Some(match reason {
+                DoneReason::Error => crate::herdr::State::Error,
+                _ => crate::herdr::State::Done,
+            });
         }
-        if state.observe(event)? {
-            break;
+        match state.observe(event) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(error) => {
+                observe_error = Some(error);
+                outcome.get_or_insert(crate::herdr::State::Error);
+                break;
+            }
         }
+    }
+    if state.error.is_some() {
+        outcome = Some(crate::herdr::State::Error);
+    }
+    if let Some(state) = outcome {
+        herdr.update(state, None);
+    }
+    if let Some(error) = observe_error {
+        herdr.release().await;
+        return Err(error);
     }
     let _ = tokio::time::timeout(AGENT_SHUTDOWN_TIMEOUT, task).await;
     // Session bookkeeping on the turn's ledger, then the explicit teardown
@@ -537,7 +569,9 @@ pub async fn emit(run: PrintRun, format: &OutputFormat, verbose: bool) -> Result
         persister.store_mut().set_model(model_spec.clone());
     }
     let _ = tokio::time::timeout(AGENT_SHUTDOWN_TIMEOUT, conversation.shutdown()).await;
-    state.finish(format, start.elapsed().as_millis())
+    let result = state.finish(format, start.elapsed().as_millis());
+    herdr.release().await;
+    result
 }
 
 #[cfg(test)]

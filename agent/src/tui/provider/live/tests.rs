@@ -24,6 +24,18 @@ use crate::history::marker;
 use crate::permissions::PermissionsConfig;
 use crate::tui::provider::{LoadedMessage, Tone};
 
+/// The next content event, skipping the session-id chrome the bootstrap
+/// and rebuilds emit, so assertions below can expect it directly.
+fn next_content_event(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> Option<AgentEvent> {
+    loop {
+        match rx.try_recv() {
+            Ok(AgentEvent::SessionIdChanged { .. }) => continue,
+            Ok(event) => return Some(event),
+            Err(_) => return None,
+        }
+    }
+}
+
 /// A config with one offline-resolvable provider (openai-compatible at a
 /// dead port, manual model table): session builds resolve without touching
 /// the network.
@@ -99,6 +111,7 @@ async fn persisted_state(
         super::usage_recorder::UsageLedger::default().with_session_id(session_ref.id().to_string());
     (
         Arc::new(Mutex::new(SessionState {
+            session_id: session_ref.id().to_string(),
             thinking: crate::thinking::ThinkingConfig::default(),
             codemode: crate::config::CodemodeMode::Off,
             conversation,
@@ -431,8 +444,8 @@ async fn thinking_changes_persist_across_clear_and_new_session() {
         Some(Some(ThinkingConfig::Budget(4096)))
     );
     assert!(matches!(
-        rx.try_recv(),
-        Ok(AgentEvent::ThinkingChanged(ThinkingConfig::Budget(4096)))
+        next_content_event(&mut rx),
+        Some(AgentEvent::ThinkingChanged(ThinkingConfig::Budget(4096)))
     ));
 
     let mut current_turn = None;
@@ -520,7 +533,10 @@ async fn codemode_switches_rebuild_the_same_persisted_session() {
         rendered.first(),
         Some(harness::ReplayItem::User { text }) if text == "history survives"
     ));
-    assert!(matches!(rx.try_recv(), Ok(AgentEvent::CodemodeChanged(_))));
+    assert!(matches!(
+        next_content_event(&mut rx),
+        Some(AgentEvent::CodemodeChanged(_))
+    ));
 
     let task = tokio::spawn(std::future::pending::<()>());
     let busy = Some(task.abort_handle());
@@ -810,7 +826,7 @@ async fn load_with_unknown_id_keeps_the_session_and_warns() {
     };
     load_session(&ctx, "bogus").await;
     assert_eq!(history_texts(&state).await, vec!["keep me".to_string()]);
-    let event = rx.try_recv().expect("a warning notice");
+    let event = next_content_event(&mut rx).expect("a warning notice");
     assert!(
         matches!(event, AgentEvent::Notice { tone: Tone::Warning, ref text }
             if text.contains("unknown session id")),

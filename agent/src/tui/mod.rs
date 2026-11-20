@@ -30,6 +30,7 @@ pub(crate) mod text;
 mod ui;
 
 use std::io;
+use std::io::IsTerminal as _;
 
 use slt::event::KeyEventKind;
 use tokio::sync::mpsc;
@@ -37,6 +38,8 @@ use tokio::sync::mpsc;
 use app::App;
 use provider::{AgentEvent, Command, Provider, Status};
 use ui::theme;
+
+use crate::herdr::{Herdr, State as HerdrState};
 
 /// Run the terminal UI against `provider` until the user quits.
 /// `startup_prompt` (the positional `PROMPT` / piped stdin) is submitted
@@ -104,6 +107,41 @@ fn base_owns_keyboard(app: &App) -> bool {
         && !app.overlays.file_picker.is_open()
         && !app.overlays.permission_prompt.is_open()
         && !app.overlays.question_form.is_open()
+}
+
+/// Herdr pane state: blocked wins over working (a parked decision needs
+/// the user even while a turn is notionally running), a failed turn is an
+/// error, and everything else settled is idle.
+fn herdr_state(app: &App) -> HerdrState {
+    if app.overlays.permission_prompt.is_open()
+        || app.overlays.question_form.is_open()
+        || app.status == Status::WaitingApproval
+    {
+        HerdrState::Blocked
+    } else if app.busy() {
+        HerdrState::Working
+    } else if app.status == Status::Failed {
+        HerdrState::Error
+    } else {
+        HerdrState::Idle
+    }
+}
+
+/// Best-effort explanation of a block: the pending permission or
+/// question, else the waiting-approval status itself.
+fn herdr_block_message(app: &App) -> Option<String> {
+    match &app.overlays.permission_prompt {
+        permission_prompt::PermissionPrompt::Open { tool, .. } => Some(format!("approve {tool}")),
+        _ => match &app.overlays.question_form {
+            question_form::QuestionForm::Open { questions, .. } => Some(format!(
+                "answer {} question{}",
+                questions.len(),
+                if questions.len() == 1 { "" } else { "s" }
+            )),
+            _ if app.status == Status::WaitingApproval => Some("waiting for approval".into()),
+            _ => None,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +317,10 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
     let expects_startup_resume = provider.expects_startup_resume();
     let (cmd_tx, mut evt_rx) = provider.start();
 
+    // Herdr pane reporting: OSC 7501 on tty stdout plus the env-gated CLI
+    // reporter; a no-op outside Herdr.
+    let herdr = std::sync::Arc::new(Herdr::for_surface(std::io::stdout().is_terminal()));
+
     let mut app = App::new();
     app.mcp = mcp;
     if let Ok(cwd) = std::env::current_dir() {
@@ -335,6 +377,7 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
     let history_in = std::sync::Arc::clone(&history_out);
     let mut app = app;
     let cmd_tx_frame = cmd_tx.clone();
+    let herdr_frame = std::sync::Arc::clone(&herdr);
     let handle = slt::run_async_with::<AgentEvent>(config, move |ui, msgs| {
         if trace_enabled() {
             let evs: Vec<String> = ui
@@ -363,6 +406,9 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
             {
                 // Candidate bell payload for this turn's completion.
                 bells.on_turn_complete(text);
+            }
+            if let AgentEvent::SessionIdChanged { id } = &ev {
+                herdr_frame.set_session(id);
             }
             app.handle_event(ev);
             if settled_done {
@@ -485,6 +531,11 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
         app.sync_draft(&cmd_tx_frame);
         app.tick_reveal(std::time::Instant::now());
 
+        // Herdr state, computed after the batch drained: the write happens
+        // on this render thread, before the frame paints, so an OSC
+        // sequence cannot tear the frame slt is about to flush.
+        herdr_frame.update(herdr_state(&app), herdr_block_message(&app).as_deref());
+
         ui::frame::frame(ui, &mut app, &mut view);
         let vis = app
             .conversation
@@ -518,6 +569,10 @@ async fn drive_slt<P: Provider>(provider: P, startup_prompt: Option<String>) -> 
         .await
         .map_err(|e| io::Error::other(e.to_string()));
     forward.abort();
+
+    // The user really quit: hand the pane back to Herdr (session swaps
+    // only re-report, they never release).
+    herdr.release().await;
 
     // Persist the input history gathered this session (best effort).
     if let Ok(dir) = crate::storage::StateDir::resolve() {
@@ -997,4 +1052,77 @@ fn startup_prompt_submits_build_mode_and_none_submits_nothing() {
     let mut pending: Option<String> = None;
     submit_startup_prompt(&mut app, &cmd_tx, &mut pending);
     assert!(sent_messages(&mut cmd_rx).is_empty());
+}
+
+/// Herdr state mapping: startup settles idle, a running turn is working,
+/// permission/question overlays and `WaitingApproval` block (with a
+/// best-effort message), a failed turn errors, and an interrupt-requested
+/// turn is no longer working.
+#[test]
+fn herdr_state_maps_app_to_pane_state() {
+    let mut app = App::new();
+    assert_eq!(herdr_state(&app), HerdrState::Idle);
+    assert_eq!(herdr_block_message(&app), None);
+
+    app.handle_event(AgentEvent::StatusChanged(Status::Thinking));
+    assert_eq!(herdr_state(&app), HerdrState::Working);
+
+    app.handle_event(AgentEvent::StatusChanged(Status::Running));
+    assert_eq!(herdr_state(&app), HerdrState::Working);
+    app.interrupt_requested = true;
+    assert_eq!(herdr_state(&app), HerdrState::Idle);
+    app.interrupt_requested = false;
+
+    app.handle_event(AgentEvent::StatusChanged(Status::WaitingApproval));
+    assert_eq!(herdr_state(&app), HerdrState::Blocked);
+    assert_eq!(
+        herdr_block_message(&app).as_deref(),
+        Some("waiting for approval")
+    );
+
+    app.handle_event(AgentEvent::StatusChanged(Status::Done));
+    app.handle_event(AgentEvent::StatusChanged(Status::Failed));
+    assert_eq!(herdr_state(&app), HerdrState::Error);
+    app.handle_event(AgentEvent::StatusChanged(Status::Done));
+    assert_eq!(herdr_state(&app), HerdrState::Idle);
+}
+
+/// A permission overlay blocks even mid-turn, naming the pending tool;
+/// a question overlay blocks with the question count; resolution returns
+/// to the underlying state.
+#[test]
+fn herdr_blocked_follows_overlays_with_messages() {
+    let mut app = App::new();
+    app.handle_event(AgentEvent::StatusChanged(Status::Running));
+    app.handle_event(AgentEvent::PermissionRequest {
+        id: "t9".into(),
+        tool: "bash".into(),
+        scopes: vec![],
+        files: vec![],
+        commands: vec![],
+    });
+    assert_eq!(herdr_state(&app), HerdrState::Blocked);
+    assert_eq!(herdr_block_message(&app).as_deref(), Some("approve bash"));
+
+    app.handle_event(AgentEvent::PermissionResolved { id: "t9".into() });
+    assert_eq!(herdr_state(&app), HerdrState::Working);
+    assert_eq!(herdr_block_message(&app), None);
+
+    app.handle_event(AgentEvent::QuestionRequest {
+        id: "q9".into(),
+        questions: vec![crate::tools::QuestionSpec {
+            question: "Which?".into(),
+            header: None,
+            options: vec![],
+            multi_select: false,
+        }],
+    });
+    assert_eq!(herdr_state(&app), HerdrState::Blocked);
+    assert_eq!(
+        herdr_block_message(&app).as_deref(),
+        Some("answer 1 question")
+    );
+
+    app.handle_event(AgentEvent::QuestionResolved { id: "q9".into() });
+    assert_eq!(herdr_state(&app), HerdrState::Working);
 }

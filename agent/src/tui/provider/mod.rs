@@ -382,6 +382,12 @@ pub enum AgentEvent {
         tone: Tone,
         text: String,
     },
+    /// The backing session's id changed (first bootstrap, `/sessions`
+    /// load, resume, `/new`). Chrome only: surfaces that track sessions
+    /// (the Herdr resume command) follow it; the transcript is unaffected.
+    SessionIdChanged {
+        id: String,
+    },
     /// The session was replaced by a persisted one (`/sessions`, resume);
     /// carries the replayed transcript (built by the shared
     /// [`crate::harness::replay`] — text, tool results, compaction cards

@@ -14,6 +14,7 @@ pub mod diff;
 pub mod error;
 pub mod harness;
 pub mod headless;
+pub(crate) mod herdr;
 pub mod history;
 pub mod id;
 pub mod instructions;
